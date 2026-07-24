@@ -1,0 +1,177 @@
+#pragma once
+
+#include "openscad_cpp_evaluator/dispatch.hpp"
+
+#include <optional>
+
+// Internal (not part of the public include/ API): prototypes for every
+// builtin's resolve/generate function pair, collected here so
+// registry.cpp doesn't need one #include per builtin file.
+namespace oscadeval {
+
+// Resolves a file argument (a string, or coerced via fmtValue) to an
+// absolute path, relative to the *source .scad file's own directory* (not
+// the process CWD) when given as a relative path. Shared by every
+// file-reading builtin: import()/surface()/DXF/SVG. Defined in import.cpp.
+std::string resolveFilePath(const Value& fileArg, const oscad::ASTNode& node);
+
+CSGParams resolveCube(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateCube(Evaluator& ev, const CSGParams& params,
+                                       const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateSphere(Evaluator& ev, const CSGParams& params,
+                                         const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+CSGParams resolveCylinder(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateCylinder(Evaluator& ev, const CSGParams& params,
+                                           const std::vector<std::unique_ptr<CSGNode>>& children,
+                                           const oscad::ASTNode& node);
+
+CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& params,
+                                             const std::vector<std::unique_ptr<CSGNode>>& children,
+                                             const oscad::ASTNode& node);
+
+// circle/square/polygon share one resolve/generate pair.
+CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generate2d(Evaluator& ev, const CSGParams& params,
+                                     const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+// translate/rotate/scale/mirror/multmatrix/resize share one resolve/
+// generate pair (2D/3D dispatch happens per-body at generate time).
+CSGParams resolveTransform(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateTransform(Evaluator& ev, const CSGParams& params,
+                                            const std::vector<std::unique_ptr<CSGNode>>& children,
+                                            const oscad::ASTNode& node);
+
+CSGParams resolveColor(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateColor(Evaluator& ev, const CSGParams& params,
+                                        const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+// union/difference/intersection share one resolve/generate pair.
+CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params,
+                                      const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+// Shared by hull/minkowski/projection/linear_extrude/rotate_extrude/roof
+// (topology.cpp, extrude.cpp, roof.cpp) -- defined in booleans.cpp since
+// they're the same shape as union/difference/intersection's own role
+// splitting/2D-merge logic.
+struct RoleSplit {
+    std::vector<ColoredBody> background;
+    std::vector<ColoredBody> foreground; // role != Background && role != ShowOnly
+    std::vector<ColoredBody> highlight;  // the subset of `foreground` that's role == Highlight
+    std::vector<ColoredBody> showOnly;
+};
+RoleSplit splitByRole(const std::vector<ColoredBody>& bodies);
+std::optional<manifold::CrossSection> toCrossSection(const std::vector<ColoredBody>& bodies);
+
+// Merges a statement's bodies into one (3D union, else 2D union, else an
+// empty Manifold) -- defined in control.cpp (intersection_for's own
+// per-iteration combine step), reused by projection.cpp. Mirrors _combine.
+ColoredBody combineBodies(const std::vector<ColoredBody>& bodies);
+
+// The 3 tag modifiers -- registered in generateDispatch() only (evalModifier
+// doesn't consult resolveDispatch, see csg_resolve.cpp).
+std::vector<ColoredBody> generateHighlight(Evaluator& ev, const CSGParams& params,
+                                            const std::vector<std::unique_ptr<CSGNode>>& children,
+                                            const oscad::ASTNode& node);
+std::vector<ColoredBody> generateBackground(Evaluator& ev, const CSGParams& params,
+                                             const std::vector<std::unique_ptr<CSGNode>>& children,
+                                             const oscad::ASTNode& node);
+std::vector<ColoredBody> generateShowOnly(Evaluator& ev, const CSGParams& params,
+                                           const std::vector<std::unique_ptr<CSGNode>>& children,
+                                           const oscad::ASTNode& node);
+
+// children() -- registered in resolveDispatch()/generateDispatch() under
+// "children" like any other builtin, but evalModularCall specially splices
+// its resolved subtree (see csg_resolve.cpp) rather than wrapping it in its
+// own CSGNode, so generateChildren is never actually reached -- kept
+// registered anyway so a lookup for "children" is never a dispatch miss.
+CSGParams resolveChildren(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateChildren(Evaluator& ev, const CSGParams& params,
+                                           const std::vector<std::unique_ptr<CSGNode>>& children,
+                                           const oscad::ASTNode& node);
+
+// render() -- a display hint; resolve just evaluates children for the tree-
+// building side effect. No generate function is registered (falls to
+// generateTree()'s default child-concatenation, exactly reproducing
+// passthrough).
+CSGParams resolveRender(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+
+// breakpoint() -- no-op as of Phase 4 (no debugger until Phase 9); still
+// evaluates/validates its optional `condition` argument for parity.
+CSGParams resolveBreakpoint(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+
+// intersection_for -- NOT a ModularCall (a distinct NodeKind), so it isn't
+// looked up via resolveDispatch()/name string; Evaluator::
+// evalIntersectionForNode calls resolveIntersectionFor directly. Still
+// registered under "intersection_for" in generateDispatch() since
+// generateTree() dispatches by CSGNode::kind uniformly regardless of the
+// AST node type that produced it.
+CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersectionFor& node, EvalContext& ctx);
+std::vector<ColoredBody> generateIntersectionFor(Evaluator& ev, const CSGParams& params,
+                                                  const std::vector<std::unique_ptr<CSGNode>>& children,
+                                                  const oscad::ASTNode& node);
+
+// import() as a geometry statement (module context) -- STL/OBJ/OFF/3MF only
+// as of Phase 5; DXF/SVG land alongside their expression-context (Region)
+// counterparts in a later phase. See import_builtin.hpp for import() used
+// as an expression instead.
+CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params,
+                                         const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+// hull()/minkowski() -- topology.cpp. Both splice their children
+// transparently like union/difference/intersection (resolve just evaluates
+// them for the tree-building side effect); the real work happens in
+// generate against the flattened+role-split child bodies.
+CSGParams resolveHull(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateHull(Evaluator& ev, const CSGParams& params,
+                                       const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+CSGParams resolveMinkowski(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams& params,
+                                            const std::vector<std::unique_ptr<CSGNode>>& children,
+                                            const oscad::ASTNode& node);
+
+// linear_extrude()/rotate_extrude()/projection() -- extrude.cpp.
+CSGParams resolveLinearExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& params,
+                                                const std::vector<std::unique_ptr<CSGNode>>& children,
+                                                const oscad::ASTNode& node);
+
+CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& params,
+                                                const std::vector<std::unique_ptr<CSGNode>>& children,
+                                                const oscad::ASTNode& node);
+
+CSGParams resolveProjection(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateProjection(Evaluator& ev, const CSGParams& params,
+                                             const std::vector<std::unique_ptr<CSGNode>>& children,
+                                             const oscad::ASTNode& node);
+
+CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateOffset(Evaluator& ev, const CSGParams& params,
+                                         const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+// roof() -- roof.cpp. Tier 1 (exact straight skeleton, stable single-
+// contour polygons) + Tier 3 (SDF/level-set fallback) only, per the plan --
+// Tier 2 (general multi-contour/hole straight skeleton) is a named,
+// documented follow-up, not silently dropped (see CLAUDE.md).
+CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateRoof(Evaluator& ev, const CSGParams& params,
+                                       const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+// surface() -- surface.cpp.
+CSGParams resolveSurface(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateSurface(Evaluator& ev, const CSGParams& params,
+                                          const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+// text() -- text.cpp.
+CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateText(Evaluator& ev, const CSGParams& params,
+                                       const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
+
+} // namespace oscadeval

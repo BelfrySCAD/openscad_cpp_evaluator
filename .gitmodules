@@ -1,0 +1,3 @@
+[submodule "external/openscad_cpp_parser"]
+	path = external/openscad_cpp_parser
+	url = git@github.com:BelfrySCAD/openscad_cpp_parser.git
