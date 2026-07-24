@@ -123,12 +123,115 @@ TEST(ExprEvalArithmetic, VectorDotVectorIsScalar) {
     EXPECT_DOUBLE_EQ(asNum(evalSrc("[1,2,3] * [4,5,6]", ev)), 32.0);
 }
 
+TEST(ExprEvalArithmetic, ScalarTimesMatrixAndMatrixTimesScalar) {
+    // End-to-end expression-evaluator dispatch for both multiplication
+    // directions -- matmul()/scale()'s own nested-list recursion is
+    // unit-tested directly in test_value.cpp, but neither direction was
+    // exercised via the real `*` operator dispatch (isNumber/isList
+    // branch selection in expr_eval.cpp's MultiplicationOp case).
+    Evaluator ev;
+    Value a = evalSrc("2 * [[1,2],[3,4]]", ev);
+    Value b = evalSrc("[[1,2],[3,4]] * 2", ev);
+    auto rowsA = std::get<ListPtr>(a)->items;
+    auto rowsB = std::get<ListPtr>(b)->items;
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rowsA[0])->items[0]), 2.0);
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rowsA[1])->items[1]), 8.0);
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rowsB[0])->items[0]), 2.0);
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rowsB[1])->items[1]), 8.0);
+}
+
+TEST(ExprEvalArithmetic, MatrixTimesVectorAndVectorTimesMatrix) {
+    Evaluator ev;
+    // [[1,2],[3,4]] * [1,1] -> row-wise dot products: [3, 7]
+    Value mv = evalSrc("[[1,2],[3,4]] * [1,1]", ev);
+    auto mvItems = std::get<ListPtr>(mv)->items;
+    ASSERT_EQ(mvItems.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(mvItems[0]), 3.0);
+    EXPECT_DOUBLE_EQ(asNum(mvItems[1]), 7.0);
+    // [1,1] * [[1,2],[3,4]] -> column-wise dot products: [4, 6]
+    Value vm = evalSrc("[1,1] * [[1,2],[3,4]]", ev);
+    auto vmItems = std::get<ListPtr>(vm)->items;
+    ASSERT_EQ(vmItems.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(vmItems[0]), 4.0);
+    EXPECT_DOUBLE_EQ(asNum(vmItems[1]), 6.0);
+}
+
+TEST(ExprEvalArithmetic, MatrixTimesMatrix) {
+    Evaluator ev;
+    Value v = evalSrc("[[1,2],[3,4]] * [[5,6],[7,8]]", ev);
+    auto rows = std::get<ListPtr>(v)->items;
+    // Standard matrix product: [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]] = [[19,22],[43,50]]
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rows[0])->items[0]), 19.0);
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rows[0])->items[1]), 22.0);
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rows[1])->items[0]), 43.0);
+    EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rows[1])->items[1]), 50.0);
+}
+
 TEST(ExprEvalArithmetic, UnaryMinusOnListNegatesElementwise) {
     Evaluator ev;
     Value v = evalSrc("-[1,-2,3]", ev);
     auto items = std::get<ListPtr>(v)->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), -1.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0);
+}
+
+TEST(ExprEvalArithmetic, UnaryMinusOnStringIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("-\"abc\"", ev)));
+}
+
+TEST(ExprEvalArithmetic, SubtractionNumericAndVector) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("5 - 3", ev)), 2.0);
+    Value v = evalSrc("[10,20,30] - [1,2,3]", ev);
+    auto items = std::get<ListPtr>(v)->items;
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 9.0);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 27.0);
+}
+
+TEST(ExprEvalArithmetic, MultiplicationBoolOperandIsUndef) {
+    // Neither operand is number/number, list*list, list*number, or
+    // number*list -- the multiplication case's final catch-all undef.
+    Evaluator ev;
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("true * 2", ev)));
+}
+
+TEST(ExprEvalArithmetic, DivisionNumeric) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("10 / 4", ev)), 2.5);
+}
+
+TEST(ExprEvalArithmetic, DivisionListByNumberScalesElementwise) {
+    Evaluator ev;
+    Value v = evalSrc("[10,20] / 2", ev);
+    auto items = std::get<ListPtr>(v)->items;
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 10.0);
+}
+
+TEST(ExprEvalArithmetic, DivisionBoolOperandIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("true / 1", ev)));
+}
+
+TEST(ExprEvalArithmetic, DivisionListByListIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("[1,2] / [3,4]", ev)));
+}
+
+TEST(ExprEvalArithmetic, ModuloByZeroIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("5 % 0", ev)));
+}
+
+TEST(ExprEvalArithmetic, ExponentNumeric) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("2 ^ 10", ev)), 1024.0);
+}
+
+TEST(ExprEvalArithmetic, ExponentNonNumericIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("\"a\" ^ 2", ev)));
 }
 
 // -- Logical operators (eager, not short-circuit) ----------------------------
@@ -180,6 +283,37 @@ TEST(ExprEvalComparisons, VectorLexicographic) {
     Evaluator ev;
     EXPECT_TRUE(asBool(evalSrc("[1,2] < [1,3]", ev)));
     EXPECT_TRUE(asBool(evalSrc("[1] < [1,2]", ev))); // shorter prefix-equal list is less
+}
+
+TEST(ExprEvalComparisons, GreaterThanOrEqual) {
+    Evaluator ev;
+    EXPECT_TRUE(asBool(evalSrc("2 >= 1", ev)));
+    EXPECT_TRUE(asBool(evalSrc("1 >= 1", ev))); // equal branch
+    EXPECT_FALSE(asBool(evalSrc("0 >= 1", ev)));
+}
+
+TEST(ExprEvalComparisons, MismatchedTypesWarnAndUndefForGreaterEqual) {
+    std::string lastWarning;
+    Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
+    Value v = evalSrc("true >= 0", ev);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(v));
+    EXPECT_NE(lastWarning.find("undefined operation (bool >= number)"), std::string::npos);
+}
+
+TEST(ExprEvalComparisons, MismatchedTypesWarnAndUndefForLessThan) {
+    std::string lastWarning;
+    Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
+    Value v = evalSrc("true < 0", ev);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(v));
+    EXPECT_NE(lastWarning.find("undefined operation (bool < number)"), std::string::npos);
+}
+
+TEST(ExprEvalComparisons, MismatchedTypesWarnAndUndefForLessThanOrEqual) {
+    std::string lastWarning;
+    Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
+    Value v = evalSrc("true <= 0", ev);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(v));
+    EXPECT_NE(lastWarning.find("undefined operation (bool <= number)"), std::string::npos);
 }
 
 // -- Ternary ------------------------------------------------------------
@@ -318,4 +452,84 @@ TEST(ExprEvalBitwiseOps, NonNumericOperandIsUndefAndWarns) {
     EXPECT_NE(echoed[0].find("WARNING: undefined operation (number | string)"), std::string::npos);
     EXPECT_NE(echoed[1].find("WARNING: undefined operation (number & bool)"), std::string::npos);
     EXPECT_NE(echoed[4].find("WARNING: undefined operation (~string)"), std::string::npos);
+}
+
+// -- Indexing / member access ----------------------------------------------
+
+TEST(ExprEvalIndexing, StringIndexingValidAndOutOfRange) {
+    Evaluator ev;
+    EXPECT_EQ(std::get<std::string>(evalSrc("\"abc\"[1]", ev)), "b");
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("\"abc\"[10]", ev)));
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("\"abc\"[-1]", ev)));
+}
+
+TEST(ExprEvalIndexing, RangeIndexingByComponent) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("[2:3:11][0]", ev)), 2.0); // start
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("[2:3:11][1]", ev)), 3.0); // step
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("[2:3:11][2]", ev)), 11.0); // end
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("[2:3:11][3]", ev)));
+}
+
+TEST(ExprEvalIndexing, ObjectIndexingByKey) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("object(a=1, b=2)[\"b\"]", ev)), 2.0);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("object(a=1)[\"nope\"]", ev)));
+}
+
+TEST(ExprEvalIndexing, ObjectMemberAccessByName) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("object(a=1, b=2).b", ev)), 2.0);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("object(a=1).nope", ev)));
+}
+
+TEST(ExprEvalIndexing, ListSwizzleWComponent) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("[1,2,3,4].w", ev)), 4.0);
+}
+
+// -- CommentedExpr unwrapping -----------------------------------------------
+
+TEST(ExprEvalCommentedExpr, LeadingCommentDoesNotAffectValue) {
+    // Only reachable when the AST was parsed with includeComments=true
+    // (getASTFromString's default is false, which every other test in this
+    // file relies on implicitly via exprSrc/parseSrc) -- evalExpr's own
+    // CommentedExpr case just unwraps and re-evaluates the inner
+    // expression, otherwise untested anywhere in this suite.
+    auto ast = oscad::getASTFromString("x = /* c */ 1;\n", /*includeComments=*/true);
+    auto scope = oscad::buildScopes(ast);
+    Evaluator ev;
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    auto* a = dynamic_cast<oscad::Assignment*>(ast[0].get());
+    ASSERT_NE(a, nullptr);
+    ASSERT_EQ(a->expr->kind(), oscad::NodeKind::CommentedExpr);
+    Value v = ev.evalExpr(*a->expr, ctx);
+    EXPECT_DOUBLE_EQ(asNum(v), 1.0);
+}
+
+// -- assert() expression form: message formatting ---------------------------
+
+TEST(ExprEvalAssertExpression, StringMessageIsQuoted) {
+    Evaluator ev;
+    try {
+        evalSrc("assert(false, \"boom\") 1", ev);
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("failed: \"boom\""), std::string::npos);
+    }
+}
+
+TEST(ExprEvalAssertExpression, NonStringMessageUsesFmtValue) {
+    // Note: the surrounding `": \"" + ... + "\""` wrapping is unconditional
+    // (not just for actual strings), so a non-string message's fmtValue()
+    // rendering still ends up inside literal quotes in the final message --
+    // this is a pre-existing quirk of evalAssertExpr, not something this
+    // test is asserting is "correct," just documenting the real output.
+    Evaluator ev;
+    try {
+        evalSrc("assert(false, 42) 1", ev);
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("failed: \"42\""), std::string::npos);
+    }
 }

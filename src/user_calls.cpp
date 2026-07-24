@@ -41,13 +41,22 @@ EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, 
 }
 
 void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
-                               EvalContext& childCtx) {
+                               const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx) {
     std::optional<EvalContext> defaultCtx;
     for (const auto& param : params) {
         const std::string& pname = param->name->name;
-        if (childCtx.let_->count(pname)) continue;
+        // `bound` (bindArgs' own return value), not childCtx.let_/dyn, is
+        // the source of truth for "did the caller actually supply this
+        // name" -- see this function's own header doc comment for why
+        // checking dyn/let_ directly is wrong either way.
+        if (bound.count(pname)) continue;
+        const bool isDyn = !pname.empty() && pname[0] == '$';
         if (!param->defaultValue) {
-            (*childCtx.let_)[pname] = Value{};
+            if (isDyn) {
+                (*childCtx.dyn)[pname] = Value{};
+            } else {
+                (*childCtx.let_)[pname] = Value{};
+            }
             continue;
         }
         if (!defaultCtx) {
@@ -62,7 +71,12 @@ void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::Parameter
             dc.childrenCallerCtx = childCtx.childrenCallerCtx;
             defaultCtx = std::move(dc);
         }
-        (*childCtx.let_)[pname] = evalExpr(*param->defaultValue, *defaultCtx);
+        Value v = evalExpr(*param->defaultValue, *defaultCtx);
+        if (isDyn) {
+            (*childCtx.dyn)[pname] = std::move(v);
+        } else {
+            (*childCtx.let_)[pname] = std::move(v);
+        }
     }
 }
 
@@ -95,7 +109,7 @@ void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad
             (*childCtx.let_)[k] = std::move(v);
         }
     }
-    applyDefaults(decl.parameters, childCtx);
+    applyDefaults(decl.parameters, bound, childCtx);
 
     int parentModules = 0;
     for (const CallStackFrame& f : callStack_) {
@@ -130,7 +144,7 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
             (*childCtx.let_)[k] = std::move(v);
         }
     }
-    applyDefaults(decl.parameters, childCtx);
+    applyDefaults(decl.parameters, bound, childCtx);
 
     const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
     std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &decl.position());
@@ -164,7 +178,7 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
             (*childCtx.let_)[k] = std::move(v);
         }
     }
-    applyDefaults(funcNode.parameters, childCtx);
+    applyDefaults(funcNode.parameters, bound, childCtx);
 
     const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
     // "<function literal>" -- the reference's call-stack entry uses the

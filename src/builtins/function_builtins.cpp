@@ -186,9 +186,26 @@ Value builtinRands(double minv, double maxv, double nArg, const Value& seedArg) 
 Value builtinSearch(const CallArgs& args) {
     const Value matchArg = getArg(args, 0, "match", Value{});
     const Value vectorArg = getArg(args, 1, "vector", Value{});
-    const ListPtr* vecPtr = std::get_if<ListPtr>(&vectorArg);
-    if (!vecPtr || !*vecPtr) return Value{};
-    const auto& vec = (*vecPtr)->items;
+    // A string "vector" haystack is searched character-by-character, same
+    // as the reference (Python strings are natively iterable/indexable by
+    // character, so `for i, item in enumerate(vector)` just works there
+    // with no special case at all -- C++ needs this explicit adaptation
+    // since std::string isn't a Value list). Materialized into a real
+    // vector of length-1 string Values rather than special-casing every
+    // access below, so findAll/the match-dispatch code stays oblivious to
+    // which kind of haystack it's searching.
+    std::vector<Value> stringHaystack;
+    const std::vector<Value>* vecItems = nullptr;
+    if (const ListPtr* vecPtr = std::get_if<ListPtr>(&vectorArg); vecPtr && *vecPtr) {
+        vecItems = &(*vecPtr)->items;
+    } else if (const std::string* vecStr = std::get_if<std::string>(&vectorArg)) {
+        stringHaystack.reserve(vecStr->size());
+        for (char c : *vecStr) stringHaystack.push_back(Value{std::string(1, c)});
+        vecItems = &stringHaystack;
+    } else {
+        return Value{};
+    }
+    const auto& vec = *vecItems;
     const int numReturns = static_cast<int>(toDoubleLenient(getArg(args, 2, "num_returns", Value{1.0})));
     const int col = static_cast<int>(toDoubleLenient(getArg(args, 3, "index_col", Value{0.0})));
 

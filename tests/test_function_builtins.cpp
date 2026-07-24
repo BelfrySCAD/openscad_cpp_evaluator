@@ -137,6 +137,18 @@ TEST(StringListBuiltins, ChrOrdRoundTrip) {
     EXPECT_EQ(asStr(evalSrc("chr(1/0)", ev)), ""); // non-finite -> "" not undef
 }
 
+TEST(StringListBuiltins, ChrOrdMultiByteUtf8CodepointsRoundTrip) {
+    // utf8Encode/utf8DecodeFirst's own 2-byte/3-byte/4-byte branches --
+    // every other chr()/ord() test in this file uses codepoints <= 0x7F.
+    Evaluator ev;
+    EXPECT_EQ(asStr(evalSrc("chr(233)", ev)), "\xC3\xA9"); // U+00E9 'é', 2-byte
+    EXPECT_EQ(asStr(evalSrc("chr(8364)", ev)), "\xE2\x82\xAC"); // U+20AC '€', 3-byte
+    EXPECT_EQ(asStr(evalSrc("chr(128512)", ev)), "\xF0\x9F\x98\x80"); // U+1F600, 4-byte
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("ord(\"\xC3\xA9\")", ev)), 233.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("ord(\"\xE2\x82\xAC\")", ev)), 8364.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("ord(\"\xF0\x9F\x98\x80\")", ev)), 128512.0);
+}
+
 TEST(StringListBuiltins, TypeChecks) {
     Evaluator ev;
     EXPECT_TRUE(asBool(evalSrc("is_undef(undef)", ev)));
@@ -163,6 +175,92 @@ TEST(StringListBuiltins, SearchAllMatchesWithNumReturnsZero) {
     EXPECT_DOUBLE_EQ(asNum(items[1]), 4.0);
 }
 
+TEST(StringListBuiltins, SearchIndexColLooksUpWithinEachRow) {
+    // findAll's own "vec[i] is itself a list, matchArg is a scalar" branch
+    // (index_col) -- every other search() test in this file matches a flat
+    // number list, never a list-of-rows.
+    Evaluator ev;
+    Value v = evalSrc("search(3, [[1,10],[2,20],[3,30]])", ev);
+    const auto& items = asList(v);
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 2.0); // row index 2 has col0==3
+}
+
+TEST(StringListBuiltins, SearchOutOfRangeIndexColMatchesNothing) {
+    Evaluator ev;
+    Value v = evalSrc("search(3, [[1,10],[2,20],[3,30]], 0, 5)", ev);
+    EXPECT_TRUE(asList(v).empty());
+}
+
+TEST(StringListBuiltins, SearchStringMatchSearchesEachCharacter) {
+    // findAll's "matchArg is itself a string" branch.
+    Evaluator ev;
+    Value v = evalSrc("search(\"ac\", [\"a\", \"b\", \"c\", \"a\"])", ev);
+    const auto& items = asList(v);
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 0.0); // first 'a'
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0); // 'c'
+}
+
+TEST(StringListBuiltins, SearchListMatchSearchesEachElement) {
+    // findAll's "matchArg is itself a list of scalars" branch.
+    Evaluator ev;
+    Value v = evalSrc("search([2,4], [1,2,3,4,5])", ev);
+    const auto& items = asList(v);
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 3.0);
+}
+
+TEST(StringListBuiltins, SearchStringHaystackSingleCharMatch) {
+    // Regression test: builtinSearch used to reject a string "vector"
+    // argument outright (returning undef unconditionally), unlike the
+    // reference, where a Python string is natively iterable/indexable by
+    // character -- `search("b", "abc")` is a real, common OpenSCAD idiom
+    // (finding a character's position in a string) that silently produced
+    // undef before this fix.
+    Evaluator ev;
+    Value found = evalSrc("search(\"b\", \"abc\")", ev);
+    const auto& items = asList(found);
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
+    EXPECT_TRUE(asList(evalSrc("search(\"z\", \"abc\")", ev)).empty());
+}
+
+TEST(StringListBuiltins, SearchMultiCharMatchAgainstStringHaystack) {
+    // Each character of `match` is searched independently against the
+    // string haystack, same as against a list haystack.
+    Evaluator ev;
+    Value v = evalSrc("search(\"ba\", \"abcd\")", ev);
+    const auto& items = asList(v);
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0); // 'b' at index 1
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 0.0); // 'a' at index 0
+}
+
+TEST(StringListBuiltins, SearchStringHaystackWithNumReturnsZero) {
+    Evaluator ev;
+    Value v = evalSrc("search(\"a\", \"abcdabcd\", 0)", ev);
+    const auto& outer = asList(v);
+    ASSERT_EQ(outer.size(), 1u);
+    const auto& inner = asList(outer[0]);
+    ASSERT_EQ(inner.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(inner[0]), 0.0);
+    EXPECT_DOUBLE_EQ(asNum(inner[1]), 4.0);
+}
+
+TEST(StringListBuiltins, SearchListOfListsMatchesWholeRows) {
+    // findAll's own "val (an element of matchArg) is itself a list" branch
+    // -- target=vec[i] directly (whole-row equality), rather than an
+    // index_col lookup within each row.
+    Evaluator ev;
+    Value v = evalSrc("search([[1,2],[3,4]], [[1,2],[5,6],[3,4]])", ev);
+    const auto& items = asList(v);
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 0.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0);
+}
+
 TEST(StringListBuiltins, LookupInterpolatesAndClamps) {
     Evaluator ev;
     EXPECT_DOUBLE_EQ(asNum(evalSrc("lookup(5, [[0,0],[10,100]])", ev)), 50.0);
@@ -176,9 +274,72 @@ TEST(StringListBuiltins, HasKey) {
     EXPECT_FALSE(asBool(evalSrc("has_key(object(a=1), \"z\")", ev)));
 }
 
+TEST(StringListBuiltins, HasKeyOnNonObjectIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("has_key(5, \"a\")", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("has_key([1,2], \"a\")", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("has_key(\"str\", \"a\")", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("has_key(undef, \"a\")", ev)));
+}
+
+TEST(StringListBuiltins, HasKeyOnEmptyObjectIsFalse) {
+    Evaluator ev;
+    EXPECT_FALSE(asBool(evalSrc("has_key(object(), \"a\")", ev)));
+}
+
+TEST(StringListBuiltins, LenOfObjectCountsKeys) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("len(object(a=1,b=2,c=3))", ev)), 3.0);
+}
+
+TEST(StringListBuiltins, ObjectPlusObjectIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("object(a=1) + object(b=2)", ev)));
+}
+
+TEST(StringListBuiltins, StrFormatsNestedObject) {
+    Evaluator ev;
+    EXPECT_EQ(asStr(evalSrc("str(object(a=1, nested=object(x=10,y=20)))", ev)), "object(a = 1, nested = object(x = 10, y = 20))");
+}
+
+TEST(StringListBuiltins, ForLoopOverObjectIteratesKeysInInsertionOrder) {
+    std::vector<std::string> echoed;
+    oscadeval::test::evalSrc("for (k = object(z=1,a=2,m=3)) echo(k);",
+                              [&](const std::string& msg) { echoed.push_back(msg); });
+    ASSERT_EQ(echoed.size(), 3u);
+    EXPECT_EQ(echoed[0], "ECHO: \"z\"");
+    EXPECT_EQ(echoed[1], "ECHO: \"a\"");
+    EXPECT_EQ(echoed[2], "ECHO: \"m\"");
+}
+
+TEST(StringListBuiltins, FunctionValuedObjectMemberIsCallable) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("object(fn=function(x) x*2).fn(5)", ev)), 10.0);
+}
+
 TEST(StringListBuiltins, VersionBuiltins) {
     Evaluator ev;
     EXPECT_DOUBLE_EQ(asNum(evalSrc("version_num()", ev)), 20250101.0);
+}
+
+TEST(StringListBuiltins, VersionReturnsThreeElementList) {
+    Evaluator ev;
+    Value v = evalSrc("version()", ev);
+    const auto& items = asList(v);
+    ASSERT_EQ(items.size(), 3u);
+}
+
+TEST(StringListBuiltins, IsFunctionAndIsObject) {
+    Evaluator ev;
+    EXPECT_TRUE(asBool(evalSrc("is_function(function(x) x)", ev)));
+    EXPECT_FALSE(asBool(evalSrc("is_function(5)", ev)));
+    EXPECT_TRUE(asBool(evalSrc("is_object(object(a=1))", ev)));
+    EXPECT_FALSE(asBool(evalSrc("is_object(5)", ev)));
+}
+
+TEST(StringListBuiltins, CrossDimensionMismatchIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("cross([1,2,3], [1,2])", ev)));
 }
 
 // -- object(): call-site interleaved positional/named merge order --------
@@ -232,6 +393,19 @@ TEST(ObjectBuiltin, PreservesInsertionOrderAcrossInterleavedMerges) {
     EXPECT_EQ(obj->items[0].first, "a");
     EXPECT_EQ(obj->items[1].first, "b");
     EXPECT_EQ(obj->items[2].first, "c");
+}
+
+TEST(ObjectBuiltin, PositionalListWithNonPairEntryIsUndef) {
+    // A positional list argument whose entries aren't all valid
+    // [string-key, value] pairs -- the whole object() call is undef, not
+    // just that one entry.
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("object([1, 2, 3])", ev)));
+}
+
+TEST(ObjectBuiltin, PositionalNonObjectNonListArgumentIsUndef) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("object(5)", ev)));
 }
 
 // -- Precedence: a builtin function name always wins over a same-named --

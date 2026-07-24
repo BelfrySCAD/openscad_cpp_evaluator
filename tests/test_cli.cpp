@@ -276,3 +276,150 @@ TEST(CliDebugRepl, ListShowsSourceFromUseInjectedFileWhenPausedThere) {
     std::filesystem::remove(src);
     std::filesystem::remove(out);
 }
+
+TEST(CliDebugRepl, PreRunEofExitsCleanlyWithoutExporting) {
+    // Closing stdin (no "quit" command at all) before "run" must be
+    // handled the same as an explicit quit -- runPrompt()'s own
+    // std::getline-fails branch, distinct from QuitBeforeRunExitsCleanly's
+    // explicit "quit" command.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_(""); // immediate EOF
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_FALSE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, PreRunCommandDispatchCoversAllBranches) {
+    // Every pre-run command runPrompt() dispatches, beyond the plain
+    // "break"/"run"/"quit" already exercised by other tests: an
+    // unparsable "break"/"delete" location (parseLocation's own failure
+    // path), "delete" of one breakpoint vs. "delete" with no args
+    // (clear-all), "info breakpoints" both with and without any set,
+    // "list" with a numeric arg and with an unparsable one, "help", and an
+    // unrecognized command.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({
+        "break bogus",
+        "delete bogus",
+        "break 2",
+        "info breakpoints",
+        "delete 2",
+        "info breakpoints",
+        "delete",
+        "list 2",
+        "list abc",
+        "help",
+        "totally_unknown_command",
+        "quit",
+    });
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string log = stdout_.str();
+    EXPECT_NE(log.find("Usage: break [file:]line"), std::string::npos);
+    EXPECT_NE(log.find("Usage: delete [file:]line"), std::string::npos);
+    EXPECT_NE(log.find("Breakpoint set at"), std::string::npos);
+    EXPECT_NE(log.find("breakpoint at"), std::string::npos);
+    EXPECT_NE(log.find("No breakpoints set."), std::string::npos);
+    EXPECT_NE(log.find("All breakpoints deleted"), std::string::npos);
+    EXPECT_NE(log.find("Commands (before"), std::string::npos);
+    EXPECT_NE(log.find("Undefined command: \"totally_unknown_command\""), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, PausedEofAbortsWithoutExporting) {
+    // interact()'s own std::getline-fails branch (distinct from
+    // QuitMidDebugAbortsWithoutExporting's explicit "quit"): closing
+    // stdin while paused must abort exactly like "quit" would.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run"}); // pauses (break-on-first), then EOF
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 1);
+    EXPECT_FALSE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, PausedCommandDispatchCoversAllBranches) {
+    // Every paused-REPL command interact() dispatches, beyond the
+    // print/set/continue already exercised elsewhere: "print" with no
+    // argument and with an unknown symbol (both usage-error branches),
+    // "set" with no "=" at all (usage error), a quoted-string "set" value
+    // and a bare-token "set" value that parses as neither number nor
+    // quoted string (parseValueForRepl's undef fallback), "delete" while
+    // paused, "help", and an unrecognized command.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({
+        "run",
+        "print",
+        "print does_not_exist",
+        "set",
+        "set width=\"hi\"",
+        "set width=not_a_number",
+        "delete",
+        "help",
+        "totally_unknown_command",
+        "continue",
+    });
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string log = stdout_.str();
+    EXPECT_NE(log.find("Usage: print <name>"), std::string::npos);
+    EXPECT_NE(log.find("No symbol \"does_not_exist\" in current context."), std::string::npos);
+    EXPECT_NE(log.find("Usage: set <name>=<value>"), std::string::npos);
+    EXPECT_NE(log.find("width will be set to"), std::string::npos);
+    EXPECT_NE(log.find("All breakpoints deleted"), std::string::npos);
+    EXPECT_NE(log.find("Commands (while paused)"), std::string::npos);
+    EXPECT_NE(log.find("Undefined command: \"totally_unknown_command\""), std::string::npos);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, StepEntersNextStatement) {
+    // "step"'s own stepCmd_="into" branch in debugHook -- distinct from
+    // PrintShowsVariableAfterAssignment's "next" ("over"), which is the
+    // only step-family command any other existing test exercises.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run", "step", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    // Two separate pauses expected: break-on-first at line 1, then "step"
+    // landing on line 2.
+    const std::string log = stdout_.str();
+    EXPECT_NE(log.find("Breakpoint hit at " + src.filename().string() + ":1"), std::string::npos);
+    EXPECT_NE(log.find("Breakpoint hit at " + src.filename().string() + ":2"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, FinishInsideFunctionPrintsReturnedValueAndBacktraceShowsCallFrame) {
+    // "finish" (returnHook's own print, only reachable from inside a user
+    // *function* call -- modules never invoke returnHook) and backtrace's
+    // "haveFrame" branch (a non-empty call stack), neither reachable from
+    // any existing test (which only ever pause at toplevel or inside a
+    // module).
+    auto src = writeScript("fn.scad", "function f(x) = x + 1;\ny = f(2);\necho(y);\ncube(1);\n");
+    auto out = src.parent_path() / "fn_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"break 1", "run", "continue", "backtrace", "finish", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string log = stdout_.str();
+    EXPECT_NE(log.find("#0  f() at " + src.filename().string() + ":1"), std::string::npos);
+    EXPECT_NE(log.find("#1  <toplevel> at " + src.filename().string() + ":2"), std::string::npos);
+    EXPECT_NE(log.find("Value returned is $1 = 3"), std::string::npos);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}

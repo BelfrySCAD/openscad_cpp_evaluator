@@ -52,3 +52,69 @@ TEST(Scoping, DollarVarAssignmentGoesToDynNotLet) {
 // no observable side effect to distinguish "ran in source order" from "ran
 // in assignment-then-others order" until a later phase adds echo() or a
 // geometry statement.
+
+TEST(Scoping, SelfReferentialParameterDefaultDoesNotInfinitelyRecurse) {
+    // `x = is_undef(x) ? 5 : x;` inside a module body assigns `x` in terms
+    // of its own (not-yet-assigned) prior value -- must resolve via
+    // sequential-visibility rules (the RHS's `x` reference sees whatever
+    // `x` was bound to on entry, i.e. the parameter's own undef default
+    // when the caller passes nothing), not recurse into evaluating its own
+    // not-yet-complete assignment.
+    std::string captured;
+    Evaluator ev([&](const std::string& msg) { captured = msg; });
+    auto ast = parseSrc("module m(x) { x = is_undef(x) ? 5 : x; echo(x); }\nm();");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    EXPECT_EQ(captured, "ECHO: 5");
+}
+
+TEST(Scoping, SelfReferentialParameterDefaultDoesNotWarnAboutOverwriting) {
+    // The same shadow-reassignment pattern as above must NOT trigger the
+    // "was assigned ... but was overwritten" warning (DoubleAssignmentIn-
+    // SameScopeWarnsWithExactFormatAndLastWins above) -- `x` here is a
+    // parameter being reassigned once, not a plain variable assigned twice
+    // in the same scope.
+    std::vector<std::string> warnings;
+    Evaluator ev([&](const std::string& msg) { warnings.push_back(msg); });
+    auto ast = parseSrc("module m(x) { x = is_undef(x) ? 5 : x; } m();");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    for (const auto& w : warnings) {
+        EXPECT_EQ(w.find("was overwritten"), std::string::npos) << w;
+    }
+}
+
+TEST(Scoping, FunctionForwardReferenceResolves) {
+    std::string captured;
+    Evaluator ev([&](const std::string& msg) { captured = msg; });
+    auto ast = parseSrc("echo(double(5));\nfunction double(x) = x * 2;");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    EXPECT_EQ(captured, "ECHO: 10");
+}
+
+TEST(Scoping, ModuleForwardReferenceResolves) {
+    auto ast = parseSrc("box(3);\nmodule box(s) { cube(s); }");
+    auto scope = oscad::buildScopes(ast);
+    Evaluator ev;
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    auto tree = ev.resolveTree(ast, ctx);
+    auto bodies = ev.generateTree(tree);
+    ASSERT_EQ(bodies.size(), 1u);
+    EXPECT_NEAR(bodies[0].body->Volume(), 27.0, 1e-9);
+}
+
+TEST(Scoping, ModuleLocalVariableDoesNotLeakToOuterScope) {
+    std::vector<std::string> echoed;
+    Evaluator ev([&](const std::string& msg) { echoed.push_back(msg); });
+    auto ast = parseSrc("x = 10;\nmodule m() { x = 20; echo(x); }\nm();\necho(x);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    ASSERT_EQ(echoed.size(), 2u);
+    EXPECT_EQ(echoed[0], "ECHO: 20");
+    EXPECT_EQ(echoed[1], "ECHO: 10");
+}

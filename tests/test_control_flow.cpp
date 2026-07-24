@@ -2,6 +2,7 @@
 
 #include "test_helpers.hpp"
 
+#include <algorithm>
 #include <gtest/gtest.h>
 
 using namespace oscadeval;
@@ -64,6 +65,32 @@ TEST(ForLoop, IteratesOverAPlainList) {
     EXPECT_EQ(e.bodies.size(), 3u);
 }
 
+TEST(ForLoop, ScalarIterableIsTreatedAsSingleElement) {
+    // The statement-form `for` (distinct from a list-comprehension `for`
+    // clause, which never reaches this since scalars there are handled by
+    // expandIterable's own bare-scalar fallback tested in test_value.cpp)
+    // -- a bare scalar iterable produces exactly one iteration.
+    std::vector<std::string> echoed;
+    runScript("for (x = 5) { echo(x); }", [&](const std::string& msg) { echoed.push_back(msg); });
+    ASSERT_EQ(echoed.size(), 1u);
+    EXPECT_EQ(echoed[0], "ECHO: 5");
+}
+
+TEST(ForLoop, UndefIterableProducesNoIterations) {
+    std::vector<std::string> echoed;
+    runScript("for (x = undef) { echo(x); }", [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_TRUE(echoed.empty());
+}
+
+TEST(ForLoop, BodyLocalVariableVisibleToSiblingStatementsInBody) {
+    std::vector<std::string> echoed;
+    runScript("for (a = [1:3]) { x = a * 2; echo(x); }", [&](const std::string& msg) { echoed.push_back(msg); });
+    ASSERT_EQ(echoed.size(), 3u);
+    EXPECT_EQ(echoed[0], "ECHO: 2");
+    EXPECT_EQ(echoed[1], "ECHO: 4");
+    EXPECT_EQ(echoed[2], "ECHO: 6");
+}
+
 // -- if / if-else -----------------------------------------------------------
 
 TEST(IfStatement, TrueBranchProducesGeometry) {
@@ -111,6 +138,40 @@ TEST(Echo, FormatsArgumentsCommaSeparated) {
     std::string captured;
     runScript("echo(1, \"a\", true);", [&](const std::string& msg) { captured = msg; });
     EXPECT_EQ(captured, "ECHO: 1, \"a\", true");
+}
+
+TEST(Echo, FormatsListValue) {
+    // fmtValue's own ListPtr branch -- every other echo test in this file
+    // uses only scalar arguments.
+    std::string captured;
+    runScript("echo([1, 2, 3]);", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: [1, 2, 3]");
+}
+
+TEST(Echo, FormatsRangeValue) {
+    std::string captured;
+    runScript("echo([2:1:10]);", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: [2 : 1 : 10]");
+}
+
+TEST(Echo, FormatsNonEmptyObjectValue) {
+    std::string captured;
+    runScript("echo(object(a=1, b=2));", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: object(a = 1, b = 2)");
+}
+
+TEST(Echo, FormatsEmptyObjectValue) {
+    std::string captured;
+    runScript("echo(object());", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: object()");
+}
+
+TEST(Echo, FormatsFunctionLiteralValue) {
+    // fmtValue's own final fallback -- a FunctionLiteral* value has no
+    // meaningful textual form (matches the reference exactly).
+    std::string captured;
+    runScript("echo(function(x) x);", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: <function-literal>");
 }
 
 TEST(AssertStatement, PassingAssertionIsANoOp) {
@@ -164,10 +225,29 @@ TEST(ListComprehension, EachFlattensNestedLists) {
 }
 
 TEST(ListComprehension, LetClauseBindsIntoBody) {
+    // Note: `for (...) let (...) sq` parses `let (...) sq` as a plain
+    // expression-level LetOp (evaluated via evalExpr's own LetOp case, not
+    // evalListElement's ListCompLet case) -- ListCompLet is a genuinely
+    // different AST node that only arises when `let(...)` is immediately
+    // followed by ANOTHER comprehension clause (see
+    // ListCompLetPrecedingForBindsIntoLaterClause below for that shape).
     RunResult r = runScript("x = [for (i = [0:2]) let (sq = i*i) sq];");
     auto items = std::get<ListPtr>(varValue(r, "x"))->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 4.0);
+}
+
+TEST(ListComprehension, ListCompLetPrecedingForBindsIntoLaterClause) {
+    // The real ListCompLet AST node shape: `let(...)` directly followed by
+    // another clause (here `for`), both inside the same `[...]` -- confirmed
+    // via the parser's own JSON AST dump that only THIS shape produces
+    // NodeKind::ListCompLet (LetClauseBindsIntoBody above's `for (...) let
+    // (...) body` shape produces a plain LetOp instead).
+    RunResult r = runScript("x = [let (a = 1) for (i = [0:2]) i + a];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 3u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 3.0);
 }
 
 TEST(ListComprehension, CStyleForAccumulates) {
@@ -176,6 +256,194 @@ TEST(ListComprehension, CStyleForAccumulates) {
     ASSERT_EQ(items.size(), 5u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 0.0);
     EXPECT_DOUBLE_EQ(asNum(items[4]), 6.0); // 0,0,1,3,6
+}
+
+TEST(ListComprehension, IfElseClauseSyntax) {
+    // The real `if (cond) a else b` clause shape (a distinct ListCompIfElse
+    // AST node) -- ForIfElseMapsBothBranches above exercises the same
+    // per-element branching via a plain ternary expression instead, which
+    // is a different NodeKind and never reaches ListCompIfElse's own
+    // evalListElement case.
+    RunResult r = runScript("x = [for (i = [0:3]) if (i % 2 == 0) \"even\" else \"odd\"];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 4u);
+    EXPECT_EQ(std::get<std::string>(items[0]), "even");
+    EXPECT_EQ(std::get<std::string>(items[1]), "odd");
+}
+
+TEST(ListComprehension, EachWrappingAForClauseFlattensIt) {
+    // isListCompClauseKind's own dispatch: `each` directly wrapping a
+    // for/if/let CLAUSE (not a plain list literal, which
+    // EachFlattensNestedLists above already covers) takes a different path
+    // in evalListElement's own ListCompEach case.
+    RunResult r = runScript("x = [each for (i = [0:2]) i];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 3u);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 2.0);
+}
+
+TEST(ListComprehension, EachWrappingAnIfOnlyClauseFlattensIt) {
+    RunResult r = runScript("x = [each if (true) 5];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
+}
+
+TEST(ListComprehension, EachWrappingAnIfElseClauseFlattensIt) {
+    RunResult r = runScript("x = [each if (false) 5 else 6];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 6.0);
+}
+
+TEST(ListComprehension, EachOnScalarAppendsSingleValue) {
+    RunResult r = runScript("x = [each 5, each 6];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 6.0);
+}
+
+TEST(ListComprehension, EachOnUndefDropsIt) {
+    RunResult r = runScript("x = [1, each undef, 2];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0);
+}
+
+TEST(ListComprehension, ForClauseWithNestedListLiteralBody) {
+    // The body of a `for` clause can itself be a plain vector literal
+    // (also NodeKind::ListComprehension) rather than a scalar expression or
+    // another comprehension clause -- a separate code path from the
+    // ordinary evalListCompBody() call every other `for` test here takes.
+    RunResult r = runScript("x = [for (i = [0:1]) [i, i * 2]];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 2u);
+    auto first = std::get<ListPtr>(items[0])->items;
+    EXPECT_DOUBLE_EQ(asNum(first[0]), 0.0);
+    EXPECT_DOUBLE_EQ(asNum(first[1]), 0.0);
+    auto second = std::get<ListPtr>(items[1])->items;
+    EXPECT_DOUBLE_EQ(asNum(second[0]), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(second[1]), 2.0);
+}
+
+TEST(ListComprehension, CStyleForWithNestedListLiteralBody) {
+    RunResult r = runScript("x = [for (a = 0; a < 2; a = a + 1) [a, a]];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 2u);
+    auto second = std::get<ListPtr>(items[1])->items;
+    EXPECT_DOUBLE_EQ(asNum(second[0]), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(second[1]), 1.0);
+}
+
+TEST(ListComprehension, CStyleForExceedingMaxIterationsThrows) {
+    // A condition that never becomes false hits evalListElement's own
+    // 1,000,000-iteration safety guard.
+    EXPECT_THROW(runScript("x = [for (a = 0; true; a = a + 1) a];"), EvalError);
+}
+
+TEST(ListComprehension, ForClauseWithEachScalarBody) {
+    // The opposite nesting from EachWrappingAForClauseFlattensIt above:
+    // `for` is the OUTER clause here, and each iteration's own BODY is
+    // `each i` (a scalar) -- appendEach's scalar-append branch, reached
+    // via evalListElement's own isNestedLc==false ListCompFor path this
+    // time, not evalListCompBody's generic dispatch.
+    RunResult r = runScript("x = [for (i = [1:3]) each i];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 3u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 3.0);
+}
+
+TEST(ListComprehension, ForUndefIterableProducesEmptyList) {
+    RunResult r = runScript("x = [for (i = undef) i];");
+    EXPECT_TRUE(std::get<ListPtr>(varValue(r, "x"))->items.empty());
+}
+
+TEST(ListComprehension, ForOverUndefBodyKeepsUndefAsAnElement) {
+    // Unlike a for-BODY that IS undef being an iterable (dropped, above),
+    // a for clause whose per-iteration BODY EXPRESSION evaluates to undef
+    // must keep that undef as a real list element, not drop it -- distinct
+    // from `each`'s own drop-undef rule (EachOnUndefDropsIt).
+    RunResult r = runScript("x = [for (i = [1,2]) undef];");
+    const auto& items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(items[0]));
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(items[1]));
+}
+
+TEST(ListComprehension, ZeroStepRangeIterationYieldsNothing) {
+    RunResult r = runScript("x = [for (i = [1:0:5]) i];");
+    EXPECT_TRUE(std::get<ListPtr>(varValue(r, "x"))->items.empty());
+}
+
+TEST(Echo, FormatsZeroStepRangeValue) {
+    std::string captured;
+    runScript("echo([1:0:5]);", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: [1 : 0 : 5]");
+}
+
+TEST(ExprEvalFunctionCall, CallingANonFunctionVariableWarnsAndIsUndef) {
+    std::vector<std::string> warnings;
+    RunResult r = runScript("x = [1,2,3];\ny = x();", [&](const std::string& msg) { warnings.push_back(msg); });
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(varValue(r, "y")));
+    ASSERT_FALSE(warnings.empty());
+    EXPECT_NE(warnings.back().find("Ignoring unknown function 'x'"), std::string::npos);
+}
+
+TEST(Intersection, EchoInDisabledFirstStatementStillFiresDespiteEmptyResult) {
+    // A deliberate resolve/generate-split consequence: resolve can't yet
+    // know the whole intersection() will end up geometrically empty (that
+    // isn't known until generate time), so echo()'s side effect during
+    // resolve still fires even though the final result has zero bodies.
+    std::string captured;
+    Evaluated e = evalSrc("intersection() { *cube(10); echo(\"fired\"); cube(2); }", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: \"fired\"");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(ListComprehension, IfClauseWithNestedListLiteralBody) {
+    // evalListCompBody's own "body is itself a plain vector literal"
+    // branch -- a separate code path from ListCompFor/ListCompCFor's own
+    // direct evalListLiteral call (see ForClauseWithNestedListLiteralBody),
+    // only reachable via a clause (ListCompIf here) that calls
+    // evalListCompBody() on its own branch expression.
+    RunResult r = runScript("x = [for (i = [0:2]) if (i > 0) [i, i]];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 2u);
+    auto first = std::get<ListPtr>(items[0])->items;
+    EXPECT_DOUBLE_EQ(asNum(first[0]), 1.0);
+    auto second = std::get<ListPtr>(items[1])->items;
+    EXPECT_DOUBLE_EQ(asNum(second[0]), 2.0);
+}
+
+// -- Indexing / member access: remaining fallback branches -----------------
+
+TEST(ExprIndexingFallbacks, NonNumericIndexOnListOrStringIsUndef) {
+    RunResult r = runScript("a = [1,2,3][\"bad\"];\nb = \"abc\"[\"bad\"];");
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(varValue(r, "a")));
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(varValue(r, "b")));
+}
+
+TEST(ExprIndexingFallbacks, IndexingANonIndexableTypeIsUndef) {
+    RunResult r = runScript("a = (5)[0];");
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(varValue(r, "a")));
+}
+
+TEST(ExprIndexingFallbacks, UnrecognizedSwizzleLetterIsUndef) {
+    RunResult r = runScript("a = [1,2,3].q;");
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(varValue(r, "a")));
+}
+
+TEST(ExprIndexingFallbacks, SwizzleLetterOutOfRangeForShortListIsUndef) {
+    RunResult r = runScript("a = [1,2].z;"); // .z is index 2, list has only 2 elements
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(varValue(r, "a")));
+}
+
+TEST(ExprIndexingFallbacks, MemberAccessOnANonMemberTypeIsUndef) {
+    RunResult r = runScript("a = (5).x;");
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(varValue(r, "a")));
 }
 
 // -- user functions: recursion, defaults, closures -----------------------
@@ -212,6 +480,32 @@ TEST(UserFunction, DollarVarLetOverridePropagatesIntoCalledFunction) {
     EXPECT_DOUBLE_EQ(asNum(varValue(r, "z")), 10.0);
 }
 
+TEST(LetStatementForm, DollarVarOverridePropagatesIntoCalledModuleAndFunction) {
+    // Same shipped-bug regression as DollarVarLetOverridePropagatesInto-
+    // CalledFunction above, but for the STATEMENT form of let (`let (...)
+    // { ... }`) rather than the expression form -- a genuinely different
+    // code path (evalLetBlock vs. evalLetExpr).
+    std::string captured;
+    runScript("function f() = $fn;\n"
+              "module m() { echo($fn); }\n"
+              "let ($fn=99) { m(); echo(f()); }",
+              [&](const std::string& msg) { captured += msg + ";"; });
+    EXPECT_EQ(captured, "ECHO: 99;ECHO: 99;");
+}
+
+TEST(UserFunction, DollarVarLetAsAssignmentRhsDoesNotLeak) {
+    // The let-expression-as-assignment-RHS shape specifically (distinct
+    // from DollarVarLetOverridePropagatesIntoCalledFunction's inline-call
+    // shape): the override must still be scoped to evaluating that one
+    // RHS, not leak into subsequent statements.
+    RunResult r = runScript("function f() = $fn;\n"
+                             "$fn = 10;\n"
+                             "v1 = let($fn=55) f();\n"
+                             "v2 = f();");
+    EXPECT_DOUBLE_EQ(asNum(varValue(r, "v1")), 55.0);
+    EXPECT_DOUBLE_EQ(asNum(varValue(r, "v2")), 10.0);
+}
+
 TEST(UserFunction, RecursiveSumOverAVectorWithoutLen) {
     // len() isn't ported until Phase 5, so this recurses on a fixed
     // 3-element vector with an explicit base case instead of the more
@@ -233,9 +527,62 @@ TEST(UserFunction, SwizzleMemberAccess) {
     EXPECT_DOUBLE_EQ(asNum(varValue(r, "y")), 3.0);
 }
 
+TEST(UserFunction, UnboundParameterWithNoDefaultIsUndef) {
+    // bindArgs/applyDefaults' own "no default value at all" branch --
+    // DefaultParameterApplied/NamedAndPositionalArgumentsBind-shaped tests
+    // elsewhere always either supply every argument or give every
+    // unsupplied one a default; this leaves `b` genuinely unbound.
+    RunResult r = runScript("function f(a, b) = is_undef(b);\nx = f(1);");
+    EXPECT_TRUE(std::get<bool>(varValue(r, "x")));
+}
+
+TEST(UserFunction, DollarPrefixedParameterBindsIntoDynNotLet) {
+    // Regression test: applyDefaults used to check ONLY childCtx.let_ for
+    // "already bound", regardless of a param's $-prefix -- so a $-prefixed
+    // param bound into ctx.dyn (by the loop just above applyDefaults'
+    // call) still looked "unbound" to it, and its own no-default branch
+    // clobbered the real value with a fresh undef written into ctx.let_.
+    // Since evalIdentifier checks let_ before dyn, that stray undef then
+    // shadowed the correct dyn value for any bare `$fn` reference in the
+    // body -- even though geometry builtins reading ctx.dyn directly
+    // (sphere's own $fn lookup) never noticed, since they never go through
+    // evalIdentifier at all. Fixed by making applyDefaults check dyn (not
+    // let_) for $-prefixed parameter names.
+    RunResult r = runScript("function f($fn) = $fn;\nx = f($fn=16);");
+    EXPECT_DOUBLE_EQ(asNum(varValue(r, "x")), 16.0);
+}
+
+TEST(UserFunction, DollarPrefixedParameterDefaultValueAppliesToDyn) {
+    // Same bug, the OTHER trigger: a $-prefixed parameter's OWN declared
+    // default (not overridden by the caller at all) used to be evaluated
+    // and written into let_ instead of dyn, so it never reached
+    // evalIdentifier's dyn fallback either.
+    RunResult r = runScript("function f($fn=16) = $fn;\nx = f();");
+    EXPECT_DOUBLE_EQ(asNum(varValue(r, "x")), 16.0);
+}
+
+TEST(UserFunction, ExceptionInsideBodyPropagatesThroughCallStackCleanup) {
+    // evalUserFunction's own catch(...)/rethrow cleanup path (pops
+    // callStack_/profiling before rethrowing) -- every other assert-failure
+    // test in this suite fails at the TOP level, never from inside a user
+    // function's own body, so this path was otherwise dead in the suite.
+    EXPECT_THROW(runScript("function f() = assert(false, \"boom\") 1;\nx = f();"), EvalError);
+}
+
 TEST(FunctionLiteral, CanBeStoredAndCalledAsAValue) {
     RunResult r = runScript("g = function(x) x * 2;\nresult = g(21);");
     EXPECT_DOUBLE_EQ(asNum(varValue(r, "result")), 42.0);
+}
+
+TEST(FunctionLiteral, DollarPrefixedParameterBindsIntoDynNotLet) {
+    // Same applyDefaults bug as UserFunction's own regression test above --
+    // evalFunctionLiteral shares the identical bindArgs+applyDefaults shape.
+    RunResult r = runScript("g = function($fn) $fn;\nx = g($fn=16);");
+    EXPECT_DOUBLE_EQ(asNum(varValue(r, "x")), 16.0);
+}
+
+TEST(FunctionLiteral, ExceptionInsideBodyStillPopsCallStack) {
+    EXPECT_THROW(runScript("g = function() assert(false, \"boom\") 1;\nx = g();"), EvalError);
 }
 
 // -- user modules: nested closures, children(), recursion ------------------
@@ -265,6 +612,33 @@ TEST(UserModule, ChildrenForwardsCallSiteGeometry) {
     ASSERT_TRUE(e.bodies[0].color.has_value());
     EXPECT_FLOAT_EQ((*e.bodies[0].color)[0], 1.0f); // red
     EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-9);
+}
+
+TEST(UserModule, ChildrenWithNoChildrenPassedProducesNoGeometry) {
+    Evaluated e = evalSrc("module m() { children(); }\nm();");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(UserModule, ColorWrappingChildrenInsideModuleForwardsGeometry) {
+    // Regression shape: color()'s own child_ctx(color=rgba) call used to
+    // reset childrenNodes/childrenCallerCtx to their defaults instead of
+    // inheriting them, silently swallowing children()'s own forwarded
+    // geometry the moment a module wrapped children() in color(c).
+    Evaluated e = evalSrc("module m(c) { color(c) children(); }\nm(\"blue\") cube(5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].color.has_value());
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[2], 1.0f); // blue
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 125.0, 1e-6);
+}
+
+TEST(UserModule, DollarVarNamedArgOverrideWrappingChildrenForwardsGeometry) {
+    // Same root cause as ColorWrappingChildrenInsideModuleForwardsGeometry
+    // above, via transform()'s own $fn-named-arg dyn-override branch
+    // instead of color()'s -- translate(..., $fn=8) still must forward
+    // children() geometry, not swallow it.
+    Evaluated e = evalSrc("module m() { translate([0,0,0], $fn=8) children(); }\nm() cube(5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 125.0, 1e-6);
 }
 
 TEST(UserModule, ChildrenWithIndexSelectsOneStatement) {
@@ -310,6 +684,98 @@ TEST(UserModule, NamedAndPositionalArgumentsBind) {
     EXPECT_NEAR(bbox.max.z, 3.0, 1e-9);
 }
 
+TEST(UserModule, DollarPrefixedParameterBindsIntoDynNotLet) {
+    // evalUserModule's own "$-prefixed bound arg goes to ctx.dyn" branch --
+    // distinct from a caller-side let($fn=...) override (already tested
+    // elsewhere): here the MODULE's own parameter declaration is itself
+    // $-prefixed. If the binding landed in ctx.let_ instead, sphere()'s own
+    // $fn lookup (which only ever reads ctx.dyn) wouldn't see it, and the
+    // triangle count would match the default $fn instead of 6.
+    Evaluated withModule = evalSrc("module s($fn) { sphere(r=2); }\ns($fn=6);");
+    Evaluated direct = evalSrc("sphere(r=2, $fn=6);");
+    ASSERT_EQ(withModule.bodies.size(), 1u);
+    ASSERT_EQ(direct.bodies.size(), 1u);
+    EXPECT_EQ(withModule.bodies[0].body->GetMeshGL().NumTri(), direct.bodies[0].body->GetMeshGL().NumTri());
+}
+
+TEST(UserModule, DollarPrefixedParameterBoundValueVisibleAsPlainIdentifier) {
+    // Same applyDefaults regression as UserFunction's own test, but for a
+    // module body that references the $-prefixed parameter by name (via
+    // echo) rather than only through a builtin that reads ctx.dyn
+    // directly -- exercises evalIdentifier's own let_-before-dyn lookup
+    // order for a module call specifically.
+    std::string captured;
+    runScript("module m($fn) { echo($fn); }\nm($fn=16);", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: 16");
+}
+
+TEST(UserModule, DollarPrefixedParameterDefaultValueVisibleAsPlainIdentifier) {
+    std::string captured;
+    runScript("module m($fn=16) { echo($fn); }\nm();", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: 16");
+}
+
+TEST(UserModule, ExceptionInsideBodyPropagatesThroughCallStackCleanup) {
+    EXPECT_THROW(evalSrc("module m() { assert(false, \"boom\"); }\nm();"), EvalError);
+}
+
+// -- Error call-chain message content (TRACE lines, not just "it throws") --
+
+TEST(ModuleErrorCallChain, SingleModuleFrameNamedInTrace) {
+    try {
+        evalSrc("module bad() { assert(false, \"boom\"); }\nbad();");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("called by 'bad'"), std::string::npos);
+    }
+}
+
+TEST(ModuleErrorCallChain, NestedModulesBothNamedInTrace) {
+    try {
+        evalSrc("module inner() { assert(false, \"boom\"); }\n"
+                "module outer() { inner(); }\n"
+                "outer();");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("called by 'inner'"), std::string::npos);
+        EXPECT_NE(what.find("called by 'outer'"), std::string::npos);
+    }
+}
+
+TEST(ModuleErrorCallChain, FunctionCalledFromModuleBothNamedInTrace) {
+    try {
+        evalSrc("function bad() = assert(false, \"boom\") 1;\n"
+                "module m() { echo(bad()); }\n"
+                "m();");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("called by 'bad'"), std::string::npos);
+        EXPECT_NE(what.find("called by 'm'"), std::string::npos);
+    }
+}
+
+TEST(FunctionBuiltins, ParentModuleReturnsInnermostEnclosingModuleName) {
+    std::string captured;
+    runScript("module m() { echo(parent_module(0)); }\nm();", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: \"m\"");
+}
+
+TEST(FunctionBuiltins, ParentModuleOutOfRangeIndexIsUndef) {
+    std::string captured;
+    runScript("module m() { echo(parent_module(5)); }\nm();", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: undef");
+}
+
+TEST(FunctionBuiltins, ParentModuleAtTopLevelIsUndef) {
+    // No enclosing module call at all (an empty call stack) -- distinct
+    // from the out-of-range-index case above, which still has one frame.
+    std::string captured;
+    runScript("echo(parent_module(0));", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: undef");
+}
+
 // -- intersection_for -----------------------------------------------------
 
 TEST(IntersectionFor, IntersectsAllIterations) {
@@ -323,4 +789,184 @@ TEST(IntersectionFor, IntersectsAllIterations) {
     // cubes span [0,3],[1,4],[2,5] on x -- intersection is [2,3].
     EXPECT_NEAR(bbox.min.x, 2.0, 1e-6);
     EXPECT_NEAR(bbox.max.x, 3.0, 1e-6);
+}
+
+TEST(IntersectionFor, TwoDeeChildrenExerciseSectionPath) {
+    // combineBodies/generateIntersectionFor's 2D CrossSection branch --
+    // every other intersection_for test here uses 3D cube() children.
+    Evaluated e = evalSrc("intersection_for (i = [0,1]) translate([i,0]) square(3);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    // squares span x in [0,3] and [1,4]; intersection is [1,3] x [0,3].
+    manifold::Rect bounds = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(bounds.min.x, 1.0, 1e-6);
+    EXPECT_NEAR(bounds.max.x, 3.0, 1e-6);
+}
+
+TEST(IntersectionFor, MultipleStatementsPerIterationAreUnionedFirst) {
+    // combineBodies' multi-body-per-iteration union branch: each iteration
+    // here contributes TWO sibling cube() statements (not one), which must
+    // be unioned together before intersecting across iterations.
+    Evaluated e = evalSrc("intersection_for (i = [0,1]) { translate([i,0,0]) cube(3); translate([i,0,0]) cube(3); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.min.x, 1.0, 1e-6);
+    EXPECT_NEAR(bbox.max.x, 3.0, 1e-6);
+}
+
+// -- render() ---------------------------------------------------------------
+
+TEST(Render, PassesChildrenThroughUnchanged) {
+    // render() is a display hint only -- no registered generate function,
+    // so its result must be identical to the bare child geometry.
+    Evaluated e = evalSrc("render() cube(2);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 2.0, 1e-9);
+}
+
+// -- breakpoint() -------------------------------------------------------
+
+TEST(ControlBreakpoint, TruthyConditionStillForcesPause) {
+    int forcedCalls = 0;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int, int, bool forced, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        if (forced) ++forcedCalls;
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    auto ast = parseSrc("breakpoint(true);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    EXPECT_EQ(forcedCalls, 1);
+}
+
+namespace {
+int countForced(const std::string& src) {
+    int forcedCalls = 0;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int, int, bool forced, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        if (forced) ++forcedCalls;
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    auto ast = parseSrc(src);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    return forcedCalls;
+}
+} // namespace
+
+TEST(ControlBreakpoint, NumericZeroAndOneCoerceLikeBooleans) {
+    EXPECT_EQ(countForced("breakpoint(0);"), 0);
+    EXPECT_EQ(countForced("breakpoint(1);"), 1);
+}
+
+TEST(ControlBreakpoint, NamedConditionArgument) {
+    EXPECT_EQ(countForced("breakpoint(condition=true);"), 1);
+    EXPECT_EQ(countForced("breakpoint(condition=false);"), 0);
+}
+
+TEST(ControlBreakpoint, VariableCondition) {
+    EXPECT_EQ(countForced("x = 5;\nbreakpoint(x > 3);"), 1);
+    EXPECT_EQ(countForced("x = 5;\nbreakpoint(x < 3);"), 0);
+}
+
+TEST(ControlBreakpoint, NoArgumentProducesNoGeometry) {
+    Evaluated e = evalSrc("breakpoint();");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(ControlBreakpoint, MultipleBreakpointsEachPauseOnce) {
+    EXPECT_EQ(countForced("breakpoint();\ncube(1);\nbreakpoint();"), 2);
+}
+
+TEST(ControlBreakpoint, ConditionalInsideForLoopPausesOnlyWhenTrue) {
+    EXPECT_EQ(countForced("for (i = [0:4]) { breakpoint(i >= 3); }"), 2); // i=3,4
+}
+
+// -- $-var visibility through children() -----------------------------------
+
+TEST(DollarVarChildren, SetInsideModuleVisibleToCallSiteChildren) {
+    std::string captured;
+    runScript("module m() { $x = 42; children(); }\nm() echo($x);", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: 42");
+}
+
+TEST(DollarVarChildren, PerIterationForLoopVarVisibleToChildrenProducesDistinctGeometry) {
+    // xcopies()-shaped pattern: each iteration's own $idx must be visible
+    // to children() called from inside that same iteration, producing 3
+    // spheres of 3 different sizes (d=$idx+1).
+    Evaluated e = evalSrc("module xcopies(spacing, n=2) {"
+                          "  for ($idx = [0:1:n-1]) {"
+                          "    translate([($idx - n/2 + 0.5) * spacing, 0, 0]) children();"
+                          "  }"
+                          "}"
+                          "xcopies(10, n=3) sphere(d=$idx+1, $fn=16);");
+    ASSERT_EQ(e.bodies.size(), 3u);
+    std::vector<double> widths;
+    for (const auto& b : e.bodies) {
+        manifold::Box bbox = b.body->BoundingBox();
+        widths.push_back(bbox.max.x - bbox.min.x);
+    }
+    std::sort(widths.begin(), widths.end());
+    EXPECT_LT(widths[0], widths[1]);
+    EXPECT_LT(widths[1], widths[2]);
+}
+
+TEST(DollarVarChildren, AssignmentInForBodyVisiblePerIterationToChildren) {
+    std::vector<std::string> echoed;
+    runScript("module m() { for (i = [0:2]) { $val = i * 10; children(); } }\nm() echo($val);",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    ASSERT_EQ(echoed.size(), 3u);
+    EXPECT_EQ(echoed[0], "ECHO: 0");
+    EXPECT_EQ(echoed[1], "ECHO: 10");
+    EXPECT_EQ(echoed[2], "ECHO: 20");
+}
+
+TEST(DollarVarChildren, InnermostNestedModuleOverrideWins) {
+    std::string captured;
+    runScript("module outer() { $x = 1; children(); }\n"
+              "module inner() { $x = 2; children(); }\n"
+              "outer() inner() echo($x);",
+              [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: 2");
+}
+
+TEST(DollarVarChildren, TopLevelValueVisibleWithoutModuleOverride) {
+    std::string captured;
+    runScript("module m() { children(); }\n$x = 99;\nm() echo($x);", [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: 99");
+}
+
+TEST(DollarVarChildren, ChildrenInForLoopProducesOneBodyPerIteration) {
+    Evaluated e = evalSrc("module triple() { for (i = [0:2]) { translate([i*10,0,0]) children(); } }\ntriple() cube(1);");
+    EXPECT_EQ(e.bodies.size(), 3u);
+}
+
+TEST(DollarVarChildren, ChildrenInLetBlockPreservesDollarVars) {
+    std::string captured;
+    runScript("module m() { $v = 5; let (x = 1) { children(); } }\nm() echo($v);",
+              [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: 5");
+}
+
+TEST(DollarVarChildren, ChildrenIndexedWithModuleSetDollarVar) {
+    Evaluated e = evalSrc("module m() { $x = 10; children(0); }\nm() { cube($x); cube(1); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 10.0, 1e-9);
+}
+
+TEST(DollarVarChildren, ChildrenNIndexesStatementNotOutputBodyWhenAnEarlierStatementProducesZeroBodies) {
+    // children(N) must count child *statements*, not output geometry
+    // bodies -- a disabled (*-prefixed) earlier statement still occupies
+    // its own statement slot. children(1) here must select cube(2), NOT
+    // cube(3) (which a body-index-based scheme would incorrectly select
+    // since *cube(1) contributes 0 bodies).
+    Evaluated e = evalSrc("module m() { children(1); }\nm() { *cube(1); cube(2); cube(3); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-9); // cube(2)
 }

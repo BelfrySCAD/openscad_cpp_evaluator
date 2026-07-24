@@ -34,6 +34,14 @@ TEST(OscTypeName, CoversEveryDistinguishedAlternative) {
 
 // -- oscEqual -------------------------------------------------------------
 
+TEST(OscEqual, RangeComparesComponentwise) {
+    // OscRange::operator== -- oscEqual falls through to the variant's own
+    // operator== when neither side is a list/object, which for two
+    // OscRange values invokes this.
+    EXPECT_TRUE(oscEqual(Value{OscRange{1, 2, 5}}, Value{OscRange{1, 2, 5}}));
+    EXPECT_FALSE(oscEqual(Value{OscRange{1, 2, 5}}, Value{OscRange{1, 2, 6}}));
+}
+
 TEST(OscEqual, BoolIsDistinctFromNumber) {
     EXPECT_FALSE(oscEqual(Value{true}, Value{1.0}));
     EXPECT_FALSE(oscEqual(Value{false}, Value{0.0}));
@@ -225,4 +233,96 @@ TEST(FormatNumber, FixedPointWithinExponentRange) {
 TEST(FormatNumber, ScientificNotationDropsLeadingExponentZero) {
     EXPECT_EQ(formatNumber(1000000.0), "1e+6"); // doc-pinned, not "1e+06"
     EXPECT_EQ(formatNumber(1.23456789e-7), "1.23457e-7"); // doc-pinned
+}
+
+TEST(FormatNumber, MantissaRoundingCarryBumpsExponent) {
+    // 9.99999999e13's mantissa rounds to exactly 10.00000 at 5-decimal
+    // precision -- the carry-fixup branch (mantissa /= 10, ++exp) corrects
+    // this to "1e+14" instead of the malformed "10.00000e+13".
+    EXPECT_EQ(formatNumber(9.99999999e13), "1e+14");
+}
+
+// -- fmtValue ---------------------------------------------------------------
+
+TEST(FmtValue, Scalars) {
+    EXPECT_EQ(fmtValue(Value{}), "undef");
+    EXPECT_EQ(fmtValue(Value{true}), "true");
+    EXPECT_EQ(fmtValue(Value{false}), "false");
+    EXPECT_EQ(fmtValue(Value{42.0}), "42");
+    EXPECT_EQ(fmtValue(Value{std::string("hi")}), "\"hi\"");
+}
+
+TEST(FmtValue, Range) {
+    EXPECT_EQ(fmtValue(Value{OscRange{2, 1, 10}}), "[2 : 1 : 10]");
+}
+
+TEST(FmtValue, List) {
+    EXPECT_EQ(fmtValue(list({num(1), num(2), num(3)})), "[1, 2, 3]");
+    EXPECT_EQ(fmtValue(Value{ListPtr{}}), "[]"); // null list pointer
+}
+
+TEST(FmtValue, Object) {
+    auto obj = std::make_shared<const ValueObject>(ValueObject{{{"a", num(1)}, {"b", num(2)}}});
+    EXPECT_EQ(fmtValue(Value{obj}), "object(a = 1, b = 2)");
+    EXPECT_EQ(fmtValue(Value{std::make_shared<const ValueObject>()}), "object()");
+}
+
+// -- toDoubleLenient --------------------------------------------------------
+
+TEST(ToDoubleLenient, BoolAndFallback) {
+    EXPECT_DOUBLE_EQ(toDoubleLenient(Value{true}), 1.0);
+    EXPECT_DOUBLE_EQ(toDoubleLenient(Value{false}), 0.0);
+    EXPECT_DOUBLE_EQ(toDoubleLenient(Value{std::string("x")}), 0.0); // non-numeric fallback
+}
+
+// -- truthy -------------------------------------------------------------
+
+TEST(Truthy, RangeAndFunctionLiteralAreAlwaysTrue) {
+    EXPECT_TRUE(truthy(Value{OscRange{0, 1, 5}}));
+}
+
+// -- scale / divScale: non-numeric list-element fallbacks --------------------
+
+TEST(Scale, NonNumericListElementIsUndef) {
+    Value v = scale(2.0, list({num(1), Value{std::string("x")}, num(3)}));
+    auto items = std::get<ListPtr>(v)->items;
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 2.0);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(items[1]));
+}
+
+TEST(DivScale, NonNumericListElementIsUndef) {
+    Value v = divScale(list({num(4), Value{std::string("x")}}), 2.0);
+    auto items = std::get<ListPtr>(v)->items;
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 2.0);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(items[1]));
+}
+
+// -- expandIterable -----------------------------------------------------
+
+TEST(ExpandIterable, ObjectExpandsToItsKeys) {
+    auto obj = std::make_shared<const ValueObject>(ValueObject{{{"a", num(1)}, {"b", num(2)}}});
+    auto items = expandIterable(Value{obj});
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_EQ(std::get<std::string>(items[0]), "a");
+    EXPECT_EQ(std::get<std::string>(items[1]), "b");
+}
+
+TEST(ExpandIterable, StringExpandsToItsCharacters) {
+    auto items = expandIterable(Value{std::string("ab")});
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_EQ(std::get<std::string>(items[0]), "a");
+    EXPECT_EQ(std::get<std::string>(items[1]), "b");
+}
+
+TEST(ExpandIterable, BareScalarWrapsToSingleElementList) {
+    auto items = expandIterable(num(5));
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
+}
+
+TEST(ExpandIterable, DescendingRangeStepsDown) {
+    auto items = expandIterable(Value{OscRange{5, -1, 2}});
+    ASSERT_EQ(items.size(), 4u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
+    EXPECT_DOUBLE_EQ(asNum(items[3]), 2.0);
 }

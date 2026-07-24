@@ -33,6 +33,18 @@ TEST(Rotate, DefaultAxisIsZ) {
     EXPECT_NEAR(a.max.y, b.max.y, 1e-6);
 }
 
+TEST(Rotate, DegenerateZeroLengthAxisIsIdentity) {
+    // axisAngleMatrix's own zero-length-axis guard (division by the axis'
+    // own length would otherwise be a divide-by-zero) -- falls back to the
+    // identity transform, matching the reference's own behavior for this
+    // degenerate input.
+    Evaluated e = evalSrc("rotate(45, [0,0,0]) cube([1,2,3], center=true);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 0.5, 1e-9);
+    EXPECT_NEAR(bbox.max.y, 1.0, 1e-9);
+    EXPECT_NEAR(bbox.max.z, 1.5, 1e-9);
+}
+
 // -- scale / mirror -----------------------------------------------------
 
 TEST(Scale, ScalesEachAxisIndependently) {
@@ -65,6 +77,59 @@ TEST(Multmatrix, PlainTranslationMatrixActsLikeTranslate) {
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
     EXPECT_NEAR(bbox.min.x, 5.0, 1e-9);
     EXPECT_NEAR(bbox.max.x, 6.0, 1e-9);
+}
+
+TEST(Multmatrix, UndefArgumentIsANoOp) {
+    Evaluated e = evalSrc("multmatrix() cube(1);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 1.0, 1e-9);
+}
+
+TEST(Multmatrix, ThreeByThreeMatrixIsPaddedWithZeroTranslation) {
+    // toMat3x4's own rowAt() bounds-check fallback (0.0) for the missing
+    // 4th column of a 3x3 input -- every other multmatrix test here uses a
+    // full 4x4/4x3 matrix.
+    Evaluated e = evalSrc("multmatrix([[1,0,0],[0,1,0],[0,0,1]]) translate([2,0,0]) cube(1);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.min.x, 2.0, 1e-9); // pure identity rotation, no added translation
+    EXPECT_NEAR(bbox.max.x, 3.0, 1e-9);
+}
+
+// -- no children ------------------------------------------------------------
+
+TEST(Transform3d, NoChildrenIsEmpty) {
+    Evaluated e = evalSrc("translate([1,0,0]);");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+// -- undef/omitted argument fallbacks -------------------------------------
+
+TEST(Transform3d, TranslateWithNoArgumentDefaultsToOrigin) {
+    // toVec3's own final fallback (v is neither a number nor a list, e.g.
+    // the monostate default an omitted "v" argument gets from getArg) --
+    // every other translate() test in this suite passes a real vector.
+    Evaluated e = evalSrc("translate() cube(1);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.min.x, 0.0, 1e-9);
+    EXPECT_NEAR(bbox.max.x, 1.0, 1e-9);
+}
+
+TEST(Transform3d, ScalarTranslateBecomesXOnlyVector) {
+    // toVec3's own scalar (bare double) branch -- translate(5) is
+    // equivalent to translate([5,0,0]), not an error or a uniform offset.
+    Evaluated e = evalSrc("translate(5) cube(1);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.min.x, 5.0, 1e-9);
+    EXPECT_NEAR(bbox.min.y, 0.0, 1e-9);
+    EXPECT_NEAR(bbox.min.z, 0.0, 1e-9);
+}
+
+TEST(Transform3d, TwoElementVectorZPadsToZero) {
+    Evaluated e = evalSrc("translate([3,4]) cube(1);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.min.x, 3.0, 1e-9);
+    EXPECT_NEAR(bbox.min.y, 4.0, 1e-9);
+    EXPECT_NEAR(bbox.min.z, 0.0, 1e-9);
 }
 
 // -- resize -----------------------------------------------------------
@@ -101,6 +166,57 @@ TEST(Transform2d, ScalePreservesAreaRatio) {
     EXPECT_NEAR(e.bodies[0].section->Area(), 6.0, 1e-9);
 }
 
+TEST(Transform2d, ScalarRotateAppliesAngleDirectly) {
+    Evaluated a = evalSrc("rotate(90) square([4,2]);");
+    manifold::Rect bounds = a.bodies[0].section->Bounds();
+    EXPECT_NEAR(bounds.max.x - bounds.min.x, 2.0, 1e-6);
+    EXPECT_NEAR(bounds.max.y - bounds.min.y, 4.0, 1e-6);
+}
+
+TEST(Transform2d, VectorRotateUsesThirdComponentAsAngle) {
+    // applyTransform2d's own "a" argument can also be a [x,y,z] vector
+    // (matching the 3D rotate() call shape) -- only the z component is
+    // actually used as the 2D rotation angle.
+    Evaluated withVec = evalSrc("rotate([0,0,90]) square([4,2]);");
+    Evaluated withScalar = evalSrc("rotate(90) square([4,2]);");
+    manifold::Rect a = withVec.bodies[0].section->Bounds();
+    manifold::Rect b = withScalar.bodies[0].section->Bounds();
+    EXPECT_NEAR(a.max.x - a.min.x, b.max.x - b.min.x, 1e-6);
+    EXPECT_NEAR(a.max.y - a.min.y, b.max.y - b.min.y, 1e-6);
+}
+
+TEST(Transform2d, VectorRotateWithNoZComponentDefaultsToZeroAngle) {
+    Evaluated e = evalSrc("rotate([0,0]) square([4,2]);");
+    manifold::Rect bounds = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(bounds.max.x - bounds.min.x, 4.0, 1e-6);
+    EXPECT_NEAR(bounds.max.y - bounds.min.y, 2.0, 1e-6);
+}
+
+TEST(Transform2d, ScalarScaleBroadcastsToBothAxes) {
+    Evaluated e = evalSrc("scale(2) square([1,1]);");
+    EXPECT_NEAR(e.bodies[0].section->Area(), 4.0, 1e-9);
+}
+
+TEST(Transform2d, MirrorFlipsAcrossAxis) {
+    Evaluated e = evalSrc("mirror([1,0]) translate([2,0]) square([1,1]);");
+    manifold::Rect bounds = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(bounds.min.x, -3.0, 1e-9);
+    EXPECT_NEAR(bounds.max.x, -2.0, 1e-9);
+}
+
+TEST(Transform2d, MultmatrixActsLikeTranslate) {
+    Evaluated e = evalSrc("multmatrix([[1,0,0,5],[0,1,0,0],[0,0,1,0],[0,0,0,1]]) square([1,1]);");
+    manifold::Rect bounds = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(bounds.min.x, 5.0, 1e-9);
+    EXPECT_NEAR(bounds.max.x, 6.0, 1e-9);
+}
+
+TEST(Transform2d, MultmatrixUndefArgumentIsANoOp) {
+    Evaluated e = evalSrc("multmatrix() square([1,1]);");
+    manifold::Rect bounds = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(bounds.max.x, 1.0, 1e-9);
+}
+
 // -- color ------------------------------------------------------------
 
 TEST(Color, NamedColorSetsRgbaOnDescendant) {
@@ -128,4 +244,53 @@ TEST(Color, HexColorParses) {
     EXPECT_FLOAT_EQ((*e.bodies[0].color)[0], 0.0f);
     EXPECT_FLOAT_EQ((*e.bodies[0].color)[1], 1.0f);
     EXPECT_FLOAT_EQ((*e.bodies[0].color)[2], 0.0f);
+}
+
+TEST(Color, HexColorUppercaseDigitsParse) {
+    Evaluated e = evalSrc("color(\"#00FF00\") cube(1);");
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[0], 0.0f);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[1], 1.0f);
+}
+
+TEST(Color, ShortHexColorParses) {
+    // hexDigit's 3-char short form (#RGB, each digit doubled) -- every
+    // other hex test here uses the full 6-digit form.
+    Evaluated e = evalSrc("color(\"#0f0\") cube(1);");
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[0], 0.0f);
+    EXPECT_NEAR((*e.bodies[0].color)[1], 1.0f, 1e-6);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[2], 0.0f);
+}
+
+TEST(Color, UnrecognizedColorNameFallsBackToWhite) {
+    Evaluated e = evalSrc("color(\"not_a_real_color\") cube(1);");
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[0], 1.0f);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[1], 1.0f);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[2], 1.0f);
+}
+
+TEST(Color, MalformedHexLengthFallsBackToWhite) {
+    // cssColor's own "neither 3 nor 6 hex digits" fallback -- distinct
+    // from an unrecognized NAME's fallback (same result, different guard).
+    Evaluated e = evalSrc("color(\"#12345\") cube(1);");
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[0], 1.0f);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[1], 1.0f);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[2], 1.0f);
+}
+
+TEST(Color, NonStringNonListArgumentFallsBackToWhite) {
+    // resolveColor's own default-rgba fallback -- a plain number for `c`
+    // matches neither the string branch (cssColor) nor the list branch at
+    // all, distinct from an unrecognized color NAME (which still goes
+    // through cssColor's own fallback).
+    Evaluated e = evalSrc("color(42) cube(1);");
+    ASSERT_TRUE(e.bodies[0].color.has_value());
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[0], 1.0f);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[1], 1.0f);
+    EXPECT_FLOAT_EQ((*e.bodies[0].color)[2], 1.0f);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-9); // geometry still produced
+}
+
+TEST(Color, NoChildrenIsEmpty) {
+    Evaluated e = evalSrc("color(\"red\");");
+    EXPECT_TRUE(e.bodies.empty());
 }

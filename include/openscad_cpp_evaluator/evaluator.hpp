@@ -349,15 +349,29 @@ private:
                             std::shared_ptr<const ChildrenNodeList> childrenNodes = nullptr,
                             const EvalContext* childrenCallerCtx = nullptr);
 
-    // Fills in any parameter not already bound in childCtx.let_ from its
-    // own default-value expression, evaluated purely lexically against the
-    // declaration's own scope (childCtx.scope) with an empty `let_` and
-    // `dyn` shared with childCtx -- a default sees neither the caller's
-    // locals nor this call's other (sibling) parameters, though $-vars
-    // remain dynamically scoped. A parameter with no default expression at
-    // all binds to undef. Mirrors the reference's _apply_defaults exactly
-    // (verified there against real OpenSCAD -- see its own doc comment).
-    void applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, EvalContext& childCtx);
+    // Fills in any parameter not already present in `bound` (bindArgs'
+    // own return value -- the authoritative "did the caller actually
+    // supply this name" record) from its own default-value expression,
+    // evaluated purely lexically against the declaration's own scope
+    // (childCtx.scope) with an empty `let_` and `dyn` shared with childCtx
+    // -- a default sees neither the caller's locals nor this call's other
+    // (sibling) parameters, though $-vars remain dynamically scoped. A
+    // parameter with no default expression at all binds to undef. Writes
+    // a $-prefixed parameter's result into childCtx.dyn, everything else
+    // into childCtx.let_ -- matching the bound-argument loop just above
+    // each call site exactly (bindArgs/callers split $ vs. non-$ names the
+    // same way). `bound` (not childCtx.let_/dyn) must be the source of
+    // truth for "already bound": childCtx.dyn is always pre-seeded with
+    // $fn/$fa/$fs/$t/$parent_modules regardless of what the caller passed
+    // (see eval_context.cpp), so checking dyn's mere presence can never
+    // distinguish "the caller explicitly passed $fn" from "$fn merely
+    // exists because of that ambient seed" -- a real bug this signature
+    // fixes (previously checked only childCtx.let_, which missed a
+    // $-prefixed name bound into dyn just as badly, in the other
+    // direction: it always looked unbound, clobbering the real value with
+    // undef).
+    void applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
+                        const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx);
 
     // Shared by checkDebug() and error()'s own errorBreak hook call: `let`
     // + `$`-prefixed `dyn` entries from `ctx`, plus (if there's an active

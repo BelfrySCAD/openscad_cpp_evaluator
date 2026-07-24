@@ -31,6 +31,11 @@ TEST(Hull, TwoDCirclesHullToACrossSection) {
     EXPECT_GT(e.bodies[0].section->Area(), std::numbers::pi); // more than one circle's worth
 }
 
+TEST(Hull, NoChildrenIsEmpty) {
+    Evaluated e = evalSrc("hull();");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
 // -- minkowski ----------------------------------------------------------
 
 TEST(Minkowski, SumOfCubeAndSphereGrowsEachDimensionByRadius) {
@@ -41,6 +46,12 @@ TEST(Minkowski, SumOfCubeAndSphereGrowsEachDimensionByRadius) {
     // cube(2, center) spans [-1,1]; +sphere(r=1) should pad every side by ~1.
     EXPECT_NEAR(bbox.min.x, -2.0, 0.05);
     EXPECT_NEAR(bbox.max.x, 2.0, 0.05);
+}
+
+TEST(Minkowski, SingleChildPassesThroughUnchanged) {
+    Evaluated e = evalSrc("minkowski() { cube(2, center=true); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
 }
 
 // -- linear_extrude -----------------------------------------------------
@@ -177,6 +188,24 @@ TEST(Roof, RectangleProducesARidgeNotAPoint) {
 TEST(Roof, EmptyInputProducesNoGeometry) {
     Evaluated e = evalSrc("roof();");
     EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(Roof, ExplicitStraightMethodProducesTheSameResultAsVoronoi) {
+    // This port has no CGAL-based "straight" construction (see roof.cpp's
+    // own file header) -- method="straight" is accepted and dispatches to
+    // the same Voronoi-diagram construction as the default.
+    Evaluated withMethod = evalSrc("roof(method=\"straight\") square(4, center=true);");
+    Evaluated withoutMethod = evalSrc("roof() square(4, center=true);");
+    ASSERT_TRUE(withMethod.bodies[0].body.has_value());
+    EXPECT_NEAR(withMethod.bodies[0].body->Volume(), withoutMethod.bodies[0].body->Volume(), 1e-9);
+}
+
+TEST(Roof, UnknownMethodWarnsAndFallsBackToVoronoi) {
+    std::string lastWarning;
+    Evaluated e = evalSrc("roof(method=\"bogus\") square(4, center=true);", [&](const std::string& msg) { lastWarning = msg; });
+    EXPECT_NE(lastWarning.find("Unknown roof method 'bogus'"), std::string::npos);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_EQ(e.bodies[0].body->Status(), manifold::Manifold::Error::NoError);
 }
 
 // -- General case (holes, multi-contour): the Voronoi-diagram construction

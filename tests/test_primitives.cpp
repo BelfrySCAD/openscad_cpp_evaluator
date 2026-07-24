@@ -72,6 +72,18 @@ TEST(Cylinder, DiameterArgumentsHalveToRadii) {
     EXPECT_NEAR(withR.bodies[0].body->Volume(), withD.bodies[0].body->Volume(), 1e-9);
 }
 
+TEST(Cylinder, NoRadiusArgumentAtAllDefaultsToRadiusOne) {
+    Evaluated withNoArgs = evalSrc("cylinder(h=5, $fn=16);");
+    Evaluated withExplicitR = evalSrc("cylinder(h=5, r=1, $fn=16);");
+    EXPECT_NEAR(withNoArgs.bodies[0].body->Volume(), withExplicitR.bodies[0].body->Volume(), 1e-9);
+}
+
+TEST(Cylinder, R1OnlyDefaultsR2ToR1) {
+    Evaluated withR1Only = evalSrc("cylinder(h=5, r1=3, $fn=16);");
+    Evaluated withBoth = evalSrc("cylinder(h=5, r1=3, r2=3, $fn=16);");
+    EXPECT_NEAR(withR1Only.bodies[0].body->Volume(), withBoth.bodies[0].body->Volume(), 1e-9);
+}
+
 // -- polyhedron -----------------------------------------------------------
 
 TEST(Polyhedron, TetrahedronVolumeMatchesAnalyticFormula) {

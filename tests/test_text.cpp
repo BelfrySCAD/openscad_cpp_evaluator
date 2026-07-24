@@ -108,6 +108,22 @@ TEST(Textmetrics, LargerSizeScalesAdvanceProportionally) {
     EXPECT_NEAR(adv20, adv10 * 2.0, 1e-6);
 }
 
+TEST(Textmetrics, MultiByteUtf8CodepointsDecodeWithoutCrashing) {
+    // utf8DecodeAll's own 2-byte/3-byte/4-byte continuation-sequence
+    // branches -- every other text()/textmetrics() test in this file uses
+    // plain ASCII, which only ever exercises the single-byte fallback.
+    // Whether the bundled font actually maps each codepoint to a glyph
+    // doesn't matter here (an unmapped codepoint is simply skipped per
+    // measureText's own documented rule) -- decoding itself must not
+    // corrupt the byte stream or crash regardless.
+    Evaluator ev;
+    // U+00E9 (2-byte, "é"), U+20AC (3-byte, "€"), U+1F600 (4-byte, an emoji).
+    Value v = asExpr("textmetrics(text=\"a\xC3\xA9\xE2\x82\xACz\xF0\x9F\x98\x80\", size=10)", ev);
+    Value advance = objGet(v, "advance");
+    const auto& items = std::get<ListPtr>(advance)->items;
+    EXPECT_GT(asNum(items[0]), 0.0);
+}
+
 // -- fontmetrics() --------------------------------------------------------
 
 TEST(Fontmetrics, ReturnsAllExpectedKeysInOrder) {

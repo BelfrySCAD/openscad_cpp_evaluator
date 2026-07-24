@@ -85,6 +85,76 @@ TEST(ImportModuleContext, UnsupportedExtensionErrors) {
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
 }
 
+TEST(ImportModuleContext, MissingFileArgumentErrors) {
+    Evaluator ev;
+    auto ast = parseSrc("import();");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+}
+
+TEST(ImportModuleContext, JsonExtensionErrorsAsGeometryStatement) {
+    const auto path = tempPath("data_as_module.json");
+    {
+        std::ofstream out(path);
+        out << R"({"a": 1})";
+    }
+    Evaluator ev;
+    auto ast = parseSrc("import(\"" + path.string() + "\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::filesystem::remove(path);
+}
+
+TEST(ImportModuleContext, MalformedMeshFileErrors) {
+    // loadMeshByExt's own exception -> caught and rethrown as ev.error()
+    // inside resolveImport's try/catch -- every other STL/OBJ/OFF/3MF test
+    // here round-trips a well-formed file written by this project's own
+    // exporter.
+    const auto path = tempPath("malformed.stl");
+    {
+        std::ofstream out(path);
+        out << "this is not a valid STL file at all";
+    }
+    Evaluator ev;
+    auto ast = parseSrc("import(\"" + path.string() + "\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::filesystem::remove(path);
+}
+
+TEST(ImportModuleContext, NonManifoldMeshWarns) {
+    // generateImport's own Manifold::Status() != NoError branch -- a
+    // single free-floating triangle (not welded to anything, non-manifold
+    // boundary) via a hand-written OFF file, distinct from every other
+    // mesh test here which round-trips a valid, closed, watertight cube.
+    const auto path = tempPath("nonmanifold.off");
+    {
+        std::ofstream out(path);
+        out << "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+    }
+    std::string lastWarning;
+    Evaluated e = evalSrc("import(\"" + path.string() + "\");", [&](const std::string& msg) { lastWarning = msg; });
+    EXPECT_NE(lastWarning.find("import: mesh is not manifold"), std::string::npos);
+    std::filesystem::remove(path);
+}
+
+TEST(ImportModuleContext, EmptyMeshHasNoTrianglesErrors) {
+    // generateImport's own "tris.empty()" check -- only reachable at
+    // generate time (not resolveTree()'s own try/catch, which only guards
+    // loadMeshByExt itself), so this needs the full resolve+generate
+    // pipeline, unlike every other error test in this file.
+    const auto path = tempPath("empty.off");
+    {
+        std::ofstream out(path);
+        out << "OFF\n0 0 0\n";
+    }
+    EXPECT_THROW(evalSrc("import(\"" + path.string() + "\");"), EvalError);
+    std::filesystem::remove(path);
+}
+
 // -- Expression-context import() -------------------------------------------
 
 TEST(ImportExpressionContext, StlReturnsVnfShape) {
@@ -121,6 +191,59 @@ TEST(ImportExpressionContext, JsonReturnsNativeValues) {
     const auto& list = std::get<ListPtr>(obj[3].second)->items;
     ASSERT_EQ(list.size(), 3u);
     EXPECT_DOUBLE_EQ(std::get<double>(list[2]), 3.0);
+    std::filesystem::remove(path);
+}
+
+TEST(ImportExpressionContext, JsonNullValueBecomesUndef) {
+    // jsonToValue's own final fallback (null, or any other unhandled JSON
+    // node type) -- every other JsonReturnsNativeValues field above is a
+    // string/number/object/list.
+    const auto path = tempPath("data_null.json");
+    {
+        std::ofstream out(path);
+        out << R"({"x": null})";
+    }
+    Evaluator ev;
+    Value v = asExpr("import(\"" + path.string() + "\")", ev);
+    const auto& obj = std::get<ObjectPtr>(v)->items;
+    ASSERT_EQ(obj.size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(obj[0].second));
+    std::filesystem::remove(path);
+}
+
+TEST(ImportExpressionContext, DxfReturnsRegionContours) {
+    const auto path = tempPath("square_expr_ie.dxf");
+    {
+        std::ofstream out(path);
+        out << "0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n8\n0\n90\n4\n70\n1\n"
+               "10\n0.0\n20\n0.0\n10\n1.0\n20\n0.0\n10\n1.0\n20\n1.0\n10\n0.0\n20\n1.0\n"
+               "0\nENDSEC\n0\nEOF\n";
+    }
+    Evaluator ev;
+    Value v = asExpr("import(\"" + path.string() + "\")", ev);
+    const auto& contours = std::get<ListPtr>(v)->items;
+    ASSERT_EQ(contours.size(), 1u);
+    std::filesystem::remove(path);
+}
+
+TEST(ImportExpressionContext, MissingFileArgumentErrors) {
+    Evaluator ev;
+    EXPECT_THROW(asExpr("import()", ev), EvalError);
+}
+
+TEST(ImportExpressionContext, UnsupportedExtensionErrors) {
+    Evaluator ev;
+    EXPECT_THROW(asExpr("import(\"nope.xyz\")", ev), EvalError);
+}
+
+TEST(ImportExpressionContext, MalformedMeshFileErrors) {
+    const auto path = tempPath("malformed_expr.stl");
+    {
+        std::ofstream out(path);
+        out << "not a valid STL file";
+    }
+    Evaluator ev;
+    EXPECT_THROW(asExpr("import(\"" + path.string() + "\")", ev), EvalError);
     std::filesystem::remove(path);
 }
 
