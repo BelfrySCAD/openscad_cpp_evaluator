@@ -1,8 +1,85 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/bytecode_compiler.hpp"
+#include "openscad_cpp_evaluator/bytecode_vm.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 #include "openscad_cpp_evaluator/import_builtin.hpp"
 
+#include <cstdlib>
+
 namespace oscadeval {
+
+const CompiledChunk* Evaluator::lookupOrCompileChunk(const oscad::FunctionDeclaration& decl) {
+    auto it = chunkCache_.find(&decl);
+    if (it == chunkCache_.end()) {
+        it = chunkCache_.emplace(&decl, tryCompileFunction(decl)).first;
+        if (it->second) flattenNestedLiterals(*it->second);
+    }
+    return it->second ? &*it->second : nullptr;
+}
+
+const CompiledChunk* Evaluator::lookupCompiledLiteralChunk(const oscad::FunctionLiteral& node) const {
+    auto it = literalChunkCache_.find(&node);
+    return it != literalChunkCache_.end() ? &it->second : nullptr;
+}
+
+void Evaluator::flattenNestedLiterals(CompiledChunk& chunk) {
+    for (auto& [litNode, litChunk] : chunk.nestedLiterals) {
+        flattenNestedLiterals(litChunk);
+        literalChunkCache_.emplace(litNode, std::move(litChunk));
+    }
+    chunk.nestedLiterals.clear();
+}
+
+const Value* Evaluator::findUpvalue(const oscad::ASTNode* targetDecl, int slot) const {
+    // Walks upvalueParent links, NOT a blind scan of callStack_ -- see
+    // that field's own doc comment for the real bug this distinction
+    // fixes (a closure passed through an unrelated, isolating
+    // intermediary function must NOT see the enclosing call's locals,
+    // even though that call is still technically active on the stack).
+    if (callStack_.empty()) return nullptr;
+    int idx = static_cast<int>(callStack_.size()) - 1;
+    while (idx >= 0) {
+        const CallStackFrame& frame = callStack_[static_cast<size_t>(idx)];
+        if (frame.declNode == targetDecl && frame.vmFrame) {
+            const auto* vmFrame = static_cast<const VmFrame*>(frame.vmFrame);
+            if (static_cast<size_t>(slot) < vmFrame->slots.size()) return &vmFrame->slots[static_cast<size_t>(slot)];
+            return nullptr;
+        }
+        idx = frame.upvalueParent;
+    }
+    return nullptr;
+}
+
+namespace {
+std::optional<bool> g_bytecodeVmOverride;
+}
+
+bool Evaluator::bytecodeVmEnabled() {
+    if (g_bytecodeVmOverride.has_value()) return *g_bytecodeVmOverride;
+    static const bool enabled = [] {
+        const char* v = std::getenv("OSCAD_BYTECODE_VM");
+        return v == nullptr || std::string(v) != "0";
+    }();
+    return enabled;
+}
+
+void Evaluator::setBytecodeVmEnabledForTesting(std::optional<bool> enabled) { g_bytecodeVmOverride = enabled; }
+
+std::unique_ptr<VmFrame> Evaluator::acquireVmFrame() {
+    if (!vmFramePool_.empty()) {
+        auto frame = std::move(vmFramePool_.back());
+        vmFramePool_.pop_back();
+        return frame;
+    }
+    return std::make_unique<VmFrame>();
+}
+
+void Evaluator::releaseVmFrame(std::unique_ptr<VmFrame> frame) {
+    frame->stack.clear();
+    frame->slots.clear();
+    frame->bound.clear();
+    vmFramePool_.push_back(std::move(frame));
+}
 
 std::unordered_map<std::string, Value> Evaluator::bindArgs(
     const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
@@ -27,16 +104,18 @@ std::unordered_map<std::string, Value> Evaluator::bindArgs(
 
 EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, const oscad::Scope* scope,
                                    std::shared_ptr<const ChildrenNodeList> childrenNodes,
-                                   const EvalContext* childrenCallerCtx) {
+                                   const EvalContext* childrenCallerCtx, bool* usedChildCtx) {
     const oscad::Position& declPos = decl.position();
     for (const CallStackFrame& frame : callStack_) {
         const oscad::Position* outer = frame.declPosition;
         if (outer == nullptr || outer->origin != declPos.origin) continue;
         const bool sameSpan = (outer->start_offset == declPos.start_offset && outer->end_offset == declPos.end_offset);
         if (!sameSpan && outer->start_offset <= declPos.start_offset && declPos.end_offset <= outer->end_offset) {
+            if (usedChildCtx) *usedChildCtx = true;
             return ctx.childCtx(scope, std::nullopt, std::move(childrenNodes), childrenCallerCtx);
         }
     }
+    if (usedChildCtx) *usedChildCtx = false;
     return ctx.callCtx(scope, std::nullopt, std::move(childrenNodes), childrenCallerCtx);
 }
 
@@ -131,29 +210,18 @@ void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad
     if (prof) profileExit(*prof);
 }
 
-Value Evaluator::evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
-                                   const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
-                                   const oscad::ASTNode* callNode) {
-    auto bound = bindArgs(decl.parameters, arguments, ctx);
-    const oscad::Scope* fnScope = decl.scope() ? decl.scope() : ctx.scope;
-    EvalContext childCtx = callCtxFor(decl, ctx, fnScope);
-    for (auto& [k, v] : bound) {
-        if (!k.empty() && k[0] == '$') {
-            childCtx.dyn->set(k, std::move(v));
-        } else {
-            childCtx.let_->set(k, std::move(v));
-        }
-    }
-    applyDefaults(decl.parameters, bound, childCtx);
-
-    const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
-    std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &decl.position());
-    callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &decl.position()});
+Value Evaluator::evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode,
+                                       const oscad::Expression& bodyExpr, EvalContext& childCtx,
+                                       const oscad::Position* callPos, int upvalueParent,
+                                       const std::function<Value()>& computeResult) {
+    std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &declNode.position());
+    callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &declNode.position(), &declNode,
+                                         nullptr, upvalueParent});
     Value result;
     try {
-        checkDebug(*decl.expr, childCtx);
+        checkDebug(bodyExpr, childCtx);
         lastCtx_ = &childCtx;
-        result = evalExpr(*decl.expr, childCtx);
+        result = computeResult();
         if (debugHooks_.returnHook) debugHooks_.returnHook(name, result, static_cast<int>(callStack_.size()));
     } catch (...) {
         callStack_.pop_back();
@@ -165,20 +233,92 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
     return result;
 }
 
+Value Evaluator::evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
+                                   const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
+                                   const oscad::ASTNode* callNode) {
+    const oscad::Scope* fnScope = decl.scope() ? decl.scope() : ctx.scope;
+    const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
+    bool usedChildCtx = false;
+    EvalContext childCtx = callCtxFor(decl, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
+
+    // The compiled path (Phase 1) replaces bindArgs+the bound-loop+
+    // applyDefaults with slot-based binding entirely (runCompiledFunction
+    // does its own, see bytecode_vm.cpp) -- nullptr (VM off, or this
+    // declaration doesn't compile -- see tryCompileFunction) falls back to
+    // the unchanged interpreter path below.
+    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupOrCompileChunk(decl) : nullptr;
+    if (!chunk) {
+        auto bound = bindArgs(decl.parameters, arguments, ctx);
+        for (auto& [k, v] : bound) {
+            if (!k.empty() && k[0] == '$') {
+                childCtx.dyn->set(k, std::move(v));
+            } else {
+                childCtx.let_->set(k, std::move(v));
+            }
+        }
+        applyDefaults(decl.parameters, bound, childCtx);
+    }
+
+    const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
+    return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
+        return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx) : evalExpr(*decl.expr, childCtx);
+    });
+}
+
+Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad::FunctionDeclaration& decl,
+                                            std::unordered_map<std::string, Value> bound, EvalContext& ctx,
+                                            const oscad::Position* callPos) {
+    const oscad::Scope* fnScope = decl.scope() ? decl.scope() : ctx.scope;
+    const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
+    bool usedChildCtx = false;
+    EvalContext childCtx = callCtxFor(decl, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
+    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupOrCompileChunk(decl) : nullptr;
+    if (!chunk) {
+        for (auto& [k, v] : bound) {
+            if (!k.empty() && k[0] == '$') {
+                childCtx.dyn->set(k, std::move(v));
+            } else {
+                childCtx.let_->set(k, std::move(v));
+            }
+        }
+        applyDefaults(decl.parameters, bound, childCtx);
+        return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent,
+                                     [&]() -> Value { return evalExpr(*decl.expr, childCtx); });
+    }
+    return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
+        return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx);
+    });
+}
+
 Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
                                       const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                                       const oscad::ASTNode* callNode) {
-    auto bound = bindArgs(funcNode.parameters, arguments, ctx);
     const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
-    EvalContext childCtx = callCtxFor(funcNode, ctx, fnScope);
-    for (auto& [k, v] : bound) {
-        if (!k.empty() && k[0] == '$') {
-            childCtx.dyn->set(k, std::move(v));
-        } else {
-            childCtx.let_->set(k, std::move(v));
+    const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
+    bool usedChildCtx = false;
+    EvalContext childCtx = callCtxFor(funcNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
+
+    // A literal only ever has a compiled chunk if some OTHER declaration's
+    // own compile discovered and compiled it as a nested FunctionLiteral
+    // (see CompiledChunk::nestedLiterals / Evaluator::flattenNestedLiterals)
+    // -- a bare top-level literal (never reached by any compiled container)
+    // has no cache entry and always falls to the interpreter below,
+    // unconditionally correct either way.
+    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
+    if (!chunk) {
+        auto bound = bindArgs(funcNode.parameters, arguments, ctx);
+        for (auto& [k, v] : bound) {
+            if (!k.empty() && k[0] == '$') {
+                childCtx.dyn->set(k, std::move(v));
+            } else {
+                childCtx.let_->set(k, std::move(v));
+            }
         }
+        applyDefaults(funcNode.parameters, bound, childCtx);
     }
-    applyDefaults(funcNode.parameters, bound, childCtx);
 
     const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
     // "<function literal>" -- the reference's call-stack entry uses the
@@ -188,23 +328,36 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
     // be assigned to). Only affects TRACE-line text for an error raised
     // from inside a function-literal call; low value to thread through
     // further given no test depends on it.
-    std::optional<ProfileHandle> prof = profileEnter("function", "<function literal>", callPos, &funcNode.position());
-    callStack_.push_back(
-        CallStackFrame{CallStackFrame::Kind::Function, "<function literal>", callPos, &funcNode.position()});
-    Value result;
-    try {
-        checkDebug(*funcNode.body, childCtx);
-        lastCtx_ = &childCtx;
-        result = evalExpr(*funcNode.body, childCtx);
-        if (debugHooks_.returnHook) debugHooks_.returnHook("<function literal>", result, static_cast<int>(callStack_.size()));
-    } catch (...) {
-        callStack_.pop_back();
-        if (prof) profileExit(*prof);
-        throw;
+    return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
+                                 [&]() -> Value {
+                                     return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx)
+                                                  : evalExpr(*funcNode.body, childCtx);
+                                 });
+}
+
+Value Evaluator::evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode,
+                                               std::unordered_map<std::string, Value> bound, EvalContext& ctx,
+                                               const oscad::Position* callPos) {
+    const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
+    const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
+    bool usedChildCtx = false;
+    EvalContext childCtx = callCtxFor(funcNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
+    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
+    if (!chunk) {
+        for (auto& [k, v] : bound) {
+            if (!k.empty() && k[0] == '$') {
+                childCtx.dyn->set(k, std::move(v));
+            } else {
+                childCtx.let_->set(k, std::move(v));
+            }
+        }
+        applyDefaults(funcNode.parameters, bound, childCtx);
+        return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
+                                     [&]() -> Value { return evalExpr(*funcNode.body, childCtx); });
     }
-    callStack_.pop_back();
-    if (prof) profileExit(*prof);
-    return result;
+    return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
+                                 [&]() -> Value { return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx); });
 }
 
 Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& ctx) {

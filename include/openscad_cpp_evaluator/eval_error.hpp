@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+namespace oscad {
+class ASTNode;
+} // namespace oscad
+
 namespace oscadeval {
 
 // Thrown for any OpenSCAD-level runtime error (assertion failure, a raised
@@ -28,6 +32,46 @@ struct CallStackFrame {
     std::string name;
     const oscad::Position* callPosition = nullptr;
     const oscad::Position* declPosition = nullptr; // Module frames only
+
+    // -- Bytecode VM upvalue support (Phase 2) ---------------------------
+    // Set for a Function frame regardless of compiled-or-not (`declNode`
+    // is cheap and harmless to always set); `vmFrame` is only non-null
+    // while this specific call is actually executing compiled bytecode.
+    // `declNode` is this call's own FunctionDeclaration/FunctionLiteral
+    // identity -- used for LOAD_UPVALUE's exact-match search
+    // (Evaluator::findUpvalue), distinct from callCtxFor's own
+    // span-containment use of `declPosition`. `vmFrame` is a type-erased
+    // `VmFrame*` (bytecode_vm.hpp isn't included here, to avoid a header
+    // coupling this foundational header doesn't otherwise need) -- cast
+    // back in bytecode_vm.cpp/user_calls.cpp, the only places that ever
+    // read it.
+    const oscad::ASTNode* declNode = nullptr;
+    void* vmFrame = nullptr;
+
+    // Upvalue-ancestry parent: the callStack_ INDEX (not pointer -- the
+    // vector can reallocate) of the frame this one's own closure-visibility
+    // chain continues from, or -1 if it terminates here. Set to the
+    // CALLING frame's own index (the one active immediately before this
+    // one was pushed) exactly when callCtxFor chose childCtx() for this
+    // call, else -1 (callCtx() was chosen -- an isolated call, matching
+    // real OpenSCAD's own "no escaping closures... only reaches through an
+    // unbroken chain of lexically-nested calls" semantics).
+    //
+    // This is NOT the same thing as "is declNode still active somewhere on
+    // callStack_" -- a real bug caught via a differential VM-off-vs-VM-on
+    // test: `function apply(f,v)=f(v); function make(x)=apply(function(y)
+    // y+x, 100);` -- when `f(v)` (the closure) runs INSIDE apply's own
+    // (isolated, since apply isn't lexically nested in make) frame, a
+    // naive "scan callStack_ for any frame whose declNode matches the
+    // upvalue's target" finds `make` (still on the stack) and WRONGLY
+    // resolves `x`, even though real OpenSCAD's own ctx-ancestry-based
+    // closures give `x` as undef here (apply's own isolation already
+    // severed the chain before the closure was ever invoked). Walking
+    // upvalueParent links instead reproduces this exactly: apply's own
+    // frame has upvalueParent=-1 (it's isolated from make), so the
+    // closure's own chain (parent = apply's frame) terminates there
+    // without ever reaching make, matching the interpreter byte-for-byte.
+    int upvalueParent = -1;
 };
 
 // " in file {origin}, line {line}" -- "" if pos is null. Mirrors the Python

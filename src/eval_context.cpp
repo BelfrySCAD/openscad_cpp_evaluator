@@ -5,7 +5,8 @@ namespace oscadeval {
 EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     EvalContext ctx;
     ctx.scope = rootScope;
-    ctx.dyn = TrailView<Value>::makeRoot();
+    auto dynIntern = std::make_shared<DynNameIntern>();
+    ctx.dyn = IndexedTrailView<Value>::makeRoot(dynIntern);
     ctx.dyn->set("$fn", Value{0.0});
     ctx.dyn->set("$fa", Value{12.0});
     ctx.dyn->set("$fs", Value{2.0});
@@ -13,7 +14,7 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     ctx.dyn->set("$parent_modules", Value{0.0});
     ctx.let_ = TrailView<Value>::makeRoot();
     ctx.dynPositions = TrailView<const oscad::Position*>::makeRoot();
-    ctx.dynExplicit = DynExplicitTrail::makeRoot();
+    ctx.dynExplicit = DynExplicitTrail::makeRoot(dynIntern);
     ctx.childrenNodes = std::make_shared<const ChildrenNodeList>();
     ctx.childrenCallerCtx = nullptr;
     return ctx;

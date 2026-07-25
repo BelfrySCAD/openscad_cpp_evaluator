@@ -1,5 +1,7 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/bytecode.hpp"
+#include "openscad_cpp_evaluator/bytecode_vm.hpp"
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/csg_node.hpp"
 #include "openscad_cpp_evaluator/debug_hooks.hpp"
@@ -238,6 +240,61 @@ public:
     // _builtin_parent_module.
     Value parentModuleName(int idx) const;
 
+    // Identifier resolution: let_ -> ($-prefixed only) dyn -> PI -> static
+    // Scope::lookupVariable fallback (re-evaluates that declaration's own
+    // expr against `ctx`). Public so the bytecode VM's LOAD_FREE opcode
+    // (bytecode_vm.cpp) can call it directly for any identifier that isn't
+    // a compile-time-resolved local slot -- this already gives the correct
+    // answer for a compiled function's own parameter names too (their slot
+    // never gets written into ctx.let_, so this just falls through to the
+    // scope-fallback's own ParameterDeclaration -> undef rule, exactly
+    // matching applyDefaults' existing sibling-isolation behavior; see
+    // bytecode_compiler.cpp's own header comment on default-value
+    // compilation for why that's relied on, not incidental).
+    Value evalIdentifier(const std::string& name, const oscad::Position* position, EvalContext& ctx, bool warnIfUndef);
+
+    // Pure Value x Value -> Value implementations shared by evalExpr's own
+    // switch cases and the bytecode VM's generic UNARY_OP/BINARY_OP/INDEX/
+    // MEMBER opcodes (bytecode_vm.cpp) -- moved out of evalExpr verbatim
+    // (no behavior change) so neither copy risks drifting from the other.
+    // `pos` is only consulted by the handful of cases that can warn()
+    // (comparisons, bitwise ops).
+    Value applyBinaryOp(oscad::NodeKind kind, const Value& a, const Value& b, const oscad::Position& pos);
+    Value applyUnaryOp(oscad::NodeKind kind, const Value& v, const oscad::Position& pos);
+    Value applyIndexAccess(const Value& obj, const Value& idx);
+    Value applyMemberAccess(const Value& obj, const std::string& member);
+    Value applyRange(const Value& startV, const Value& endV, const Value& stepV);
+
+    // Entry point for a call site resolved INSIDE compiled bytecode (the
+    // CALL_FN opcode, bytecode_vm.cpp): `bound` is already fully evaluated
+    // (each argument expression was compiled and run against the CALLING
+    // chunk's own slots, unlike bindArgs, which evaluates raw AST argument
+    // nodes against a live ctx) -- otherwise mirrors evalUserFunction
+    // exactly (callCtxFor, compiled-vs-interpreted dispatch, the callstack/
+    // profile/debug bracket via the same evalUserFunctionCore both share).
+    // Public: bytecode_vm.cpp is a separate translation unit.
+    Value evalUserFunctionFromBound(const std::string& name, const oscad::FunctionDeclaration& decl,
+                                     std::unordered_map<std::string, Value> bound, EvalContext& ctx,
+                                     const oscad::Position* callPos);
+
+    // Same, for a call whose callee was only resolvable at runtime (the
+    // CALL_DYNAMIC opcode, once it's popped a Value and confirmed it holds
+    // a FunctionLiteral pointer -- the closure-calling case Phase 2 exists
+    // for) -- `bound` is matched against `funcNode`'s OWN parameters
+    // (discovered now, not at compile time, since the callee wasn't
+    // statically known). Mirrors evalFunctionLiteral exactly otherwise.
+    Value evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode, std::unordered_map<std::string, Value> bound,
+                                        EvalContext& ctx, const oscad::Position* callPos);
+
+    // Testing-only override, checked before the (once-cached) env var --
+    // lets test_bytecode_compiler.cpp force VM-on for specific tests
+    // without depending on process-startup environment (the env-var read
+    // in bytecodeVmEnabled() is cached forever after its first call, so a
+    // plain setenv() from inside a test body would have no effect on later
+    // calls within the same test binary). Pass std::nullopt to go back to
+    // the env var.
+    static void setBytecodeVmEnabledForTesting(std::optional<bool> enabled);
+
     // Checks whether a debug pause should happen at `node` (via the
     // injected DebugHooks::debugHook, if any -- a no-op otherwise),
     // applying any `mods` the hook returns to `ctx.let_` and throwing
@@ -274,7 +331,6 @@ private:
     std::vector<ColoredBody> evaluateImpl(const NodeList& nodes, EvalContext& ctx,
                                            const std::unordered_map<std::string, Value>& viewportParams);
 
-    Value evalIdentifier(const std::string& name, const oscad::Position* position, EvalContext& ctx, bool warnIfUndef);
     // Evaluates one top-level element of a `[...]` list literal (a plain
     // expression, or one of the 6 list-comprehension clause kinds --
     // for/c-for/let/if/if-else/each), appending whatever it contributes to
@@ -345,9 +401,18 @@ private:
     // script) back when every derivation copied the whole map; deleted
     // once the trail redesign made that copy cost disappear entirely, see
     // git history for the removed shareDyn/hasDollarParam machinery.
+    // `usedChildCtx`, if non-null, is set to true/false with which branch
+    // this call took -- needed by evalUserFunctionCore's callers (Phase 2)
+    // to compute the new frame's own upvalue-ancestry parent correctly:
+    // childCtx() alone does NOT mean a closure over `decl`'s enclosing
+    // frame is actually reachable -- it only means "continue whatever
+    // ancestry `ctx` itself already has," which can already be severed
+    // (see CallStackFrame::upvalueParent's own doc comment for the real
+    // scenario this was caught on -- a closure passed through an
+    // unrelated intermediary function).
     EvalContext callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, const oscad::Scope* scope,
                             std::shared_ptr<const ChildrenNodeList> childrenNodes = nullptr,
-                            const EvalContext* childrenCallerCtx = nullptr);
+                            const EvalContext* childrenCallerCtx = nullptr, bool* usedChildCtx = nullptr);
 
     // Fills in any parameter not already present in `bound` (bindArgs'
     // own return value -- the authoritative "did the caller actually
@@ -380,6 +445,28 @@ private:
     // before any statement has ever run) -- returns an empty frame then.
     DebugFrame buildDebugFrame(const EvalContext* ctx) const;
 
+    // Shared by evalUserFunction/evalUserFunctionFromBound/
+    // evalFunctionLiteral: the callstack/profile/debug bracket, factored
+    // out so these three entry points (raw-AST-argument vs. already-bound-
+    // value vs. function-literal call sites) can't drift on it.
+    // `computeResult` is called with the call already on callStack_/
+    // profiling active -- it's just "evaluate the body," binding (which
+    // differs by entry point and compiled-vs-interpreted) already done by
+    // the caller before this runs. `declNode`/`bodyExpr` take a plain
+    // ASTNode/Expression rather than FunctionDeclaration specifically so
+    // FunctionLiteral (`.body`/`.position()`, the same shape under
+    // different member names) can share this too -- also where
+    // CallStackFrame::declNode gets stamped, the identity
+    // Evaluator::findUpvalue's runtime search matches against.
+    // `upvalueParent`: the callStack_ index the new frame's own
+    // closure-visibility chain continues from, or -1 -- see
+    // CallStackFrame::upvalueParent's own doc comment; the caller computes
+    // this from callCtxFor's `usedChildCtx` out-param, since the decision
+    // needs to be known before the new frame is pushed here.
+    Value evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode, const oscad::Expression& bodyExpr,
+                                EvalContext& childCtx, const oscad::Position* callPos, int upvalueParent,
+                                const std::function<Value()>& computeResult);
+
     void evalUserModule(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call, EvalContext& ctx);
     Value evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
                             const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
@@ -387,6 +474,86 @@ private:
     Value evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
                                const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                                const oscad::ASTNode* callNode);
+
+    // -- Bytecode VM (Phase 1) -------------------------------------------
+
+    // Compile-attempt cache keyed by declaration pointer identity, populated
+    // lazily on first call -- safe under `use <file>`'s AST-node-sharing
+    // (see eval_use.hpp's own doc comment): a compiled chunk's slot layout
+    // depends only on the declaration's own parameters/body, never on which
+    // combining scope it's evaluated under. nullopt means "tried, doesn't
+    // compile" (see tryCompileFunction) -- cached too, so a function that
+    // uses e.g. echo() isn't re-attempted on every single call.
+    std::unordered_map<const oscad::FunctionDeclaration*, std::optional<CompiledChunk>> chunkCache_;
+    const CompiledChunk* lookupOrCompileChunk(const oscad::FunctionDeclaration& decl);
+
+    // FunctionLiteral chunks (Phase 2/closures): populated only as a side
+    // effect of successfully compiling some OTHER declaration that
+    // lexically contains the literal (see CompiledChunk::nestedLiterals'
+    // own doc comment for why eager discovery, not lazy-on-first-call, is
+    // required) -- flattenNestedLiterals() walks a freshly compiled
+    // chunk's own nestedLiterals tree (recursively, for a literal
+    // containing another literal) and merges every entry in here.
+    // Presence = compiled; a literal that failed to compile, or was never
+    // reached by any compiled container, simply has no entry -- no
+    // optional wrapper needed (unlike chunkCache_, which also has to
+    // remember "tried once, don't retry").
+    std::unordered_map<const oscad::FunctionLiteral*, CompiledChunk> literalChunkCache_;
+    const CompiledChunk* lookupCompiledLiteralChunk(const oscad::FunctionLiteral& node) const;
+    void flattenNestedLiterals(CompiledChunk& chunk);
+
+public:
+    // Pooled VmFrame scratch buffers (see VmFrame's own doc comment,
+    // bytecode_vm.hpp, for why pooling exists at all -- a measured, not
+    // assumed, fix for 3-fresh-vector-allocations-per-call erasing the
+    // whole point of the VM). Public: bytecode_vm.cpp is a separate
+    // translation unit. `acquireVmFrame()` reuses an already-returned
+    // frame's allocated capacity when one is available (a still-active
+    // recursive/nested call's own frame is never in the pool, so this
+    // never aliases two concurrent calls onto the same buffers).
+    std::unique_ptr<VmFrame> acquireVmFrame();
+    void releaseVmFrame(std::unique_ptr<VmFrame> frame);
+
+    // Closures/upvalues (Phase 2). `setCurrentCallVmFrame` stamps the
+    // just-acquired VmFrame onto the CURRENT (topmost) call-stack entry --
+    // called from runCompiledFunction/runCompiledFunctionFromBound right
+    // after acquiring, before running any bytecode, so a nested compiled
+    // call's own LOAD_UPVALUE can find it immediately.
+    // `findUpvalue` walks the live call stack innermost-first for a frame
+    // whose own declaration identity matches `targetDecl` -- returns
+    // nullptr if that call already returned (this codebase has no
+    // escaping closures) or was never compiled (vmFrame still null, e.g.
+    // an interpreted enclosing call -- see this project's own scope-trail
+    // notes on why that combination can't arise for code this phase
+    // actually compiles: a container is only ever compiled if every
+    // FunctionLiteral nested inside it also compiled, so an upvalue's own
+    // target is always itself compiled whenever it's actually active).
+    void setCurrentCallVmFrame(void* frame) {
+        if (!callStack_.empty()) callStack_.back().vmFrame = frame;
+    }
+    const Value* findUpvalue(const oscad::ASTNode* targetDecl, int slot) const;
+
+private:
+    std::vector<std::unique_ptr<VmFrame>> vmFramePool_;
+
+    // Reads the OSCAD_BYTECODE_VM env var exactly once (function-local
+    // static) -- default-ON as of Phase 5's rollout decision: unset, or
+    // any value other than "0", leaves it on; OSCAD_BYTECODE_VM=0 is the
+    // opt-out escape hatch. Flipped from the earlier default-off after
+    // three rounds of real-world validation found zero regressions and a
+    // consistent, measured (not assumed) ~20-30% wall-time win on a real
+    // BOSL2-heavy stress script (Anklet.scad) -- see this phase's own
+    // Instruments profile: total sampled CPU-busy time dropped from
+    // 1.904s to 1.497s (VM off vs on, same optimized native-arm64 build),
+    // composition unchanged (malloc/string-hash still dominate what's
+    // left -- the VM's own dispatch overhead is a mere ~1.6% of runtime;
+    // the win is from avoiding work, not from being fast itself), with no
+    // new hotspot introduced. Deliberately process-wide via getenv, not a
+    // constructor parameter, since threading a flag through every
+    // existing test's/caller's Evaluator construction isn't practical
+    // (see this phase's own plan notes on the differential-run validation
+    // strategy this enables).
+    static bool bytecodeVmEnabled();
 
     // -- Profiling (Phase 9) --------------------------------------------
 

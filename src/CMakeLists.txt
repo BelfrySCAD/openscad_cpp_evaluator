@@ -5,6 +5,8 @@ add_library(openscad_cpp_evaluator STATIC
   expr_eval.cpp
   stmt_eval.cpp
   user_calls.cpp
+  bytecode_compiler.cpp
+  bytecode_vm.cpp
   colored_body.cpp
   css_colors.cpp
   csg_resolve.cpp

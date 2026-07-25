@@ -358,4 +358,12 @@ std::vector<Value> expandIterable(const Value& v) {
     return {v}; // bare scalar -> single-element list
 }
 
+void appendEachInto(std::vector<Value>& out, const Value& v) {
+    if (const ListPtr* l = std::get_if<ListPtr>(&v); l && *l) {
+        for (const Value& x : (*l)->items) out.push_back(x);
+    } else if (!std::holds_alternative<std::monostate>(v)) {
+        out.push_back(v);
+    }
+}
+
 } // namespace oscadeval

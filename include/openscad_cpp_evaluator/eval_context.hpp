@@ -40,7 +40,7 @@ using ChildrenNodeList = std::vector<const oscad::ASTNode*>;
 // opening a new one.
 struct EvalContext {
     const oscad::Scope* scope = nullptr;
-    std::shared_ptr<TrailView<Value>> dyn;                       // $-prefixed only
+    std::shared_ptr<IndexedTrailView<Value>> dyn;                 // $-prefixed only, interned-int-keyed
     std::shared_ptr<TrailView<Value>> let_;                      // plain-named bindings
     std::shared_ptr<TrailView<const oscad::Position*>> dynPositions;
     std::shared_ptr<DynExplicitTrail> dynExplicit;               // which $-names the script itself assigned

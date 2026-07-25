@@ -194,15 +194,176 @@ private:
     std::shared_ptr<void> guard_;
 };
 
+// Shared bidirectional name<->small-int interning table for $-prefixed
+// dynamic variables. Owned jointly by dyn's and dynExplicit's storage (see
+// EvalContext::makeRoot()) so a name like "$fn" interns to the SAME id in
+// both -- required since assigning a $-var writes dyn and marks
+// dynExplicit using that one id. The distinct-name vocabulary of any real
+// script is tiny (a handful of builtins plus whatever the script defines),
+// so this table stays small and is effectively populated once.
+class DynNameIntern {
+public:
+    int idFor(const std::string& name) {
+        auto it = ids_.find(name);
+        if (it != ids_.end()) return it->second;
+        int id = static_cast<int>(names_.size());
+        ids_.emplace(name, id);
+        names_.push_back(name);
+        return id;
+    }
+    const std::string& nameFor(int id) const { return names_[static_cast<size_t>(id)]; }
+
+private:
+    std::unordered_map<std::string, int> ids_;
+    std::vector<std::string> names_;
+};
+
+// The int-keyed twin of ScopeTrailStorage above, used only for $-dynamic
+// variables (dyn/dynExplicit): the identical ancestry-chain visibility
+// algorithm, but keyed by a small interned integer (via DynNameIntern)
+// instead of a raw std::string, so each name's own push-stack lives in a
+// directly-indexed std::vector rather than an unordered_map<string,...> --
+// no per-access string hashing/comparison once a name has been interned.
+// The public API still takes plain std::string names (interning happens
+// internally, transparent to every existing call site) -- this alone
+// removes string-vs-string comparison during hashmap collision resolution
+// and improves cache locality; the larger win (skipping the interning
+// lookup entirely) is realized once the bytecode compiler (a later phase)
+// resolves a name to its id ONCE at compile time and threads the id
+// through as an instruction immediate instead of re-interning on every
+// execution.
+template <typename T>
+class IndexedScopeTrailStorage {
+public:
+    explicit IndexedScopeTrailStorage(std::shared_ptr<DynNameIntern> intern) : intern_(std::move(intern)) {}
+
+    int openLevel(int parentLevel) {
+        int level = ++nextLevel_;
+        parent_[level] = parentLevel;
+        return level;
+    }
+
+    void set(const std::string& name, T value, int level) {
+        int id = intern_->idFor(name);
+        ensureSize(id);
+        stacks_[static_cast<size_t>(id)].push_back(Entry{std::move(value), level});
+        dirty_[level].push_back(id);
+    }
+
+    void popLevel(int level) {
+        auto it = dirty_.find(level);
+        if (it != dirty_.end()) {
+            for (int id : it->second) {
+                auto& stack = stacks_[static_cast<size_t>(id)];
+                if (!stack.empty()) stack.pop_back();
+            }
+            dirty_.erase(it);
+        }
+        parent_.erase(level);
+    }
+
+    // Same sorted-merge ancestry walk as ScopeTrailStorage::lookup -- see
+    // its own doc comment for the full algorithm rationale.
+    const T* lookup(const std::string& name, int myLevel) const { return lookupById(intern_->idFor(name), myLevel); }
+
+    const T* lookupById(int id, int myLevel) const {
+        if (id < 0 || static_cast<size_t>(id) >= stacks_.size()) return nullptr;
+        const std::vector<Entry>& vec = stacks_[static_cast<size_t>(id)];
+        auto idx = static_cast<long>(vec.size()) - 1;
+        int ancestor = myLevel;
+        while (ancestor != 0 && idx >= 0) {
+            const int entryLevel = vec[static_cast<size_t>(idx)].level;
+            if (entryLevel > ancestor) {
+                --idx;
+            } else if (entryLevel == ancestor) {
+                return &vec[static_cast<size_t>(idx)].value;
+            } else {
+                auto pit = parent_.find(ancestor);
+                ancestor = pit != parent_.end() ? pit->second : 0;
+            }
+        }
+        return nullptr;
+    }
+
+    bool has(const std::string& name, int myLevel) const { return lookup(name, myLevel) != nullptr; }
+
+    std::vector<std::pair<std::string, T>> items(int myLevel) const {
+        std::vector<std::pair<std::string, T>> result;
+        for (size_t id = 0; id < stacks_.size(); ++id) {
+            if (const T* v = lookupById(static_cast<int>(id), myLevel)) {
+                result.emplace_back(intern_->nameFor(static_cast<int>(id)), *v);
+            }
+        }
+        return result;
+    }
+
+private:
+    struct Entry {
+        T value;
+        int level;
+    };
+    void ensureSize(int id) {
+        if (static_cast<size_t>(id) >= stacks_.size()) stacks_.resize(static_cast<size_t>(id) + 1);
+    }
+    std::shared_ptr<DynNameIntern> intern_;
+    std::vector<std::vector<Entry>> stacks_;
+    std::unordered_map<int, std::vector<int>> dirty_;
+    std::unordered_map<int, int> parent_;
+    int nextLevel_ = 0;
+};
+
+// Per-EvalContext handle onto a shared IndexedScopeTrailStorage<T> -- the
+// int-keyed twin of TrailView<T> above; see that class's doc comment for
+// what level_/guard_ mean, unchanged here.
+template <typename T>
+class IndexedTrailView {
+public:
+    static std::shared_ptr<IndexedTrailView<T>> makeRoot(std::shared_ptr<DynNameIntern> intern) {
+        auto storage = std::make_shared<IndexedScopeTrailStorage<T>>(std::move(intern));
+        int level = storage->openLevel(0);
+        return std::make_shared<IndexedTrailView<T>>(storage, level, makeGuard(storage, level));
+    }
+
+    std::shared_ptr<IndexedTrailView<T>> openChild(bool isolate) const {
+        int level = storage_->openLevel(isolate ? 0 : level_);
+        return std::make_shared<IndexedTrailView<T>>(storage_, level, makeGuard(storage_, level));
+    }
+
+    IndexedTrailView(std::shared_ptr<IndexedScopeTrailStorage<T>> storage, int level, std::shared_ptr<void> guard)
+        : storage_(std::move(storage)), level_(level), guard_(std::move(guard)) {}
+
+    void set(const std::string& name, T value) { storage_->set(name, std::move(value), level_); }
+    const T* find(const std::string& name) const { return storage_->lookup(name, level_); }
+    bool count(const std::string& name) const { return storage_->has(name, level_) ? 1 : 0; }
+    bool empty() const { return storage_->items(level_).empty(); }
+    const T& at(const std::string& name) const {
+        const T* v = find(name);
+        if (!v) throw std::out_of_range("IndexedTrailView::at: key not found");
+        return *v;
+    }
+    std::vector<std::pair<std::string, T>> items() const { return storage_->items(level_); }
+
+private:
+    static std::shared_ptr<void> makeGuard(std::shared_ptr<IndexedScopeTrailStorage<T>> storage, int level) {
+        return std::shared_ptr<void>(nullptr, [storage, level](void*) { storage->popLevel(level); });
+    }
+
+    std::shared_ptr<IndexedScopeTrailStorage<T>> storage_;
+    int level_;
+    std::shared_ptr<void> guard_;
+};
+
 // dynExplicit's own trail: a set (which $-names the SCRIPT itself
-// explicitly assigned), not a value map -- kept as its own TrailView<bool>
-// rather than folded into `dyn`'s entries specifically so every existing
+// explicitly assigned), not a value map -- kept as its own trail rather
+// than folded into `dyn`'s entries specifically so every existing
 // `ctx.dyn->at(name)`-style read site keeps returning a bare Value, not a
 // {Value,bool} pair (dyn is read far more often than dynExplicit is
 // consulted). Always opened/leveled in lockstep with `dyn` at every
 // derivation site (see eval_context.cpp) -- they never diverge, just
-// happen to stay two separate objects rather than one merged type.
-using DynExplicitTrail = TrailView<bool>;
+// happen to stay two separate objects rather than one merged type. Both
+// share the SAME DynNameIntern instance as `dyn` (see EvalContext::
+// makeRoot()), so a given $-name always interns to the same id in both.
+using DynExplicitTrail = IndexedTrailView<bool>;
 using NameSet = std::unordered_set<std::string>;
 
 inline NameSet explicitSnapshot(const DynExplicitTrail& trail) {
