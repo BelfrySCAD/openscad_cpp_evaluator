@@ -4,6 +4,7 @@
 
 #include "test_helpers.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>

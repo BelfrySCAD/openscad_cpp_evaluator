@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <random>
 #include <unordered_set>

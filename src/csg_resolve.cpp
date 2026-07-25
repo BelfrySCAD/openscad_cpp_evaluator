@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <stdexcept>
 
 namespace oscadeval {
