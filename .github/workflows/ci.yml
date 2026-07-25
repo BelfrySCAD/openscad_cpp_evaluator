@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install bison/flex (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bison flex
+
+      - name: Install bison/flex (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bison flex
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      # Bytecode VM on (the default as of the Phase 5 rollout decision --
+      # see evaluator.hpp's own bytecodeVmEnabled() comment) and off
+      # (OSCAD_BYTECODE_VM=0), so a regression in either the compiled or
+      # the interpreted path fails CI, not just whichever happens to be
+      # default at the time.
+      - name: Test (bytecode VM on, the default)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Test (bytecode VM off)
+        run: ctest --test-dir build --output-on-failure
+        env:
+          OSCAD_BYTECODE_VM: "0"
