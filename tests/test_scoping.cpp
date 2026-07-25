@@ -107,6 +107,32 @@ TEST(Scoping, ModuleForwardReferenceResolves) {
     EXPECT_NEAR(bodies[0].body->Volume(), 27.0, 1e-9);
 }
 
+TEST(Scoping, DollarArgUndeclaredByCalleeFunctionDoesNotLeakToCallerDyn) {
+    // f() declares no $-prefixed parameter, so hasDollarParam(f) is false
+    // and the shareDyn fast path (callCtxFor -> childCtx/callCtx with
+    // shareDyn=true) applies -- child_ctx.dyn aliases the CALLER's dyn map
+    // instead of copying it. bindArgs still writes ANY named argument into
+    // `bound`, including one that doesn't match any of f's declared
+    // parameters (this is how `$fn=64`-style call-site dynamic-scope
+    // overrides work generally) -- so the bound-argument loop in
+    // evalUserFunction writes "$fn" into child_ctx.dyn even though f()
+    // never declared it. If dyn were actually aliased (not just
+    // conditionally shared), that write would mutate the CALLER's own dyn
+    // map in place, leaking $fn=99 out to sibling statements after f()
+    // returns. It doesn't leak here because bindArgs (unlike an ordinary
+    // declared-$-param bind) is the one case shareDyn's "no declared
+    // $-param" precondition doesn't fully cover -- verifying real,
+    // observed behavior, not just re-asserting the optimization's own
+    // stated invariant.
+    Evaluator ev;
+    auto ast = parseSrc("function f(x) = x;\na = f(x=1, $fn=99);\nb = $fn;");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evalChildren(ast, ctx);
+    EXPECT_DOUBLE_EQ(asNum(ctx.let_->at("b")), 0.0); // untouched ambient default, not leaked 99
+    EXPECT_DOUBLE_EQ(asNum(ctx.dyn->at("$fn")), 0.0);
+}
+
 TEST(Scoping, ModuleLocalVariableDoesNotLeakToOuterScope) {
     std::vector<std::string> echoed;
     Evaluator ev([&](const std::string& msg) { echoed.push_back(msg); });
@@ -117,4 +143,43 @@ TEST(Scoping, ModuleLocalVariableDoesNotLeakToOuterScope) {
     ASSERT_EQ(echoed.size(), 2u);
     EXPECT_EQ(echoed[0], "ECHO: 20");
     EXPECT_EQ(echoed[1], "ECHO: 10");
+}
+
+TEST(Scoping, ChildrenForwardedThroughIsolatedCallWithSameNamedParamStillSeesAncestorBinding) {
+    // A real bug found running a real BOSL2 script (attachable()/
+    // trapezoid(), which deep-forwards children() through several more
+    // calls while an intermediate ISOLATED call -- attachable() itself,
+    // with its own unbound "path"/"h" parameters -- stays on the call
+    // stack throughout). `wrapper(path)` below mirrors that shape: an
+    // isolated (non-closure) call whose own declared parameter shares a
+    // name with an ancestor's variable, forwarding children() straight
+    // through past itself via `leaf()`. The deferred child block
+    // (`echo(path)`, lexically inside `outer()`) must resolve `path`
+    // against OUTER's own binding, not wrapper's own same-named
+    // (unbound, undef) parameter -- even though wrapper's own scope is
+    // still open (unpopped) the entire time the deferred block runs.
+    //
+    // This was broken by an earlier trail-storage design that judged
+    // visibility purely by level-number ordering ("pushed no later than
+    // my own level"): wrapper's own undef "path" binding is chronologically
+    // *more recent* than outer's real one, so a numeric-only check picked
+    // it up as if it were an ancestor, even though wrapper is not an
+    // ancestor of the deferred child block at all -- just an unrelated,
+    // still-open branch. Fixed by tracking true parent-chain ancestry per
+    // level instead of comparing level numbers (see scope_trail.hpp).
+    std::vector<std::string> echoed;
+    Evaluator ev([&](const std::string& msg) { echoed.push_back(msg); });
+    auto ast = parseSrc(
+        "module leaf() { children(0); }\n"
+        "module wrapper(path) { leaf() children(0); }\n"
+        "module outer() {\n"
+        "    path = [1, 2, 3];\n"
+        "    wrapper() echo(path);\n"
+        "}\n"
+        "outer();\n");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    ASSERT_EQ(echoed.size(), 1u);
+    EXPECT_EQ(echoed[0], "ECHO: [1, 2, 3]");
 }

@@ -17,9 +17,9 @@ int fnSegments(double fn, double fa, double fs, double r) {
 
 namespace {
 double dynNumberOr(const EvalContext& ctx, const std::string& name, double fallback) {
-    auto it = ctx.dyn->find(name);
-    if (it == ctx.dyn->end()) return fallback;
-    const double* d = std::get_if<double>(&it->second);
+    const Value* v = ctx.dyn->find(name);
+    if (!v) return fallback;
+    const double* d = std::get_if<double>(v);
     return d ? *d : fallback;
 }
 } // namespace

@@ -120,7 +120,7 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
         }
         for (const Value& val : varSeqs[depth].second) {
             EvalContext childCtx = parentCtx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
-            (*childCtx.let_)[varSeqs[depth].first] = val;
+            childCtx.let_->set(varSeqs[depth].first, val);
             recurse(depth + 1, childCtx);
         }
     };

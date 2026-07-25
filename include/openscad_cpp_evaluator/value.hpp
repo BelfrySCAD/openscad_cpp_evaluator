@@ -150,4 +150,11 @@ std::string fmtValue(const Value& v);
 // _eval_for/_resolve_intersection_for.
 std::vector<Value> expandIterable(const Value& v);
 
+// `each <body>`'s own flatten-one-level rule, shared by the AST interpreter
+// (evalListLiteral/evalListElement's ListCompEach handling, expr_eval.cpp)
+// and the bytecode VM's ACCUM_APPEND_EACH opcode: a list value extends
+// `out` with its own items, undef is dropped, anything else appends as a
+// single item.
+void appendEachInto(std::vector<Value>& out, const Value& v);
+
 } // namespace oscadeval

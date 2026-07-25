@@ -70,10 +70,10 @@ std::optional<bool> valueLess(const Value& a, const Value& b) {
 // nothing to defer here.
 void bindLetName(EvalContext& ctx, const std::string& name, const Value& v) {
     if (!name.empty() && name[0] == '$') {
-        (*ctx.dyn)[name] = v;
-        ctx.dynExplicit->insert(name);
+        ctx.dyn->set(name, v);
+        ctx.dynExplicit->set(name, true);
     } else {
-        (*ctx.let_)[name] = v;
+        ctx.let_->set(name, v);
     }
 }
 
@@ -96,21 +96,6 @@ void appendAll(std::vector<Value>& out, std::vector<Value> more) {
     out.insert(out.end(), std::make_move_iterator(more.begin()), std::make_move_iterator(more.end()));
 }
 
-// `each <body>`'s own flatten-one-level rule, shared between evalListLiteral
-// and evalListCompBody's ListCompEach handling: a nested-clause body's own
-// contributed items are re-flattened one level (a list item extends, a
-// scalar appends, undef is dropped); a plain-expression body flattens only
-// if its own value happens to be a list (extends), otherwise appends
-// (dropping undef). Mirrors the "each" branch duplicated across
-// _eval_list_comp/_eval_list_comp_body.
-void appendEach(std::vector<Value>& out, const Value& v) {
-    if (const ListPtr* l = std::get_if<ListPtr>(&v); l && *l) {
-        for (const Value& x : (*l)->items) out.push_back(x);
-    } else if (!std::holds_alternative<std::monostate>(v)) {
-        out.push_back(v);
-    }
-}
-
 } // namespace
 
 Evaluator::Evaluator(EchoFn echoFn, std::shared_ptr<FontProvider> fontProvider, std::shared_ptr<ManifoldCache> manifoldCache,
@@ -129,12 +114,10 @@ void Evaluator::warn(const std::string& message, const oscad::Position* position
 
 Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* position, EvalContext& ctx,
                                  bool warnIfUndef) {
-    auto letIt = ctx.let_->find(name);
-    if (letIt != ctx.let_->end()) return letIt->second;
+    if (const Value* v = ctx.let_->find(name)) return *v;
 
     if (!name.empty() && name[0] == '$') {
-        auto dynIt = ctx.dyn->find(name);
-        if (dynIt != ctx.dyn->end()) return dynIt->second;
+        if (const Value* v = ctx.dyn->find(name)) return *v;
     }
 
     if (name == "PI") return Value{std::numbers::pi};
@@ -177,7 +160,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                 }
                 for (const Value& val : pairs[depth].values) {
                     EvalContext childCtx = parentCtx.letChildCtx();
-                    (*childCtx.let_)[pairs[depth].name] = val;
+                    childCtx.let_->set(pairs[depth].name, val);
                     recurse(depth + 1, childCtx);
                 }
             };
@@ -187,7 +170,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
         case oscad::NodeKind::ListCompCFor: {
             auto& n = static_cast<const oscad::ListCompCFor&>(elem);
             EvalContext loopCtx = ctx.letChildCtx();
-            for (const auto& assign : n.inits) (*loopCtx.let_)[assign->name->name] = evalExpr(*assign->expr, loopCtx);
+            for (const auto& assign : n.inits) loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
 
             const bool isNestedLc = (n.body->kind() == oscad::NodeKind::ListComprehension);
             constexpr int kMaxCForIterations = 1'000'000;
@@ -202,7 +185,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                 } else {
                     appendAll(out, evalListCompBody(*n.body, loopCtx));
                 }
-                for (const auto& assign : n.incrs) (*loopCtx.let_)[assign->name->name] = evalExpr(*assign->expr, loopCtx);
+                for (const auto& assign : n.incrs) loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
             }
             return;
         }
@@ -228,9 +211,9 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             auto& n = static_cast<const oscad::ListCompEach&>(elem);
             const oscad::ASTNode& inner = *n.body;
             if (isListCompClauseKind(inner.kind())) {
-                for (const Value& item : evalListCompBody(inner, ctx)) appendEach(out, item);
+                for (const Value& item : evalListCompBody(inner, ctx)) appendEachInto(out, item);
             } else {
-                appendEach(out, evalExpr(static_cast<const oscad::Expression&>(inner), ctx));
+                appendEachInto(out, evalExpr(static_cast<const oscad::Expression&>(inner), ctx));
             }
             return;
         }
@@ -257,9 +240,13 @@ Value Evaluator::evalListLiteral(const oscad::ListComprehension& node, EvalConte
 }
 
 Value Evaluator::evalRangeLiteral(const oscad::RangeLiteral& node, EvalContext& ctx) {
-    Value startV = evalExpr(*node.start, ctx);
-    Value endV = evalExpr(*node.end, ctx);
-    Value stepV = evalExpr(*node.step, ctx);
+    return applyRange(evalExpr(*node.start, ctx), evalExpr(*node.end, ctx), evalExpr(*node.step, ctx));
+}
+
+// Shared with the bytecode VM's RANGE opcode -- see applyBinaryOp's own
+// comment on why these are factored out as plain Value x Value x Value ->
+// Value functions.
+Value Evaluator::applyRange(const Value& startV, const Value& endV, const Value& stepV) {
     double start = std::holds_alternative<std::monostate>(startV) ? 0.0 : toDoubleLenient(startV);
     double end = std::holds_alternative<std::monostate>(endV) ? 0.0 : toDoubleLenient(endV);
     double step = std::holds_alternative<std::monostate>(stepV) ? 1.0 : toDoubleLenient(stepV);
@@ -357,76 +344,139 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
 
         case NodeKind::PrimaryIndex: {
             auto& n = static_cast<const oscad::PrimaryIndex&>(node);
-            Value obj = evalExpr(*n.left, ctx);
-            Value idx = evalExpr(*n.index, ctx);
-            if (const ListPtr* l = std::get_if<ListPtr>(&obj)) {
-                if (const double* d = std::get_if<double>(&idx)) {
-                    const int i = static_cast<int>(*d);
-                    if (i < 0 || !*l || static_cast<size_t>(i) >= (*l)->items.size()) return Value{};
-                    return (*l)->items[static_cast<size_t>(i)];
-                }
-                return Value{};
-            }
-            if (const std::string* s = std::get_if<std::string>(&obj)) {
-                if (const double* d = std::get_if<double>(&idx)) {
-                    const int i = static_cast<int>(*d);
-                    if (i < 0 || static_cast<size_t>(i) >= s->size()) return Value{};
-                    return Value{std::string(1, (*s)[static_cast<size_t>(i)])};
-                }
-                return Value{};
-            }
-            if (const OscRange* r = std::get_if<OscRange>(&obj)) {
-                if (const double* d = std::get_if<double>(&idx)) {
-                    const int i = static_cast<int>(*d);
-                    if (i == 0) return Value{r->start};
-                    if (i == 1) return Value{r->step};
-                    if (i == 2) return Value{r->end};
-                }
-                return Value{};
-            }
-            if (const ObjectPtr* o = std::get_if<ObjectPtr>(&obj)) {
-                if (const std::string* key = std::get_if<std::string>(&idx); key && *o) {
-                    for (const auto& [k, v] : (*o)->items) {
-                        if (k == *key) return v;
-                    }
-                }
-                return Value{};
-            }
-            return Value{};
+            return applyIndexAccess(evalExpr(*n.left, ctx), evalExpr(*n.index, ctx));
         }
         case NodeKind::PrimaryMember: {
             auto& n = static_cast<const oscad::PrimaryMember&>(node);
-            Value obj = evalExpr(*n.left, ctx);
-            const std::string& member = n.member->name;
-            if (const ListPtr* l = std::get_if<ListPtr>(&obj); l && *l) {
-                std::optional<int> idx = swizzleIndex(member);
-                if (idx && static_cast<size_t>(*idx) < (*l)->items.size()) return (*l)->items[static_cast<size_t>(*idx)];
-                return Value{};
-            }
-            if (const ObjectPtr* o = std::get_if<ObjectPtr>(&obj); o && *o) {
-                for (const auto& [k, v] : (*o)->items) {
-                    if (k == member) return v;
-                }
-                return Value{};
-            }
-            return Value{};
+            return applyMemberAccess(evalExpr(*n.left, ctx), n.member->name);
         }
 
         case NodeKind::AdditionOp: {
             auto& n = static_cast<const oscad::AdditionOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
-            if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) + std::get<double>(b)};
-            return vecAdd(a, b);
+            return applyBinaryOp(NodeKind::AdditionOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
         }
         case NodeKind::SubtractionOp: {
             auto& n = static_cast<const oscad::SubtractionOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
-            if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) - std::get<double>(b)};
-            return vecSub(a, b);
+            return applyBinaryOp(NodeKind::SubtractionOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
         }
         case NodeKind::MultiplicationOp: {
             auto& n = static_cast<const oscad::MultiplicationOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
+            return applyBinaryOp(NodeKind::MultiplicationOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::DivisionOp: {
+            auto& n = static_cast<const oscad::DivisionOp&>(node);
+            return applyBinaryOp(NodeKind::DivisionOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::ModuloOp: {
+            auto& n = static_cast<const oscad::ModuloOp&>(node);
+            return applyBinaryOp(NodeKind::ModuloOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::ExponentOp: {
+            auto& n = static_cast<const oscad::ExponentOp&>(node);
+            return applyBinaryOp(NodeKind::ExponentOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::UnaryMinusOp: {
+            auto& n = static_cast<const oscad::UnaryMinusOp&>(node);
+            return applyUnaryOp(NodeKind::UnaryMinusOp, evalExpr(*n.expr, ctx), n.position());
+        }
+
+        case NodeKind::LogicalAndOp: {
+            // Must short-circuit: the reference's `bool(eval(left)) and
+            // bool(eval(right))` relies on Python's own `and` not evaluating
+            // `right` when `left` is falsy -- and BOSL2-style code depends on
+            // it directly (`is_undef(x) || (assert(is_num(x)) ...)` throws if
+            // the assert always runs). Evaluating both sides unconditionally
+            // (the previous behavior here) broke exactly that idiom.
+            auto& n = static_cast<const oscad::LogicalAndOp&>(node);
+            if (!truthy(evalExpr(*n.left, ctx))) return Value{false};
+            return Value{truthy(evalExpr(*n.right, ctx))};
+        }
+        case NodeKind::LogicalOrOp: {
+            auto& n = static_cast<const oscad::LogicalOrOp&>(node);
+            if (truthy(evalExpr(*n.left, ctx))) return Value{true};
+            return Value{truthy(evalExpr(*n.right, ctx))};
+        }
+        case NodeKind::LogicalNotOp: {
+            auto& n = static_cast<const oscad::LogicalNotOp&>(node);
+            return applyUnaryOp(NodeKind::LogicalNotOp, evalExpr(*n.expr, ctx), n.position());
+        }
+
+        case NodeKind::EqualityOp: {
+            auto& n = static_cast<const oscad::EqualityOp&>(node);
+            return applyBinaryOp(NodeKind::EqualityOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::InequalityOp: {
+            auto& n = static_cast<const oscad::InequalityOp&>(node);
+            return applyBinaryOp(NodeKind::InequalityOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::GreaterThanOp: {
+            auto& n = static_cast<const oscad::GreaterThanOp&>(node);
+            return applyBinaryOp(NodeKind::GreaterThanOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::GreaterThanOrEqualOp: {
+            auto& n = static_cast<const oscad::GreaterThanOrEqualOp&>(node);
+            return applyBinaryOp(NodeKind::GreaterThanOrEqualOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx),
+                                  n.position());
+        }
+        case NodeKind::LessThanOp: {
+            auto& n = static_cast<const oscad::LessThanOp&>(node);
+            return applyBinaryOp(NodeKind::LessThanOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::LessThanOrEqualOp: {
+            auto& n = static_cast<const oscad::LessThanOrEqualOp&>(node);
+            return applyBinaryOp(NodeKind::LessThanOrEqualOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx),
+                                  n.position());
+        }
+
+        case NodeKind::TernaryOp: {
+            auto& n = static_cast<const oscad::TernaryOp&>(node);
+            return truthy(evalExpr(*n.condition, ctx)) ? evalExpr(*n.trueExpr, ctx) : evalExpr(*n.falseExpr, ctx);
+        }
+
+        case NodeKind::BitwiseOrOp: {
+            auto& n = static_cast<const oscad::BitwiseOrOp&>(node);
+            return applyBinaryOp(NodeKind::BitwiseOrOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::BitwiseAndOp: {
+            auto& n = static_cast<const oscad::BitwiseAndOp&>(node);
+            return applyBinaryOp(NodeKind::BitwiseAndOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx), n.position());
+        }
+        case NodeKind::BitwiseNotOp: {
+            auto& n = static_cast<const oscad::BitwiseNotOp&>(node);
+            return applyUnaryOp(NodeKind::BitwiseNotOp, evalExpr(*n.expr, ctx), n.position());
+        }
+        case NodeKind::BitwiseShiftLeftOp: {
+            auto& n = static_cast<const oscad::BitwiseShiftLeftOp&>(node);
+            return applyBinaryOp(NodeKind::BitwiseShiftLeftOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx),
+                                  n.position());
+        }
+        case NodeKind::BitwiseShiftRightOp: {
+            auto& n = static_cast<const oscad::BitwiseShiftRightOp&>(node);
+            return applyBinaryOp(NodeKind::BitwiseShiftRightOp, evalExpr(*n.left, ctx), evalExpr(*n.right, ctx),
+                                  n.position());
+        }
+
+        default:
+            throw std::logic_error(std::string("Evaluator::evalExpr: NodeKind '") + oscad::nodeKindName(node.kind()) +
+                                    "' not yet implemented (later phase)");
+    }
+}
+
+// -- Shared binary/unary/index/member primitives --------------------------
+// Moved out of evalExpr's switch verbatim (see this method's own call sites
+// above): also called by the bytecode VM's generic BINARY_OP/UNARY_OP/INDEX/
+// MEMBER opcodes (bytecode_vm.cpp) so neither copy can drift from the other.
+
+Value Evaluator::applyBinaryOp(oscad::NodeKind kind, const Value& a, const Value& b, const oscad::Position& pos) {
+    using oscad::NodeKind;
+    switch (kind) {
+        case NodeKind::AdditionOp:
+            if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) + std::get<double>(b)};
+            return vecAdd(a, b);
+        case NodeKind::SubtractionOp:
+            if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) - std::get<double>(b)};
+            return vecSub(a, b);
+        case NodeKind::MultiplicationOp: {
             if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) * std::get<double>(b)};
             const bool aList = std::holds_alternative<ListPtr>(a);
             const bool bList = std::holds_alternative<ListPtr>(b);
@@ -436,8 +486,6 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             return Value{}; // remaining combos (bool, string*number, ...) never succeed in the reference either
         }
         case NodeKind::DivisionOp: {
-            auto& n = static_cast<const oscad::DivisionOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (isNumber(a) && isNumber(b)) {
                 const double av = std::get<double>(a), bv = std::get<double>(b);
                 if (bv == 0.0) {
@@ -451,101 +499,53 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             return Value{};
         }
         case NodeKind::ModuloOp: {
-            auto& n = static_cast<const oscad::ModuloOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (isBoolValue(a) || isBoolValue(b) || !isNumber(a) || !isNumber(b)) return Value{};
             const double bv = std::get<double>(b);
             if (bv == 0.0) return Value{}; // ZeroDivisionError -> undef
             return Value{pyMod(std::get<double>(a), bv)};
         }
         case NodeKind::ExponentOp: {
-            auto& n = static_cast<const oscad::ExponentOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (isBoolValue(a) || isBoolValue(b) || !isNumber(a) || !isNumber(b)) return Value{};
             const double av = std::get<double>(a), bv = std::get<double>(b);
             if (av == 0.0 && bv < 0.0) return Value{}; // ZeroDivisionError -> undef
             return Value{std::pow(av, bv)};
         }
-        case NodeKind::UnaryMinusOp: {
-            auto& n = static_cast<const oscad::UnaryMinusOp&>(node);
-            Value v = evalExpr(*n.expr, ctx);
-            if (std::holds_alternative<ListPtr>(v)) return scale(-1.0, v);
-            if (isBoolValue(v)) return Value{};
-            if (isNumber(v)) return Value{-std::get<double>(v)};
-            return Value{};
-        }
-
-        case NodeKind::LogicalAndOp: {
-            auto& n = static_cast<const oscad::LogicalAndOp&>(node);
-            const bool l = truthy(evalExpr(*n.left, ctx));
-            const bool r = truthy(evalExpr(*n.right, ctx)); // both sides always evaluate, matches the reference (no short-circuit)
-            return Value{l && r};
-        }
-        case NodeKind::LogicalOrOp: {
-            auto& n = static_cast<const oscad::LogicalOrOp&>(node);
-            const bool l = truthy(evalExpr(*n.left, ctx));
-            const bool r = truthy(evalExpr(*n.right, ctx));
-            return Value{l || r};
-        }
-        case NodeKind::LogicalNotOp: {
-            auto& n = static_cast<const oscad::LogicalNotOp&>(node);
-            return Value{!truthy(evalExpr(*n.expr, ctx))};
-        }
-
-        case NodeKind::EqualityOp: {
-            auto& n = static_cast<const oscad::EqualityOp&>(node);
-            return Value{oscEqual(evalExpr(*n.left, ctx), evalExpr(*n.right, ctx))};
-        }
-        case NodeKind::InequalityOp: {
-            auto& n = static_cast<const oscad::InequalityOp&>(node);
-            return Value{!oscEqual(evalExpr(*n.left, ctx), evalExpr(*n.right, ctx))};
-        }
+        case NodeKind::EqualityOp:
+            return Value{oscEqual(a, b)};
+        case NodeKind::InequalityOp:
+            return Value{!oscEqual(a, b)};
         case NodeKind::GreaterThanOp: {
-            auto& n = static_cast<const oscad::GreaterThanOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!oscComparable(a, b)) {
-                warn("undefined operation (" + oscTypeName(a) + " > " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " > " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             auto gt = valueLess(b, a);
             return gt ? Value{*gt} : Value{};
         }
         case NodeKind::GreaterThanOrEqualOp: {
-            auto& n = static_cast<const oscad::GreaterThanOrEqualOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!oscComparable(a, b)) {
-                warn("undefined operation (" + oscTypeName(a) + " >= " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " >= " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             auto gt = valueLess(b, a);
             return gt ? Value{*gt || oscEqual(a, b)} : Value{};
         }
         case NodeKind::LessThanOp: {
-            auto& n = static_cast<const oscad::LessThanOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!oscComparable(a, b)) {
-                warn("undefined operation (" + oscTypeName(a) + " < " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " < " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             auto lt = valueLess(a, b);
             return lt ? Value{*lt} : Value{};
         }
         case NodeKind::LessThanOrEqualOp: {
-            auto& n = static_cast<const oscad::LessThanOrEqualOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!oscComparable(a, b)) {
-                warn("undefined operation (" + oscTypeName(a) + " <= " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " <= " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             auto lt = valueLess(a, b);
             return lt ? Value{*lt || oscEqual(a, b)} : Value{};
         }
-
-        case NodeKind::TernaryOp: {
-            auto& n = static_cast<const oscad::TernaryOp&>(node);
-            return truthy(evalExpr(*n.condition, ctx)) ? evalExpr(*n.trueExpr, ctx) : evalExpr(*n.falseExpr, ctx);
-        }
-
         // Real OpenSCAD added these in PR #4833 (merged 2025-03-14, "Bitwise
         // operators. Fixes #3345."): both operands truncate-to-int64 (real
         // OpenSCAD's own Value::toInteger()/toInt64(), Value.cc), operate in
@@ -557,64 +557,47 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
         // `bool`/`string`/etc. operand is an "undefined operation" warning,
         // per real OpenSCAD's own `type() == Type::NUMBER` gate.
         case NodeKind::BitwiseOrOp: {
-            auto& n = static_cast<const oscad::BitwiseOrOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!isNumber(a) || !isNumber(b)) {
-                warn("undefined operation (" + oscTypeName(a) + " | " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " | " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             return Value{static_cast<double>(toBitwiseInt64(a) | toBitwiseInt64(b))};
         }
         case NodeKind::BitwiseAndOp: {
-            auto& n = static_cast<const oscad::BitwiseAndOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!isNumber(a) || !isNumber(b)) {
-                warn("undefined operation (" + oscTypeName(a) + " & " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " & " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             return Value{static_cast<double>(toBitwiseInt64(a) & toBitwiseInt64(b))};
         }
-        case NodeKind::BitwiseNotOp: {
-            auto& n = static_cast<const oscad::BitwiseNotOp&>(node);
-            Value v = evalExpr(*n.expr, ctx);
-            if (!isNumber(v)) {
-                warn("undefined operation (~" + oscTypeName(v) + ")", &n.position());
-                return Value{};
-            }
-            return Value{static_cast<double>(~toBitwiseInt64(v))};
-        }
         case NodeKind::BitwiseShiftLeftOp: {
-            auto& n = static_cast<const oscad::BitwiseShiftLeftOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!isNumber(a) || !isNumber(b)) {
-                warn("undefined operation (" + oscTypeName(a) + " << " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " << " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             const std::int64_t rhs = toBitwiseInt64(b);
             if (rhs < 0) {
-                warn("negative shift", &n.position());
+                warn("negative shift", &pos);
                 return Value{};
             }
             if (rhs >= 64) {
-                warn("shift too large", &n.position());
+                warn("shift too large", &pos);
                 return Value{};
             }
             return Value{static_cast<double>(toBitwiseInt64(a) << rhs)};
         }
         case NodeKind::BitwiseShiftRightOp: {
-            auto& n = static_cast<const oscad::BitwiseShiftRightOp&>(node);
-            Value a = evalExpr(*n.left, ctx), b = evalExpr(*n.right, ctx);
             if (!isNumber(a) || !isNumber(b)) {
-                warn("undefined operation (" + oscTypeName(a) + " >> " + oscTypeName(b) + ")", &n.position());
+                warn("undefined operation (" + oscTypeName(a) + " >> " + oscTypeName(b) + ")", &pos);
                 return Value{};
             }
             const std::int64_t rhs = toBitwiseInt64(b);
             if (rhs < 0) {
-                warn("negative shift", &n.position());
+                warn("negative shift", &pos);
                 return Value{};
             }
             if (rhs >= 64) {
-                warn("shift too large", &n.position());
+                warn("shift too large", &pos);
                 return Value{};
             }
             // Arithmetic (sign-propagating) right shift for a negative lhs
@@ -624,11 +607,84 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             // is needed here to match it.
             return Value{static_cast<double>(toBitwiseInt64(a) >> rhs)};
         }
-
         default:
-            throw std::logic_error(std::string("Evaluator::evalExpr: NodeKind '") + oscad::nodeKindName(node.kind()) +
-                                    "' not yet implemented (later phase)");
+            throw std::logic_error(std::string("Evaluator::applyBinaryOp: NodeKind '") + oscad::nodeKindName(kind) +
+                                    "' is not a binary operator");
     }
+}
+
+Value Evaluator::applyUnaryOp(oscad::NodeKind kind, const Value& v, const oscad::Position& pos) {
+    using oscad::NodeKind;
+    switch (kind) {
+        case NodeKind::UnaryMinusOp:
+            if (std::holds_alternative<ListPtr>(v)) return scale(-1.0, v);
+            if (isBoolValue(v)) return Value{};
+            if (isNumber(v)) return Value{-std::get<double>(v)};
+            return Value{};
+        case NodeKind::LogicalNotOp:
+            return Value{!truthy(v)};
+        case NodeKind::BitwiseNotOp:
+            if (!isNumber(v)) {
+                warn("undefined operation (~" + oscTypeName(v) + ")", &pos);
+                return Value{};
+            }
+            return Value{static_cast<double>(~toBitwiseInt64(v))};
+        default:
+            throw std::logic_error(std::string("Evaluator::applyUnaryOp: NodeKind '") + oscad::nodeKindName(kind) +
+                                    "' is not a unary operator");
+    }
+}
+
+Value Evaluator::applyIndexAccess(const Value& obj, const Value& idx) {
+    if (const ListPtr* l = std::get_if<ListPtr>(&obj)) {
+        if (const double* d = std::get_if<double>(&idx)) {
+            const int i = static_cast<int>(*d);
+            if (i < 0 || !*l || static_cast<size_t>(i) >= (*l)->items.size()) return Value{};
+            return (*l)->items[static_cast<size_t>(i)];
+        }
+        return Value{};
+    }
+    if (const std::string* s = std::get_if<std::string>(&obj)) {
+        if (const double* d = std::get_if<double>(&idx)) {
+            const int i = static_cast<int>(*d);
+            if (i < 0 || static_cast<size_t>(i) >= s->size()) return Value{};
+            return Value{std::string(1, (*s)[static_cast<size_t>(i)])};
+        }
+        return Value{};
+    }
+    if (const OscRange* r = std::get_if<OscRange>(&obj)) {
+        if (const double* d = std::get_if<double>(&idx)) {
+            const int i = static_cast<int>(*d);
+            if (i == 0) return Value{r->start};
+            if (i == 1) return Value{r->step};
+            if (i == 2) return Value{r->end};
+        }
+        return Value{};
+    }
+    if (const ObjectPtr* o = std::get_if<ObjectPtr>(&obj)) {
+        if (const std::string* key = std::get_if<std::string>(&idx); key && *o) {
+            for (const auto& [k, v] : (*o)->items) {
+                if (k == *key) return v;
+            }
+        }
+        return Value{};
+    }
+    return Value{};
+}
+
+Value Evaluator::applyMemberAccess(const Value& obj, const std::string& member) {
+    if (const ListPtr* l = std::get_if<ListPtr>(&obj); l && *l) {
+        std::optional<int> idx = swizzleIndex(member);
+        if (idx && static_cast<size_t>(*idx) < (*l)->items.size()) return (*l)->items[static_cast<size_t>(*idx)];
+        return Value{};
+    }
+    if (const ObjectPtr* o = std::get_if<ObjectPtr>(&obj); o && *o) {
+        for (const auto& [k, v] : (*o)->items) {
+            if (k == member) return v;
+        }
+        return Value{};
+    }
+    return Value{};
 }
 
 } // namespace oscadeval

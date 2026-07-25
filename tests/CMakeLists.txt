@@ -11,6 +11,7 @@ add_executable(oscad_eval_tests
   test_value.cpp
   test_eval_context.cpp
   test_scoping.cpp
+  test_bytecode_compiler.cpp
   test_expr_eval.cpp
   test_csg_tree.cpp
   test_export.cpp

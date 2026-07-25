@@ -431,9 +431,9 @@ CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     }
 
     const auto dynOr = [&](const char* name, double fallback) {
-        auto it = effCtx.dyn->find(name);
-        if (it == effCtx.dyn->end()) return fallback;
-        const double* d = std::get_if<double>(&it->second);
+        const Value* v = effCtx.dyn->find(name);
+        if (!v) return fallback;
+        const double* d = std::get_if<double>(v);
         return d ? *d : fallback;
     };
 

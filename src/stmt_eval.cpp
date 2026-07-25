@@ -9,20 +9,19 @@ namespace oscadeval {
 void Evaluator::evalAssignment(const oscad::Assignment& node, EvalContext& ctx) {
     const std::string& name = node.name->name;
     if (!name.empty() && name[0] == '$') {
-        (*ctx.dyn)[name] = evalExpr(*node.expr, ctx);
-        ctx.dynExplicit->insert(name);
+        ctx.dyn->set(name, evalExpr(*node.expr, ctx));
+        ctx.dynExplicit->set(name, true);
         return;
     }
 
     const oscad::Position* pos = &node.position();
-    auto positionIt = ctx.dynPositions->find(name);
-    if (positionIt != ctx.dynPositions->end()) {
-        const oscad::Position* firstPos = positionIt->second;
+    if (const oscad::Position* const* firstPosEntry = ctx.dynPositions->find(name)) {
+        const oscad::Position* firstPos = *firstPosEntry;
         const int firstLine = firstPos ? firstPos->line : 0;
         warn(name + " was assigned on line " + std::to_string(firstLine) + " but was overwritten", pos);
     }
-    (*ctx.let_)[name] = evalExpr(*node.expr, ctx);
-    (*ctx.dynPositions)[name] = pos;
+    ctx.let_->set(name, evalExpr(*node.expr, ctx));
+    ctx.dynPositions->set(name, pos);
 }
 
 void Evaluator::doEcho(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
@@ -93,7 +92,7 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
         }
         for (const Value& val : pairs[depth].values) {
             EvalContext childCtx = parentCtx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
-            (*childCtx.let_)[pairs[depth].name] = val;
+            childCtx.let_->set(pairs[depth].name, val);
             recurse(depth + 1, childCtx);
         }
     };
@@ -115,10 +114,10 @@ void Evaluator::evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx) {
         Value v = evalExpr(*assign->expr, ctx);
         const std::string& name = assign->name->name;
         if (!name.empty() && name[0] == '$') {
-            (*childCtx.dyn)[name] = v;
-            childCtx.dynExplicit->insert(name);
+            childCtx.dyn->set(name, v);
+            childCtx.dynExplicit->set(name, true);
         } else {
-            (*childCtx.let_)[name] = v;
+            childCtx.let_->set(name, v);
         }
     }
     evalChildren(node.children, childCtx);
