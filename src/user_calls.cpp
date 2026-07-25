@@ -53,9 +53,9 @@ void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::Parameter
         const bool isDyn = !pname.empty() && pname[0] == '$';
         if (!param->defaultValue) {
             if (isDyn) {
-                (*childCtx.dyn)[pname] = Value{};
+                childCtx.dyn->set(pname, Value{});
             } else {
-                (*childCtx.let_)[pname] = Value{};
+                childCtx.let_->set(pname, Value{});
             }
             continue;
         }
@@ -63,7 +63,7 @@ void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::Parameter
             EvalContext dc;
             dc.scope = childCtx.scope;
             dc.dyn = childCtx.dyn; // shared -- a default expression can't mutate $-vars
-            dc.let_ = std::make_shared<LetMap>(); // empty: no caller locals, no sibling params
+            dc.let_ = childCtx.let_->openChild(/*isolate=*/true); // empty: no caller locals, no sibling params
             dc.dynPositions = childCtx.dynPositions;
             dc.dynExplicit = childCtx.dynExplicit;
             dc.color = childCtx.color;
@@ -73,9 +73,9 @@ void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::Parameter
         }
         Value v = evalExpr(*param->defaultValue, *defaultCtx);
         if (isDyn) {
-            (*childCtx.dyn)[pname] = std::move(v);
+            childCtx.dyn->set(pname, std::move(v));
         } else {
-            (*childCtx.let_)[pname] = std::move(v);
+            childCtx.let_->set(pname, std::move(v));
         }
     }
 }
@@ -100,13 +100,13 @@ void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad
             ++childrenCount;
         }
     }
-    (*childCtx.dyn)["$children"] = Value{static_cast<double>(childrenCount)};
+    childCtx.dyn->set("$children", Value{static_cast<double>(childrenCount)});
 
     for (auto& [k, v] : bound) {
         if (!k.empty() && k[0] == '$') {
-            (*childCtx.dyn)[k] = std::move(v);
+            childCtx.dyn->set(k, std::move(v));
         } else {
-            (*childCtx.let_)[k] = std::move(v);
+            childCtx.let_->set(k, std::move(v));
         }
     }
     applyDefaults(decl.parameters, bound, childCtx);
@@ -115,7 +115,7 @@ void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad
     for (const CallStackFrame& f : callStack_) {
         if (f.kind == CallStackFrame::Kind::Module) ++parentModules;
     }
-    (*childCtx.dyn)["$parent_modules"] = Value{static_cast<double>(parentModules)};
+    childCtx.dyn->set("$parent_modules", Value{static_cast<double>(parentModules)});
 
     std::optional<ProfileHandle> prof = profileEnter("module", call.name->name, &call.position(), &decl.position());
     callStack_.push_back(
@@ -139,9 +139,9 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
     EvalContext childCtx = callCtxFor(decl, ctx, fnScope);
     for (auto& [k, v] : bound) {
         if (!k.empty() && k[0] == '$') {
-            (*childCtx.dyn)[k] = std::move(v);
+            childCtx.dyn->set(k, std::move(v));
         } else {
-            (*childCtx.let_)[k] = std::move(v);
+            childCtx.let_->set(k, std::move(v));
         }
     }
     applyDefaults(decl.parameters, bound, childCtx);
@@ -173,9 +173,9 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
     EvalContext childCtx = callCtxFor(funcNode, ctx, fnScope);
     for (auto& [k, v] : bound) {
         if (!k.empty() && k[0] == '$') {
-            (*childCtx.dyn)[k] = std::move(v);
+            childCtx.dyn->set(k, std::move(v));
         } else {
-            (*childCtx.let_)[k] = std::move(v);
+            childCtx.let_->set(k, std::move(v));
         }
     }
     applyDefaults(funcNode.parameters, bound, childCtx);
@@ -273,11 +273,11 @@ void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
     // A children() forwarding chain's own dyn/let_/etc. must alias the
     // *caller's* (not this ctx's) -- see EvalContext::withScope's rationale.
     EvalContext evalCtx = callerCtx->childCtx(nullptr, std::nullopt, callerCtx->childrenNodes, callerCtx->childrenCallerCtx);
-    for (const auto& [k, v] : *ctx.dyn) {
-        if (!k.empty() && k[0] == '$') (*evalCtx.dyn)[k] = v;
+    for (const auto& [k, v] : ctx.dyn->items()) {
+        if (!k.empty() && k[0] == '$') evalCtx.dyn->set(k, v);
     }
-    for (const auto& [k, v] : *ctx.let_) {
-        if (!k.empty() && k[0] == '$') (*evalCtx.let_)[k] = v;
+    for (const auto& [k, v] : ctx.let_->items()) {
+        if (!k.empty() && k[0] == '$') evalCtx.let_->set(k, v);
     }
 
     if (std::holds_alternative<std::monostate>(idxArg)) {

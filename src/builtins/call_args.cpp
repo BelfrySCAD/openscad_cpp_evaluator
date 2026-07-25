@@ -44,11 +44,11 @@ ResolvedCallArgs resolveCallArgs(Evaluator& ev, const std::vector<std::unique_pt
     }
     if (!anyDollar) return ResolvedCallArgs{std::move(args), ctx};
 
-    auto newDyn = std::make_shared<DynMap>(*ctx.dyn);
+    EvalContext effCtx = ctx.childCtx();
     for (const auto& [key, value] : args.named) {
-        if (!key.empty() && key[0] == '$') (*newDyn)[key] = value;
+        if (!key.empty() && key[0] == '$') effCtx.dyn->set(key, value);
     }
-    return ResolvedCallArgs{std::move(args), ctx.childCtx(nullptr, std::nullopt, nullptr, nullptr, std::move(newDyn))};
+    return ResolvedCallArgs{std::move(args), std::move(effCtx)};
 }
 
 Value callArgsToValue(const CallArgs& args) {

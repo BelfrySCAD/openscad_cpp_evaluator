@@ -234,7 +234,7 @@ TEST(ExprEvalArithmetic, ExponentNonNumericIsUndef) {
     EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("\"a\" ^ 2", ev)));
 }
 
-// -- Logical operators (eager, not short-circuit) ----------------------------
+// -- Logical operators (short-circuit) --------------------------------------
 
 TEST(ExprEvalLogical, AndOrNot) {
     Evaluator ev;
@@ -244,15 +244,21 @@ TEST(ExprEvalLogical, AndOrNot) {
     EXPECT_TRUE(asBool(evalSrc("!false", ev)));
 }
 
-TEST(ExprEvalLogical, BothSidesAlwaysEvaluateEvenWhenShortCircuitable) {
-    // The reference implementation's && / || evaluate both operands
-    // unconditionally (no short-circuit) -- verified via an unknown-
-    // variable warning firing on the right side of `false && nope`, which
-    // a short-circuiting implementation would never touch.
+TEST(ExprEvalLogical, RightSideNotEvaluatedWhenShortCircuited) {
+    // `&&`/`||` must short-circuit: the reference's
+    // `bool(eval(left)) and bool(eval(right))` relies on Python's own
+    // `and`/`or` not evaluating the right operand once the left one already
+    // decides the result -- previously mis-ported as "always evaluate both
+    // sides," which broke the extremely common BOSL2 idiom
+    // `is_undef(x) || (assert(is_num(x)) ...)` (the assert would always run).
+    // Verified via an unknown-variable warning that would fire on the right
+    // side of `false && nope`/`true || nope` if it were ever evaluated.
     std::string lastWarning;
     Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
-    evalSrc("false && nope", ev);
-    EXPECT_NE(lastWarning.find("nope"), std::string::npos);
+    EXPECT_FALSE(asBool(evalSrc("false && nope", ev)));
+    EXPECT_EQ(lastWarning.find("nope"), std::string::npos);
+    EXPECT_TRUE(asBool(evalSrc("true || nope", ev)));
+    EXPECT_EQ(lastWarning.find("nope"), std::string::npos);
 }
 
 // -- Comparisons ------------------------------------------------------------

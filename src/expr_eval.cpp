@@ -70,10 +70,10 @@ std::optional<bool> valueLess(const Value& a, const Value& b) {
 // nothing to defer here.
 void bindLetName(EvalContext& ctx, const std::string& name, const Value& v) {
     if (!name.empty() && name[0] == '$') {
-        (*ctx.dyn)[name] = v;
-        ctx.dynExplicit->insert(name);
+        ctx.dyn->set(name, v);
+        ctx.dynExplicit->set(name, true);
     } else {
-        (*ctx.let_)[name] = v;
+        ctx.let_->set(name, v);
     }
 }
 
@@ -129,12 +129,10 @@ void Evaluator::warn(const std::string& message, const oscad::Position* position
 
 Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* position, EvalContext& ctx,
                                  bool warnIfUndef) {
-    auto letIt = ctx.let_->find(name);
-    if (letIt != ctx.let_->end()) return letIt->second;
+    if (const Value* v = ctx.let_->find(name)) return *v;
 
     if (!name.empty() && name[0] == '$') {
-        auto dynIt = ctx.dyn->find(name);
-        if (dynIt != ctx.dyn->end()) return dynIt->second;
+        if (const Value* v = ctx.dyn->find(name)) return *v;
     }
 
     if (name == "PI") return Value{std::numbers::pi};
@@ -177,7 +175,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                 }
                 for (const Value& val : pairs[depth].values) {
                     EvalContext childCtx = parentCtx.letChildCtx();
-                    (*childCtx.let_)[pairs[depth].name] = val;
+                    childCtx.let_->set(pairs[depth].name, val);
                     recurse(depth + 1, childCtx);
                 }
             };
@@ -187,7 +185,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
         case oscad::NodeKind::ListCompCFor: {
             auto& n = static_cast<const oscad::ListCompCFor&>(elem);
             EvalContext loopCtx = ctx.letChildCtx();
-            for (const auto& assign : n.inits) (*loopCtx.let_)[assign->name->name] = evalExpr(*assign->expr, loopCtx);
+            for (const auto& assign : n.inits) loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
 
             const bool isNestedLc = (n.body->kind() == oscad::NodeKind::ListComprehension);
             constexpr int kMaxCForIterations = 1'000'000;
@@ -202,7 +200,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                 } else {
                     appendAll(out, evalListCompBody(*n.body, loopCtx));
                 }
-                for (const auto& assign : n.incrs) (*loopCtx.let_)[assign->name->name] = evalExpr(*assign->expr, loopCtx);
+                for (const auto& assign : n.incrs) loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
             }
             return;
         }
@@ -476,16 +474,20 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
         }
 
         case NodeKind::LogicalAndOp: {
+            // Must short-circuit: the reference's `bool(eval(left)) and
+            // bool(eval(right))` relies on Python's own `and` not evaluating
+            // `right` when `left` is falsy -- and BOSL2-style code depends on
+            // it directly (`is_undef(x) || (assert(is_num(x)) ...)` throws if
+            // the assert always runs). Evaluating both sides unconditionally
+            // (the previous behavior here) broke exactly that idiom.
             auto& n = static_cast<const oscad::LogicalAndOp&>(node);
-            const bool l = truthy(evalExpr(*n.left, ctx));
-            const bool r = truthy(evalExpr(*n.right, ctx)); // both sides always evaluate, matches the reference (no short-circuit)
-            return Value{l && r};
+            if (!truthy(evalExpr(*n.left, ctx))) return Value{false};
+            return Value{truthy(evalExpr(*n.right, ctx))};
         }
         case NodeKind::LogicalOrOp: {
             auto& n = static_cast<const oscad::LogicalOrOp&>(node);
-            const bool l = truthy(evalExpr(*n.left, ctx));
-            const bool r = truthy(evalExpr(*n.right, ctx));
-            return Value{l || r};
+            if (truthy(evalExpr(*n.left, ctx))) return Value{true};
+            return Value{truthy(evalExpr(*n.right, ctx))};
         }
         case NodeKind::LogicalNotOp: {
             auto& n = static_cast<const oscad::LogicalNotOp&>(node);

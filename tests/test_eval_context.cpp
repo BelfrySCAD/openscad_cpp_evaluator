@@ -35,7 +35,7 @@ TEST(EvalContextWithScope, AliasesLetForSiblingVisibility) {
     EvalContext sibling1 = ctx.withScope(scope.get());
     EvalContext sibling2 = ctx.withScope(scope.get());
 
-    (*sibling1.let_)["a"] = Value{5.0};
+    sibling1.let_->set("a", Value{5.0});
     // sibling2 shares the SAME underlying map (not a copy), so it must see
     // sibling1's write immediately -- the mechanism that makes
     // `a = 1; cube(a); a = 2;`-style sequential assignment visibility work.
@@ -50,7 +50,7 @@ TEST(EvalContextChildCtx, CopiesLetBreakingAliasingWithParent) {
     auto scope = makeScope(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EvalContext child = ctx.childCtx();
-    (*child.let_)["a"] = Value{1.0};
+    child.let_->set("a", Value{1.0});
     EXPECT_FALSE(ctx.let_->count("a")); // parent unaffected -- childCtx() snapshot-copies
 }
 
@@ -58,7 +58,7 @@ TEST(EvalContextChildCtx, ResetsDynPositionsButStillCopiesDyn) {
     std::vector<std::unique_ptr<oscad::ASTNode>> ast;
     auto scope = makeScope(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
-    (*ctx.dynPositions)["a"] = nullptr; // placeholder entry; only presence/absence matters here
+    ctx.dynPositions->set("a", nullptr); // placeholder entry; only presence/absence matters here
     EvalContext child = ctx.childCtx();
     EXPECT_TRUE(child.dynPositions->empty()); // fresh -- the reference's asymmetric child_ctx() rule
     EXPECT_DOUBLE_EQ(std::get<double>(child.dyn->at("$fn")), 0.0); // dyn itself still copied
@@ -82,7 +82,7 @@ TEST(EvalContextCallCtx, IsolatesLetAndResetsChildrenNodes) {
     std::vector<std::unique_ptr<oscad::ASTNode>> ast;
     auto scope = makeScope(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
-    (*ctx.let_)["a"] = Value{1.0};
+    ctx.let_->set("a", Value{1.0});
     ctx.childrenNodes = std::make_shared<const ChildrenNodeList>(ChildrenNodeList{ast[0].get()});
 
     EvalContext call = ctx.callCtx();
@@ -95,10 +95,10 @@ TEST(EvalContextLetChildCtx, CopiesLetIndependentlyOfParent) {
     std::vector<std::unique_ptr<oscad::ASTNode>> ast;
     auto scope = makeScope(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
-    (*ctx.let_)["a"] = Value{1.0};
+    ctx.let_->set("a", Value{1.0});
 
     EvalContext letCtx = ctx.letChildCtx();
-    (*letCtx.let_)["a"] = Value{2.0};
+    letCtx.let_->set("a", Value{2.0});
     EXPECT_DOUBLE_EQ(std::get<double>(ctx.let_->at("a")), 1.0); // parent's binding untouched
     EXPECT_DOUBLE_EQ(std::get<double>(letCtx.let_->at("a")), 2.0);
 }

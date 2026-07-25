@@ -5,8 +5,8 @@ namespace oscadeval {
 DebugFrame Evaluator::buildDebugFrame(const EvalContext* ctx) const {
     DebugFrame frame;
     if (!ctx) return frame;
-    for (const auto& [k, v] : *ctx->let_) frame.locals[k] = v;
-    for (const auto& [k, v] : *ctx->dyn) {
+    for (const auto& [k, v] : ctx->let_->items()) frame.locals[k] = v;
+    for (const auto& [k, v] : ctx->dyn->items()) {
         if (!k.empty() && k[0] == '$') frame.locals[k] = v;
     }
     // Top-level script variables not shadowed by a nested call's own
@@ -14,7 +14,7 @@ DebugFrame Evaluator::buildDebugFrame(const EvalContext* ctx) const {
     // deep inside a module/function call, matching the reference's own
     // outer_scope merge for the innermost frame.
     if (!callStack_.empty() && rootCtx_ != nullptr) {
-        for (const auto& [k, v] : *rootCtx_->let_) {
+        for (const auto& [k, v] : rootCtx_->let_->items()) {
             if (!frame.locals.count(k)) frame.locals[k] = v;
         }
     }
@@ -28,7 +28,7 @@ void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool fo
     const DebugFramesFn getFrame = [this, &ctx]() { return buildDebugFrame(&ctx); };
 
     DebugAction action = debugHooks_.debugHook(pos.line, depth, forced, pos.origin, callStack_, getFrame);
-    for (auto& [k, v] : action.mods) (*ctx.let_)[k] = v;
+    for (auto& [k, v] : action.mods) ctx.let_->set(k, v);
     if (action.stop) throw EvalError("Debugging stopped.");
 }
 

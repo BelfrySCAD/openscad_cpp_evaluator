@@ -177,7 +177,7 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     // Seeds ctx.dyn directly, deliberately not touching ctx.dynExplicit --
     // see this method's own doc comment in evaluator.hpp for why that
     // distinction matters to a caller.
-    for (const auto& [k, v] : viewportParams) (*ctx.dyn)[k] = v;
+    for (const auto& [k, v] : viewportParams) ctx.dyn->set(k, v);
 
     profileResult.reset();
     profileSites_.clear();

@@ -337,14 +337,14 @@ private:
     // doesn't inherit its own in-progress locals as if they were its
     // caller's. Mirrors the reference's _call_ctx_for exactly.
     //
-    // ponytail: the reference also computes a `share_dyn` optimization here
-    // (skip copying ctx.dyn when the callee has no $-prefixed parameter,
-    // aliasing it instead) -- measured at ~9.6% of total evaluate() time on
-    // a BOSL2-heavy script in the *Python* reference, where dict-copy cost
-    // is dominated by interpreter overhead. This port always copies
-    // (matching childCtx()/callCtx()'s existing "always copy" simplicity);
-    // revisit only if C++ profiling on a real script shows dyn-copying as
-    // a hot path -- the copy itself is far cheaper here than in Python.
+    // childCtx()/callCtx() themselves are now O(1) "open a new trail
+    // level" operations (see scope_trail.hpp) regardless of whether the
+    // callee declares a $-parameter -- this used to matter a great deal
+    // (a `shareDyn` fast path skipped an O(map-size) copy when provably
+    // safe, worth ~25% of total evaluate() wall time on a real BOSL2-heavy
+    // script) back when every derivation copied the whole map; deleted
+    // once the trail redesign made that copy cost disappear entirely, see
+    // git history for the removed shareDyn/hasDollarParam machinery.
     EvalContext callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, const oscad::Scope* scope,
                             std::shared_ptr<const ChildrenNodeList> childrenNodes = nullptr,
                             const EvalContext* childrenCallerCtx = nullptr);
