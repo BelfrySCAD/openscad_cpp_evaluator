@@ -238,6 +238,7 @@ TEST(CliDebugRepl, SetOverridesVariableOnResume) {
         double v;
         while (ls >> v) maxCoord = std::max(maxCoord, std::fabs(v));
     }
+    in.close(); // Windows can't remove() a file while it's still open.
     EXPECT_DOUBLE_EQ(maxCoord, 2.0); // would be 10.0 without the override
     std::filesystem::remove(src);
     std::filesystem::remove(out);

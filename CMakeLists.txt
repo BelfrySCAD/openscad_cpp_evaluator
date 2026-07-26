@@ -5,6 +5,23 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ponytail: MSVC always reports __cplusplus as 199711L regardless of the
+# real /std: level unless this flag is passed (a long-standing legacy-
+# compatibility quirk) -- set it at the outer-project level too (the
+# submodule's own CMakeLists.txt sets it for its own targets, but that
+# add_compile_options call is directory-scoped and doesn't reach this
+# project's own src/tools/tests targets). Several dependencies here
+# (nlohmann_json, Manifold, Boost.Polygon) branch on __cplusplus.
+if(MSVC)
+  add_compile_options(/Zc:__cplusplus)
+  # MSVC's <cmath> only defines M_PI et al. when this is set before the
+  # first include -- a command-line define guarantees that regardless of
+  # each translation unit's own include order. Unix libcs define these
+  # unconditionally (a POSIX extension our code already relies on), so no
+  # equivalent is needed there.
+  add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+
 add_subdirectory(external/openscad_cpp_parser)
 
 # openscad_cpp_parser's own src/CMakeLists.txt exposes its public headers via
@@ -24,6 +41,17 @@ include(FetchContent)
 # shows single-threaded Boolean ops are a bottleneck. MANIFOLD_CROSS_SECTION
 # stays at its own default (ON) -- 2D CrossSection support is needed from
 # Phase 3 onward.
+#
+# BUILD_SHARED_LIBS off: Manifold's own CMakeLists.txt defaults this ON,
+# which builds manifold.dll/manifoldc.dll instead of static libs. Harmless
+# on Linux/macOS (CMake gives build-tree executables an automatic rpath to
+# find a build-tree .so/.dylib), but Windows has no rpath equivalent -- a
+# DLL must be either next to the .exe or on PATH, neither of which is true
+# for a FetchContent dependency built into its own build/_deps/ tree, so
+# every test/CLI executable failed to even start (STATUS_DLL_NOT_FOUND).
+# Forcing this off, matching the existing MANIFOLD_TEST override pattern,
+# fixes Windows and is a no-op everywhere else this project already worked.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(MANIFOLD_TEST OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   manifold

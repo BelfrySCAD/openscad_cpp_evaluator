@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 
@@ -14,6 +15,10 @@ using namespace oscadeval;
 using namespace oscadeval::test;
 
 namespace {
+
+std::filesystem::path tempPath(const std::string& name) {
+    return std::filesystem::temp_directory_path() / ("oscad_eval_test_" + name);
+}
 
 std::vector<ColoredBody> evalToBodies(const std::string& code) {
     auto ast = parseSrc(code);
@@ -55,7 +60,7 @@ StlSummary readStl(const std::string& path) {
 
 TEST(ExportStl, WritesCorrectTriangleCountAndHeader) {
     std::vector<ColoredBody> bodies = evalToBodies("cube(2);");
-    const std::string path = "/tmp/oscad_eval_test_cube.stl";
+    const std::string path = tempPath("cube.stl").string();
     writeStl(path, bodies);
 
     StlSummary s = readStl(path);
@@ -67,7 +72,7 @@ TEST(ExportStl, WritesCorrectTriangleCountAndHeader) {
 
 TEST(ExportStl, TranslatedCubeBoundsMatch) {
     std::vector<ColoredBody> bodies = evalToBodies("translate([1,0,0]) cube(2);");
-    const std::string path = "/tmp/oscad_eval_test_translate.stl";
+    const std::string path = tempPath("translate.stl").string();
     writeStl(path, bodies);
 
     StlSummary s = readStl(path);
@@ -78,7 +83,7 @@ TEST(ExportStl, TranslatedCubeBoundsMatch) {
 
 TEST(ExportStl, NoGeometryThrows) {
     std::vector<ColoredBody> empty;
-    EXPECT_THROW(writeStl("/tmp/oscad_eval_test_empty.stl", empty), std::runtime_error);
+    EXPECT_THROW(writeStl(tempPath("empty.stl").string(), empty), std::runtime_error);
 }
 
 // -- toRenderableBodies (Phase 6) ------------------------------------------
@@ -101,7 +106,7 @@ TEST(ToRenderableBodies, ThinExtrudesABareTopLevel2dShapeSoItCanExportAsStl) {
     manifold::Box bbox = renderable[0].body->BoundingBox();
     EXPECT_NEAR(bbox.max.z - bbox.min.z, 1e-3, 1e-9);
 
-    const std::string path = "/tmp/oscad_eval_test_flat_preview.stl";
+    const std::string path = tempPath("flat_preview.stl").string();
     writeStl(path, renderable);
     StlSummary s = readStl(path);
     EXPECT_GT(s.triangleCount, 0u);
