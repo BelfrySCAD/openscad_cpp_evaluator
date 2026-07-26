@@ -3,6 +3,7 @@
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
+#include "openscad_cpp_evaluator/import_builtin.hpp"
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
 
@@ -40,6 +41,23 @@ struct IterList {
     std::vector<Value> values;
     size_t index = 0;
 };
+
+// Shared by Op::CallFn's isBuiltin (evalBuiltinFunction) and isImport
+// (importAsValue) branches -- both take the same pre-resolved CallArgs
+// shape resolveArgs would build for the interpreter path. `args` is
+// consumed (each element moved out).
+CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount) {
+    CallArgs callArgs;
+    int positionalIdx = 0;
+    for (size_t i = 0; i < argCount; ++i) {
+        if (site.argNames[i]) {
+            callArgs.named[*site.argNames[i]] = std::move(args[i]);
+        } else {
+            callArgs.positional[positionalIdx++] = std::move(args[i]);
+        }
+    }
+    return callArgs;
+}
 
 Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Instruction>& code,
                 std::vector<Value>& slots, EvalContext& ctx, std::vector<Value>& stack,
@@ -258,19 +276,29 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                     stack.pop_back();
                 }
                 Value result;
-                if (site.isBuiltin) {
+                if (site.isImport) {
+                    // import(): not in isBuiltinFunctionName's table (special-
+                    // cased earlier in evalFunctionCall), but importAsValue
+                    // takes the exact same pre-resolved CallArgs shape
+                    // evalBuiltinFunction does.
+                    CallArgs callArgs = buildCallArgs(site, args, argCount);
+                    result = importAsValue(ev, callArgs, *site.callNode);
+                } else if (site.isBuiltin && site.calleeName == "object") {
+                    // object() needs its arguments merged in exact call-site
+                    // interleaved order, which CallArgs' split positional/
+                    // named maps can't represent -- but args/site.argNames
+                    // are already in that exact source order (compiled and
+                    // popped the same way every other call's arguments are),
+                    // so no raw AST access is needed here at all.
+                    std::vector<std::pair<std::optional<std::string>, Value>> pairs;
+                    pairs.reserve(argCount);
+                    for (size_t i = 0; i < argCount; ++i) pairs.emplace_back(site.argNames[i], std::move(args[i]));
+                    result = mergeObjectArgs(pairs);
+                } else if (site.isBuiltin) {
                     // evalBuiltinFunction takes a pre-resolved CallArgs, no
                     // live ctx needed at all -- builtin functions are
                     // already value-based, no interpreter bridge required.
-                    CallArgs callArgs;
-                    int positionalIdx = 0;
-                    for (size_t i = 0; i < argCount; ++i) {
-                        if (site.argNames[i]) {
-                            callArgs.named[*site.argNames[i]] = std::move(args[i]);
-                        } else {
-                            callArgs.positional[positionalIdx++] = std::move(args[i]);
-                        }
-                    }
+                    CallArgs callArgs = buildCallArgs(site, args, argCount);
                     result = evalBuiltinFunction(ev, site.calleeName, callArgs, *site.callNode);
                 } else {
                     // Replays bindArgs' own positional/named matching rule
@@ -423,6 +451,34 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 stack.push_back(std::move(result));
                 ++pc;
                 break;
+            }
+            case Op::Echo: {
+                const CompiledChunk::EchoSite& site = chunk.echoSites[static_cast<size_t>(ins.a)];
+                const size_t argCount = static_cast<size_t>(ins.b);
+                std::vector<std::pair<std::optional<std::string>, Value>> pairs(argCount);
+                for (size_t i = 0; i < argCount; ++i) {
+                    pairs[argCount - 1 - i] = {site.argNames[argCount - 1 - i], std::move(stack.back())};
+                    stack.pop_back();
+                }
+                ev.emitEcho(pairs);
+                ++pc;
+                break;
+            }
+            case Op::AssertFail: {
+                // Only ever reached on the condition-false path (guarded by
+                // a JumpIfTrue the compiler emits around it) -- always
+                // throws, matching evalAssertExpr's own error() call
+                // exactly (same message format, same "assert" innermostFrame).
+                const bool hasMessage = ins.a == 1;
+                std::string err = "Assertion '" + std::get<std::string>(chunk.constants[static_cast<size_t>(ins.b)]) +
+                                   "' failed";
+                if (hasMessage) {
+                    Value msg = std::move(stack.back());
+                    stack.pop_back();
+                    const std::string* s = std::get_if<std::string>(&msg);
+                    err += ": \"" + (s ? *s : fmtValue(msg)) + "\"";
+                }
+                ev.error(err, *ins.node, "assert");
             }
         }
     }
