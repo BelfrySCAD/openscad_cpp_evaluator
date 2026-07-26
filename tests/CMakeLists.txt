@@ -19,6 +19,7 @@ add_executable(oscad_eval_tests
   test_transforms.cpp
   test_booleans.cpp
   test_control_flow.cpp
+  test_tail_calls.cpp
   test_function_builtins.cpp
   test_import_export.cpp
   test_zip_stored.cpp

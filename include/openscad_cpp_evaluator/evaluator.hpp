@@ -349,6 +349,7 @@ private:
     Value evalLetExpr(const oscad::LetOp& node, EvalContext& ctx);
     Value evalEchoExpr(const oscad::EchoOp& node, EvalContext& ctx);
     Value evalAssertExpr(const oscad::AssertOp& node, EvalContext& ctx);
+    void bindLetName(EvalContext& ctx, const std::string& name, const Value& v);
 
     void evalStatement(const oscad::ASTNode& node, EvalContext& ctx);
     void evalAssignment(const oscad::Assignment& node, EvalContext& ctx);
@@ -438,6 +439,17 @@ private:
     void applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
                         const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx);
 
+    // Shared tail of evalUserFunction/evalUserFunctionFromBound/
+    // evalFunctionLiteral/evalFunctionLiteralFromBound's interpreter
+    // branch: splits `bound` into childCtx.dyn ($-prefixed) vs.
+    // childCtx.let_ (everything else), then calls applyDefaults for
+    // whatever `bound` didn't cover. Factored out (identical four-way
+    // duplication before this) specifically so the tail-call trampoline's
+    // own FunctionCall case (simplifyTailStep, added alongside this) can
+    // reuse it instead of a fifth copy.
+    void bindCallArgsInto(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
+                           std::unordered_map<std::string, Value> bound, EvalContext& childCtx);
+
     // Shared by checkDebug() and error()'s own errorBreak hook call: `let`
     // + `$`-prefixed `dyn` entries from `ctx`, plus (if there's an active
     // user call) any top-level script variable not shadowed locally.
@@ -466,6 +478,87 @@ private:
     Value evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode, const oscad::Expression& bodyExpr,
                                 EvalContext& childCtx, const oscad::Position* callPos, int upvalueParent,
                                 const std::function<Value()>& computeResult);
+
+    // -- Tail-call optimization (interpreter path) -----------------------
+    //
+    // Mirrors upstream real OpenSCAD's own trampoline (Expression.cc's
+    // FunctionCall::evaluate()/simplify_function_body): a chain of
+    // TernaryOp/LetOp/EchoOp/AssertOp/FunctionCall nodes in tail position
+    // is walked with a loop (evalFunctionBodyTrampoline) instead of genuine
+    // C++ recursion, so a deep tail-recursive OpenSCAD function (e.g.
+    // `function sum(n,acc=0) = n==0 ? acc : sum(n-1,acc+n);`) runs in O(1)
+    // native stack space instead of overflowing. evalExpr's own switch is
+    // completely untouched -- simplifyTailStep is a separate, narrower
+    // dispatch over the same 5 node kinds, used only from
+    // evalFunctionBodyTrampoline; anything it doesn't specially handle (or
+    // a FunctionCall that isn't eligible -- see tryTailStepFor) is
+    // evaluated for real via the ordinary evalExpr/evalUserFunction path,
+    // exactly as it always has been.
+
+    // One trampoline step: either a final Value, or "continue with
+    // `nextExpr`/`ctx`" (isNewLogicalCall marks a genuine call boundary --
+    // the trampoline mutates callStack_'s top frame and records a
+    // profiling hop only for these, not for Ternary/Let/Echo/Assert
+    // unwrapping, which stay logically part of the *same* call).
+    struct TailStep {
+        const oscad::Expression* nextExpr = nullptr;
+        EvalContext ctx;
+        bool isNewLogicalCall = false;
+        std::string calleeName;
+        const oscad::ASTNode* calleeDecl = nullptr;
+        const oscad::Position* callPos = nullptr;
+    };
+
+    // Returns a TailStep for an isolated (non-closure-nested, see below),
+    // uncompiled call to a declaration sharing FunctionDeclaration/
+    // FunctionLiteral's common shape (name/params/body known by the
+    // caller) -- shared by simplifyTailStep's two callee-kind branches.
+    // Returns nullopt when this hop isn't eligible for trampolining:
+    //  - `hasCompiledChunk`: the callee has its own compiled bytecode
+    //    chunk -- its own tail calls are Phase B's (bytecode VM) job; this
+    //    port's interpreter-path trampoline doesn't try to run compiled
+    //    code, so crossing into a compiled callee pays one real C++ frame
+    //    here, by design (see this plan's own "mixed compiled/interpreted
+    //    tail chain" note).
+    //  - closure-nested (callCtxFor's usedChildCtx==true): this port's
+    //    closure lookup (findUpvalue) walks CallStackFrame::upvalueParent
+    //    as an index chain across DISTINCT call-stack slots (unlike
+    //    upstream OpenSCAD, which captures its closure context directly).
+    //    Collapsing a closure-nested hop into the trampoline's single
+    //    mutated frame would make that frame's own upvalueParent point at
+    //    itself -- findUpvalue would then loop forever the first time such
+    //    a closure reads an ancestor two or more levels up. Isolated hops
+    //    (self-recursion, mutual recursion, accumulator-style helpers --
+    //    the overwhelming common case) are unaffected and get full
+    //    O(1)-stack treatment; a closure-nested tail call just pays one
+    //    real C++ stack frame, same as today.
+    std::optional<TailStep> tryTailStepFor(const std::string& calleeName, const oscad::ASTNode& declNode,
+                                            const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
+                                            const oscad::Expression& body, bool hasCompiledChunk,
+                                            const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                                            EvalContext& ctx, const oscad::Position& callPos);
+
+    // Marker for "not one of the 5 trampolinable node kinds" -- the
+    // trampoline falls back to a genuine evalExpr(node, ctx) call for
+    // these (unchanged, real recursion), exactly as it always has.
+    struct NotTailStep {};
+
+    std::variant<Value, TailStep, NotTailStep> simplifyTailStep(const oscad::Expression& node, EvalContext& ctx);
+
+    // The trampoline itself -- replaces a single `evalExpr(*decl.expr,
+    // childCtx)` call as the body of evalUserFunctionCore's `computeResult`
+    // lambda, for the interpreter (non-compiled) branch only. The FIRST
+    // logical call's CallStackFrame/profiling are already set up by
+    // evalUserFunctionCore/profileEnter before this runs -- this function
+    // only needs to mutate them on a *subsequent* tail hop. `ctx` is taken
+    // by reference to the SAME storage evalUserFunctionCore already
+    // pointed lastCtx_ at before computeResult() runs -- each iteration
+    // move-assigns into it (never declares a fresh local), so lastCtx_
+    // never dangles and needs no extra bookkeeping. `declNode` anchors the
+    // 1,000,000-iteration cap's error position (mirrors upstream's own
+    // RecursionException cap exactly) -- turns a tail-recursive function
+    // with no base case into a controlled error instead of a hang.
+    Value evalFunctionBodyTrampoline(const oscad::ASTNode* declNode, const oscad::Expression& bodyExpr, EvalContext& ctx);
 
     void evalUserModule(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call, EvalContext& ctx);
     Value evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
@@ -579,6 +672,21 @@ private:
     std::optional<ProfileHandle> profileEnter(const std::string& kind, const std::string& name,
                                                const oscad::Position* callPos, const oscad::Position* declPos);
     void profileExit(const ProfileHandle& handle);
+
+    // Lightweight sibling of profileEnter/profileExit for a single
+    // trampolined tail-call hop (evalFunctionBodyTrampoline/
+    // runCompiledFunctionTrampoline): only does the find-or-create-site +
+    // callCount+=1 half, no timing and no profileActive_/profileChildTime_
+    // touch. A tail chain only ever gets ONE real profileEnter/profileExit
+    // bracket (the outer call evalUserFunctionCore already wraps, unchanged
+    // by TCO) -- without this, every intermediate site visited only via a
+    // tail-hop would show zero recorded calls at all, not just imprecise
+    // timing, since it would never reach profileSites_. Wall time is
+    // deliberately NOT sliced per hop -- it lumps onto the outermost call
+    // as one simplification (every hop's own selfTime/cumulativeTime reads
+    // 0.0 except the outermost); every hop's own callCount is accurate.
+    void profileRecordTailHop(const std::string& kind, const std::string& name, const oscad::Position* callPos,
+                               const oscad::Position* declPos);
 
     // The tree-build stack (mirrors the reference's self._tree_stack): each
     // frame is the children accumulator for whichever CSGNode is currently
