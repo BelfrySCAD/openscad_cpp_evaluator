@@ -1,5 +1,6 @@
 #include "openscad_cpp_evaluator/dxf_svg_import.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
