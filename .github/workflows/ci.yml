@@ -22,7 +22,15 @@ jobs:
 
       - name: Install bison/flex (macOS)
         if: runner.os == 'macOS'
-        run: brew install bison flex
+        # The hosted macOS runner image ships with an untrusted `aws/tap`
+        # pre-tapped (unrelated to anything this workflow uses) -- any brew
+        # command then prints a "taps are not trusted" warning for it.
+        # Untap it first (non-fatal: `|| true` in case a future runner
+        # image doesn't have it) rather than reaching for the deprecated
+        # HOMEBREW_NO_REQUIRE_TAP_TRUST escape hatch.
+        run: |
+          brew untap aws/tap || true
+          brew install bison flex
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
