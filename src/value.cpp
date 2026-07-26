@@ -328,34 +328,34 @@ std::string fmtValue(const Value& v) {
     return "<function-literal>"; // const FunctionLiteral* -- no meaningful textual form in the reference either
 }
 
-std::vector<Value> expandIterable(const Value& v) {
-    if (std::holds_alternative<std::monostate>(v)) return {};
+IterableValues expandIterable(const Value& v) {
+    if (std::holds_alternative<std::monostate>(v)) return IterableValues{};
     if (const OscRange* r = std::get_if<OscRange>(&v)) {
         std::vector<Value> out;
-        if (r->step == 0.0) return out;
+        if (r->step == 0.0) return IterableValues{std::move(out)};
         if (r->step > 0) {
             for (double x = r->start; x <= r->end + 1e-10; x += r->step) out.push_back(Value{x});
         } else {
             for (double x = r->start; x >= r->end - 1e-10; x += r->step) out.push_back(Value{x});
         }
-        return out;
+        return IterableValues{std::move(out)};
     }
     if (const ObjectPtr* o = std::get_if<ObjectPtr>(&v)) {
         std::vector<Value> out;
         if (*o) {
             for (const auto& [key, val] : (*o)->items) out.push_back(Value{key});
         }
-        return out;
+        return IterableValues{std::move(out)};
     }
     if (const std::string* s = std::get_if<std::string>(&v)) {
         std::vector<Value> out;
         for (char c : *s) out.push_back(Value{std::string(1, c)});
-        return out;
+        return IterableValues{std::move(out)};
     }
     if (const ListPtr* l = std::get_if<ListPtr>(&v)) {
-        return *l ? (*l)->items : std::vector<Value>{};
+        return *l ? IterableValues{*l} : IterableValues{};
     }
-    return {v}; // bare scalar -> single-element list
+    return IterableValues{std::vector<Value>{v}}; // bare scalar -> single-element list
 }
 
 void appendEachInto(std::vector<Value>& out, const Value& v) {

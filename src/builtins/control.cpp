@@ -97,7 +97,7 @@ ColoredBody combineBodies(const std::vector<ColoredBody>& bodies) {
 // children) -- same rationale as booleans.cpp's own group_sizes. Mirrors
 // _resolve_intersection_for/_generate_intersection_for.
 CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersectionFor& node, EvalContext& ctx) {
-    std::vector<std::pair<std::string, std::vector<Value>>> varSeqs;
+    std::vector<std::pair<std::string, IterableValues>> varSeqs;
     varSeqs.reserve(node.assignments.size());
     for (const auto& assign : node.assignments) {
         Value values = ev.evalExpr(*assign->expr, ctx);

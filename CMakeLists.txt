@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
 project(openscad_cpp_evaluator CXX)
 
+# Default to an optimized build when the caller doesn't ask for a specific
+# one -- otherwise the exact command this repo's own README tells users to
+# run (`cmake -S . -B build`, no -DCMAKE_BUILD_TYPE) silently produces an
+# unoptimized build. CMAKE_CONFIGURATION_TYPES is set instead of
+# CMAKE_BUILD_TYPE on multi-config generators (Xcode/MSVC), where this
+# guard doesn't apply.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

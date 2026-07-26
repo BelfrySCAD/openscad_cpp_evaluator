@@ -6,6 +6,7 @@
 #include "openscad_cpp_parser/ast/ast_node.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -32,6 +33,15 @@ struct CSGNode {
     std::vector<std::unique_ptr<CSGNode>> children; // CSGNode owns its own children (strict tree)
     CSGParams params;                      // resolve step's plain-data output
     bool uncacheable = false;              // set by a later phase (ManifoldCache, Phase 8)
+
+    // Memoizes manifold_cache.cpp's cacheKey(*this) -- that function
+    // recurses into every descendant to build its own key, so without this
+    // memo a generate-time walk that calls cacheKey() at every node (not
+    // just the root) redoes each subtree's serialization once per ancestor
+    // that references it (O(n^2) on a chain-shaped tree). Populated lazily
+    // on first cacheKey() call; every node here is always reached through a
+    // non-const CSGNode&, so no `mutable` is needed to write it.
+    std::optional<std::string> cachedKey;
 };
 
 } // namespace oscadeval

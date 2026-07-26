@@ -48,6 +48,11 @@ private:
 // touches CSGNode::bodies), so it's always cheap/safe to compute
 // speculatively even on a cache miss. Mirrors the reference's
 // Evaluator._cache_key/_canon.
-std::string cacheKey(const CSGNode& node);
+//
+// Takes a non-const reference because it memoizes the result into
+// CSGNode::cachedKey -- without this, a top-down walk that calls
+// cacheKey() at every node (not just the root, see generateTree()) would
+// re-serialize each subtree once per ancestor that references it.
+std::string cacheKey(CSGNode& node);
 
 } // namespace oscadeval
