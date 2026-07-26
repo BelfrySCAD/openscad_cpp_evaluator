@@ -24,19 +24,27 @@ void Evaluator::evalAssignment(const oscad::Assignment& node, EvalContext& ctx) 
     ctx.dynPositions->set(name, pos);
 }
 
-void Evaluator::doEcho(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
+void Evaluator::emitEcho(const std::vector<std::pair<std::optional<std::string>, Value>>& pairs) {
     std::string msg = "ECHO: ";
-    for (size_t i = 0; i < arguments.size(); ++i) {
+    for (size_t i = 0; i < pairs.size(); ++i) {
         if (i) msg += ", ";
-        const oscad::Argument& arg = *arguments[i];
-        Value val = evalExpr(*argExpr(arg), ctx);
-        if (arg.kind() == oscad::NodeKind::NamedArgument) {
-            msg += static_cast<const oscad::NamedArgument&>(arg).name->name + " = " + fmtValue(val);
-        } else {
-            msg += fmtValue(val);
-        }
+        const auto& [name, val] = pairs[i];
+        msg += name ? (*name + " = " + fmtValue(val)) : fmtValue(val);
     }
     if (echoFn_) echoFn_(msg);
+}
+
+void Evaluator::doEcho(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
+    std::vector<std::pair<std::optional<std::string>, Value>> pairs;
+    pairs.reserve(arguments.size());
+    for (const auto& argPtr : arguments) {
+        const oscad::Argument& arg = *argPtr;
+        Value val = evalExpr(*argExpr(arg), ctx);
+        std::optional<std::string> name;
+        if (arg.kind() == oscad::NodeKind::NamedArgument) name = static_cast<const oscad::NamedArgument&>(arg).name->name;
+        pairs.emplace_back(std::move(name), std::move(val));
+    }
+    emitEcho(pairs);
 }
 
 void Evaluator::evalAssertStatement(const oscad::ModularAssert& node, EvalContext& ctx) {

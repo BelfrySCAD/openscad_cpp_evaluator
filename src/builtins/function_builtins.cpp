@@ -379,7 +379,7 @@ bool isBuiltinFunctionName(const std::string& name) {
     return names.count(name) > 0;
 }
 
-Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
+Value mergeObjectArgs(const std::vector<std::pair<std::optional<std::string>, Value>>& evaluated) {
     std::vector<std::pair<std::string, Value>> result;
     const auto setKey = [&](const std::string& k, const Value& v) {
         for (auto& [ek, ev2] : result) {
@@ -390,10 +390,9 @@ Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argu
         }
         result.emplace_back(k, v);
     };
-    for (const auto& argPtr : arguments) {
-        const Value v = ev.evalExpr(*argExpr(*argPtr), ctx);
-        if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
-            setKey(static_cast<const oscad::NamedArgument&>(*argPtr).name->name, v);
+    for (const auto& [name, v] : evaluated) {
+        if (name) {
+            setKey(*name, v);
             continue;
         }
         if (const ObjectPtr* o = std::get_if<ObjectPtr>(&v); o && *o) {
@@ -412,6 +411,20 @@ Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argu
         }
     }
     return Value{std::make_shared<const ValueObject>(ValueObject{std::move(result)})};
+}
+
+Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
+    std::vector<std::pair<std::optional<std::string>, Value>> evaluated;
+    evaluated.reserve(arguments.size());
+    for (const auto& argPtr : arguments) {
+        Value v = ev.evalExpr(*argExpr(*argPtr), ctx);
+        std::optional<std::string> name;
+        if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
+            name = static_cast<const oscad::NamedArgument&>(*argPtr).name->name;
+        }
+        evaluated.emplace_back(std::move(name), std::move(v));
+    }
+    return mergeObjectArgs(evaluated);
 }
 
 Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::ASTNode& node) {

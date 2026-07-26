@@ -137,6 +137,30 @@ enum class Op {
     // from today.
     CallFnTail,
     CallDynamicTail,
+
+    // -- echo()/assert() expression forms, import()/object() calls -------
+    // a = index into CompiledChunk::echoSites, b = argument count (pops
+    // that many, in push order, same convention as CallFn). Formats+emits
+    // via Evaluator::emitEcho, then falls straight through to whatever
+    // follows in the instruction stream (the body -- no jump needed,
+    // exactly like LetOp's own straight-line "assignments then body"
+    // shape; echo() always evaluates every argument unconditionally, so
+    // there's no branch to emit here).
+    Echo,
+
+    // Only ever emitted for a non-empty-argument AssertOp (see
+    // bytecode_compiler.cpp's own AssertOp case -- a zero-argument
+    // assert() is unconditionally true and compiles straight through with
+    // no check at all). Reached only on the condition-false path (guarded
+    // by a JumpIfTrue the compiler emits around it, mirroring LogicalOrOp's
+    // own jump-then-patch shape) -- always throws via Evaluator::error(),
+    // i.e. [[noreturn]] at runtime. a = 1 if a message Value was compiled
+    // and pushed (pop it), else 0. b = constant-pool index of condText
+    // (the condition expression's own source text, interned ONCE at
+    // compile time via its toString() -- cheaper than the interpreter,
+    // which recomputes this on every failing call). pos/node: same
+    // Evaluator::error() TRACE-walk need CheckIterLimit already has.
+    AssertFail,
 };
 
 struct Instruction {
@@ -173,18 +197,22 @@ struct CompiledChunk {
 
     // A call site statically resolved at compile time (see
     // bytecode_compiler.cpp's PrimaryCall case): either a builtin function
-    // name (`decl == nullptr`, dispatched through evalBuiltinFunction) or a
+    // name (`decl == nullptr`, dispatched through evalBuiltinFunction --
+    // `object()` gets its own special dispatch to mergeObjectArgs instead,
+    // see bytecode_vm.cpp's CallFn handler, despite still setting
+    // isBuiltin=true, since it's already in isBuiltinFunctionName's table),
+    // `import` (`isImport=true`, dispatched to importAsValue instead), or a
     // user FunctionDeclaration found via the enclosing declaration's own
-    // static scope -- `import`/`object()` (need special raw-argument
-    // handling) and any callee that doesn't resolve to one of these two
-    // cases (a function-literal *value* call, an unknown name) bail
-    // compilation of the whole containing function instead of appearing
-    // here. `argNames[i]` is nullopt for a positional argument, else the
-    // named argument's name -- mirrors bindArgs'/resolveArgs' own
-    // positional-index-among-positional-args-only rule, replayed at
-    // runtime (see bytecode_vm.cpp's CallFn handler).
+    // static scope -- a callee that doesn't resolve to any of these (a
+    // function-literal *value* call, an unknown name) bails compilation of
+    // the whole containing function instead of appearing here. `argNames[i]`
+    // is nullopt for a positional argument, else the named argument's name
+    // -- mirrors bindArgs'/resolveArgs' own positional-index-among-
+    // positional-args-only rule, replayed at runtime (see bytecode_vm.cpp's
+    // CallFn handler).
     struct CallSite {
         bool isBuiltin = false;
+        bool isImport = false;
         std::string calleeName;
         const oscad::FunctionDeclaration* decl = nullptr;
         std::vector<std::optional<std::string>> argNames;
@@ -202,6 +230,14 @@ struct CompiledChunk {
         int slot = 0;
     };
 
+    // One echo() expression form's own argument names, in source order --
+    // see Op::Echo. Not folded into CallSite: an echo() has no callee/decl/
+    // isBuiltin identity at all, so those fields would sit permanently
+    // unused and misleadingly defaulted.
+    struct EchoSite {
+        std::vector<std::optional<std::string>> argNames;
+    };
+
     std::vector<Param> params;
     std::vector<std::vector<Instruction>> defaultCode;
     std::vector<Instruction> bodyCode;
@@ -209,6 +245,7 @@ struct CompiledChunk {
     std::vector<std::string> names;
     std::vector<CallSite> callSites;
     std::vector<UpvalueRef> upvalues;
+    std::vector<EchoSite> echoSites;
     int numSlots = 0;
     // Count of distinct ListCompFor-assignment iterLists allocated across
     // this whole chunk (see IterMaterialize/IterReset/IterNext) -- runChunk

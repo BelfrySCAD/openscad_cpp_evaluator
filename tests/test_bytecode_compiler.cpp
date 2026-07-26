@@ -4,6 +4,8 @@
 
 #include "test_helpers.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 
 // Targeted correctness tests for the Phase 1 bytecode compiler/VM
@@ -44,6 +46,10 @@ std::string runCapturingEcho(const std::string& code) {
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     ev.resolveTree(ast, ctx);
     return captured;
+}
+
+std::filesystem::path tempPath(const std::string& name) {
+    return std::filesystem::temp_directory_path() / ("oscad_bytecode_compiler_test_" + name);
 }
 
 } // namespace
@@ -538,4 +544,150 @@ TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnDefaultAndFallbackCases) {
         onResult = runCapturingEcho(script);
     }
     EXPECT_EQ(offResult, onResult);
+}
+
+// -- Compiling echo()/assert()/import()/object() ---------------------------
+//
+// These four previously bailed compilation of their whole containing
+// function (fell through to `default: throw NotCompilable{}` for echo/
+// assert, or an explicit bail for import/object) -- see bytecode_compiler.cpp's
+// PrimaryCall/EchoOp/AssertOp cases and bytecode_vm.cpp's Op::Echo/
+// Op::AssertFail handlers and CallFn's isImport/object-name dispatch.
+
+TEST(BytecodeCompiler, EchoExpressionCompiles) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("function f(x) = echo(\"got\", x) x + 1;\necho(f(5));"), "ECHO: \"got\", 5\nECHO: 6");
+    // Named argument formatting ("name = value") and chained echo(...)
+    // echo(...) body (each inherits `tail` from the enclosing one, no jump
+    // between them -- straight-line fallthrough).
+    EXPECT_EQ(runCapturingEcho("function g(x) = echo(x, label=\"y\") echo(\"again\") x * 2;\necho(g(3));"),
+              "ECHO: 3, label = \"y\"\nECHO: \"again\"\nECHO: 6");
+}
+
+TEST(BytecodeCompiler, AssertExpressionCompiles) {
+    ScopedVm vm(true);
+    // Passing condition: falls through to body untouched.
+    EXPECT_EQ(runCapturingEcho("function f(x) = assert(x > 0) x;\necho(f(5));"), "ECHO: 5");
+    // Zero-argument assert() is unconditionally true (compiled with no
+    // check at all -- see the compiler's own AssertOp case).
+    EXPECT_EQ(runCapturingEcho("function h() = assert() 42;\necho(h());"), "ECHO: 42");
+}
+
+TEST(BytecodeCompiler, AssertExpressionFailureThrowsWithCorrectMessage) {
+    ScopedVm vm(true);
+    Evaluator ev;
+    auto ast = parseSrc("function f(x) = assert(x > 0) x;\nresult = f(-1);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.resolveTree(ast, ctx);
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        // condText baked in at compile time via the condition's own
+        // toString() -- must match the source text exactly.
+        EXPECT_NE(std::string(e.what()).find("Assertion 'x > 0' failed"), std::string::npos);
+    }
+}
+
+TEST(BytecodeCompiler, AssertExpressionFailureWithMessageThrowsWithMessage) {
+    ScopedVm vm(true);
+    Evaluator ev;
+    auto ast = parseSrc("function f(x) = assert(x > 0, \"must be positive\") x;\nresult = f(-1);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.resolveTree(ast, ctx);
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("Assertion 'x > 0' failed"), std::string::npos);
+        EXPECT_NE(msg.find("must be positive"), std::string::npos);
+    }
+}
+
+TEST(BytecodeCompiler, AssertMessageArgumentReferencesEarlierLetBinding) {
+    // The message argument is lazily compiled (only reachable on the
+    // condition-false path, behind a JumpIfTrue) -- its own slot
+    // references must still resolve correctly, since CompileScope is a
+    // purely compile-time name/index table, unaffected by which runtime
+    // path actually reaches this code.
+    ScopedVm vm(true);
+    EXPECT_EQ(
+        runCapturingEcho(
+            "function f(x) = let(lo = 0) assert(x > lo, str(\"must exceed \", lo)) x;\necho(f(5));"),
+        "ECHO: 5");
+    Evaluator ev;
+    auto ast = parseSrc("function f(x) = let(lo = 0) assert(x > lo, str(\"must exceed \", lo)) x;\nresult = f(-1);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.resolveTree(ast, ctx);
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("must exceed 0"), std::string::npos);
+    }
+}
+
+TEST(BytecodeCompiler, ImportCompilesAsTailPositionBody) {
+    // The specific case that crashes without the CallFnTail exclusion fix
+    // (bytecode_compiler.cpp's tail-opcode-selection condition): import()
+    // as a function's ENTIRE body is a tail-position PrimaryCall resolving
+    // to isImport=true, isBuiltin=false -- without `!site.isImport` in that
+    // condition this would emit CallFnTail, whose handler unconditionally
+    // dereferences site.decl (null for an import site).
+    ScopedVm vm(true);
+    const auto path = tempPath("data.json");
+    {
+        std::ofstream out(path);
+        out << R"({"a": 1, "b": 2})";
+    }
+    EXPECT_EQ(runCapturingEcho("function f() = import(\"" + path.string() + "\");\necho(f());"),
+              "ECHO: object(a = 1, b = 2)");
+    std::filesystem::remove(path);
+}
+
+TEST(BytecodeCompiler, ObjectCompilesWithExactCallSiteInterleavedOrder) {
+    ScopedVm vm(true);
+    // a=1 (named) -> b spread from an existing object's own entries ->
+    // c=3 (named) -> a=4 (named, overrides the earlier a=1) -- later
+    // writes for the same key must win, in exact call-site order, matching
+    // builtinObject's own documented semantics.
+    EXPECT_EQ(runCapturingEcho("existing = object(b = 2);\n"
+                                "function f() = object(a = 1, existing, c = 3, a = 4);\n"
+                                "echo(f());"),
+              "ECHO: object(a = 4, b = 2, c = 3)");
+    // Positional list-of-pairs spread.
+    EXPECT_EQ(runCapturingEcho("function g() = object(a = 1, [[\"b\", 2]], a = 3);\necho(g());"),
+              "ECHO: object(a = 3, b = 2)");
+}
+
+TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnEchoAssertImportObjectCases) {
+    const auto path = tempPath("combined_data.json");
+    {
+        std::ofstream out(path);
+        out << R"({"k": 9})";
+    }
+    const std::string script = "function withEcho(x) = echo(\"trace\", x) x + 1;\n"
+                                "function withAssert(x) = assert(x >= 0, \"must be non-negative\") x * 2;\n"
+                                "function withImport() = import(\"" +
+                                path.string() +
+                                "\");\n"
+                                "existing = object(m = 1);\n"
+                                "function withObject() = object(n = 2, existing, m = 3);\n"
+                                "function combined(x) = echo(\"start\") assert(x > 0) let(y = withEcho(x)) "
+                                "withAssert(y) + withObject().n;\n"
+                                "echo(combined(5));\n"
+                                "echo(withImport());";
+    std::string offResult;
+    {
+        ScopedVm vm(false);
+        offResult = runCapturingEcho(script);
+    }
+    std::string onResult;
+    {
+        ScopedVm vm(true);
+        onResult = runCapturingEcho(script);
+    }
+    EXPECT_EQ(offResult, onResult);
+    std::filesystem::remove(path);
 }

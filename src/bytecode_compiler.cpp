@@ -1,5 +1,6 @@
 #include "openscad_cpp_evaluator/bytecode_compiler.hpp"
 
+#include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
@@ -356,9 +357,25 @@ public:
                 bool isStatic = false;
                 if (leftId) {
                     const std::string& calleeName = leftId->name;
-                    if (calleeName == "import" || calleeName == "object") throw NotCompilable{};
                     site.calleeName = calleeName; // also Op::CallDynamic's own "unknown function" warning text
-                    if (isBuiltinFunctionName(calleeName)) {
+                    if (calleeName == "import") {
+                        // Not in isBuiltinFunctionName's table (special-
+                        // cased earlier in evalFunctionCall, bypassing the
+                        // builtin dispatch table entirely) -- needs its
+                        // own flag. Runtime dispatch: bytecode_vm.cpp's
+                        // CallFn handler calls importAsValue instead of
+                        // evalBuiltinFunction when isImport is set.
+                        site.isImport = true;
+                        isStatic = true;
+                    } else if (isBuiltinFunctionName(calleeName)) {
+                        // object() is already in this table -- it gets
+                        // isBuiltin=true here like any other builtin, and
+                        // is special-cased at RUNTIME instead (bytecode_vm.cpp's
+                        // CallFn handler dispatches calleeName=="object" to
+                        // mergeObjectArgs instead of evalBuiltinFunction,
+                        // since it needs its arguments merged in exact
+                        // call-site interleaved order, not resolveArgs'
+                        // split positional/named CallArgs shape).
                         site.isBuiltin = true;
                         isStatic = true;
                     } else {
@@ -400,16 +417,20 @@ public:
                 }
                 int siteIdx = static_cast<int>(chunk_.callSites.size());
                 chunk_.callSites.push_back(std::move(site));
-                // Builtins never trampoline (matching upstream's own
-                // BuiltinFunction early-return via a genuine call) --
-                // CallFnTail/CallDynamicTail are only emitted for `tail`
-                // AND a non-builtin callee. Eligibility beyond that
-                // (isolated vs. closure-nested) is a runtime fact the
-                // compiler can't know -- see bytecode.hpp's own doc
-                // comment on these two opcodes.
+                // Builtins and import() never trampoline (matching
+                // upstream's own BuiltinFunction early-return via a
+                // genuine call) -- CallFnTail is only emitted for `tail`
+                // AND a plain user-function callee. Required, not
+                // optional: CallFnTail's own runtime handler unconditionally
+                // dereferences site.decl->parameters.size() -- site.decl is
+                // null for an import site, so omitting !site.isImport here
+                // would crash on a tail-position import() call. Eligibility
+                // beyond that (isolated vs. closure-nested) is a runtime
+                // fact the compiler can't know -- see bytecode.hpp's own
+                // doc comment on these two opcodes.
                 Op op;
                 if (isStatic) {
-                    op = (tail && !site.isBuiltin) ? Op::CallFnTail : Op::CallFn;
+                    op = (tail && !site.isBuiltin && !site.isImport) ? Op::CallFnTail : Op::CallFn;
                 } else {
                     op = tail ? Op::CallDynamicTail : Op::CallDynamic;
                 }
@@ -437,6 +458,66 @@ public:
                 out[placeholderIdx].b = nextSlot_ - slotStart;
                 compileExpr(*n.body, out, scope, tail); // body inherits
                 scope.pop();
+                return;
+            }
+
+            case NodeKind::EchoOp: {
+                // Always evaluates every argument unconditionally (unlike
+                // AssertOp's message, see below) -- same shape as an
+                // ordinary call's own argument compilation.
+                auto& n = static_cast<const oscad::EchoOp&>(node);
+                CompiledChunk::EchoSite site;
+                for (const auto& argPtr : n.arguments) {
+                    if (argPtr->kind() == NodeKind::NamedArgument) {
+                        auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
+                        compileExpr(*a.expr, out, scope); // an argument is never tail
+                        site.argNames.push_back(a.name->name);
+                    } else {
+                        auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
+                        compileExpr(*a.expr, out, scope);
+                        site.argNames.push_back(std::nullopt);
+                    }
+                }
+                int siteIdx = static_cast<int>(chunk_.echoSites.size());
+                chunk_.echoSites.push_back(std::move(site));
+                out.push_back({Op::Echo, siteIdx, static_cast<int>(n.arguments.size()), &n.position()});
+                compileExpr(*n.body, out, scope, tail); // body inherits, no jump needed (Echo always falls through)
+                return;
+            }
+
+            case NodeKind::AssertOp: {
+                auto& n = static_cast<const oscad::AssertOp&>(node);
+                if (n.arguments.empty()) {
+                    // Mirrors evalAssertExpr's own `raw.empty() || ...`
+                    // short-circuit exactly: a zero-argument assert() is
+                    // unconditionally true, so the check can never fail --
+                    // skip it entirely rather than compiling a check that
+                    // can never trigger.
+                    compileExpr(*n.body, out, scope, tail);
+                    return;
+                }
+                compileExpr(*argExpr(*n.arguments[0]), out, scope); // condition, never tail
+                size_t jumpPassed = out.size();
+                out.push_back({Op::JumpIfTrue, 0, 0, nullptr});
+                const bool hasMessage = n.arguments.size() > 1;
+                // Lazily compiled: only reachable on the condition-false
+                // path (guarded by the JumpIfTrue above) -- mirrors
+                // evalAssertExpr's own lazy evaluation of the message
+                // argument exactly (only evaluated when the assertion
+                // actually fails). Slot resolution is unaffected by which
+                // runtime path reaches this code -- CompileScope is purely
+                // a compile-time name/index table, same as every other
+                // conditionally-executed branch this compiler already
+                // handles (Ternary, LogicalAnd/Or, ListCompIf).
+                if (hasMessage) compileExpr(*argExpr(*n.arguments[1]), out, scope); // message, never tail
+                // Precomputed ONCE at compile time (cheaper than the
+                // interpreter, which recomputes this on every failing
+                // call) -- toString() is a pure, ctx-free AST-to-text
+                // operation.
+                int condTextIdx = internConst(Value{argExpr(*n.arguments[0])->toString()});
+                out.push_back({Op::AssertFail, hasMessage ? 1 : 0, condTextIdx, &n.position(), &n});
+                out[jumpPassed].a = static_cast<int>(out.size());
+                compileExpr(*n.body, out, scope, tail);
                 return;
             }
 
@@ -479,9 +560,14 @@ public:
 #undef OSCAD_COMPILE_BINARY
 
             default:
-                // PrimaryCall, FunctionLiteral, ListComprehension/ListComp*,
-                // EchoOp, AssertOp -- see this file's header comment for why
-                // each is out of Phase 1's scope.
+                // Safety net for any Expression NodeKind without its own
+                // case above -- falls back to the interpreter for the
+                // whole containing function, same as always. Not
+                // maintained as an exhaustive list of exclusions in this
+                // comment (that list has gone stale before -- see git
+                // history); every construct known to matter as of this
+                // writing (including echo()/assert()/import()/object(),
+                // previously excluded here) now has its own case.
                 throw NotCompilable{};
         }
     }

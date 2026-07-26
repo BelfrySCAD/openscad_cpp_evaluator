@@ -664,6 +664,19 @@ public:
     void recordTailCallHop(const std::string& calleeName, const oscad::ASTNode& calleeDecl,
                             const oscad::Position* callPos, unsigned& recursionGuard);
 
+    // "ECHO: ..." formatting + emission given ALREADY-EVALUATED
+    // (name-or-nullopt, Value) pairs in call-site order -- the shared core
+    // doEcho (below) wraps (evaluate each raw argument, then call this).
+    // Public: the bytecode VM's compiled echo() expression form (Op::Echo,
+    // bytecode_vm.cpp, a separate translation unit) pops its own
+    // already-evaluated arguments off the compiled stack and calls this
+    // directly, so `ModularEcho` (statement form), evalEchoExpr
+    // (interpreted expression form), and the compiled form all share
+    // exactly one formatting rule -- can't drift, same reasoning as
+    // applyBinaryOp/applyUnaryOp being shared between the interpreter and
+    // VM already.
+    void emitEcho(const std::vector<std::pair<std::optional<std::string>, Value>>& pairs);
+
 private:
     std::vector<std::unique_ptr<VmFrame>> vmFramePool_;
 

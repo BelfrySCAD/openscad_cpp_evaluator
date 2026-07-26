@@ -43,4 +43,15 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
 // twice -- wrong for anything with a side effect, e.g. rands()).
 Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx);
 
+// The shared merge core builtinObject wraps: given ALREADY-EVALUATED
+// (name-or-nullopt, Value) pairs in exact call-site order, merges them the
+// same way (a named pair always setKey()s directly; a positional pair
+// spreads an object's own entries or a list-of-[key,value]-pairs, same
+// rules as above). Public so the bytecode VM's compiled object() call site
+// (Op::CallFn's isBuiltin branch, bytecode_vm.cpp) can replay this exact
+// logic against its own already-evaluated (argNames[i], args[i]) pairs
+// (already in call-site order by construction -- see CallSite::argNames)
+// without re-deriving the merge rules or touching raw AST nodes.
+Value mergeObjectArgs(const std::vector<std::pair<std::optional<std::string>, Value>>& evaluated);
+
 } // namespace oscadeval
