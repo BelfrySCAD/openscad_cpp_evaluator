@@ -41,6 +41,17 @@ include(FetchContent)
 # shows single-threaded Boolean ops are a bottleneck. MANIFOLD_CROSS_SECTION
 # stays at its own default (ON) -- 2D CrossSection support is needed from
 # Phase 3 onward.
+#
+# BUILD_SHARED_LIBS off: Manifold's own CMakeLists.txt defaults this ON,
+# which builds manifold.dll/manifoldc.dll instead of static libs. Harmless
+# on Linux/macOS (CMake gives build-tree executables an automatic rpath to
+# find a build-tree .so/.dylib), but Windows has no rpath equivalent -- a
+# DLL must be either next to the .exe or on PATH, neither of which is true
+# for a FetchContent dependency built into its own build/_deps/ tree, so
+# every test/CLI executable failed to even start (STATUS_DLL_NOT_FOUND).
+# Forcing this off, matching the existing MANIFOLD_TEST override pattern,
+# fixes Windows and is a no-op everywhere else this project already worked.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(MANIFOLD_TEST OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   manifold
