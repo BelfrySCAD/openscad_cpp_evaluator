@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/zip_stored.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fstream>

@@ -7,6 +7,7 @@
 #include "openscad_cpp_parser/ast/vector_element.hpp"
 #include "openscad_cpp_parser/scope.hpp"
 
+#include <functional>
 #include <unordered_map>
 
 namespace oscadeval {

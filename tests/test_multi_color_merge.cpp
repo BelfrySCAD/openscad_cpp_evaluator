@@ -3,6 +3,7 @@
 #include "test_helpers.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <gtest/gtest.h>
 #include <set>
 

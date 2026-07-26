@@ -5,6 +5,8 @@
 
 #include "cli_lib.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
