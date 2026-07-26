@@ -1,5 +1,6 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/bound_args.hpp"
 #include "openscad_cpp_evaluator/bytecode.hpp"
 #include "openscad_cpp_evaluator/eval_context.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
@@ -7,7 +8,6 @@
 #include "openscad_cpp_parser/ast/expression.hpp"
 
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 namespace oscadeval {
@@ -47,7 +47,7 @@ struct VmFrame {
 struct TailCallRequest {
     const oscad::FunctionDeclaration* decl = nullptr;
     const oscad::FunctionLiteral* literal = nullptr;
-    std::unordered_map<std::string, Value> bound;
+    BoundArgs bound;
     EvalContext ctx;
     std::string name;
     const oscad::Position* callPos = nullptr;
@@ -80,9 +80,8 @@ Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
 // reuses directly (see runCompiledFunctionTrampoline/
 // runCompiledFunctionFromBoundTrampoline), since a tail request's own
 // bound-args shape is identical to this function's own parameter shape.
-Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk,
-                                    const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx,
-                                    TailCallRequest* tailOut = nullptr);
+Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, const BoundArgs& bound,
+                                    EvalContext& childCtx, TailCallRequest* tailOut = nullptr);
 
 // The trampoline entry points -- replace runCompiledFunction/
 // runCompiledFunctionFromBound at evalUserFunction's/evalUserFunctionFromBound's/
@@ -102,7 +101,7 @@ Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk,
 Value runCompiledFunctionTrampoline(Evaluator& ev, const CompiledChunk& chunk,
                                      const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
                                      EvalContext& callerCtx, EvalContext& childCtx);
-Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk& chunk,
-                                              const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx);
+Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk& chunk, const BoundArgs& bound,
+                                              EvalContext& childCtx);
 
 } // namespace oscadeval

@@ -91,6 +91,27 @@ TEST(EvalContextCallCtx, IsolatesLetAndResetsChildrenNodes) {
     EXPECT_DOUBLE_EQ(std::get<double>(call.dyn->at("$fn")), 0.0); // $-vars stay dynamically scoped
 }
 
+TEST(EvalContextChildCtx, ValueOnlyDynWriteDoesNotClearAncestorsExplicitFlag) {
+    // dyn/dynExplicit now share one underlying trail (scope_trail.hpp's
+    // DynValueView/DynExplicitView) purely to cut allocations -- this
+    // must not change observable behavior. A value-only write (e.g. a
+    // parameter default, or applyDefaults' own $fn={}) at a NESTED level
+    // must not clobber an ANCESTOR's already-explicit flag for that same
+    // name: dynExplicit's own ancestry-visible answer for "$fn" has to
+    // stay true even though a later, deeper level only ever touched dyn.
+    std::vector<std::unique_ptr<oscad::ASTNode>> ast;
+    auto scope = makeScope(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ctx.dyn->set("$fn", Value{64.0});
+    ctx.dynExplicit->set("$fn", true); // script explicitly assigned $fn=64
+
+    EvalContext child = ctx.childCtx();
+    child.dyn->set("$fn", Value{12.0}); // value-only write, e.g. a default -- dynExplicit untouched here
+
+    EXPECT_DOUBLE_EQ(std::get<double>(child.dyn->at("$fn")), 12.0);   // new value visible
+    EXPECT_TRUE(child.dynExplicit->count("$fn"));                     // still explicit, inherited from ctx
+}
+
 TEST(EvalContextLetChildCtx, CopiesLetIndependentlyOfParent) {
     std::vector<std::unique_ptr<oscad::ASTNode>> ast;
     auto scope = makeScope(ast);

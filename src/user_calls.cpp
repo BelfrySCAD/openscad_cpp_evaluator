@@ -81,20 +81,20 @@ void Evaluator::releaseVmFrame(std::unique_ptr<VmFrame> frame) {
     vmFramePool_.push_back(std::move(frame));
 }
 
-std::unordered_map<std::string, Value> Evaluator::bindArgs(
-    const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
-    const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
-    std::unordered_map<std::string, Value> result;
+BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
+                               const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
+    BoundArgs result;
+    result.reserve(arguments.size());
     size_t positionalIdx = 0;
     const size_t nparams = params.size();
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-            result[a.name->name] = evalExpr(*a.expr, ctx);
+            result.set(a.name->name, evalExpr(*a.expr, ctx));
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
             if (positionalIdx < nparams) {
-                result[params[positionalIdx]->name->name] = evalExpr(*a.expr, ctx);
+                result.set(params[positionalIdx]->name->name, evalExpr(*a.expr, ctx));
             }
             ++positionalIdx;
         }
@@ -127,7 +127,7 @@ std::optional<EvalContext> Evaluator::isolatedCallCtxFor(const oscad::ASTNode& d
 }
 
 void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
-                               const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx) {
+                               const BoundArgs& bound, EvalContext& childCtx) {
     std::optional<EvalContext> defaultCtx;
     for (const auto& param : params) {
         const std::string& pname = param->name->name;
@@ -167,7 +167,7 @@ void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::Parameter
 }
 
 void Evaluator::bindCallArgsInto(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
-                                  std::unordered_map<std::string, Value> bound, EvalContext& childCtx) {
+                                  BoundArgs bound, EvalContext& childCtx) {
     for (auto& [k, v] : bound) {
         if (!k.empty() && k[0] == '$') {
             childCtx.dyn->set(k, std::move(v));
@@ -478,8 +478,7 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
 }
 
 Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad::FunctionDeclaration& decl,
-                                            std::unordered_map<std::string, Value> bound, EvalContext& ctx,
-                                            const oscad::Position* callPos) {
+                                            BoundArgs bound, EvalContext& ctx, const oscad::Position* callPos) {
     const oscad::Scope* fnScope = decl.scope() ? decl.scope() : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;
@@ -531,9 +530,8 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
                                  });
 }
 
-Value Evaluator::evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode,
-                                               std::unordered_map<std::string, Value> bound, EvalContext& ctx,
-                                               const oscad::Position* callPos) {
+Value Evaluator::evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode, BoundArgs bound,
+                                               EvalContext& ctx, const oscad::Position* callPos) {
     const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;

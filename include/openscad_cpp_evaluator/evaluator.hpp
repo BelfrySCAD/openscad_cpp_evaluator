@@ -1,5 +1,6 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/bound_args.hpp"
 #include "openscad_cpp_evaluator/bytecode.hpp"
 #include "openscad_cpp_evaluator/bytecode_vm.hpp"
 #include "openscad_cpp_evaluator/call_args.hpp"
@@ -211,9 +212,8 @@ public:
     // user module calls, user function calls, and function-literal calls.
     // Public: builtins/control.cpp's children()/render() plumbing and a
     // future phase's own call sites may need it directly.
-    std::unordered_map<std::string, Value> bindArgs(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
-                                                      const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
-                                                      EvalContext& ctx);
+    BoundArgs bindArgs(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
+                       const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx);
 
     // children()/children(N) -- deferred evaluation of the calling module's
     // own children, re-injecting the current $-variables. `args` is the
@@ -273,9 +273,8 @@ public:
     // exactly (callCtxFor, compiled-vs-interpreted dispatch, the callstack/
     // profile/debug bracket via the same evalUserFunctionCore both share).
     // Public: bytecode_vm.cpp is a separate translation unit.
-    Value evalUserFunctionFromBound(const std::string& name, const oscad::FunctionDeclaration& decl,
-                                     std::unordered_map<std::string, Value> bound, EvalContext& ctx,
-                                     const oscad::Position* callPos);
+    Value evalUserFunctionFromBound(const std::string& name, const oscad::FunctionDeclaration& decl, BoundArgs bound,
+                                     EvalContext& ctx, const oscad::Position* callPos);
 
     // Same, for a call whose callee was only resolvable at runtime (the
     // CALL_DYNAMIC opcode, once it's popped a Value and confirmed it holds
@@ -283,8 +282,8 @@ public:
     // for) -- `bound` is matched against `funcNode`'s OWN parameters
     // (discovered now, not at compile time, since the callee wasn't
     // statically known). Mirrors evalFunctionLiteral exactly otherwise.
-    Value evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode, std::unordered_map<std::string, Value> bound,
-                                        EvalContext& ctx, const oscad::Position* callPos);
+    Value evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode, BoundArgs bound, EvalContext& ctx,
+                                        const oscad::Position* callPos);
 
     // Testing-only override, checked before the (once-cached) env var --
     // lets test_bytecode_compiler.cpp force VM-on for specific tests
@@ -436,8 +435,8 @@ private:
     // $-prefixed name bound into dyn just as badly, in the other
     // direction: it always looked unbound, clobbering the real value with
     // undef).
-    void applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
-                        const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx);
+    void applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, const BoundArgs& bound,
+                        EvalContext& childCtx);
 
     // Shared tail of evalUserFunction/evalUserFunctionFromBound/
     // evalFunctionLiteral/evalFunctionLiteralFromBound's interpreter
@@ -447,8 +446,8 @@ private:
     // duplication before this) specifically so the tail-call trampoline's
     // own FunctionCall case (simplifyTailStep, added alongside this) can
     // reuse it instead of a fifth copy.
-    void bindCallArgsInto(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
-                           std::unordered_map<std::string, Value> bound, EvalContext& childCtx);
+    void bindCallArgsInto(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, BoundArgs bound,
+                           EvalContext& childCtx);
 
     // Shared by checkDebug() and error()'s own errorBreak hook call: `let`
     // + `$`-prefixed `dyn` entries from `ctx`, plus (if there's an active

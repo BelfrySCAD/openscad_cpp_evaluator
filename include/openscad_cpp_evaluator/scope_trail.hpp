@@ -1,5 +1,7 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/value.hpp"
+
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -364,20 +366,117 @@ private:
     int level_;
 };
 
-// dynExplicit's own trail: a set (which $-names the SCRIPT itself
-// explicitly assigned), not a value map -- kept as its own trail rather
-// than folded into `dyn`'s entries specifically so every existing
-// `ctx.dyn->at(name)`-style read site keeps returning a bare Value, not a
-// {Value,bool} pair (dyn is read far more often than dynExplicit is
-// consulted). Always opened/leveled in lockstep with `dyn` at every
-// derivation site (see eval_context.cpp) -- they never diverge, just
-// happen to stay two separate objects rather than one merged type. Both
-// share the SAME DynNameIntern instance as `dyn` (see EvalContext::
-// makeRoot()), so a given $-name always interns to the same id in both.
-using DynExplicitTrail = IndexedTrailView<bool>;
+// dyn and dynExplicit ("which $-names the SCRIPT itself explicitly
+// assigned", as opposed to merely present via an ambient seed/default)
+// used to be two fully independent IndexedTrailViews, always opened
+// together at every derivation site (see eval_context.cpp) but never
+// actually sharing storage -- two heap allocations per childCtx()/
+// callCtx()/letChildCtx() call where one would do. DynEntry/DynValueView/
+// DynExplicitView below combine them into ONE underlying
+// IndexedTrailView<DynEntry>, cutting that to one allocation; the two
+// view classes are thin, distinctly-typed PROJECTIONS of the very same
+// shared_ptr<IndexedTrailView<DynEntry>> (shared via a plain shared_ptr
+// copy between them -- a refcount bump, not a second heap object), so
+// every existing dyn/dynExplicit call site keeps reading/writing through
+// the exact same method names/shapes it always did (find/set/count/
+// items/empty), via each view's operator-> returning `this` (so
+// `ctx.dyn->find(...)` keeps compiling unchanged even though `dyn` is now
+// a plain value member, not a shared_ptr).
+//
+// dyn and dynExplicit are set INDEPENDENTLY at many call sites -- e.g. a
+// parameter default binds only the value (dynExplicit untouched), while
+// an explicit `$fn=64;` assignment binds both. A write through EITHER
+// view must not clobber the OTHER field's own ancestry-visible value for
+// that name at this exact level, so both views' set() read the name's
+// CURRENTLY VISIBLE combined entry first (via the shared ancestry walk)
+// and carry the other field forward unchanged, rather than resetting it.
+struct DynEntry {
+    Value value;
+    bool explicitlySet = false;
+};
+
+class DynValueView {
+public:
+    DynValueView() = default;
+    explicit DynValueView(std::shared_ptr<IndexedTrailView<DynEntry>> trail) : trail_(std::move(trail)) {}
+
+    DynValueView* operator->() { return this; }
+    const DynValueView* operator->() const { return this; }
+
+    // The raw shared trail, so EvalContext's derivation methods can open
+    // ONE new level and wrap it into both a DynValueView and a
+    // DynExplicitView, rather than each view opening its own (which would
+    // silently re-fork them into two independent trails again).
+    const std::shared_ptr<IndexedTrailView<DynEntry>>& trail() const { return trail_; }
+
+    void set(const std::string& name, Value value) {
+        bool explicitlySet = false;
+        if (const DynEntry* existing = trail_->find(name)) explicitlySet = existing->explicitlySet;
+        trail_->set(name, DynEntry{std::move(value), explicitlySet});
+    }
+    const Value* find(const std::string& name) const {
+        const DynEntry* e = trail_->find(name);
+        return e ? &e->value : nullptr;
+    }
+    bool count(const std::string& name) const { return find(name) != nullptr; }
+    bool empty() const { return trail_->empty(); }
+    const Value& at(const std::string& name) const {
+        const Value* v = find(name);
+        if (!v) throw std::out_of_range("DynValueView::at: key not found");
+        return *v;
+    }
+    std::vector<std::pair<std::string, Value>> items() const {
+        std::vector<std::pair<std::string, Value>> result;
+        for (auto& [name, entry] : trail_->items()) result.emplace_back(name, entry.value);
+        return result;
+    }
+
+private:
+    std::shared_ptr<IndexedTrailView<DynEntry>> trail_;
+};
+
+class DynExplicitView {
+public:
+    DynExplicitView() = default;
+    explicit DynExplicitView(std::shared_ptr<IndexedTrailView<DynEntry>> trail) : trail_(std::move(trail)) {}
+
+    DynExplicitView* operator->() { return this; }
+    const DynExplicitView* operator->() const { return this; }
+
+    void set(const std::string& name, bool explicitlySet) {
+        Value value;
+        if (const DynEntry* existing = trail_->find(name)) value = existing->value;
+        trail_->set(name, DynEntry{std::move(value), explicitlySet});
+    }
+    bool find(const std::string& name) const {
+        const DynEntry* e = trail_->find(name);
+        return e && e->explicitlySet;
+    }
+    bool count(const std::string& name) const { return find(name); }
+    // NOT trail_->empty() -- the shared trail can hold plenty of
+    // value-only entries (a seeded default, viewportParams, ...) with
+    // explicitlySet=false. dynExplicit's own "empty" means "no NAME has
+    // ever been explicitly assigned", which only items() (already
+    // filtering on that flag) can answer correctly.
+    bool empty() const {
+        for (auto& [name, entry] : trail_->items()) {
+            if (entry.explicitlySet) return false;
+        }
+        return true;
+    }
+    std::vector<std::pair<std::string, bool>> items() const {
+        std::vector<std::pair<std::string, bool>> result;
+        for (auto& [name, entry] : trail_->items()) result.emplace_back(name, entry.explicitlySet);
+        return result;
+    }
+
+private:
+    std::shared_ptr<IndexedTrailView<DynEntry>> trail_;
+};
+
 using NameSet = std::unordered_set<std::string>;
 
-inline NameSet explicitSnapshot(const DynExplicitTrail& trail) {
+inline NameSet explicitSnapshot(const DynExplicitView& trail) {
     NameSet result;
     for (auto& [name, v] : trail.items()) {
         if (v) result.insert(name);

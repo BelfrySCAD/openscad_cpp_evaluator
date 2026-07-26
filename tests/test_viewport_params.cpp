@@ -57,7 +57,7 @@ TEST(ViewportParams, ScriptAssignmentIsExplicit) {
     EXPECT_DOUBLE_EQ(std::get<double>(items[0]), 1.0);
     EXPECT_DOUBLE_EQ(std::get<double>(items[1]), 2.0);
     EXPECT_DOUBLE_EQ(std::get<double>(items[2]), 3.0);
-    EXPECT_EQ(explicitSnapshot(*ctx.dynExplicit), NameSet{"$vpt"});
+    EXPECT_EQ(explicitSnapshot(ctx.dynExplicit), NameSet{"$vpt"});
 }
 
 TEST(ViewportParams, OnlyTheAssignedNameIsExplicit) {
@@ -66,7 +66,7 @@ TEST(ViewportParams, OnlyTheAssignedNameIsExplicit) {
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     ev.evaluate(ast, ctx, vpSeed());
-    EXPECT_EQ(explicitSnapshot(*ctx.dynExplicit), NameSet{"$vpd"});
+    EXPECT_EQ(explicitSnapshot(ctx.dynExplicit), NameSet{"$vpd"});
     EXPECT_FALSE(ctx.dynExplicit->count("$vpt"));
     EXPECT_TRUE(ctx.dyn->count("$vpt") > 0); // still present (seeded), just not explicit
 }
@@ -77,7 +77,7 @@ TEST(ViewportParams, RegularSpecialVarAssignmentAlsoTracked) {
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     ev.evaluate(ast, ctx); // no viewportParams at all
-    EXPECT_EQ(explicitSnapshot(*ctx.dynExplicit), NameSet{"$fn"});
+    EXPECT_EQ(explicitSnapshot(ctx.dynExplicit), NameSet{"$fn"});
 }
 
 TEST(ViewportParams, AnimationTSetViaViewportParams) {
