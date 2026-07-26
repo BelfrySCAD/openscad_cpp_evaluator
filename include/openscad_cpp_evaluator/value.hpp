@@ -3,6 +3,7 @@
 #include "openscad_cpp_evaluator/osc_range.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -143,35 +144,137 @@ std::string fmtValue(const Value& v);
 // Read-only view over a for()/intersection_for() loop assignment's expanded
 // iteration values (see expandIterable() below). When the source was
 // already a list, this just holds the list's own shared_ptr (a refcount
-// bump, no copy of `items`); the range/object/string/scalar cases must
-// synthesize a fresh vector regardless (there's no existing storage to
-// view), which is held instead. Either way, callers only ever need
-// size()/operator[]/range-for, which both cases provide uniformly.
+// bump, no copy of `items`); object/string/scalar cases must synthesize a
+// fresh vector regardless (there's no existing storage to view), which is
+// held instead. A range is neither: it's kept as (start, step, end) and
+// each element is produced on demand, in the SAME left-to-right
+// accumulation order (`x += step`, repeated) the old eager expansion
+// always used -- never a recomputed `start + i*step`, which can round
+// differently than repeated addition over many steps, and this codebase's
+// float fidelity is meant to be bit-for-bit, not "close enough". No
+// vector is ever materialized for a range, however large.
+//
+// Every real caller reaches elements in strictly increasing order from 0
+// (begin()/end()'s range-for, or the bytecode VM's own index that only
+// ever increments by exactly 1 -- see bytecode_vm.cpp's Op::IterNext).
+// operator[]'s one-slot cursor_ cache exploits exactly that pattern to
+// stay O(1) per access; a genuinely out-of-order index (nothing here does
+// this today) still returns the CORRECT value by restarting the
+// accumulation from `start`, just slower -- never silently wrong.
 class IterableValues {
 public:
     IterableValues() = default;
     explicit IterableValues(ListPtr list) : list_(std::move(list)) {}
     explicit IterableValues(std::vector<Value> owned)
         : owned_(std::make_shared<std::vector<Value>>(std::move(owned))) {}
+    IterableValues(double rangeStart, double rangeStep, double rangeEnd)
+        : rangeStart_(rangeStart), rangeStep_(rangeStep), rangeEnd_(rangeEnd), isRange_(true) {}
 
-    size_t size() const { return list_ ? list_->items.size() : (owned_ ? owned_->size() : 0); }
-    const Value& operator[](size_t i) const { return list_ ? list_->items[i] : (*owned_)[i]; }
-    const Value* begin() const { return list_ ? list_->items.data() : (owned_ ? owned_->data() : nullptr); }
-    const Value* end() const { return begin() + size(); }
+    // O(1) for list/owned. For a range this walks the whole sequence once
+    // (the same cost expandIterable's old eager version always paid to
+    // find this out, just without allocating anything to store it in) --
+    // kept for API completeness; no caller in this codebase actually
+    // calls size() on a range today (they all reach elements via
+    // begin()/end() or the sequential operator[] below, neither of which
+    // needs a count up front).
+    size_t size() const {
+        if (!isRange_) return list_ ? list_->items.size() : (owned_ ? owned_->size() : 0);
+        size_t n = 0;
+        for (double x = rangeStart_; inRange(x); x += rangeStep_) ++n;
+        return n;
+    }
+
+    const Value& operator[](size_t i) const {
+        if (!isRange_) return list_ ? list_->items[i] : (*owned_)[i];
+        if (!cursor_ || i < cursor_->index) cursor_ = Cursor{0, rangeStart_, Value{}};
+        while (cursor_->index < i) {
+            cursor_->value += rangeStep_;
+            ++cursor_->index;
+        }
+        cursor_->cached = Value{cursor_->value};
+        return cursor_->cached;
+    }
+
+    // A sentinel-style forward iterator: `end()`'s own position is never
+    // read (operator!= only ever asks "is *this* exhausted", the usual
+    // shape for a lazily-produced sequence with no predetermined length)
+    // -- see IterableValues::exhausted()/advance()/dereference() below.
+    class Iterator {
+    public:
+        const Value& operator*() const { return owner_->dereference(state_); }
+        Iterator& operator++() {
+            owner_->advance(state_);
+            return *this;
+        }
+        bool operator!=(const Iterator&) const { return !owner_->exhausted(state_); }
+
+    private:
+        friend class IterableValues;
+        struct State {
+            size_t idx = 0;
+            double x = 0;
+            mutable Value cached;
+        };
+        Iterator(const IterableValues* owner, State state) : owner_(owner), state_(state) {}
+        const IterableValues* owner_;
+        State state_;
+    };
+
+    Iterator begin() const { return Iterator(this, Iterator::State{0, rangeStart_, Value{}}); }
+    Iterator end() const { return Iterator(this, Iterator::State{}); }
 
 private:
+    bool inRange(double x) const {
+        if (rangeStep_ > 0) return x <= rangeEnd_ + 1e-10;
+        if (rangeStep_ < 0) return x >= rangeEnd_ - 1e-10;
+        return false;
+    }
+
+    const Value& dereference(const Iterator::State& s) const {
+        if (isRange_) {
+            s.cached = Value{s.x};
+            return s.cached;
+        }
+        return list_ ? list_->items[s.idx] : (*owned_)[s.idx];
+    }
+
+    void advance(Iterator::State& s) const {
+        if (isRange_) {
+            s.x += rangeStep_;
+        } else {
+            ++s.idx;
+        }
+    }
+
+    bool exhausted(const Iterator::State& s) const {
+        if (isRange_) return !inRange(s.x);
+        const size_t n = list_ ? list_->items.size() : (owned_ ? owned_->size() : 0);
+        return s.idx >= n;
+    }
+
     ListPtr list_;
     std::shared_ptr<std::vector<Value>> owned_;
+    double rangeStart_ = 0, rangeStep_ = 0, rangeEnd_ = 0;
+    bool isRange_ = false;
+
+    struct Cursor {
+        size_t index;
+        double value;
+        Value cached;
+    };
+    mutable std::optional<Cursor> cursor_;
 };
 
 // Converts a for()/intersection_for() loop assignment's evaluated RHS into
-// the list of values to iterate: undef -> empty, range -> expanded
-// (matching OscRange's own start/step/end iteration, half-open at the far
-// end within a 1e-10 epsilon), object -> its keys as strings, string ->
-// individual characters as 1-character strings, list -> its elements
-// as-is (no copy -- see IterableValues), anything else (a bare scalar) ->
-// a single-element list. Mirrors the shared expansion logic duplicated
-// across the reference's _eval_for/_resolve_intersection_for.
+// the sequence of values to iterate: undef -> empty, range -> a LAZY
+// sequence (matching OscRange's own start/step/end iteration, half-open
+// at the far end within a 1e-10 epsilon -- see IterableValues's own doc
+// comment; no vector is ever built for this case, however large the
+// range), object -> its keys as strings, string -> individual characters
+// as 1-character strings, list -> its elements as-is (no copy -- see
+// IterableValues), anything else (a bare scalar) -> a single-element
+// list. Mirrors the shared expansion logic duplicated across the
+// reference's _eval_for/_resolve_intersection_for.
 IterableValues expandIterable(const Value& v);
 
 // `each <body>`'s own flatten-one-level rule, shared by the AST interpreter
