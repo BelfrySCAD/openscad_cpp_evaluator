@@ -63,20 +63,6 @@ std::optional<bool> valueLess(const Value& a, const Value& b) {
     return ia.size() < ib.size();
 }
 
-// Writes one let()-clause binding into the right place ($-prefixed ->
-// dyn/dynExplicit, everything else -> let_). Mirrors _bind_let_name, minus
-// the copy-on-first-$-write tracking: this port's letChildCtx() always
-// copies dyn/dynExplicit eagerly (see its own doc comment), so there's
-// nothing to defer here.
-void bindLetName(EvalContext& ctx, const std::string& name, const Value& v) {
-    if (!name.empty() && name[0] == '$') {
-        ctx.dyn->set(name, v);
-        ctx.dynExplicit->set(name, true);
-    } else {
-        ctx.let_->set(name, v);
-    }
-}
-
 bool isListCompClauseKind(oscad::NodeKind kind) {
     using oscad::NodeKind;
     switch (kind) {
@@ -254,6 +240,22 @@ Value Evaluator::applyRange(const Value& startV, const Value& endV, const Value&
 }
 
 // -- let()/echo()/assert() expression forms ------------------------------
+
+// Writes one let()-clause binding into the right place ($-prefixed ->
+// dyn/dynExplicit, everything else -> let_). Mirrors _bind_let_name, minus
+// the copy-on-first-$-write tracking: this port's letChildCtx() always
+// copies dyn/dynExplicit eagerly (see its own doc comment), so there's
+// nothing to defer here. A member (not a TU-local free function) so
+// user_calls.cpp's tail-call trampoline can share it instead of
+// duplicating this logic.
+void Evaluator::bindLetName(EvalContext& ctx, const std::string& name, const Value& v) {
+    if (!name.empty() && name[0] == '$') {
+        ctx.dyn->set(name, v);
+        ctx.dynExplicit->set(name, true);
+    } else {
+        ctx.let_->set(name, v);
+    }
+}
 
 Value Evaluator::evalLetExpr(const oscad::LetOp& node, EvalContext& ctx) {
     EvalContext childCtx = ctx.letChildCtx();

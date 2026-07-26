@@ -65,6 +65,38 @@ std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::strin
     return ProfileHandle{key, recursiveReentry, std::chrono::steady_clock::now()};
 }
 
+void Evaluator::profileRecordTailHop(const std::string& kind, const std::string& name, const oscad::Position* callPos,
+                                      const oscad::Position* declPos) {
+    if (!profiling_) return;
+    const std::string callOrigin = callPos ? callPos->origin : "";
+    const int callLine = callPos ? callPos->line : 0;
+    const ProfileSiteKey key{kind, name, callOrigin, callLine};
+
+    auto it = profileSites_.find(key);
+    if (it == profileSites_.end()) {
+        CallSiteProfile site;
+        site.kind = kind;
+        site.name = name;
+        // The trampoline has already mutated callStack_.back() to this
+        // hop's own identity by the time this runs -- its PREVIOUS
+        // contents (the caller of this hop, from the trampoline chain's
+        // point of view) aren't recoverable here, so callerName falls back
+        // to the frame one level further out (the real, non-trampolined
+        // caller) -- matches profileEnter's own "callStack_.back() is the
+        // caller" rule, since that's genuinely one level too shallow only
+        // in the middle of a tail chain, a case this port's profiler
+        // doesn't try to distinguish further (see this function's own doc
+        // comment on the wall-time lumping simplification).
+        site.callerName = callStack_.empty() ? "<toplevel>" : callStack_.back().name;
+        site.callOrigin = callOrigin;
+        site.callLine = callLine;
+        site.declOrigin = declPos ? declPos->origin : "";
+        site.declLine = declPos ? declPos->line : 0;
+        it = profileSites_.emplace(key, std::move(site)).first;
+    }
+    it->second.callCount += 1;
+}
+
 void Evaluator::profileExit(const ProfileHandle& handle) {
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - handle.start).count();
     const double childTime = profileChildTime_.back();

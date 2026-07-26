@@ -159,6 +159,18 @@ void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::Parameter
     }
 }
 
+void Evaluator::bindCallArgsInto(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
+                                  std::unordered_map<std::string, Value> bound, EvalContext& childCtx) {
+    for (auto& [k, v] : bound) {
+        if (!k.empty() && k[0] == '$') {
+            childCtx.dyn->set(k, std::move(v));
+        } else {
+            childCtx.let_->set(k, std::move(v));
+        }
+    }
+    applyDefaults(params, bound, childCtx);
+}
+
 void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call, EvalContext& ctx) {
     const oscad::Scope* childScope = decl.scope() ? decl.scope() : ctx.scope;
     auto bound = bindArgs(decl.parameters, call.arguments, ctx);
@@ -210,6 +222,201 @@ void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad
     if (prof) profileExit(*prof);
 }
 
+// -- Tail-call optimization (interpreter path) -----------------------------
+//
+// See these functions' own declarations in evaluator.hpp for the full
+// design rationale (mirrors upstream real OpenSCAD's own
+// FunctionCall::evaluate()/simplify_function_body trampoline, with the
+// isolated-hop-only restriction this port's stack-scanning closure lookup
+// requires).
+
+std::optional<Evaluator::TailStep> Evaluator::tryTailStepFor(
+    const std::string& calleeName, const oscad::ASTNode& declNode,
+    const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, const oscad::Expression& body,
+    bool hasCompiledChunk, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
+    const oscad::Position& callPos) {
+    if (hasCompiledChunk) return std::nullopt;
+    const oscad::Scope* fnScope = declNode.scope() ? declNode.scope() : ctx.scope;
+    bool usedChildCtx = false;
+    EvalContext childCtx = callCtxFor(declNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    if (usedChildCtx) return std::nullopt;
+    bindCallArgsInto(params, bindArgs(params, arguments, ctx), childCtx);
+    TailStep step;
+    step.nextExpr = &body;
+    step.ctx = std::move(childCtx);
+    step.isNewLogicalCall = true;
+    step.calleeName = calleeName;
+    step.calleeDecl = &declNode;
+    step.callPos = &callPos;
+    return step;
+}
+
+std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simplifyTailStep(
+    const oscad::Expression& node, EvalContext& ctx) {
+    switch (node.kind()) {
+        case oscad::NodeKind::TernaryOp: {
+            auto& n = static_cast<const oscad::TernaryOp&>(node);
+            const oscad::Expression* branch = truthy(evalExpr(*n.condition, ctx)) ? n.trueExpr.get() : n.falseExpr.get();
+            TailStep step;
+            step.nextExpr = branch;
+            step.ctx = ctx;
+            return step;
+        }
+        case oscad::NodeKind::LetOp: {
+            auto& n = static_cast<const oscad::LetOp&>(node);
+            EvalContext childCtx = ctx.letChildCtx();
+            for (const auto& assign : n.assignments) {
+                Value v = evalExpr(*assign->expr, childCtx);
+                bindLetName(childCtx, assign->name->name, v);
+            }
+            TailStep step;
+            step.nextExpr = n.body.get();
+            step.ctx = std::move(childCtx);
+            return step;
+        }
+        case oscad::NodeKind::EchoOp: {
+            auto& n = static_cast<const oscad::EchoOp&>(node);
+            doEcho(n.arguments, ctx);
+            TailStep step;
+            step.nextExpr = n.body.get();
+            step.ctx = ctx;
+            return step;
+        }
+        case oscad::NodeKind::AssertOp: {
+            // Mirrors evalAssertExpr's own condition-check/error-building
+            // logic exactly (a small, deliberate duplication -- see this
+            // function's own header comment on why it doesn't delegate to
+            // evalExpr for these 5 node kinds).
+            auto& n = static_cast<const oscad::AssertOp&>(node);
+            const auto& raw = n.arguments;
+            const bool condition = raw.empty() || truthy(evalExpr(*argExpr(*raw[0]), ctx));
+            if (!condition) {
+                std::string condText = raw.empty() ? "false" : argExpr(*raw[0])->toString();
+                std::string err = "Assertion '" + condText + "' failed";
+                if (raw.size() > 1) {
+                    Value msg = evalExpr(*argExpr(*raw[1]), ctx);
+                    const std::string* s = std::get_if<std::string>(&msg);
+                    err += ": \"" + (s ? *s : fmtValue(msg)) + "\"";
+                }
+                error(err, n, "assert");
+            }
+            TailStep step;
+            step.nextExpr = n.body.get();
+            step.ctx = ctx;
+            return step;
+        }
+        case oscad::NodeKind::PrimaryCall: {
+            auto& n = static_cast<const oscad::PrimaryCall&>(node);
+            const oscad::Identifier* leftId = (n.left->kind() == oscad::NodeKind::Identifier)
+                                                   ? static_cast<const oscad::Identifier*>(n.left.get())
+                                                   : nullptr;
+
+            // import/builtins: nothing evaluated yet (name-only checks),
+            // safe to delegate to the existing evalFunctionCall wholesale
+            // -- neither ever trampolines, matching upstream's own
+            // BuiltinFunction early-return via a genuine call.
+            if (leftId && (leftId->name == "import" || isBuiltinFunctionName(leftId->name))) {
+                return Value{evalFunctionCall(n, ctx)};
+            }
+
+            if (leftId) {
+                const oscad::ASTNode* declNode = ctx.scope->lookupFunction(leftId->name);
+                if (declNode && declNode->kind() == oscad::NodeKind::FunctionDeclaration) {
+                    const auto& decl = static_cast<const oscad::FunctionDeclaration&>(*declNode);
+                    const bool hasChunk = bytecodeVmEnabled() && lookupOrCompileChunk(decl) != nullptr;
+                    std::optional<TailStep> step = tryTailStepFor(leftId->name, decl, decl.parameters, *decl.expr,
+                                                                   hasChunk, n.arguments, ctx, n.position());
+                    if (step) return std::move(*step);
+                    // Not eligible (closure-nested or compiled) -- a real
+                    // call, same as evalFunctionCall would have made for
+                    // this same resolved decl. n.left is never
+                    // re-evaluated here (a plain Identifier lookup has no
+                    // side effects to duplicate).
+                    return Value{evalUserFunction(leftId->name, decl, n.arguments, ctx, &n)};
+                }
+            }
+
+            // Function-literal *value* callee -- resolve n.left/leftId
+            // exactly once (matching evalFunctionCall's own
+            // warnIfUndef=false probe), then either trampoline or call it
+            // directly. Never re-evaluate n.left below this point -- it
+            // may itself be an arbitrary (side-effecting) expression.
+            Value funcVal = leftId ? evalIdentifier(leftId->name, &leftId->position(), ctx, false) : evalExpr(*n.left, ctx);
+            if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&funcVal); flPtr && *flPtr) {
+                const oscad::FunctionLiteral& funcNode = **flPtr;
+                const bool hasChunk = bytecodeVmEnabled() && lookupCompiledLiteralChunk(funcNode) != nullptr;
+                std::optional<TailStep> step = tryTailStepFor("<function literal>", funcNode, funcNode.parameters,
+                                                               *funcNode.body, hasChunk, n.arguments, ctx, n.position());
+                if (step) return std::move(*step);
+                return Value{evalFunctionLiteral(funcNode, n.arguments, ctx, &n)};
+            }
+
+            if (leftId) warn("Ignoring unknown function '" + leftId->name + "'", &n.position());
+            return Value{};
+        }
+        default:
+            return NotTailStep{};
+    }
+}
+
+Value Evaluator::evalFunctionBodyTrampoline(const oscad::ASTNode* declNode, const oscad::Expression& bodyExpr,
+                                             EvalContext& ctx) {
+    static constexpr unsigned kTcoIterationCap = 1000000;
+    const oscad::Expression* expr = &bodyExpr;
+    // Every EvalContext this trampoline ever derives must stay alive for
+    // its whole run, not just the currently-active one. scope_trail.hpp's
+    // levels are normally kept reachable by the C++ call stack itself
+    // (each nested call's own local EvalContext coexists with its
+    // ancestors' until it returns) -- exactly what this trampoline
+    // deliberately avoids growing. $-vars (dyn/dynExplicit) stay
+    // dynamically scoped THROUGH even an isolated call (see callCtx()'s
+    // own doc comment: dyn's isolate=false, unlike let_'s isolate=true),
+    // so a later iteration may still need to walk back through a much
+    // earlier one's dyn level to resolve a name. Reusing a single ctx
+    // variable via plain assignment would drop the old value's shared_ptr
+    // refcount to zero and pop that level (TrailView's custom deleter ->
+    // ScopeTrailStorage::popLevel(), scope_trail.hpp) -- permanently
+    // erasing its parent-chain link (and any bindings made at it) even
+    // though a much later step still needs to see through it. Caught by
+    // BytecodeCompiler.VmOffAndVmOnAgreeOnClosureCases turning up "undef"
+    // for a name that should still resolve -- not a hypothetical.
+    //
+    // Trades the native C++ *stack* growth this trampoline exists to
+    // avoid for heap growth instead: O(iteration count) EvalContext
+    // objects (a handful of shared_ptrs each), bounded by available RAM
+    // rather than a ~few-MB thread stack -- not literally O(1) memory,
+    // but converts a hard crash into a working (if not minimal-memory)
+    // computation. A future pass could shrink this further (only
+    // dyn/dynExplicit genuinely need cross-call-boundary lifetime;
+    // let_/dynPositions reset at every isolated call and could be
+    // dropped there) if memory ever measurably matters more than this
+    // simpler all-or-nothing approach.
+    std::vector<EvalContext> chain{ctx};
+    unsigned recursionGuard = 0;
+    while (true) {
+        auto result = simplifyTailStep(*expr, ctx);
+        if (Value* v = std::get_if<Value>(&result)) return std::move(*v);
+        if (std::holds_alternative<NotTailStep>(result)) return evalExpr(*expr, ctx);
+
+        TailStep& step = std::get<TailStep>(result);
+        expr = step.nextExpr;
+        chain.push_back(std::move(step.ctx));
+        ctx = chain.back();
+        if (step.isNewLogicalCall) {
+            if (++recursionGuard > kTcoIterationCap) {
+                error("Recursion detected calling function '" + step.calleeName + "'", *declNode);
+            }
+            CallStackFrame& frame = callStack_.back();
+            frame.name = step.calleeName;
+            frame.declNode = step.calleeDecl;
+            frame.declPosition = &step.calleeDecl->position();
+            frame.callPosition = step.callPos;
+            frame.upvalueParent = -1;
+            profileRecordTailHop("function", step.calleeName, step.callPos, &step.calleeDecl->position());
+        }
+    }
+}
+
 Value Evaluator::evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode,
                                        const oscad::Expression& bodyExpr, EvalContext& childCtx,
                                        const oscad::Position* callPos, int upvalueParent,
@@ -249,20 +456,13 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
     // the unchanged interpreter path below.
     const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupOrCompileChunk(decl) : nullptr;
     if (!chunk) {
-        auto bound = bindArgs(decl.parameters, arguments, ctx);
-        for (auto& [k, v] : bound) {
-            if (!k.empty() && k[0] == '$') {
-                childCtx.dyn->set(k, std::move(v));
-            } else {
-                childCtx.let_->set(k, std::move(v));
-            }
-        }
-        applyDefaults(decl.parameters, bound, childCtx);
+        bindCallArgsInto(decl.parameters, bindArgs(decl.parameters, arguments, ctx), childCtx);
     }
 
     const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
     return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
-        return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx) : evalExpr(*decl.expr, childCtx);
+        return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx)
+                      : evalFunctionBodyTrampoline(&decl, *decl.expr, childCtx);
     });
 }
 
@@ -276,16 +476,9 @@ Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad:
     const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
     const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupOrCompileChunk(decl) : nullptr;
     if (!chunk) {
-        for (auto& [k, v] : bound) {
-            if (!k.empty() && k[0] == '$') {
-                childCtx.dyn->set(k, std::move(v));
-            } else {
-                childCtx.let_->set(k, std::move(v));
-            }
-        }
-        applyDefaults(decl.parameters, bound, childCtx);
+        bindCallArgsInto(decl.parameters, std::move(bound), childCtx);
         return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent,
-                                     [&]() -> Value { return evalExpr(*decl.expr, childCtx); });
+                                     [&]() -> Value { return evalFunctionBodyTrampoline(&decl, *decl.expr, childCtx); });
     }
     return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
         return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx);
@@ -309,15 +502,7 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
     // unconditionally correct either way.
     const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
     if (!chunk) {
-        auto bound = bindArgs(funcNode.parameters, arguments, ctx);
-        for (auto& [k, v] : bound) {
-            if (!k.empty() && k[0] == '$') {
-                childCtx.dyn->set(k, std::move(v));
-            } else {
-                childCtx.let_->set(k, std::move(v));
-            }
-        }
-        applyDefaults(funcNode.parameters, bound, childCtx);
+        bindCallArgsInto(funcNode.parameters, bindArgs(funcNode.parameters, arguments, ctx), childCtx);
     }
 
     const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
@@ -331,7 +516,7 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
     return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
                                  [&]() -> Value {
                                      return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx)
-                                                  : evalExpr(*funcNode.body, childCtx);
+                                                  : evalFunctionBodyTrampoline(&funcNode, *funcNode.body, childCtx);
                                  });
 }
 
@@ -345,16 +530,10 @@ Value Evaluator::evalFunctionLiteralFromBound(const oscad::FunctionLiteral& func
     const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
     const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
     if (!chunk) {
-        for (auto& [k, v] : bound) {
-            if (!k.empty() && k[0] == '$') {
-                childCtx.dyn->set(k, std::move(v));
-            } else {
-                childCtx.let_->set(k, std::move(v));
-            }
-        }
-        applyDefaults(funcNode.parameters, bound, childCtx);
-        return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
-                                     [&]() -> Value { return evalExpr(*funcNode.body, childCtx); });
+        bindCallArgsInto(funcNode.parameters, std::move(bound), childCtx);
+        return evalUserFunctionCore(
+            "<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
+            [&]() -> Value { return evalFunctionBodyTrampoline(&funcNode, *funcNode.body, childCtx); });
     }
     return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
                                  [&]() -> Value { return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx); });
