@@ -143,20 +143,29 @@ private:
 // own `level_` is both what new writes via set() get tagged with AND the
 // starting point for a read's ancestry walk (see ScopeTrailStorage::
 // lookup) -- see eval_context.cpp for how each of withScope()/childCtx()/
-// callCtx()/letChildCtx() derives it. `guard_` is what makes scope-exit
-// automatic: its custom deleter calls storage_->popLevel(level_) when the
-// LAST live copy of this specific TrailView is destroyed (normal return,
-// an early `return`, or exception unwind all trigger it identically, no
-// try/catch needed at any call site) -- null for a view that didn't
-// itself open a new level (openLevel() wasn't called for it, e.g.
-// withScope()'s aliased siblings), since nothing needs popping for those.
+// callCtx()/letChildCtx() derives it. Scope-exit is automatic via this
+// class's own destructor, which calls storage_->popLevel(level_) (normal
+// return, an early `return`, or exception unwind all trigger it
+// identically, no try/catch needed at any call site) -- safe specifically
+// because a TrailView is only ever reached through shared_ptr<TrailView<T>>
+// (every field that holds one, e.g. EvalContext::let_, is that shared_ptr,
+// never the object itself), so the *outer* shared_ptr's own refcounting
+// already guarantees the destructor fires exactly once, on the last live
+// reference. Copy/move are deleted to keep that invariant enforced rather
+// than merely documented -- this used to be a separate `shared_ptr<void>
+// guard_` member with its own custom-deleter control-block allocation
+// (belt-and-suspenders against a direct-copy hazard that can't actually
+// happen given the invariant above); folding popLevel() into ~TrailView()
+// directly halves childCtx()/callCtx()'s allocation count (4 trails * 2
+// allocations each down to 4 trails * 1) with no change to the
+// ancestry-walk/isolation logic itself.
 template <typename T>
 class TrailView {
 public:
     static std::shared_ptr<TrailView<T>> makeRoot() {
         auto storage = std::make_shared<ScopeTrailStorage<T>>();
         int level = storage->openLevel(0);
-        return std::make_shared<TrailView<T>>(storage, level, makeGuard(storage, level));
+        return std::make_shared<TrailView<T>>(storage, level);
     }
 
     // Open a fresh level for writes. `isolate=true` terminates the new
@@ -168,11 +177,16 @@ public:
     // scope's own writes get popped away on exit).
     std::shared_ptr<TrailView<T>> openChild(bool isolate) const {
         int level = storage_->openLevel(isolate ? 0 : level_);
-        return std::make_shared<TrailView<T>>(storage_, level, makeGuard(storage_, level));
+        return std::make_shared<TrailView<T>>(storage_, level);
     }
 
-    TrailView(std::shared_ptr<ScopeTrailStorage<T>> storage, int level, std::shared_ptr<void> guard)
-        : storage_(std::move(storage)), level_(level), guard_(std::move(guard)) {}
+    TrailView(std::shared_ptr<ScopeTrailStorage<T>> storage, int level)
+        : storage_(std::move(storage)), level_(level) {}
+    ~TrailView() { storage_->popLevel(level_); }
+    TrailView(const TrailView&) = delete;
+    TrailView& operator=(const TrailView&) = delete;
+    TrailView(TrailView&&) = delete;
+    TrailView& operator=(TrailView&&) = delete;
 
     void set(const std::string& name, T value) { storage_->set(name, std::move(value), level_); }
     const T* find(const std::string& name) const { return storage_->lookup(name, level_); }
@@ -186,13 +200,8 @@ public:
     std::vector<std::pair<std::string, T>> items() const { return storage_->items(level_); }
 
 private:
-    static std::shared_ptr<void> makeGuard(std::shared_ptr<ScopeTrailStorage<T>> storage, int level) {
-        return std::shared_ptr<void>(nullptr, [storage, level](void*) { storage->popLevel(level); });
-    }
-
     std::shared_ptr<ScopeTrailStorage<T>> storage_;
     int level_;
-    std::shared_ptr<void> guard_;
 };
 
 // Shared bidirectional name<->small-int interning table for $-prefixed
@@ -315,23 +324,29 @@ private:
 
 // Per-EvalContext handle onto a shared IndexedScopeTrailStorage<T> -- the
 // int-keyed twin of TrailView<T> above; see that class's doc comment for
-// what level_/guard_ mean, unchanged here.
+// the destructor-based scope-exit mechanism and why copy/move are deleted,
+// unchanged here.
 template <typename T>
 class IndexedTrailView {
 public:
     static std::shared_ptr<IndexedTrailView<T>> makeRoot(std::shared_ptr<DynNameIntern> intern) {
         auto storage = std::make_shared<IndexedScopeTrailStorage<T>>(std::move(intern));
         int level = storage->openLevel(0);
-        return std::make_shared<IndexedTrailView<T>>(storage, level, makeGuard(storage, level));
+        return std::make_shared<IndexedTrailView<T>>(storage, level);
     }
 
     std::shared_ptr<IndexedTrailView<T>> openChild(bool isolate) const {
         int level = storage_->openLevel(isolate ? 0 : level_);
-        return std::make_shared<IndexedTrailView<T>>(storage_, level, makeGuard(storage_, level));
+        return std::make_shared<IndexedTrailView<T>>(storage_, level);
     }
 
-    IndexedTrailView(std::shared_ptr<IndexedScopeTrailStorage<T>> storage, int level, std::shared_ptr<void> guard)
-        : storage_(std::move(storage)), level_(level), guard_(std::move(guard)) {}
+    IndexedTrailView(std::shared_ptr<IndexedScopeTrailStorage<T>> storage, int level)
+        : storage_(std::move(storage)), level_(level) {}
+    ~IndexedTrailView() { storage_->popLevel(level_); }
+    IndexedTrailView(const IndexedTrailView&) = delete;
+    IndexedTrailView& operator=(const IndexedTrailView&) = delete;
+    IndexedTrailView(IndexedTrailView&&) = delete;
+    IndexedTrailView& operator=(IndexedTrailView&&) = delete;
 
     void set(const std::string& name, T value) { storage_->set(name, std::move(value), level_); }
     const T* find(const std::string& name) const { return storage_->lookup(name, level_); }
@@ -345,13 +360,8 @@ public:
     std::vector<std::pair<std::string, T>> items() const { return storage_->items(level_); }
 
 private:
-    static std::shared_ptr<void> makeGuard(std::shared_ptr<IndexedScopeTrailStorage<T>> storage, int level) {
-        return std::shared_ptr<void>(nullptr, [storage, level](void*) { storage->popLevel(level); });
-    }
-
     std::shared_ptr<IndexedScopeTrailStorage<T>> storage_;
     int level_;
-    std::shared_ptr<void> guard_;
 };
 
 // dynExplicit's own trail: a set (which $-names the SCRIPT itself
