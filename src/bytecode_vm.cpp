@@ -308,15 +308,16 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                     // (positional index counted only among positional
                     // arguments, later write for a repeated name wins)
                     // against already-evaluated values.
-                    std::unordered_map<std::string, Value> bound;
+                    BoundArgs bound;
+                    bound.reserve(argCount);
                     size_t positionalIdx = 0;
                     const size_t nparams = site.decl->parameters.size();
                     for (size_t i = 0; i < argCount; ++i) {
                         if (site.argNames[i]) {
-                            bound[*site.argNames[i]] = std::move(args[i]);
+                            bound.set(*site.argNames[i], std::move(args[i]));
                         } else {
                             if (positionalIdx < nparams) {
-                                bound[site.decl->parameters[positionalIdx]->name->name] = std::move(args[i]);
+                                bound.set(site.decl->parameters[positionalIdx]->name->name, std::move(args[i]));
                             }
                             ++positionalIdx;
                         }
@@ -340,15 +341,16 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 stack.pop_back();
                 Value result;
                 if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&callee); flPtr && *flPtr) {
-                    std::unordered_map<std::string, Value> bound;
+                    BoundArgs bound;
+                    bound.reserve(argCount);
                     size_t positionalIdx = 0;
                     const size_t nparams = (*flPtr)->parameters.size();
                     for (size_t i = 0; i < argCount; ++i) {
                         if (site.argNames[i]) {
-                            bound[*site.argNames[i]] = std::move(args[i]);
+                            bound.set(*site.argNames[i], std::move(args[i]));
                         } else {
                             if (positionalIdx < nparams) {
-                                bound[(*flPtr)->parameters[positionalIdx]->name->name] = std::move(args[i]);
+                                bound.set((*flPtr)->parameters[positionalIdx]->name->name, std::move(args[i]));
                             }
                             ++positionalIdx;
                         }
@@ -369,15 +371,16 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                     args[argCount - 1 - i] = std::move(stack.back());
                     stack.pop_back();
                 }
-                std::unordered_map<std::string, Value> bound;
+                BoundArgs bound;
+                bound.reserve(argCount);
                 size_t positionalIdx = 0;
                 const size_t nparams = site.decl->parameters.size();
                 for (size_t i = 0; i < argCount; ++i) {
                     if (site.argNames[i]) {
-                        bound[*site.argNames[i]] = std::move(args[i]);
+                        bound.set(*site.argNames[i], std::move(args[i]));
                     } else {
                         if (positionalIdx < nparams) {
-                            bound[site.decl->parameters[positionalIdx]->name->name] = std::move(args[i]);
+                            bound.set(site.decl->parameters[positionalIdx]->name->name, std::move(args[i]));
                         }
                         ++positionalIdx;
                     }
@@ -421,15 +424,16 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 Value result;
                 if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&callee); flPtr && *flPtr) {
                     const oscad::FunctionLiteral& funcNode = **flPtr;
-                    std::unordered_map<std::string, Value> bound;
+                    BoundArgs bound;
+                    bound.reserve(argCount);
                     size_t positionalIdx = 0;
                     const size_t nparams = funcNode.parameters.size();
                     for (size_t i = 0; i < argCount; ++i) {
                         if (site.argNames[i]) {
-                            bound[*site.argNames[i]] = std::move(args[i]);
+                            bound.set(*site.argNames[i], std::move(args[i]));
                         } else {
                             if (positionalIdx < nparams) {
-                                bound[funcNode.parameters[positionalIdx]->name->name] = std::move(args[i]);
+                                bound.set(funcNode.parameters[positionalIdx]->name->name, std::move(args[i]));
                             }
                             ++positionalIdx;
                         }
@@ -563,18 +567,16 @@ Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
     return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack, tailOut);
 }
 
-Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk,
-                                    const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx,
-                                    TailCallRequest* tailOut) {
+Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, const BoundArgs& bound,
+                                    EvalContext& childCtx, TailCallRequest* tailOut) {
     VmFrameGuard guard(ev);
     VmFrame& frame = guard.get();
     frame.slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame.bound.assign(chunk.params.size(), false);
     ev.setCurrentCallVmFrame(&frame);
     for (size_t i = 0; i < chunk.params.size(); ++i) {
-        auto it = bound.find(chunk.params[i].name);
-        if (it != bound.end()) {
-            frame.slots[static_cast<size_t>(chunk.params[i].slot)] = it->second;
+        if (const Value* v = bound.find(chunk.params[i].name)) {
+            frame.slots[static_cast<size_t>(chunk.params[i].slot)] = *v;
             frame.bound[i] = true;
         }
     }
@@ -632,7 +634,7 @@ Value runCompiledFunctionTrampoline(Evaluator& ev, const CompiledChunk& chunk,
         ev.recordTailCallHop(req.name, calleeDecl, req.callPos, recursionGuard);
         const CompiledChunk* curChunk =
             req.decl ? ev.lookupOrCompileChunk(*req.decl) : ev.lookupCompiledLiteralChunk(*req.literal);
-        std::unordered_map<std::string, Value> bound = std::move(req.bound);
+        BoundArgs bound = std::move(req.bound);
         chain.push_back(std::move(req.ctx));
         TailCallRequest next;
         result = runCompiledFunctionFromBound(ev, *curChunk, bound, chain.back(), &next);
@@ -641,8 +643,7 @@ Value runCompiledFunctionTrampoline(Evaluator& ev, const CompiledChunk& chunk,
     return result;
 }
 
-Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk& chunk,
-                                              const std::unordered_map<std::string, Value>& bound,
+Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk& chunk, const BoundArgs& bound,
                                               EvalContext& childCtx) {
     std::vector<EvalContext> chain{childCtx};
     TailCallRequest req;
@@ -654,7 +655,7 @@ Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk&
         ev.recordTailCallHop(req.name, calleeDecl, req.callPos, recursionGuard);
         const CompiledChunk* curChunk =
             req.decl ? ev.lookupOrCompileChunk(*req.decl) : ev.lookupCompiledLiteralChunk(*req.literal);
-        std::unordered_map<std::string, Value> nextBound = std::move(req.bound);
+        BoundArgs nextBound = std::move(req.bound);
         chain.push_back(std::move(req.ctx));
         TailCallRequest next;
         result = runCompiledFunctionFromBound(ev, *curChunk, nextBound, chain.back(), &next);
