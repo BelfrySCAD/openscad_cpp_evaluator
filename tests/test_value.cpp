@@ -326,3 +326,54 @@ TEST(ExpandIterable, DescendingRangeStepsDown) {
     EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
     EXPECT_DOUBLE_EQ(asNum(items[3]), 2.0);
 }
+
+TEST(ExpandIterable, ZeroStepRangeIsEmpty) {
+    auto items = expandIterable(Value{OscRange{0, 0, 10}});
+    EXPECT_EQ(items.size(), 0u);
+    EXPECT_FALSE(items.begin() != items.end());
+}
+
+TEST(ExpandIterable, FractionalStepRangeViaRangeForMatchesAccumulation) {
+    // Values must match repeated `x += step` accumulation exactly (not a
+    // recomputed start + i*step, which can round differently) -- ranges
+    // are lazy now (see IterableValues), so this exercises that the
+    // on-demand path reproduces the same sequence the old eager
+    // expansion always produced.
+    auto items = expandIterable(Value{OscRange{0.0, 0.1, 0.5}});
+    double expected = 0.0;
+    size_t count = 0;
+    for (const Value& v : items) {
+        EXPECT_DOUBLE_EQ(asNum(v), expected);
+        expected += 0.1;
+        ++count;
+    }
+    EXPECT_EQ(count, 6u); // 0.0, 0.1, 0.2, 0.3, 0.4, 0.5
+}
+
+TEST(ExpandIterable, OutOfOrderIndexAccessStillReturnsCorrectValue) {
+    // Nothing in this codebase reads a range's expansion out of
+    // sequence (see IterableValues's own doc comment for why the
+    // sequential path is what's optimized), but an out-of-order
+    // operator[] call must still be CORRECT, just slower -- confirms the
+    // cursor's "restart from start" fallback rather than silently
+    // returning a stale/wrong value.
+    auto items = expandIterable(Value{OscRange{0, 1, 9}});
+    EXPECT_DOUBLE_EQ(asNum(items[7]), 7.0);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 2.0); // rewinds behind the cursor's last position
+    EXPECT_DOUBLE_EQ(asNum(items[5]), 5.0);
+}
+
+TEST(ExpandIterable, LargeRangePartialIterationStaysLazy) {
+    // A huge range must not eagerly materialize a vector: constructing
+    // expandIterable() and reading only the first few elements has to
+    // stay instant regardless of the range's nominal size (a billion
+    // elements here). If this regresses to eager expansion, this test
+    // times out/OOMs instead of merely failing an assertion.
+    auto items = expandIterable(Value{OscRange{0, 1, 1'000'000'000.0}});
+    auto it = items.begin();
+    EXPECT_DOUBLE_EQ(asNum(*it), 0.0);
+    ++it;
+    EXPECT_DOUBLE_EQ(asNum(*it), 1.0);
+    ++it;
+    EXPECT_DOUBLE_EQ(asNum(*it), 2.0);
+}

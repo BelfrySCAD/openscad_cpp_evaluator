@@ -331,14 +331,11 @@ std::string fmtValue(const Value& v) {
 IterableValues expandIterable(const Value& v) {
     if (std::holds_alternative<std::monostate>(v)) return IterableValues{};
     if (const OscRange* r = std::get_if<OscRange>(&v)) {
-        std::vector<Value> out;
-        if (r->step == 0.0) return IterableValues{std::move(out)};
-        if (r->step > 0) {
-            for (double x = r->start; x <= r->end + 1e-10; x += r->step) out.push_back(Value{x});
-        } else {
-            for (double x = r->start; x >= r->end - 1e-10; x += r->step) out.push_back(Value{x});
-        }
-        return IterableValues{std::move(out)};
+        // Lazy -- IterableValues itself reproduces this exact
+        // termination condition (a zero step is naturally empty: neither
+        // `x <= end` nor `x >= end` branch ever fires for it) without
+        // building a vector here.
+        return IterableValues{r->start, r->step, r->end};
     }
     if (const ObjectPtr* o = std::get_if<ObjectPtr>(&v)) {
         std::vector<Value> out;
