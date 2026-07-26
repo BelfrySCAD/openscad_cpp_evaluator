@@ -140,15 +140,39 @@ std::string formatNumber(double v);
 // Evaluator._fmt_val.
 std::string fmtValue(const Value& v);
 
+// Read-only view over a for()/intersection_for() loop assignment's expanded
+// iteration values (see expandIterable() below). When the source was
+// already a list, this just holds the list's own shared_ptr (a refcount
+// bump, no copy of `items`); the range/object/string/scalar cases must
+// synthesize a fresh vector regardless (there's no existing storage to
+// view), which is held instead. Either way, callers only ever need
+// size()/operator[]/range-for, which both cases provide uniformly.
+class IterableValues {
+public:
+    IterableValues() = default;
+    explicit IterableValues(ListPtr list) : list_(std::move(list)) {}
+    explicit IterableValues(std::vector<Value> owned)
+        : owned_(std::make_shared<std::vector<Value>>(std::move(owned))) {}
+
+    size_t size() const { return list_ ? list_->items.size() : (owned_ ? owned_->size() : 0); }
+    const Value& operator[](size_t i) const { return list_ ? list_->items[i] : (*owned_)[i]; }
+    const Value* begin() const { return list_ ? list_->items.data() : (owned_ ? owned_->data() : nullptr); }
+    const Value* end() const { return begin() + size(); }
+
+private:
+    ListPtr list_;
+    std::shared_ptr<std::vector<Value>> owned_;
+};
+
 // Converts a for()/intersection_for() loop assignment's evaluated RHS into
 // the list of values to iterate: undef -> empty, range -> expanded
 // (matching OscRange's own start/step/end iteration, half-open at the far
 // end within a 1e-10 epsilon), object -> its keys as strings, string ->
 // individual characters as 1-character strings, list -> its elements
-// as-is, anything else (a bare scalar) -> a single-element list. Mirrors
-// the shared expansion logic duplicated across the reference's
-// _eval_for/_resolve_intersection_for.
-std::vector<Value> expandIterable(const Value& v);
+// as-is (no copy -- see IterableValues), anything else (a bare scalar) ->
+// a single-element list. Mirrors the shared expansion logic duplicated
+// across the reference's _eval_for/_resolve_intersection_for.
+IterableValues expandIterable(const Value& v);
 
 // `each <body>`'s own flatten-one-level rule, shared by the AST interpreter
 // (evalListLiteral/evalListElement's ListCompEach handling, expr_eval.cpp)

@@ -11,6 +11,7 @@
 #include <limits>
 #include <numbers>
 #include <random>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace oscadeval {
@@ -427,11 +428,56 @@ Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argu
     return mergeObjectArgs(evaluated);
 }
 
+namespace {
+
+// One id per name evalBuiltinFunction actually handles (NOT the same list
+// as isBuiltinFunctionName -- "object" is deliberately absent here, since
+// evalFunctionCall special-cases it to builtinObject() before this
+// function is ever reached, see function_builtins.hpp). A single hash
+// lookup into this table replaces what used to be an up-to-~40-way
+// `if (name == "...")` string-compare chain; the switch below then
+// compiles to a jump table instead of sequential comparisons. No branch's
+// logic changed, only how it's reached.
+enum class BuiltinFnId {
+    TextMetrics, FontMetrics, Abs, Sign, Ceil, Floor, Round, Sqrt, Ln, Log, Exp, Sin, Cos, Tan,
+    Asin, Acos, Atan, Atan2, Max, Min, Pow, Norm, Cross, Rands, Concat, Len, Str, Chr, Ord,
+    IsUndef, IsNum, IsBool, IsString, IsList, IsFunction, IsObject, Search, Lookup, HasKey,
+    Version, VersionNum, ParentModule,
+};
+
+const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
+    static const std::unordered_map<std::string, BuiltinFnId> ids = {
+        {"textmetrics", BuiltinFnId::TextMetrics}, {"fontmetrics", BuiltinFnId::FontMetrics},
+        {"abs", BuiltinFnId::Abs}, {"sign", BuiltinFnId::Sign}, {"ceil", BuiltinFnId::Ceil},
+        {"floor", BuiltinFnId::Floor}, {"round", BuiltinFnId::Round}, {"sqrt", BuiltinFnId::Sqrt},
+        {"ln", BuiltinFnId::Ln}, {"log", BuiltinFnId::Log}, {"exp", BuiltinFnId::Exp},
+        {"sin", BuiltinFnId::Sin}, {"cos", BuiltinFnId::Cos}, {"tan", BuiltinFnId::Tan},
+        {"asin", BuiltinFnId::Asin}, {"acos", BuiltinFnId::Acos}, {"atan", BuiltinFnId::Atan},
+        {"atan2", BuiltinFnId::Atan2}, {"max", BuiltinFnId::Max}, {"min", BuiltinFnId::Min},
+        {"pow", BuiltinFnId::Pow}, {"norm", BuiltinFnId::Norm}, {"cross", BuiltinFnId::Cross},
+        {"rands", BuiltinFnId::Rands}, {"concat", BuiltinFnId::Concat}, {"len", BuiltinFnId::Len},
+        {"str", BuiltinFnId::Str}, {"chr", BuiltinFnId::Chr}, {"ord", BuiltinFnId::Ord},
+        {"is_undef", BuiltinFnId::IsUndef}, {"is_num", BuiltinFnId::IsNum},
+        {"is_bool", BuiltinFnId::IsBool}, {"is_string", BuiltinFnId::IsString},
+        {"is_list", BuiltinFnId::IsList}, {"is_function", BuiltinFnId::IsFunction},
+        {"is_object", BuiltinFnId::IsObject}, {"search", BuiltinFnId::Search},
+        {"lookup", BuiltinFnId::Lookup}, {"has_key", BuiltinFnId::HasKey},
+        {"version", BuiltinFnId::Version}, {"version_num", BuiltinFnId::VersionNum},
+        {"parent_module", BuiltinFnId::ParentModule},
+    };
+    return ids;
+}
+
+} // namespace
+
 Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::ASTNode& node) {
     (void)node;
 
-    if (name == "textmetrics") return builtinTextmetrics(ev, args);
-    if (name == "fontmetrics") return builtinFontmetrics(ev, args);
+    const auto& ids = builtinFnIds();
+    const auto idIt = ids.find(name);
+    // Not one of the names this function handles (e.g. "object", routed
+    // elsewhere before reaching here) -- mirrors the old chain's fallthrough.
+    if (idIt == ids.end()) return Value{};
 
     if (numericOnlyNames().count(name)) {
         for (const Value& v : allPositional(args)) {
@@ -439,159 +485,162 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         }
     }
 
-    if (name == "abs") return Value{std::fabs(toDoubleLenient(getArg(args, 0, "x", Value{})))};
-    if (name == "sign") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        return Value{x > 0 ? 1.0 : x < 0 ? -1.0 : 0.0};
-    }
-    if (name == "ceil") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        return Value{(std::isnan(x) || std::isinf(x)) ? x : std::ceil(x)};
-    }
-    if (name == "floor") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        return Value{(std::isnan(x) || std::isinf(x)) ? x : std::floor(x)};
-    }
-    if (name == "round") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        if (std::isnan(x) || std::isinf(x)) return Value{x};
-        return Value{x >= 0 ? std::floor(x + 0.5) : std::ceil(x - 0.5)};
-    }
-    if (name == "sqrt") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::sqrt(x)};
-    }
-    if (name == "ln") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        if (x == 0) return Value{-std::numeric_limits<double>::infinity()};
-        return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log(x)};
-    }
-    if (name == "log") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        if (x == 0) return Value{-std::numeric_limits<double>::infinity()};
-        return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log10(x)};
-    }
-    if (name == "exp") return Value{std::exp(toDoubleLenient(getArg(args, 0, "x", Value{})))};
-    if (name == "sin") return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kSin90, &std::sin)};
-    if (name == "cos") return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kCos90, &std::cos)};
-    if (name == "tan") return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kTan90, &std::tan)};
-    if (name == "asin") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : degrees(std::asin(x))};
-    }
-    if (name == "acos") {
-        const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-        return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : degrees(std::acos(x))};
-    }
-    if (name == "atan") return Value{degrees(std::atan(toDoubleLenient(getArg(args, 0, "x", Value{}))))};
-    if (name == "atan2") {
-        return Value{degrees(std::atan2(toDoubleLenient(getArg(args, 0, "y", Value{})), toDoubleLenient(getArg(args, 1, "x", Value{}))))};
-    }
-    if (name == "max") return builtinMinMax(args, true);
-    if (name == "min") return builtinMinMax(args, false);
-    if (name == "pow") return builtinPow(toDoubleLenient(getArg(args, 0, "x", Value{})), toDoubleLenient(getArg(args, 1, "y", Value{})));
-    if (name == "norm") {
-        const auto v = allNumericList(getArg(args, 0, "v", Value{}));
-        if (!v) return Value{};
-        double sum = 0;
-        for (double x : *v) sum += x * x;
-        return Value{std::sqrt(sum)};
-    }
-    if (name == "cross") return builtinCross(getArg(args, 0, "a", Value{}), getArg(args, 1, "b", Value{}));
-    if (name == "rands") {
-        ev.noteRandsCall();
-        return builtinRands(toDoubleLenient(getArg(args, 0, "min_value", Value{})), toDoubleLenient(getArg(args, 1, "max_value", Value{})),
-                             toDoubleLenient(getArg(args, 2, "value_count", Value{})), getArg(args, 3, "seed", Value{}));
-    }
-    if (name == "concat") {
-        std::vector<Value> out;
-        for (const Value& a : allPositional(args)) {
-            if (const ListPtr* l = std::get_if<ListPtr>(&a); l && *l) {
-                out.insert(out.end(), (*l)->items.begin(), (*l)->items.end());
-            } else {
-                out.push_back(a);
-            }
+    switch (idIt->second) {
+        case BuiltinFnId::TextMetrics: return builtinTextmetrics(ev, args);
+        case BuiltinFnId::FontMetrics: return builtinFontmetrics(ev, args);
+        case BuiltinFnId::Abs: return Value{std::fabs(toDoubleLenient(getArg(args, 0, "x", Value{})))};
+        case BuiltinFnId::Sign: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            return Value{x > 0 ? 1.0 : x < 0 ? -1.0 : 0.0};
         }
-        return listOf(std::move(out));
-    }
-    if (name == "len") {
-        const Value x = getArg(args, 0, "x", Value{});
-        if (const ListPtr* l = std::get_if<ListPtr>(&x); l && *l) return Value{static_cast<double>((*l)->items.size())};
-        if (const std::string* s = std::get_if<std::string>(&x)) return Value{static_cast<double>(s->size())};
-        if (const ObjectPtr* o = std::get_if<ObjectPtr>(&x); o && *o) return Value{static_cast<double>((*o)->items.size())};
-        return Value{};
-    }
-    if (name == "str") {
-        std::string out;
-        for (const Value& a : allPositional(args)) {
-            if (const std::string* s = std::get_if<std::string>(&a)) {
-                out += *s;
-            } else {
-                out += fmtValue(a);
-            }
+        case BuiltinFnId::Ceil: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            return Value{(std::isnan(x) || std::isinf(x)) ? x : std::ceil(x)};
         }
-        return Value{out};
-    }
-    if (name == "chr") {
-        const Value x = getArg(args, 0, "x", Value{});
-        const auto valid = [](const Value& c) {
-            const double* d = std::get_if<double>(&c);
-            return d != nullptr && std::isfinite(*d);
-        };
-        if (const ListPtr* l = std::get_if<ListPtr>(&x); l && *l) {
+        case BuiltinFnId::Floor: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            return Value{(std::isnan(x) || std::isinf(x)) ? x : std::floor(x)};
+        }
+        case BuiltinFnId::Round: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            if (std::isnan(x) || std::isinf(x)) return Value{x};
+            return Value{x >= 0 ? std::floor(x + 0.5) : std::ceil(x - 0.5)};
+        }
+        case BuiltinFnId::Sqrt: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::sqrt(x)};
+        }
+        case BuiltinFnId::Ln: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            if (x == 0) return Value{-std::numeric_limits<double>::infinity()};
+            return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log(x)};
+        }
+        case BuiltinFnId::Log: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            if (x == 0) return Value{-std::numeric_limits<double>::infinity()};
+            return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log10(x)};
+        }
+        case BuiltinFnId::Exp: return Value{std::exp(toDoubleLenient(getArg(args, 0, "x", Value{})))};
+        case BuiltinFnId::Sin: return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kSin90, &std::sin)};
+        case BuiltinFnId::Cos: return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kCos90, &std::cos)};
+        case BuiltinFnId::Tan: return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kTan90, &std::tan)};
+        case BuiltinFnId::Asin: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : degrees(std::asin(x))};
+        }
+        case BuiltinFnId::Acos: {
+            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
+            return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : degrees(std::acos(x))};
+        }
+        case BuiltinFnId::Atan: return Value{degrees(std::atan(toDoubleLenient(getArg(args, 0, "x", Value{}))))};
+        case BuiltinFnId::Atan2:
+            return Value{degrees(std::atan2(toDoubleLenient(getArg(args, 0, "y", Value{})), toDoubleLenient(getArg(args, 1, "x", Value{}))))};
+        case BuiltinFnId::Max: return builtinMinMax(args, true);
+        case BuiltinFnId::Min: return builtinMinMax(args, false);
+        case BuiltinFnId::Pow: return builtinPow(toDoubleLenient(getArg(args, 0, "x", Value{})), toDoubleLenient(getArg(args, 1, "y", Value{})));
+        case BuiltinFnId::Norm: {
+            const auto v = allNumericList(getArg(args, 0, "v", Value{}));
+            if (!v) return Value{};
+            double sum = 0;
+            for (double x : *v) sum += x * x;
+            return Value{std::sqrt(sum)};
+        }
+        case BuiltinFnId::Cross: return builtinCross(getArg(args, 0, "a", Value{}), getArg(args, 1, "b", Value{}));
+        case BuiltinFnId::Rands: {
+            ev.noteRandsCall();
+            return builtinRands(toDoubleLenient(getArg(args, 0, "min_value", Value{})), toDoubleLenient(getArg(args, 1, "max_value", Value{})),
+                                 toDoubleLenient(getArg(args, 2, "value_count", Value{})), getArg(args, 3, "seed", Value{}));
+        }
+        case BuiltinFnId::Concat: {
+            std::vector<Value> out;
+            for (const Value& a : allPositional(args)) {
+                if (const ListPtr* l = std::get_if<ListPtr>(&a); l && *l) {
+                    out.insert(out.end(), (*l)->items.begin(), (*l)->items.end());
+                } else {
+                    out.push_back(a);
+                }
+            }
+            return listOf(std::move(out));
+        }
+        case BuiltinFnId::Len: {
+            const Value x = getArg(args, 0, "x", Value{});
+            if (const ListPtr* l = std::get_if<ListPtr>(&x); l && *l) return Value{static_cast<double>((*l)->items.size())};
+            if (const std::string* s = std::get_if<std::string>(&x)) return Value{static_cast<double>(s->size())};
+            if (const ObjectPtr* o = std::get_if<ObjectPtr>(&x); o && *o) return Value{static_cast<double>((*o)->items.size())};
+            return Value{};
+        }
+        case BuiltinFnId::Str: {
             std::string out;
-            for (const Value& c : (*l)->items) {
-                if (valid(c)) out += utf8Encode(static_cast<uint32_t>(std::get<double>(c)));
+            for (const Value& a : allPositional(args)) {
+                if (const std::string* s = std::get_if<std::string>(&a)) {
+                    out += *s;
+                } else {
+                    out += fmtValue(a);
+                }
             }
             return Value{out};
         }
-        return Value{valid(x) ? utf8Encode(static_cast<uint32_t>(std::get<double>(x))) : std::string{}};
-    }
-    if (name == "ord") {
-        const Value s = getArg(args, 0, "s", Value{});
-        const std::string* str = std::get_if<std::string>(&s);
-        if (!str || str->empty()) return Value{};
-        return Value{static_cast<double>(utf8DecodeFirst(*str))};
-    }
-    if (name == "is_undef") return Value{std::holds_alternative<std::monostate>(getArg(args, 0, "x", Value{}))};
-    if (name == "is_num") {
-        const Value x = getArg(args, 0, "x", Value{});
-        const double* d = std::get_if<double>(&x);
-        return Value{d != nullptr && !std::isnan(*d)};
-    }
-    if (name == "is_bool") return Value{std::holds_alternative<bool>(getArg(args, 0, "x", Value{}))};
-    if (name == "is_string") return Value{std::holds_alternative<std::string>(getArg(args, 0, "x", Value{}))};
-    if (name == "is_list") {
-        const Value x = getArg(args, 0, "x", Value{});
-        return Value{std::holds_alternative<ListPtr>(x) && std::get<ListPtr>(x) != nullptr};
-    }
-    if (name == "is_function") {
-        const Value x = getArg(args, 0, "x", Value{});
-        return Value{std::holds_alternative<const oscad::FunctionLiteral*>(x) && std::get<const oscad::FunctionLiteral*>(x) != nullptr};
-    }
-    if (name == "is_object") {
-        const Value x = getArg(args, 0, "x", Value{});
-        return Value{std::holds_alternative<ObjectPtr>(x) && std::get<ObjectPtr>(x) != nullptr};
-    }
-    if (name == "search") return builtinSearch(args);
-    if (name == "lookup") return builtinLookup(args);
-    if (name == "has_key") {
-        const Value objArg = getArg(args, 0, "object", Value{});
-        const ObjectPtr* obj = std::get_if<ObjectPtr>(&objArg);
-        if (!obj || !*obj) return Value{};
-        const Value keyArg = getArg(args, 1, "key", Value{});
-        const std::string* key = std::get_if<std::string>(&keyArg);
-        if (!key) return Value{false};
-        for (const auto& [k, v] : (*obj)->items) {
-            if (k == *key) return Value{true};
+        case BuiltinFnId::Chr: {
+            const Value x = getArg(args, 0, "x", Value{});
+            const auto valid = [](const Value& c) {
+                const double* d = std::get_if<double>(&c);
+                return d != nullptr && std::isfinite(*d);
+            };
+            if (const ListPtr* l = std::get_if<ListPtr>(&x); l && *l) {
+                std::string out;
+                for (const Value& c : (*l)->items) {
+                    if (valid(c)) out += utf8Encode(static_cast<uint32_t>(std::get<double>(c)));
+                }
+                return Value{out};
+            }
+            return Value{valid(x) ? utf8Encode(static_cast<uint32_t>(std::get<double>(x))) : std::string{}};
         }
-        return Value{false};
+        case BuiltinFnId::Ord: {
+            const Value s = getArg(args, 0, "s", Value{});
+            const std::string* str = std::get_if<std::string>(&s);
+            if (!str || str->empty()) return Value{};
+            return Value{static_cast<double>(utf8DecodeFirst(*str))};
+        }
+        case BuiltinFnId::IsUndef: return Value{std::holds_alternative<std::monostate>(getArg(args, 0, "x", Value{}))};
+        case BuiltinFnId::IsNum: {
+            const Value x = getArg(args, 0, "x", Value{});
+            const double* d = std::get_if<double>(&x);
+            return Value{d != nullptr && !std::isnan(*d)};
+        }
+        case BuiltinFnId::IsBool: return Value{std::holds_alternative<bool>(getArg(args, 0, "x", Value{}))};
+        case BuiltinFnId::IsString: return Value{std::holds_alternative<std::string>(getArg(args, 0, "x", Value{}))};
+        case BuiltinFnId::IsList: {
+            const Value x = getArg(args, 0, "x", Value{});
+            return Value{std::holds_alternative<ListPtr>(x) && std::get<ListPtr>(x) != nullptr};
+        }
+        case BuiltinFnId::IsFunction: {
+            const Value x = getArg(args, 0, "x", Value{});
+            return Value{std::holds_alternative<const oscad::FunctionLiteral*>(x) && std::get<const oscad::FunctionLiteral*>(x) != nullptr};
+        }
+        case BuiltinFnId::IsObject: {
+            const Value x = getArg(args, 0, "x", Value{});
+            return Value{std::holds_alternative<ObjectPtr>(x) && std::get<ObjectPtr>(x) != nullptr};
+        }
+        case BuiltinFnId::Search: return builtinSearch(args);
+        case BuiltinFnId::Lookup: return builtinLookup(args);
+        case BuiltinFnId::HasKey: {
+            const Value objArg = getArg(args, 0, "object", Value{});
+            const ObjectPtr* obj = std::get_if<ObjectPtr>(&objArg);
+            if (!obj || !*obj) return Value{};
+            const Value keyArg = getArg(args, 1, "key", Value{});
+            const std::string* key = std::get_if<std::string>(&keyArg);
+            if (!key) return Value{false};
+            for (const auto& [k, v] : (*obj)->items) {
+                if (k == *key) return Value{true};
+            }
+            return Value{false};
+        }
+        case BuiltinFnId::Version: return numList({2025.0, 1.0, 1.0});
+        case BuiltinFnId::VersionNum: return Value{20250101.0};
+        case BuiltinFnId::ParentModule:
+            return ev.parentModuleName(static_cast<int>(toDoubleLenient(getArg(args, 0, "index", Value{0.0}))));
     }
-    if (name == "version") return numList({2025.0, 1.0, 1.0});
-    if (name == "version_num") return Value{20250101.0};
-    if (name == "parent_module") return ev.parentModuleName(static_cast<int>(toDoubleLenient(getArg(args, 0, "index", Value{0.0}))));
-
-    return Value{};
+    return Value{}; // unreachable: every BuiltinFnId has a case above
 }
 
 } // namespace oscadeval

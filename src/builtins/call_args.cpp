@@ -6,27 +6,60 @@
 
 namespace oscadeval {
 
+void CallArgs::setPositional(int pos, Value v) {
+    for (auto& [k, existing] : positional) {
+        if (k == pos) {
+            existing = std::move(v);
+            return;
+        }
+    }
+    positional.emplace_back(pos, std::move(v));
+}
+
+void CallArgs::setNamed(const std::string& name, Value v) {
+    for (auto& [k, existing] : named) {
+        if (k == name) {
+            existing = std::move(v);
+            return;
+        }
+    }
+    named.emplace_back(name, std::move(v));
+}
+
+const Value* CallArgs::findPositional(int pos) const {
+    for (const auto& [k, v] : positional) {
+        if (k == pos) return &v;
+    }
+    return nullptr;
+}
+
+const Value* CallArgs::findNamed(const std::string& name) const {
+    for (const auto& [k, v] : named) {
+        if (k == name) return &v;
+    }
+    return nullptr;
+}
+
 CallArgs resolveArgs(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
     CallArgs result;
+    result.positional.reserve(arguments.size());
     int pos = 0;
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::PositionalArgument) {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
-            result.positional[pos++] = ev.evalExpr(*a.expr, ctx);
+            result.positional.emplace_back(pos++, ev.evalExpr(*a.expr, ctx));
         } else if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-            result.named[a.name->name] = ev.evalExpr(*a.expr, ctx);
+            result.named.emplace_back(a.name->name, ev.evalExpr(*a.expr, ctx));
         }
     }
     return result;
 }
 
 Value getArg(const CallArgs& args, std::optional<int> pos, const std::string& name, Value defaultValue) {
-    auto namedIt = args.named.find(name);
-    if (namedIt != args.named.end()) return namedIt->second;
+    if (const Value* named = args.findNamed(name)) return *named;
     if (pos.has_value()) {
-        auto posIt = args.positional.find(*pos);
-        if (posIt != args.positional.end()) return posIt->second;
+        if (const Value* positional = args.findPositional(*pos)) return *positional;
     }
     return defaultValue;
 }
@@ -54,12 +87,8 @@ ResolvedCallArgs resolveCallArgs(Evaluator& ev, const std::vector<std::unique_pt
 Value callArgsToValue(const CallArgs& args) {
     int maxPos = -1;
     for (const auto& [idx, v] : args.positional) maxPos = std::max(maxPos, idx);
-    std::vector<Value> posVec;
-    posVec.reserve(static_cast<size_t>(maxPos + 1));
-    for (int i = 0; i <= maxPos; ++i) {
-        auto it = args.positional.find(i);
-        posVec.push_back(it != args.positional.end() ? it->second : Value{});
-    }
+    std::vector<Value> posVec(static_cast<size_t>(maxPos + 1));
+    for (const auto& [idx, v] : args.positional) posVec[static_cast<size_t>(idx)] = v;
 
     std::vector<std::pair<std::string, Value>> namedVec(args.named.begin(), args.named.end());
 
@@ -92,10 +121,12 @@ CallArgs valueToCallArgs(const Value& v) {
 
     if (const ListPtr* posList = std::get_if<ListPtr>(&(*outer)->items[0]); posList && *posList) {
         const auto& items = (*posList)->items;
-        for (size_t i = 0; i < items.size(); ++i) args.positional[static_cast<int>(i)] = items[i];
+        args.positional.reserve(items.size());
+        for (size_t i = 0; i < items.size(); ++i) args.positional.emplace_back(static_cast<int>(i), items[i]);
     }
     if (const ObjectPtr* namedObj = std::get_if<ObjectPtr>(&(*outer)->items[1]); namedObj && *namedObj) {
-        for (const auto& [key, value] : (*namedObj)->items) args.named[key] = value;
+        args.named.reserve((*namedObj)->items.size());
+        for (const auto& [key, value] : (*namedObj)->items) args.named.emplace_back(key, value);
     }
     return args;
 }

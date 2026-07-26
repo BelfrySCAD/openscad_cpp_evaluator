@@ -38,7 +38,7 @@ private:
 // One ListCompFor assignment's own materialized iteration state -- see
 // IterMaterialize/IterReset/IterNext's own doc comments (bytecode.hpp).
 struct IterList {
-    std::vector<Value> values;
+    IterableValues values;
     size_t index = 0;
 };
 
@@ -51,9 +51,12 @@ CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& 
     int positionalIdx = 0;
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
-            callArgs.named[*site.argNames[i]] = std::move(args[i]);
+            // Each call site's argNames are distinct source arguments, never
+            // a repeated key, so a direct emplace_back (no overwrite check)
+            // is safe and avoids a pointless linear scan on every insert.
+            callArgs.named.emplace_back(*site.argNames[i], std::move(args[i]));
         } else {
-            callArgs.positional[positionalIdx++] = std::move(args[i]);
+            callArgs.positional.emplace_back(positionalIdx++, std::move(args[i]));
         }
     }
     return callArgs;

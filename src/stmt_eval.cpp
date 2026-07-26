@@ -73,7 +73,7 @@ void Evaluator::evalAssertStatement(const oscad::ModularAssert& node, EvalContex
 void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
     struct AssignPair {
         std::string name;
-        std::vector<Value> values;
+        IterableValues values;
     };
     std::vector<AssignPair> pairs;
     pairs.reserve(node.assignments.size());

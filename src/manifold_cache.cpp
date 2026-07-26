@@ -117,7 +117,9 @@ std::string canonParams(const CSGParams& params) {
 
 } // namespace
 
-std::string cacheKey(const CSGNode& node) {
+std::string cacheKey(CSGNode& node) {
+    if (node.cachedKey) return *node.cachedKey;
+
     std::string out = "N(";
     appendLenPrefixed(out, node.kind);
     out += node.isBuiltin ? "1" : "0";
@@ -125,7 +127,8 @@ std::string cacheKey(const CSGNode& node) {
     out += std::to_string(node.children.size()) + "[";
     for (const auto& c : node.children) appendLenPrefixed(out, cacheKey(*c));
     out += "])";
-    return out;
+    node.cachedKey = out;
+    return *node.cachedKey;
 }
 
 } // namespace oscadeval

@@ -8,7 +8,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace oscadeval {
@@ -19,9 +18,26 @@ class Evaluator;
 // (indexed by source position, 0-based) and named. Mirrors the Python
 // reference's single _resolve_args() dict, which relies on Python dicts
 // allowing mixed int/str keys in the one table; C++ needs two containers.
+//
+// Flat vectors, not unordered_maps: real call arity is almost always a
+// handful of arguments (cube(10), translate([x,y,z]), ...), and this is
+// rebuilt fresh on every single call/loop-iteration -- an unordered_map
+// pays a bucket-array allocation plus one node allocation per entry for
+// what a linear scan over a small vector finds just as fast, with a
+// single (or zero) allocation total.
 struct CallArgs {
-    std::unordered_map<int, Value> positional;
-    std::unordered_map<std::string, Value> named;
+    std::vector<std::pair<int, Value>> positional;
+    std::vector<std::pair<std::string, Value>> named;
+
+    // Insert-or-overwrite-by-key, matching the assignment semantics
+    // (`positional[pos] = v`) the previous unordered_map-based callers
+    // relied on (valueToCallArgs / bytecode_vm.cpp can, in principle,
+    // write the same key twice).
+    void setPositional(int pos, Value v);
+    void setNamed(const std::string& name, Value v);
+
+    const Value* findPositional(int pos) const;
+    const Value* findNamed(const std::string& name) const;
 };
 
 // Evaluates every argument expression against `ctx`. Mirrors

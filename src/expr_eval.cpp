@@ -125,7 +125,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             auto& n = static_cast<const oscad::ListCompFor&>(elem);
             struct Pair {
                 std::string name;
-                std::vector<Value> values;
+                IterableValues values;
             };
             std::vector<Pair> pairs;
             pairs.reserve(n.assignments.size());
