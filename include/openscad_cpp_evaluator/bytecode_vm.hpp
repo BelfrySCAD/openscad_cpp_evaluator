@@ -33,6 +33,26 @@ struct VmFrame {
     std::vector<bool> bound;
 };
 
+// Filled by runChunk's Op::CallFnTail/CallDynamicTail handler when a tail
+// hop is eligible to trampoline (isolated -- see Evaluator::
+// isolatedCallCtxFor's own doc comment) instead of recursing for real.
+// `ctx` is the ALREADY-DERIVED isolated-call EvalContext (callCtxFor's own
+// callCtx() branch, computed once by isolatedCallCtxFor rather than
+// re-derived by the trampoline loop) -- a fresh $-var (dyn) trail level
+// for this hop, matching what a real (non-tail) call would have built via
+// evalUserFunctionFromBound/evalFunctionLiteralFromBound's own callCtxFor
+// call. Exactly one of `decl`/`literal` is non-null; both null means "no
+// tail request" (the sentinel runCompiledFunctionTrampoline/
+// runCompiledFunctionFromBoundTrampoline check for after each hop).
+struct TailCallRequest {
+    const oscad::FunctionDeclaration* decl = nullptr;
+    const oscad::FunctionLiteral* literal = nullptr;
+    std::unordered_map<std::string, Value> bound;
+    EvalContext ctx;
+    std::string name;
+    const oscad::Position* callPos = nullptr;
+};
+
 // Binds `arguments` (evaluated against `callerCtx`, exactly like bindArgs)
 // into a fresh slot array per chunk.params, applies any unbound parameter's
 // compiled default, then runs the compiled body -- all against `childCtx`
@@ -42,9 +62,11 @@ struct VmFrame {
 // about lives in the slot array instead). Mirrors evalUserFunction's own
 // bindArgs+bound-loop+applyDefaults+evalExpr sequence exactly in observable
 // effect, just via slots instead of a per-call unordered_map + ctx.let_.
+// `tailOut`: forwarded to the body's own runChunk call -- see
+// runCompiledFunctionTrampoline for the only caller that passes non-null.
 Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
                           const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& callerCtx,
-                          EvalContext& childCtx);
+                          EvalContext& childCtx, TailCallRequest* tailOut = nullptr);
 
 // Same, but for a call site whose arguments are already evaluated (a
 // compiled CALL_FN opcode's own callee, or Evaluator::evalUserFunctionFromBound's
@@ -53,8 +75,34 @@ Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
 // straight to childCtx.dyn, exactly like bindCompiledArgs' own handling;
 // an undeclared plain name has no slot and is simply unreferenceable, same
 // reasoning as bindCompiledArgs), applies defaults for anything left
-// unbound, then runs the body.
+// unbound, then runs the body. `tailOut`: see runCompiledFunction's own
+// note -- this is also the function every trampoline hop AFTER the first
+// reuses directly (see runCompiledFunctionTrampoline/
+// runCompiledFunctionFromBoundTrampoline), since a tail request's own
+// bound-args shape is identical to this function's own parameter shape.
 Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk,
-                                    const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx);
+                                    const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx,
+                                    TailCallRequest* tailOut = nullptr);
+
+// The trampoline entry points -- replace runCompiledFunction/
+// runCompiledFunctionFromBound at evalUserFunction's/evalUserFunctionFromBound's/
+// evalFunctionLiteral's/evalFunctionLiteralFromBound's own call sites
+// (user_calls.cpp). Runs the first (real) call normally, then loops on
+// any TailCallRequest that comes back -- each subsequent hop reuses
+// runCompiledFunctionFromBound directly (a tail request's bound-args
+// shape already matches its own parameter shape exactly), acquiring a
+// fresh VmFrame each time (releasing the previous one -- safe, since only
+// an ISOLATED hop ever reaches here, meaning nothing can hold an upvalue
+// into a tail-discarded frame's own slots) and recording the hop via
+// Evaluator::recordTailCallHop (callStack_ frame mutation, the
+// 1,000,000-iteration cap, profiling). See these functions' own .cpp
+// definitions for why every hop's own EvalContext must be kept alive for
+// the whole trampoline run (a std::vector<EvalContext> chain, mirroring
+// evalFunctionBodyTrampoline's identical fix on the interpreter side).
+Value runCompiledFunctionTrampoline(Evaluator& ev, const CompiledChunk& chunk,
+                                     const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                                     EvalContext& callerCtx, EvalContext& childCtx);
+Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk& chunk,
+                                              const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx);
 
 } // namespace oscadeval

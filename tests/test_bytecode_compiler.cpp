@@ -426,6 +426,93 @@ TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnClosureCases) {
     EXPECT_EQ(offResult, onResult);
 }
 
+// -- Tail-call optimization, VM path (Phase B) -----------------------------
+//
+// Mirrors tests/test_tail_calls.cpp's own Phase A (interpreter) suite, but
+// forcing the compiled path via ScopedVm(true). Before Phase B
+// (CallFnTail/CallDynamicTail, runCompiledFunctionTrampoline/
+// runCompiledFunctionFromBoundTrampoline), every compiled call -- tail
+// position or not -- recursed genuinely (runChunk -> evalUserFunctionFromBound
+// -> evalUserFunctionCore -> runCompiledFunctionFromBound -> runChunk),
+// growing the real C++ stack once per OpenSCAD-level call; these are the
+// tests that prove the VM path specifically needed its own fix, not just
+// Phase A's interpreter-side one (a script forcing OSCAD_BYTECODE_VM=0 was
+// already covered there).
+
+TEST(BytecodeCompiler, DeepSelfTailRecursionUnderVmDoesNotOverflowTheNativeStack) {
+    ScopedVm vm(true);
+    const std::string script = "function sum(n, acc=0) = n == 0 ? acc : sum(n - 1, acc + n);\necho(sum(500000));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 1.25e+11");
+}
+
+TEST(BytecodeCompiler, MutualTailRecursionUnderVmAtDepthDoesNotOverflowTheNativeStack) {
+    ScopedVm vm(true);
+    const std::string script = "function is_even(n) = n == 0 ? true : is_odd(n - 1);\n"
+                                "function is_odd(n) = n == 0 ? false : is_even(n - 1);\n"
+                                "echo(is_even(300000));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: true");
+}
+
+TEST(BytecodeCompiler, MixedCompiledInterpretedTailChainStaysCorrect) {
+    ScopedVm vm(true);
+    // `relay` is compiled and tail-calls `uses_echo`, which contains an
+    // echo() expression and so can never compile (NotCompilable, see
+    // compileExpr's own default case) -- this hop crosses the compiled/
+    // interpreted boundary, paying one real C++ frame there by design (see
+    // runCompiledFunctionTrampoline's own doc comment), but must still
+    // produce the correct value. `uses_echo` then tail-calls BACK into the
+    // compiled `relay` for good measure.
+    const std::string script = "function uses_echo(n) = echo(\"hop\") n == 0 ? 99 : relay(n - 1);\n"
+                                "function relay(n) = n == 0 ? -1 : uses_echo(n - 1);\n"
+                                "echo(relay(4));";
+    // relay(4) -> uses_echo(3) [echo] -> relay(2) -> uses_echo(1) [echo] ->
+    // relay(0) -> -1 (two hops through uses_echo, each crossing the
+    // compiled/interpreted boundary once each way).
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: \"hop\"\nECHO: \"hop\"\nECHO: -1");
+}
+
+TEST(BytecodeCompiler, ClosureNestedTailCallUnderVmFallsBackAndStillResolves) {
+    ScopedVm vm(true);
+    // Same closure-nesting hazard as the interpreter path's own
+    // ClosureNestedTailCallFallsBackToRealRecursionAndStillResolves
+    // (test_tail_calls.cpp) -- g's own call is lexically nested inside
+    // make's body (a closure over `x`, read via Op::LoadUpvalue), so
+    // isolatedCallCtxFor must return nullopt for it, and CallDynamicTail's
+    // handler must fall back to a real evalFunctionLiteralFromBound call
+    // instead of trampolining.
+    const std::string script = "function make(x) = let(g = function(y) y + x) g(5);\necho(make(10));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 15");
+}
+
+TEST(BytecodeCompiler, InfiniteTailRecursionUnderVmHitsTheIterationCapWithABoundedTrace) {
+    // `loop`'s body (a plain PrimaryCall in tail position, no echo/assert)
+    // compiles cleanly, so this exercises Op::CallFnTail's own runtime
+    // isolation/chunk check and runCompiledFunctionTrampoline's loop
+    // directly -- unlike a script using assert()/echo() in the chain
+    // (those node kinds never compile at all, see compileExpr's own
+    // default case, so a function using either always falls back to the
+    // interpreter's own trampoline regardless of OSCAD_BYTECODE_VM).
+    ScopedVm vm(true);
+    Evaluator ev;
+    auto ast = parseSrc("function loop(n) = loop(n + 1);\nresult = loop(0);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.resolveTree(ast, ctx);
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("loop"), std::string::npos);
+        EXPECT_NE(msg.find("Recursion detected"), std::string::npos);
+        // Bounded TRACE despite 1,000,000 tail hops: runCompiledFunctionTrampoline
+        // mutates callStack_'s current frame in place per hop (never
+        // pushes), exactly like the interpreter path's own trampoline.
+        size_t count = 0;
+        for (size_t pos = msg.find("TRACE:"); pos != std::string::npos; pos = msg.find("TRACE:", pos + 1)) ++count;
+        EXPECT_LE(count, 2u);
+    }
+}
+
 TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnDefaultAndFallbackCases) {
     const std::string script = "function helper(x) = x + 1;\n"
                                 "function outer(y) = helper(y) * 2;\n"

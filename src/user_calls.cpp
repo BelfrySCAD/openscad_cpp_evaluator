@@ -119,6 +119,13 @@ EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, 
     return ctx.callCtx(scope, std::nullopt, std::move(childrenNodes), childrenCallerCtx);
 }
 
+std::optional<EvalContext> Evaluator::isolatedCallCtxFor(const oscad::ASTNode& declNode, EvalContext& ctx) {
+    bool usedChildCtx = false;
+    EvalContext result = callCtxFor(declNode, ctx, ctx.scope, nullptr, nullptr, &usedChildCtx);
+    if (usedChildCtx) return std::nullopt;
+    return result;
+}
+
 void Evaluator::applyDefaults(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
                                const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx) {
     std::optional<EvalContext> defaultCtx;
@@ -359,9 +366,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
     }
 }
 
-Value Evaluator::evalFunctionBodyTrampoline(const oscad::ASTNode* declNode, const oscad::Expression& bodyExpr,
-                                             EvalContext& ctx) {
-    static constexpr unsigned kTcoIterationCap = 1000000;
+Value Evaluator::evalFunctionBodyTrampoline(const oscad::Expression& bodyExpr, EvalContext& ctx) {
     const oscad::Expression* expr = &bodyExpr;
     // Every EvalContext this trampoline ever derives must stay alive for
     // its whole run, not just the currently-active one. scope_trail.hpp's
@@ -403,18 +408,24 @@ Value Evaluator::evalFunctionBodyTrampoline(const oscad::ASTNode* declNode, cons
         chain.push_back(std::move(step.ctx));
         ctx = chain.back();
         if (step.isNewLogicalCall) {
-            if (++recursionGuard > kTcoIterationCap) {
-                error("Recursion detected calling function '" + step.calleeName + "'", *declNode);
-            }
-            CallStackFrame& frame = callStack_.back();
-            frame.name = step.calleeName;
-            frame.declNode = step.calleeDecl;
-            frame.declPosition = &step.calleeDecl->position();
-            frame.callPosition = step.callPos;
-            frame.upvalueParent = -1;
-            profileRecordTailHop("function", step.calleeName, step.callPos, &step.calleeDecl->position());
+            recordTailCallHop(step.calleeName, *step.calleeDecl, step.callPos, recursionGuard);
         }
     }
+}
+
+void Evaluator::recordTailCallHop(const std::string& calleeName, const oscad::ASTNode& calleeDecl,
+                                   const oscad::Position* callPos, unsigned& recursionGuard) {
+    static constexpr unsigned kTcoIterationCap = 1000000;
+    if (++recursionGuard > kTcoIterationCap) {
+        error("Recursion detected calling function '" + calleeName + "'", calleeDecl);
+    }
+    CallStackFrame& frame = callStack_.back();
+    frame.name = calleeName;
+    frame.declNode = &calleeDecl;
+    frame.declPosition = &calleeDecl.position();
+    frame.callPosition = callPos;
+    frame.upvalueParent = -1;
+    profileRecordTailHop("function", calleeName, callPos, &calleeDecl.position());
 }
 
 Value Evaluator::evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode,
@@ -461,8 +472,8 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
 
     const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
     return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
-        return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx)
-                      : evalFunctionBodyTrampoline(&decl, *decl.expr, childCtx);
+        return chunk ? runCompiledFunctionTrampoline(*this, *chunk, arguments, ctx, childCtx)
+                      : evalFunctionBodyTrampoline(*decl.expr, childCtx);
     });
 }
 
@@ -478,10 +489,10 @@ Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad:
     if (!chunk) {
         bindCallArgsInto(decl.parameters, std::move(bound), childCtx);
         return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent,
-                                     [&]() -> Value { return evalFunctionBodyTrampoline(&decl, *decl.expr, childCtx); });
+                                     [&]() -> Value { return evalFunctionBodyTrampoline(*decl.expr, childCtx); });
     }
     return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
-        return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx);
+        return runCompiledFunctionFromBoundTrampoline(*this, *chunk, bound, childCtx);
     });
 }
 
@@ -515,8 +526,8 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
     // further given no test depends on it.
     return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
                                  [&]() -> Value {
-                                     return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx)
-                                                  : evalFunctionBodyTrampoline(&funcNode, *funcNode.body, childCtx);
+                                     return chunk ? runCompiledFunctionTrampoline(*this, *chunk, arguments, ctx, childCtx)
+                                                  : evalFunctionBodyTrampoline(*funcNode.body, childCtx);
                                  });
 }
 
@@ -533,10 +544,10 @@ Value Evaluator::evalFunctionLiteralFromBound(const oscad::FunctionLiteral& func
         bindCallArgsInto(funcNode.parameters, std::move(bound), childCtx);
         return evalUserFunctionCore(
             "<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
-            [&]() -> Value { return evalFunctionBodyTrampoline(&funcNode, *funcNode.body, childCtx); });
+            [&]() -> Value { return evalFunctionBodyTrampoline(*funcNode.body, childCtx); });
     }
     return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
-                                 [&]() -> Value { return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx); });
+                                 [&]() -> Value { return runCompiledFunctionFromBoundTrampoline(*this, *chunk, bound, childCtx); });
 }
 
 Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& ctx) {
