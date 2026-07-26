@@ -14,6 +14,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # (nlohmann_json, Manifold, Boost.Polygon) branch on __cplusplus.
 if(MSVC)
   add_compile_options(/Zc:__cplusplus)
+  # MSVC's <cmath> only defines M_PI et al. when this is set before the
+  # first include -- a command-line define guarantees that regardless of
+  # each translation unit's own include order. Unix libcs define these
+  # unconditionally (a POSIX extension our code already relies on), so no
+  # equivalent is needed there.
+  add_compile_definitions(_USE_MATH_DEFINES)
 endif()
 
 add_subdirectory(external/openscad_cpp_parser)
