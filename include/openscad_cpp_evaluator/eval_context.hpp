@@ -19,17 +19,22 @@ using ChildrenNodeList = std::vector<const oscad::ASTNode*>;
 
 // Mutable evaluation state threaded through recursive evaluation. Mirrors
 // the Python reference's EvalContext dataclass field-for-field.
-// `dyn`/`let_`/`dynPositions`/`dynExplicit` are each a `shared_ptr` onto a
-// TrailView (scope_trail.hpp) -- a binding-trail handle, not an owned
-// map/set. This replaced an earlier design where each field was a
-// `shared_ptr<unordered_map>` copied wholesale on every derivation
-// (childCtx()/callCtx()/letChildCtx()): profiling a real BOSL2-heavy
-// script found that copying was a dominant cost (hundreds of thousands of
-// user function/module calls, each paying for a full map copy). The trail
-// makes every derivation an O(1) "open a new level" instead, since this
-// codebase has no escaping closures to worry about (see scope_trail.hpp's
-// own module comment) -- popLevel() on scope-exit only pops what that
-// scope actually pushed, not the whole map's contents.
+// `let_`/`dynPositions` are each a `shared_ptr` onto a TrailView
+// (scope_trail.hpp) -- a binding-trail handle, not an owned map/set;
+// `dyn`/`dynExplicit` are each a thin value-type VIEW (DynValueView/
+// DynExplicitView) wrapping a `shared_ptr` onto ONE shared underlying
+// trail between them (see scope_trail.hpp's own doc comment on those two
+// classes) -- copying either view is just a shared_ptr copy underneath,
+// same aliasing behavior as the plain shared_ptr fields. This replaced an
+// earlier design where each field was a `shared_ptr<unordered_map>`
+// copied wholesale on every derivation (childCtx()/callCtx()/
+// letChildCtx()): profiling a real BOSL2-heavy script found that copying
+// was a dominant cost (hundreds of thousands of user function/module
+// calls, each paying for a full map copy). The trail makes every
+// derivation an O(1) "open a new level" instead, since this codebase has
+// no escaping closures to worry about (see scope_trail.hpp's own module
+// comment) -- popLevel() on scope-exit only pops what that scope
+// actually pushed, not the whole map's contents.
 //
 // `withScope()` (below) still relies on shared_ptr's reference semantics
 // exactly like the old design did: an Assignment statement mutates the
@@ -40,10 +45,16 @@ using ChildrenNodeList = std::vector<const oscad::ASTNode*>;
 // opening a new one.
 struct EvalContext {
     const oscad::Scope* scope = nullptr;
-    std::shared_ptr<IndexedTrailView<Value>> dyn;                 // $-prefixed only, interned-int-keyed
+    // dyn/dynExplicit share ONE underlying trail (DynValueView/
+    // DynExplicitView, scope_trail.hpp) -- two distinctly-typed
+    // projections of the same shared_ptr<IndexedTrailView<DynEntry>>, not
+    // two independent trails, so a derivation only opens one new level for
+    // both. Each still reads/writes exactly like its own former
+    // independent trail (find/set/count/items/empty via operator->).
+    DynValueView dyn;            // $-prefixed only, interned-int-keyed
     std::shared_ptr<TrailView<Value>> let_;                      // plain-named bindings
     std::shared_ptr<TrailView<const oscad::Position*>> dynPositions;
-    std::shared_ptr<DynExplicitTrail> dynExplicit;               // which $-names the script itself assigned
+    DynExplicitView dynExplicit; // which $-names the script itself assigned
     std::optional<std::array<double, 4>> color;
     std::shared_ptr<const ChildrenNodeList> childrenNodes;
     const EvalContext* childrenCallerCtx = nullptr;

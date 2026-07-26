@@ -5,8 +5,11 @@ namespace oscadeval {
 EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     EvalContext ctx;
     ctx.scope = rootScope;
-    auto dynIntern = std::make_shared<DynNameIntern>();
-    ctx.dyn = IndexedTrailView<Value>::makeRoot(dynIntern);
+    // dyn/dynExplicit share one underlying trail -- see scope_trail.hpp's
+    // own doc comment on DynValueView/DynExplicitView.
+    auto dynTrail = IndexedTrailView<DynEntry>::makeRoot(std::make_shared<DynNameIntern>());
+    ctx.dyn = DynValueView(dynTrail);
+    ctx.dynExplicit = DynExplicitView(dynTrail);
     ctx.dyn->set("$fn", Value{0.0});
     ctx.dyn->set("$fa", Value{12.0});
     ctx.dyn->set("$fs", Value{2.0});
@@ -14,7 +17,6 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     ctx.dyn->set("$parent_modules", Value{0.0});
     ctx.let_ = TrailView<Value>::makeRoot();
     ctx.dynPositions = TrailView<const oscad::Position*>::makeRoot();
-    ctx.dynExplicit = DynExplicitTrail::makeRoot(dynIntern);
     ctx.childrenNodes = std::make_shared<const ChildrenNodeList>();
     ctx.childrenCallerCtx = nullptr;
     return ctx;
@@ -31,8 +33,9 @@ EvalContext EvalContext::childCtx(const oscad::Scope* newScope, std::optional<st
                                    const EvalContext* newChildrenCallerCtx) const {
     EvalContext result;
     result.scope = newScope ? newScope : scope;
-    result.dyn = dyn->openChild(/*isolate=*/false);
-    result.dynExplicit = dynExplicit->openChild(false);
+    auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false);
+    result.dyn = DynValueView(newDynTrail);
+    result.dynExplicit = DynExplicitView(newDynTrail);
     result.let_ = let_->openChild(false);
     result.dynPositions = dynPositions->openChild(/*isolate=*/true); // fresh -- the reference's asymmetric rule
     result.color = newColor.has_value() ? newColor : color;
@@ -46,8 +49,9 @@ EvalContext EvalContext::callCtx(const oscad::Scope* newScope, std::optional<std
                                   const EvalContext* newChildrenCallerCtx) const {
     EvalContext result;
     result.scope = newScope ? newScope : scope;
-    result.dyn = dyn->openChild(/*isolate=*/false); // stays dynamically scoped through
-    result.dynExplicit = dynExplicit->openChild(false);
+    auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false); // stays dynamically scoped through
+    result.dyn = DynValueView(newDynTrail);
+    result.dynExplicit = DynExplicitView(newDynTrail);
     result.let_ = let_->openChild(/*isolate=*/true); // isolated call scope
     result.dynPositions = dynPositions->openChild(true);
     result.color = newColor.has_value() ? newColor : color;
@@ -58,10 +62,11 @@ EvalContext EvalContext::callCtx(const oscad::Scope* newScope, std::optional<std
 
 EvalContext EvalContext::letChildCtx() const {
     EvalContext result = *this;
-    result.dyn = dyn->openChild(/*isolate=*/false);
+    auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false);
+    result.dyn = DynValueView(newDynTrail);
+    result.dynExplicit = DynExplicitView(newDynTrail);
     result.let_ = let_->openChild(false);
     result.dynPositions = dynPositions->openChild(false);
-    result.dynExplicit = dynExplicit->openChild(false);
     return result;
 }
 
