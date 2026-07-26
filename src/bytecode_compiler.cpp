@@ -152,7 +152,23 @@ public:
         return static_cast<int>(chunk_.names.size()) - 1;
     }
 
-    void compileExpr(const oscad::Expression& node, std::vector<Instruction>& out, CompileScope& scope) {
+    // `tail`: true iff `node`'s own value, once produced, becomes the
+    // enclosing function/literal body's result with nothing further done
+    // to it -- i.e. a genuine tail position (see bytecode.hpp's own
+    // CallFnTail/CallDynamicTail doc comment). Defaults false: only
+    // compileFunctionLike's own top-level body call starts true;
+    // TernaryOp/LetOp forward their own `tail` to whichever sub-expression
+    // is itself in tail position (both branches for Ternary, just the
+    // body for Let -- an assignment's own RHS is never tail); every other
+    // node kind's sub-expressions are unconditionally non-tail (an
+    // operand, an argument, a condition -- something is always done with
+    // their result afterward). Only affects the PrimaryCall case, which
+    // emits CallFnTail/CallDynamicTail instead of CallFn/CallDynamic when
+    // `tail` is true and the callee is a non-builtin (builtins are never
+    // trampolined, matching upstream's own BuiltinFunction early-return
+    // via a genuine call).
+    void compileExpr(const oscad::Expression& node, std::vector<Instruction>& out, CompileScope& scope,
+                      bool tail = false) {
         using oscad::NodeKind;
         switch (node.kind()) {
             case NodeKind::NumberLiteral:
@@ -170,7 +186,8 @@ public:
                 out.push_back({Op::PushConst, internConst(Value{}), 0, nullptr});
                 return;
             case NodeKind::CommentedExpr:
-                compileExpr(*static_cast<const oscad::CommentedExpr&>(node).expr, out, scope);
+                // Transparent wrapper -- forwards `tail` unchanged.
+                compileExpr(*static_cast<const oscad::CommentedExpr&>(node).expr, out, scope, tail);
                 return;
             case NodeKind::Identifier: {
                 auto& n = static_cast<const oscad::Identifier&>(node);
@@ -270,14 +287,14 @@ public:
             }
             case NodeKind::TernaryOp: {
                 auto& n = static_cast<const oscad::TernaryOp&>(node);
-                compileExpr(*n.condition, out, scope);
+                compileExpr(*n.condition, out, scope); // condition is never tail
                 size_t jumpToFalse = out.size();
                 out.push_back({Op::JumpIfFalse, 0, 0, nullptr});
-                compileExpr(*n.trueExpr, out, scope);
+                compileExpr(*n.trueExpr, out, scope, tail); // both branches inherit
                 size_t jumpToEnd = out.size();
                 out.push_back({Op::Jump, 0, 0, nullptr});
                 out[jumpToFalse].a = static_cast<int>(out.size());
-                compileExpr(*n.falseExpr, out, scope);
+                compileExpr(*n.falseExpr, out, scope, tail);
                 out[jumpToEnd].a = static_cast<int>(out.size());
                 return;
             }
@@ -365,14 +382,15 @@ public:
                     // function" warning only ever names the callee when it
                     // WAS a plain identifier (site.calleeName stays empty
                     // otherwise) -- see Op::CallDynamic's own runtime
-                    // handler.
+                    // handler. Never itself in tail position (it's the
+                    // CALLEE being resolved, not this call's own result).
                     compileExpr(*n.left, out, scope);
                 }
 
                 for (const auto& argPtr : n.arguments) {
                     if (argPtr->kind() == NodeKind::NamedArgument) {
                         auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-                        compileExpr(*a.expr, out, scope);
+                        compileExpr(*a.expr, out, scope); // an argument is never tail
                         site.argNames.push_back(a.name->name);
                     } else {
                         auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
@@ -382,8 +400,20 @@ public:
                 }
                 int siteIdx = static_cast<int>(chunk_.callSites.size());
                 chunk_.callSites.push_back(std::move(site));
-                out.push_back(
-                    {isStatic ? Op::CallFn : Op::CallDynamic, siteIdx, static_cast<int>(n.arguments.size()), &n.position()});
+                // Builtins never trampoline (matching upstream's own
+                // BuiltinFunction early-return via a genuine call) --
+                // CallFnTail/CallDynamicTail are only emitted for `tail`
+                // AND a non-builtin callee. Eligibility beyond that
+                // (isolated vs. closure-nested) is a runtime fact the
+                // compiler can't know -- see bytecode.hpp's own doc
+                // comment on these two opcodes.
+                Op op;
+                if (isStatic) {
+                    op = (tail && !site.isBuiltin) ? Op::CallFnTail : Op::CallFn;
+                } else {
+                    op = tail ? Op::CallDynamicTail : Op::CallDynamic;
+                }
+                out.push_back({op, siteIdx, static_cast<int>(n.arguments.size()), &n.position()});
                 return;
             }
 
@@ -394,7 +424,7 @@ public:
                 out.push_back({Op::OpenLocalScope, 0, 0, nullptr});
                 int slotStart = nextSlot_;
                 for (const auto& assign : n.assignments) {
-                    compileExpr(*assign->expr, out, scope);
+                    compileExpr(*assign->expr, out, scope); // RHS is never tail
                     const std::string& name = assign->name->name;
                     if (!name.empty() && name[0] == '$') {
                         out.push_back({Op::StoreDyn, internName(name), 0, &assign->position()});
@@ -405,7 +435,7 @@ public:
                 }
                 out[placeholderIdx].a = slotStart;
                 out[placeholderIdx].b = nextSlot_ - slotStart;
-                compileExpr(*n.body, out, scope);
+                compileExpr(*n.body, out, scope, tail); // body inherits
                 scope.pop();
                 return;
             }
@@ -693,7 +723,7 @@ bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, 
                 compiler.compileExpr(*params[i]->defaultValue, chunk.defaultCode[i], defaultScope);
             }
         }
-        compiler.compileExpr(bodyExpr, chunk.bodyCode, bodyScope);
+        compiler.compileExpr(bodyExpr, chunk.bodyCode, bodyScope, /*tail=*/true);
     } catch (const NotCompilable&) {
         return false;
     }

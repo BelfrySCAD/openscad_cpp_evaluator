@@ -42,7 +42,8 @@ struct IterList {
 };
 
 Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Instruction>& code,
-                std::vector<Value>& slots, EvalContext& ctx, std::vector<Value>& stack) {
+                std::vector<Value>& slots, EvalContext& ctx, std::vector<Value>& stack,
+                TailCallRequest* tailOut = nullptr) {
     stack.clear();
     // Native scratch state for list-comprehension clauses (Phase 3) -- not
     // pooled (unlike stack/slots/bound): only chunks containing a real
@@ -329,6 +330,100 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 ++pc;
                 break;
             }
+            case Op::CallFnTail: {
+                const CompiledChunk::CallSite& site = chunk.callSites[static_cast<size_t>(ins.a)];
+                const size_t argCount = static_cast<size_t>(ins.b);
+                std::vector<Value> args(argCount);
+                for (size_t i = 0; i < argCount; ++i) {
+                    args[argCount - 1 - i] = std::move(stack.back());
+                    stack.pop_back();
+                }
+                std::unordered_map<std::string, Value> bound;
+                size_t positionalIdx = 0;
+                const size_t nparams = site.decl->parameters.size();
+                for (size_t i = 0; i < argCount; ++i) {
+                    if (site.argNames[i]) {
+                        bound[*site.argNames[i]] = std::move(args[i]);
+                    } else {
+                        if (positionalIdx < nparams) {
+                            bound[site.decl->parameters[positionalIdx]->name->name] = std::move(args[i]);
+                        }
+                        ++positionalIdx;
+                    }
+                }
+                // Eligible for trampolining only when isolated (not
+                // closure-nested -- see Evaluator::isolatedCallCtxFor's own
+                // doc comment) AND the callee itself has a compiled chunk
+                // (a tail hop into a callee that doesn't compile pays one
+                // real C++ frame at that boundary instead, same as today).
+                // Ineligible falls through to exactly what CallFn already
+                // does -- no new behavior for that case.
+                if (tailOut != nullptr) {
+                    if (auto hopCtx = ev.isolatedCallCtxFor(*site.decl, ctx)) {
+                        if (ev.lookupOrCompileChunk(*site.decl) != nullptr) {
+                            tailOut->decl = site.decl;
+                            tailOut->literal = nullptr;
+                            tailOut->bound = std::move(bound);
+                            tailOut->ctx = std::move(*hopCtx);
+                            tailOut->name = site.calleeName;
+                            tailOut->callPos = &site.callNode->position();
+                            return Value{};
+                        }
+                    }
+                }
+                Value result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound), ctx,
+                                                              &site.callNode->position());
+                stack.push_back(std::move(result));
+                ++pc;
+                break;
+            }
+            case Op::CallDynamicTail: {
+                const CompiledChunk::CallSite& site = chunk.callSites[static_cast<size_t>(ins.a)];
+                const size_t argCount = static_cast<size_t>(ins.b);
+                std::vector<Value> args(argCount);
+                for (size_t i = 0; i < argCount; ++i) {
+                    args[argCount - 1 - i] = std::move(stack.back());
+                    stack.pop_back();
+                }
+                Value callee = std::move(stack.back());
+                stack.pop_back();
+                Value result;
+                if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&callee); flPtr && *flPtr) {
+                    const oscad::FunctionLiteral& funcNode = **flPtr;
+                    std::unordered_map<std::string, Value> bound;
+                    size_t positionalIdx = 0;
+                    const size_t nparams = funcNode.parameters.size();
+                    for (size_t i = 0; i < argCount; ++i) {
+                        if (site.argNames[i]) {
+                            bound[*site.argNames[i]] = std::move(args[i]);
+                        } else {
+                            if (positionalIdx < nparams) {
+                                bound[funcNode.parameters[positionalIdx]->name->name] = std::move(args[i]);
+                            }
+                            ++positionalIdx;
+                        }
+                    }
+                    if (tailOut != nullptr) {
+                        if (auto hopCtx = ev.isolatedCallCtxFor(funcNode, ctx)) {
+                            if (ev.lookupCompiledLiteralChunk(funcNode) != nullptr) {
+                                tailOut->decl = nullptr;
+                                tailOut->literal = &funcNode;
+                                tailOut->bound = std::move(bound);
+                                tailOut->ctx = std::move(*hopCtx);
+                                tailOut->name = "<function literal>";
+                                tailOut->callPos = ins.pos;
+                                return Value{};
+                            }
+                        }
+                    }
+                    result = ev.evalFunctionLiteralFromBound(funcNode, std::move(bound), ctx, ins.pos);
+                } else if (!site.calleeName.empty()) {
+                    ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
+                }
+                stack.push_back(std::move(result));
+                ++pc;
+                break;
+            }
         }
     }
     return stack.empty() ? Value{} : std::move(stack.back());
@@ -386,7 +481,7 @@ void bindCompiledArgs(Evaluator& ev, const CompiledChunk& chunk,
 
 Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
                           const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& callerCtx,
-                          EvalContext& childCtx) {
+                          EvalContext& childCtx, TailCallRequest* tailOut) {
     VmFrameGuard guard(ev);
     VmFrame& frame = guard.get();
     frame.slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
@@ -406,11 +501,12 @@ Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
                 runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack);
         }
     }
-    return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack);
+    return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack, tailOut);
 }
 
 Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk,
-                                    const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx) {
+                                    const std::unordered_map<std::string, Value>& bound, EvalContext& childCtx,
+                                    TailCallRequest* tailOut) {
     VmFrameGuard guard(ev);
     VmFrame& frame = guard.get();
     frame.slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
@@ -439,7 +535,73 @@ Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk,
                 runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack);
         }
     }
-    return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack);
+    return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack, tailOut);
+}
+
+// The trampoline entry points -- see bytecode_vm.hpp's own doc comment for
+// the overview. Both share the identical loop shape: run the first
+// (real) call via the ordinary entry function (with tailOut populated),
+// then keep reusing runCompiledFunctionFromBound directly for every
+// subsequent hop (a TailCallRequest's own bound-args shape already
+// matches that function's own parameter shape exactly -- no new binding
+// logic needed).
+//
+// Every hop's own EvalContext (TailCallRequest::ctx, already derived by
+// isolatedCallCtxFor -- a fresh $-var/dyn trail level) is kept alive for
+// the WHOLE trampoline run via `chain`, mirroring evalFunctionBodyTrampoline's
+// identical fix on the interpreter side (user_calls.cpp) exactly: $-vars
+// stay dynamically scoped THROUGH even an isolated call (callCtx()'s own
+// dyn uses isolate=false), so a later hop may still need to walk back
+// through a much earlier one's dyn level to resolve a name. Reusing a
+// single EvalContext variable via plain assignment would drop an earlier
+// level's shared_ptr refcount to zero and pop it (ScopeTrailStorage::
+// popLevel, scope_trail.hpp's custom-deleter mechanism) -- permanently
+// erasing a parent-chain link a later hop still needs. Trades native C++
+// *stack* growth (what this trampoline exists to eliminate) for heap
+// growth instead -- O(iteration count) EvalContext objects, bounded by
+// available RAM rather than a ~few-MB thread stack.
+Value runCompiledFunctionTrampoline(Evaluator& ev, const CompiledChunk& chunk,
+                                     const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                                     EvalContext& callerCtx, EvalContext& childCtx) {
+    std::vector<EvalContext> chain{childCtx};
+    TailCallRequest req;
+    Value result = runCompiledFunction(ev, chunk, arguments, callerCtx, chain.back(), &req);
+    unsigned recursionGuard = 0;
+    while (req.decl != nullptr || req.literal != nullptr) {
+        const oscad::ASTNode& calleeDecl =
+            req.decl ? static_cast<const oscad::ASTNode&>(*req.decl) : static_cast<const oscad::ASTNode&>(*req.literal);
+        ev.recordTailCallHop(req.name, calleeDecl, req.callPos, recursionGuard);
+        const CompiledChunk* curChunk =
+            req.decl ? ev.lookupOrCompileChunk(*req.decl) : ev.lookupCompiledLiteralChunk(*req.literal);
+        std::unordered_map<std::string, Value> bound = std::move(req.bound);
+        chain.push_back(std::move(req.ctx));
+        TailCallRequest next;
+        result = runCompiledFunctionFromBound(ev, *curChunk, bound, chain.back(), &next);
+        req = std::move(next);
+    }
+    return result;
+}
+
+Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk& chunk,
+                                              const std::unordered_map<std::string, Value>& bound,
+                                              EvalContext& childCtx) {
+    std::vector<EvalContext> chain{childCtx};
+    TailCallRequest req;
+    Value result = runCompiledFunctionFromBound(ev, chunk, bound, chain.back(), &req);
+    unsigned recursionGuard = 0;
+    while (req.decl != nullptr || req.literal != nullptr) {
+        const oscad::ASTNode& calleeDecl =
+            req.decl ? static_cast<const oscad::ASTNode&>(*req.decl) : static_cast<const oscad::ASTNode&>(*req.literal);
+        ev.recordTailCallHop(req.name, calleeDecl, req.callPos, recursionGuard);
+        const CompiledChunk* curChunk =
+            req.decl ? ev.lookupOrCompileChunk(*req.decl) : ev.lookupCompiledLiteralChunk(*req.literal);
+        std::unordered_map<std::string, Value> nextBound = std::move(req.bound);
+        chain.push_back(std::move(req.ctx));
+        TailCallRequest next;
+        result = runCompiledFunctionFromBound(ev, *curChunk, nextBound, chain.back(), &next);
+        req = std::move(next);
+    }
+    return result;
 }
 
 } // namespace oscadeval

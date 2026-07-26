@@ -550,15 +550,13 @@ private:
     // lambda, for the interpreter (non-compiled) branch only. The FIRST
     // logical call's CallStackFrame/profiling are already set up by
     // evalUserFunctionCore/profileEnter before this runs -- this function
-    // only needs to mutate them on a *subsequent* tail hop. `ctx` is taken
-    // by reference to the SAME storage evalUserFunctionCore already
+    // only needs to mutate them on a *subsequent* tail hop, via
+    // recordTailCallHop (also shared with the bytecode-VM trampoline). `ctx`
+    // is taken by reference to the SAME storage evalUserFunctionCore already
     // pointed lastCtx_ at before computeResult() runs -- each iteration
     // move-assigns into it (never declares a fresh local), so lastCtx_
-    // never dangles and needs no extra bookkeeping. `declNode` anchors the
-    // 1,000,000-iteration cap's error position (mirrors upstream's own
-    // RecursionException cap exactly) -- turns a tail-recursive function
-    // with no base case into a controlled error instead of a hang.
-    Value evalFunctionBodyTrampoline(const oscad::ASTNode* declNode, const oscad::Expression& bodyExpr, EvalContext& ctx);
+    // never dangles and needs no extra bookkeeping.
+    Value evalFunctionBodyTrampoline(const oscad::Expression& bodyExpr, EvalContext& ctx);
 
     void evalUserModule(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call, EvalContext& ctx);
     Value evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
@@ -578,7 +576,6 @@ private:
     // compile" (see tryCompileFunction) -- cached too, so a function that
     // uses e.g. echo() isn't re-attempted on every single call.
     std::unordered_map<const oscad::FunctionDeclaration*, std::optional<CompiledChunk>> chunkCache_;
-    const CompiledChunk* lookupOrCompileChunk(const oscad::FunctionDeclaration& decl);
 
     // FunctionLiteral chunks (Phase 2/closures): populated only as a side
     // effect of successfully compiling some OTHER declaration that
@@ -592,10 +589,21 @@ private:
     // optional wrapper needed (unlike chunkCache_, which also has to
     // remember "tried once, don't retry").
     std::unordered_map<const oscad::FunctionLiteral*, CompiledChunk> literalChunkCache_;
-    const CompiledChunk* lookupCompiledLiteralChunk(const oscad::FunctionLiteral& node) const;
     void flattenNestedLiterals(CompiledChunk& chunk);
 
 public:
+    // lookupOrCompileChunk/lookupCompiledLiteralChunk: public (not just
+    // private helpers of evalUserFunction*/evalFunctionLiteral* anymore)
+    // since bytecode_vm.cpp's Phase B trampoline (runCompiledFunctionTrampoline/
+    // runCompiledFunctionFromBoundTrampoline, a separate translation unit)
+    // needs to resolve a tail-called declaration's own chunk directly, the
+    // same way runChunk's CallFnTail/CallDynamicTail handlers need it to
+    // decide whether a hop even HAS a compiled chunk to jump to (a callee
+    // that doesn't compile falls back to a real call instead -- see
+    // bytecode.hpp's own CallFnTail/CallDynamicTail doc comment).
+    const CompiledChunk* lookupOrCompileChunk(const oscad::FunctionDeclaration& decl);
+    const CompiledChunk* lookupCompiledLiteralChunk(const oscad::FunctionLiteral& node) const;
+
     // Pooled VmFrame scratch buffers (see VmFrame's own doc comment,
     // bytecode_vm.hpp, for why pooling exists at all -- a measured, not
     // assumed, fix for 3-fresh-vector-allocations-per-call erasing the
@@ -625,6 +633,36 @@ public:
         if (!callStack_.empty()) callStack_.back().vmFrame = frame;
     }
     const Value* findUpvalue(const oscad::ASTNode* targetDecl, int slot) const;
+
+    // -- Tail-call optimization support shared by both execution paths ---
+    //
+    // Bytecode-VM analog of tryTailStepFor's own isolation check (see that
+    // function's doc comment for the exact closure-nesting hazard this
+    // avoids -- identical reasoning applies here). Public: runChunk's
+    // Op::CallFnTail/CallDynamicTail handlers (bytecode_vm.cpp, a separate
+    // translation unit) call this to decide whether a hop is eligible to
+    // trampoline. Returns the already-derived isolated-call EvalContext
+    // (callCtxFor's own callCtx() branch) on success -- the caller uses it
+    // directly rather than re-deriving, exactly one callCtxFor call either
+    // way (same as the interpreter path's own tryTailStepFor) -- or
+    // nullopt if `declNode` is closure-nested inside the currently-active
+    // call, in which case the caller must fall back to a real recursive
+    // call (evalUserFunctionFromBound/evalFunctionLiteralFromBound).
+    std::optional<EvalContext> isolatedCallCtxFor(const oscad::ASTNode& declNode, EvalContext& ctx);
+
+    // Shared per-hop bookkeeping for BOTH trampolines (evalFunctionBodyTrampoline,
+    // user_calls.cpp, AND runCompiledFunctionTrampoline/
+    // runCompiledFunctionFromBoundTrampoline, bytecode_vm.cpp): mutates
+    // callStack_'s current (already-pushed, by the outer evalUserFunctionCore)
+    // frame in place to reflect the new callee's identity (name/declNode/
+    // declPosition/callPosition, upvalueParent reset to -1 -- always
+    // isolated, or this hop wouldn't be here), checks/bumps `recursionGuard`
+    // against the same 1,000,000-iteration cap real upstream OpenSCAD uses
+    // (throws via error() past it, message text mirroring upstream's own
+    // RecursionException), and records a lightweight profiling hop
+    // (profileRecordTailHop). Public: bytecode_vm.cpp needs it too.
+    void recordTailCallHop(const std::string& calleeName, const oscad::ASTNode& calleeDecl,
+                            const oscad::Position* callPos, unsigned& recursionGuard);
 
 private:
     std::vector<std::unique_ptr<VmFrame>> vmFramePool_;

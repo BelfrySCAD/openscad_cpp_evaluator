@@ -120,6 +120,23 @@ enum class Op {
     // pointer, warns (if calleeName is non-empty) and pushes undef,
     // exactly like the interpreter's own fallback.
     CallDynamic,
+
+    // -- Tail-call optimization (Phase B) ---------------------------------
+    // Same operands/semantics as CallFn/CallDynamic, emitted instead of
+    // them ONLY for a PrimaryCall the compiler determined is in tail
+    // position (bytecode_compiler.cpp's `tail` param threaded through
+    // compileExpr) AND resolves to a non-builtin callee. Whether a given
+    // hop is actually eligible to trampoline (isolated, i.e. not
+    // closure-nested inside the currently-executing call -- see
+    // Evaluator::isolatedCallCtxFor's own doc comment) is a RUNTIME fact
+    // the compiler can't know, so runChunk's handler for these two
+    // opcodes checks it dynamically: eligible -> fills the caller-supplied
+    // TailCallRequest and returns immediately (short-circuiting runChunk's
+    // own pc loop); not eligible -> falls back to doing exactly what
+    // CallFn/CallDynamic already do (a real recursive call), no different
+    // from today.
+    CallFnTail,
+    CallDynamicTail,
 };
 
 struct Instruction {
