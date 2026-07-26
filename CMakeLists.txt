@@ -5,6 +5,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ponytail: MSVC always reports __cplusplus as 199711L regardless of the
+# real /std: level unless this flag is passed (a long-standing legacy-
+# compatibility quirk) -- set it at the outer-project level too (the
+# submodule's own CMakeLists.txt sets it for its own targets, but that
+# add_compile_options call is directory-scoped and doesn't reach this
+# project's own src/tools/tests targets). Several dependencies here
+# (nlohmann_json, Manifold, Boost.Polygon) branch on __cplusplus.
+if(MSVC)
+  add_compile_options(/Zc:__cplusplus)
+endif()
+
 add_subdirectory(external/openscad_cpp_parser)
 
 # openscad_cpp_parser's own src/CMakeLists.txt exposes its public headers via
