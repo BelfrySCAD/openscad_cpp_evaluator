@@ -118,6 +118,42 @@ TEST(CliExportFormats, ExplicitFormatOverridesExtension) {
     std::filesystem::remove(out);
 }
 
+// -- --profile ------------------------------------------------------------
+
+TEST(CliProfile, WritesReportWithCallSiteAndSummary) {
+    // A recursive user function gives real call sites to report on --
+    // fib(0)/fib(1) never recurse further, so the tree stays small.
+    auto src = writeScript("profile.scad", "function fib(n) = n < 2 ? n : fib(n-1) + fib(n-2);\n"
+                                            "cube([fib(4)+1, 1, 1]);\n");
+    auto out = src.parent_path() / "profile_out.stl";
+    auto report = src.parent_path() / "profile_out.txt";
+    std::filesystem::remove(out);
+    std::filesystem::remove(report);
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--profile", report.string()}, std::cin, stdout_, stderr_), 0);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    ASSERT_TRUE(std::filesystem::exists(report));
+    const std::string text = readFile(report);
+    EXPECT_NE(text.find("Profile report for"), std::string::npos);
+    EXPECT_NE(text.find("Total time:"), std::string::npos);
+    EXPECT_NE(text.find("fib"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+    std::filesystem::remove(report);
+}
+
+TEST(CliProfile, UnwritableProfilePathReturns1) {
+    auto src = writeScript("profile2.scad", kCubeScript);
+    auto out = src.parent_path() / "profile2_out.stl";
+    std::filesystem::remove(out);
+    std::ostringstream stdout_, stderr_;
+    // A path inside a nonexistent directory can never be opened for writing.
+    const std::string badPath = (src.parent_path() / "no_such_dir_xyz" / "p.txt").string();
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--profile", badPath}, std::cin, stdout_, stderr_), 1);
+    EXPECT_NE(stderr_.str().find("error:"), std::string::npos);
+    std::filesystem::remove(src);
+}
+
 // -- use <file> ---------------------------------------------------------
 
 TEST(CliUseStatement, InjectsModuleAndExports) {
