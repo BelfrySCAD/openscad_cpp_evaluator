@@ -778,6 +778,34 @@ wall-clock measurement, not something either port tries to make deterministic). 
 path for writing can fail (bad directory, permissions); this returns exit code 1 with an
 `error: ...` message on `err`, matching every other file-write failure this CLI already handles
 (mesh export's own `ValueError`/`ImportError` catch).
+
+**Sort/filter/CSV options for `--profile`, added right after**: the original `--profile` always
+sorted by self time and always emitted plain text — no way to sort by cumulative time or call
+count, no way to cut a large (Anklet.scad's own real-world script produces 800+ call-site rows)
+report down to just the rows that matter, and no machine-readable output for further processing.
+`--profile-sort {self,cumulative,calls,name}` (default `self`, matching the original behavior
+exactly) and `--profile-min-self SECONDS`/`--profile-min-calls N` (both default `0`, so omitting
+them reproduces the original unfiltered behavior) are threaded through a new `ProfileOptions`
+struct; `formatProfileReport()` split into `selectAndSortCallSites()` (filter, then sort by the
+chosen key — every non-`name` order keeps the original tie-break rule) and two renderers,
+`renderProfileReportText()` (the original layout, unchanged) and `renderProfileReportCsv()` (new;
+`--profile-format {text,csv}`, default `text`). CSV's summary lives in `#`-prefixed comment lines
+ahead of the real header/data rows (skippable via `pandas.read_csv(..., comment="#")` or a plain
+`grep -v '^#'`) since it isn't itself tabular data; the header/data rows are properly RFC-4180
+quoted (`csvField()`) even though no real OpenSCAD identifier or BOSL2 library path is likely to
+ever need it. Invalid `--profile-sort`/`--profile-format` values are rejected with exit code 1 and
+an `error: ...` message *before* evaluation ever starts (unlike `--format`'s own pre-existing
+looser handling, which silently falls through to 3MF for an unrecognized value — a latent quirk
+this change didn't touch, since fixing it wasn't in scope). Ported identically (same option names,
+same defaults, same CSV column names, same comment-line convention) to the Python reference's own
+`_select_and_sort_call_sites()`/`_render_profile_report_text()`/`_render_profile_report_csv()` in
+`cli.py` — its CSV writer uses stdlib `csv.writer` (gets RFC-4180 quoting for free, no hand-rolled
+equivalent of `csvField()` needed there) and its `--profile-sort`/`--profile-format` validation is
+`argparse`'s own `choices=` mechanism (exit code 2, not 1 — already the established precedent for
+`--format`'s own `choices=` validation, not a new inconsistency this change introduces). Manually
+cross-checked against Anklet.scad (the real-world BOSL2 benchmark script — see this repo's own
+perf-tracking memory): `--profile-format csv --profile-sort cumulative --profile-min-calls 100`
+cuts an 873-line unfiltered report down to 107 lines of just the call sites that actually matter.
 - `examples/minimal_debugger.cpp` — a self-checking, runnable demonstration of the `DebugHookFn`
   seam alone (trace every statement, stop at a chosen line, override a variable via the hook's
   returned `mods`), a close port of the reference's own `examples/minimal_debugger.py`.
