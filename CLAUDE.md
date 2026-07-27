@@ -56,7 +56,7 @@ called once per top-level statement via `evalChildren` — a deliberate, documen
 from the reference's many expr-level call sites, see `DebugHookFn`'s own doc comment) and a
 gdb-style REPL built on that seam (`debug_repl.hpp`/`.cpp`, wired into the CLI's `--debug` flag) —
 `break`/`delete`/`list`/`run`/`quit`/`help` before running, `continue`/`step`/`next`/`finish`/
-`print`/`backtrace`/`set`/`break`/`delete`/`list`/`quit`/`help` while paused. Cross-checked against
+`child`/`print`/`backtrace`/`set`/`break`/`delete`/`list`/`quit`/`help` while paused. Cross-checked against
 the Python reference CLI for a union/difference/sphere/cylinder/cube script (Phase 3), a
 recursion+nested-closure+`children()`+`for`-heavy script (Phase 4), a math-builtin-driven
 sizing/import-round-trip script (Phase 5, including a Python→C++ and C++→Python 3MF cross-read), a
@@ -633,8 +633,8 @@ grep for `ponytail:`.
 - `include/openscad_cpp_evaluator/debug_repl.hpp`, `src/debug/debug_repl.cpp` — `DebugRepl`, a
   gdb-style REPL built entirely on the `DebugHooks` seam above (no special access to `Evaluator`
   internals): `break`/`delete`/`info breakpoints`/`list`/`run`/`quit`/`help` before running,
-  `continue`/`step`/`next`/`finish`/`print`/`backtrace`/`list`/`break`/`delete`/`set`/`quit`/`help`
-  while paused — a close, line-by-line port of the reference's own `_debug_repl.py`, not
+  `continue`/`step`/`next`/`finish`/`child`/`print`/`backtrace`/`list`/`break`/`delete`/`set`/`quit`/
+  `help` while paused — a close, line-by-line port of the reference's own `_debug_repl.py`, not
   re-derived, since its step-into/step-over/step-out semantics already went through several rounds
   of real-world fixes there. Blocks synchronously on its own `std::istream&` from inside the hook
   itself (no worker thread) since the CLI's `evaluate()` call and the prompt are on the same thread.
@@ -654,6 +654,37 @@ grep for `ponytail:`.
   `test_list_shows_source_from_use_injected_file_when_paused_there`. Manually cross-checked byte-
   for-byte identical `--debug` transcripts between both CLIs on the same fixture afterward, same as
   every other debugger-behavior claim in this file.
+
+**`child` (step-to-child), added after Phase 9**: neither this port's own `_debug_repl.py`-derived
+REPL nor the Python reference's `_debug_repl.py` itself originally had this command — it turned out
+to exist only one layer further upstream, in BelfrySCAD's own GUI debugger
+(`src/belfryscad/window/debugger.py`'s `DebugSession`, "Step to Child" button/`⌃F11`), which
+`_debug_repl.py`'s own module docstring already cites as the source its into/over/out semantics are
+ported from, but `_debug_repl.py` had never picked up this one. Confirmed via the Python
+reference's own `evaluator.py` first: `Evaluator._child_statement_positions`/
+`_last_children_positions` (the evaluator-side plumbing `to_child`'s hit-test needs — "(origin,
+line) for each top-level, non-declaration child of the currently-checked node") already existed
+there, docstring-labeled for exactly this command, just never wired to a REPL command. Added to
+both `_debug_repl.py` and this port the same way: pauses the first time control reaches one of the
+paused call's own `{ ... }` children (wherever `children()`/`children(N)` forwards to them), or —
+if the call never invokes `children()` at all — falls back to the same "call returned" depth-drop
+safety net `finish`/step-out already uses, so it can never hang. This port's own equivalent plumbing
+is `Evaluator::lastChildrenPositions()` (`evaluator.hpp`, computed by `checkDebug()`,
+`debug_profile.cpp`, on every check — mirrors `_last_children_positions` being recomputed
+unconditionally, not just when a debugger happens to be attached) and
+`DebugRepl::attachEvaluator()` (`debug_repl.hpp`/`.cpp` — `DebugRepl` is constructed, and its
+pre-run prompt run, *before* the `Evaluator` it'll be wired into exists, so this can't happen at
+construction time the way the other hooks do; `cli_lib.cpp` calls it right after constructing the
+`Evaluator`). Both ports needed the same non-obvious fix once actually tested end to end: the
+snapshotted target positions must be run through the same origin-normalization
+(`_resolve`/`resolveOrigin`, i.e. realpath) the hit-test's own `resolved` already goes through — a
+raw, un-normalized origin (as `_last_children_positions` naturally stores it) can disagree with the
+realpath'd form purely from a symlink (e.g. macOS's `/var` → `/private/var`) even for the
+objectively same file, which silently broke the very first end-to-end test of this on both sides
+before the fix. See `tests/test_cli.cpp`'s `CliDebugRepl.ChildStepsToChildrenCallForwardedStatement`/
+`ChildFallsBackToCallReturnWhenChildrenNeverInvoked` and the reference's own `tests/test_cli.py`'s
+`test_child_steps_to_children_call_forwarded_statement`/
+`test_child_falls_back_to_call_return_when_children_never_invoked`.
 - `examples/minimal_debugger.cpp` — a self-checking, runnable demonstration of the `DebugHookFn`
   seam alone (trace every statement, stop at a chosen line, override a variable via the hook's
   returned `mods`), a close port of the reference's own `examples/minimal_debugger.py`.

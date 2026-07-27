@@ -13,6 +13,8 @@
 
 namespace oscadeval {
 
+class Evaluator;
+
 // A minimal, gdb-style interactive debugger for the CLI's `--debug` flag.
 // Wires into Evaluator via the same DebugHooks contract any caller uses
 // (see examples/minimal_debugger.cpp). Unlike a GUI debugger, which needs
@@ -36,6 +38,16 @@ public:
     // assert against, driving the whole class in-process with no
     // subprocess spawned and no real terminal needed.
     explicit DebugRepl(const std::string& sourcePath, std::istream& in = std::cin, std::ostream& out = std::cout);
+
+    // Lets "child" (step-to-child) read Evaluator::lastChildrenPositions().
+    // Set once, after the caller (cli_lib.cpp) constructs the Evaluator it's
+    // about to wire this repl's hooks into -- DebugRepl itself is
+    // constructed, and its pre-run prompt run, BEFORE that Evaluator exists,
+    // so this can't happen at construction time. Left unset (nullptr),
+    // "child" behaves exactly like "finish" (the depth-drop fallback still
+    // applies) -- matching what happens if the paused call never invokes
+    // children() at all.
+    void attachEvaluator(Evaluator& ev) { evaluator_ = &ev; }
 
     // Interactive prompt shown before evaluation starts. Returns false if
     // the user quit without running -- the caller shouldn't call
@@ -81,13 +93,21 @@ private:
     mutable std::unordered_map<std::string, std::vector<std::string>> sourceLinesByOrigin_;
     std::map<std::string, std::set<int>> breakpoints_;
     bool breakOnFirst_ = true;
-    std::optional<std::string> stepCmd_; // "into" | "over" | "out"
+    std::optional<std::string> stepCmd_; // "into" | "over" | "out" | "to_child"
     int stepLine_ = 0;
     int stepDepth_ = 0;
     std::string stepOrigin_;
+    // Snapshotted from Evaluator::lastChildrenPositions() when "child" is
+    // issued, each origin normalized through resolveOrigin() to match how
+    // debugHook()'s own `resolved` is normalized -- otherwise a raw,
+    // un-normalized origin string (e.g. differing from `resolved` only by
+    // a symlink, such as macOS's /var -> /private/var) would never compare
+    // equal even for the objectively same file.
+    std::set<std::pair<std::string, int>> stepToChildTargets_;
     std::unordered_map<std::string, Value> pendingMods_;
     int printCount_ = 0;
     bool quit_ = false;
+    Evaluator* evaluator_ = nullptr;
 };
 
 } // namespace oscadeval

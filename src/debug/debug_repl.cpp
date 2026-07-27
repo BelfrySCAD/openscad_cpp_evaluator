@@ -1,5 +1,6 @@
 #include "openscad_cpp_evaluator/debug_repl.hpp"
 
+#include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
 
 #include <algorithm>
@@ -75,6 +76,9 @@ constexpr const char* kPausedHelp =
     "  step, s                 Step into the next statement/call\n"
     "  next, n                 Step over the next statement (don't descend into calls)\n"
     "  finish, fin             Run until the current call returns\n"
+    "  child, sc               Step to child: run until children()/children(N) forwards\n"
+    "                          control to one of this call's own { ... } children\n"
+    "                          (or it returns, if it never calls children() at all)\n"
     "  print <name>, p         Print a variable's value\n"
     "  backtrace, bt, where    Show the call stack (innermost first)\n"
     "  list [line], l          Show source around a line (default: current line)\n"
@@ -263,6 +267,14 @@ DebugAction DebugRepl::debugHook(int line, int depth, bool forced, const std::st
         stepHit = line != stepLine_ || resolved != stepOrigin_;
     } else if (stepCmd_ == "out") {
         stepHit = depth < stepDepth_;
+    } else if (stepCmd_ == "to_child") {
+        // Pause the first time control reaches one of the paused call's
+        // own children (wherever children()/children(N) forwards to
+        // them) -- or, if the call never invokes children() at all, fall
+        // back to the same "call returned" safety net step-out uses, so
+        // this can never hang. Mirrors BelfrySCAD's DebugSession::
+        // _make_hook exactly.
+        stepHit = stepToChildTargets_.count({resolved, line}) > 0 || depth < stepDepth_;
     }
 
     const bool shouldPause =
@@ -322,6 +334,9 @@ DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
         if (cmd == "finish" || cmd == "fin") {
             return resume(std::string("out"), line, depth, origin);
         }
+        if (cmd == "child" || cmd == "sc") {
+            return resume(std::string("to_child"), line, depth, origin);
+        }
         if (cmd == "print" || cmd == "p") {
             printVar(arg, visibleVars);
         } else if (cmd == "backtrace" || cmd == "bt" || cmd == "where") {
@@ -351,6 +366,17 @@ DebugAction DebugRepl::resume(std::optional<std::string> stepCmd, int line, int 
         stepLine_ = line;
         stepDepth_ = depth;
         stepOrigin_ = origin;
+    }
+    if (stepCmd == "to_child") {
+        stepToChildTargets_.clear();
+        if (evaluator_) {
+            const auto& targets = evaluator_->lastChildrenPositions();
+            if (targets) {
+                for (const auto& [childOrigin, childLine] : *targets) {
+                    stepToChildTargets_.emplace(resolveOrigin(childOrigin), childLine);
+                }
+            }
+        }
     }
     DebugAction action;
     action.mods = std::move(pendingMods_);
