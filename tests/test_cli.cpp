@@ -154,6 +154,97 @@ TEST(CliProfile, UnwritableProfilePathReturns1) {
     std::filesystem::remove(src);
 }
 
+TEST(CliProfile, SortCallsOrdersHigherCallCountFirst) {
+    // fib(6): the recursive call site is "fib(n-1)"/"fib(n-2)" on line 1
+    // (many calls); the toplevel call site is "fib(6)" on line 2 (one
+    // call). --profile-sort calls must put the former's row first
+    // regardless of self time. Keyed on the unique "file:line" location
+    // column rather than exact column spacing, which is an implementation
+    // detail this test shouldn't depend on.
+    auto src = writeScript("profile3.scad", "function fib(n) = n < 2 ? n : fib(n-1) + fib(n-2);\n"
+                                             "cube([fib(6)+1, 1, 1]);\n");
+    auto out = src.parent_path() / "profile3_out.stl";
+    auto report = src.parent_path() / "profile3_out.txt";
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--profile", report.string(), "--profile-sort", "calls"},
+                      std::cin, stdout_, stderr_),
+              0);
+    const std::string text = readFile(report);
+    const size_t recursiveRow = text.find("profile3.scad:1");
+    const size_t toplevelRow = text.find("profile3.scad:2");
+    ASSERT_NE(recursiveRow, std::string::npos);
+    ASSERT_NE(toplevelRow, std::string::npos);
+    EXPECT_LT(recursiveRow, toplevelRow);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+    std::filesystem::remove(report);
+}
+
+TEST(CliProfile, MinCallsFiltersOutLowVolumeCallSites) {
+    // Same script/call sites as above -- the line-2 (toplevel, 1 call)
+    // site is filtered out by a threshold the line-1 (recursive, dozens
+    // of calls) site clears.
+    auto src = writeScript("profile4.scad", "function fib(n) = n < 2 ? n : fib(n-1) + fib(n-2);\n"
+                                             "cube([fib(6)+1, 1, 1]);\n");
+    auto out = src.parent_path() / "profile4_out.stl";
+    auto report = src.parent_path() / "profile4_out.txt";
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(
+        runCli({src.string(), "-o", out.string(), "--profile", report.string(), "--profile-min-calls", "10"},
+               std::cin, stdout_, stderr_),
+        0);
+    const std::string text = readFile(report);
+    EXPECT_NE(text.find("profile4.scad:1"), std::string::npos);
+    EXPECT_EQ(text.find("profile4.scad:2"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+    std::filesystem::remove(report);
+}
+
+TEST(CliProfile, CsvFormatWritesHeaderAndCommaSeparatedRows) {
+    auto src = writeScript("profile5.scad", "function fib(n) = n < 2 ? n : fib(n-1) + fib(n-2);\n"
+                                             "cube([fib(4)+1, 1, 1]);\n");
+    auto out = src.parent_path() / "profile5_out.stl";
+    auto report = src.parent_path() / "profile5_out.csv";
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--profile", report.string(), "--profile-format", "csv"},
+                      std::cin, stdout_, stderr_),
+              0);
+    const std::string text = readFile(report);
+    EXPECT_NE(text.find("# total_time,"), std::string::npos);
+    EXPECT_NE(text.find("kind,name,caller,call_origin,call_line,call_count,self_time,cumulative_time\n"), std::string::npos);
+    EXPECT_NE(text.find("function,fib,"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+    std::filesystem::remove(report);
+}
+
+TEST(CliProfile, InvalidProfileSortReturns1) {
+    auto src = writeScript("profile6.scad", kCubeScript);
+    auto out = src.parent_path() / "profile6_out.stl";
+    auto report = src.parent_path() / "profile6_out.txt";
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--profile", report.string(), "--profile-sort", "bogus"},
+                      std::cin, stdout_, stderr_),
+              1);
+    EXPECT_NE(stderr_.str().find("--profile-sort"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(report));
+    std::filesystem::remove(src);
+}
+
+TEST(CliProfile, InvalidProfileFormatReturns1) {
+    auto src = writeScript("profile7.scad", kCubeScript);
+    auto out = src.parent_path() / "profile7_out.stl";
+    auto report = src.parent_path() / "profile7_out.txt";
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--profile", report.string(), "--profile-format", "bogus"},
+                      std::cin, stdout_, stderr_),
+              1);
+    EXPECT_NE(stderr_.str().find("--profile-format"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(report));
+    std::filesystem::remove(src);
+}
+
 // -- use <file> ---------------------------------------------------------
 
 TEST(CliUseStatement, InjectsModuleAndExports) {
