@@ -55,6 +55,9 @@ jobs:
           # against musl.
           CIBW_BUILD: "cp312-*"
           CIBW_SKIP: "*-musllinux*"
+          # cibuildwheel builds win32 in addition to win_amd64 by default;
+          # this project only targets 64-bit Windows.
+          CIBW_ARCHS_WINDOWS: AMD64
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           # manylinux_2_28 (AlmaLinux 8) uses dnf, not apt -- but its default
