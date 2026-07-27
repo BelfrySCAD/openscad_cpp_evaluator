@@ -5,6 +5,8 @@
 
 #include "cli_lib.hpp"
 
+#include "openscad_cpp_evaluator/debug_repl.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -476,4 +478,27 @@ TEST(CliDebugRepl, ChildFallsBackToCallReturnWhenChildrenNeverInvoked) {
     ASSERT_TRUE(std::filesystem::exists(out));
     std::filesystem::remove(src);
     std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, RequestPauseCausesNextDebugHookCallToPauseLikeABreakpoint) {
+    // requestPause() sets the exact same flag a real SIGINT handler would
+    // (see its own doc comment -- the in-process test harness here, an
+    // injected istream/ostream with no subprocess, can't deliver a real
+    // OS signal). Constructs a DebugRepl directly (not through runCli())
+    // and drives debugHook() by hand so this is isolated from
+    // breakOnFirst_/breakpoints_/stepHit -- a different origin than the
+    // constructed source path means break-on-first can't be what's
+    // causing the pause, so this specifically proves requestPause()'s
+    // own contribution to the shouldPause OR-chain.
+    auto src = writeScript("m.scad", kModuleScript);
+    std::ostringstream out;
+    std::istringstream stdin_ = feedInput({"continue"});
+    DebugRepl repl(src.string(), stdin_, out);
+    repl.requestPause();
+    std::vector<CallStackFrame> callStack;
+    DebugAction action =
+        repl.debugHook(5, 0, /*forced=*/false, "/some/other/file.scad", callStack, [] { return DebugFrame{}; });
+    EXPECT_FALSE(action.stop);
+    EXPECT_NE(out.str().find("Interrupted at"), std::string::npos);
+    std::filesystem::remove(src);
 }

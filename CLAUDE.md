@@ -685,6 +685,39 @@ before the fix. See `tests/test_cli.cpp`'s `CliDebugRepl.ChildStepsToChildrenCal
 `ChildFallsBackToCallReturnWhenChildrenNeverInvoked` and the reference's own `tests/test_cli.py`'s
 `test_child_steps_to_children_call_forwarded_statement`/
 `test_child_falls_back_to_call_return_when_children_never_invoked`.
+
+**Ctrl+C-interrupts-a-running-eval, added right after `child`**: neither port had ANY SIGINT
+handling before this — Ctrl+C during a running `evaluate()` just killed the process (C++'s
+default `SIGINT` disposition) or raised an unhandled `KeyboardInterrupt` mid-AST-walk (Python's
+own default), in both cases with no chance to inspect state. BelfrySCAD's own `DebugSession` has
+the analogous "pause a running eval" feature already, but triggered by a GUI button (F5), not
+Ctrl+C — its `_pause_requested`/`pause()` is the proven precedent this ports: a plain flag,
+read-and-cleared inside the same hook, folded into the exact same `should_pause`/`shouldPause`
+OR-chain breakpoints/steps already use (so the result behaves identically to hitting a
+breakpoint — `print`/`backtrace`/`continue`/`step`/`child` all just work once paused this way).
+This port's own piece: `DebugRepl::installInterruptHandler()` (`debug_repl.hpp`/`.cpp`) installs a
+process-wide `std::signal(SIGINT, ...)` whose handler does nothing but
+`pauseRequested_.store(true, ...)` on an `std::atomic<bool>` -- the async-signal-safe minimum,
+since a signal handler can't safely do anything else (no I/O, no locks, no throwing) and can't
+capture `this` either (a single "currently active `DebugRepl`" pointer bridges the free-function
+handler back to the real instance; fine for this CLI's own single-`--debug`-session-per-process
+usage, not something a hypothetical multi-instance embedder could rely on as-is).
+`DebugRepl::requestPause()` is the same flag-setter, exposed directly and separately so
+`tests/test_cli.cpp` can simulate "the user just pressed Ctrl+C" without a real OS signal (the
+existing in-process istream/ostream test harness has no subprocess to deliver one to) — see
+`CliDebugRepl.RequestPauseCausesNextDebugHookCallToPauseLikeABreakpoint`, which constructs a
+`DebugRepl` directly and drives `debugHook()` by hand, isolated from `breakOnFirst_`/
+`breakpoints_`/`stepHit` via a deliberately different origin, to prove specifically that
+`requestPause()`'s own contribution to the OR-chain is what causes the pause. Manually verified
+end to end with a *real* `SIGINT` (`kill -INT <pid>` against a running `--debug` session, both
+this port's CLI and the Python reference's own) — both correctly print `"Interrupted at
+<file>:<line>"` (a distinct message from `"Breakpoint hit at ..."`, so the user can tell an
+unprompted interrupt apart from a breakpoint they set themselves) and the REPL keeps working
+normally afterward. One accepted, documented quirk: a `SIGINT` that arrives while already blocked
+on stdin at a prompt (not mid-`evaluate()`) still sets the flag, which then gets consumed on the
+very next statement check once the user resumes, causing an immediate re-pause — harmless, not a
+hang or crash, and not worth a more elaborate "only listen while genuinely running" state machine
+for.
 - `examples/minimal_debugger.cpp` — a self-checking, runnable demonstration of the `DebugHookFn`
   seam alone (trace every statement, stop at a chosen line, override a variable via the hook's
   returned `mods`), a close port of the reference's own `examples/minimal_debugger.py`.

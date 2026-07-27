@@ -4,6 +4,7 @@
 #include "openscad_cpp_evaluator/value.hpp"
 
 #include <algorithm>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -13,6 +14,18 @@
 namespace oscadeval {
 
 namespace {
+
+// A plain C function pointer is the only thing std::signal() accepts --
+// it can't capture `this`, so this bridges to whichever DebugRepl
+// instance last called installInterruptHandler(). Only one DebugRepl is
+// ever active at a time in this CLI's own usage; a future embedder
+// running more than one concurrently would need a different design, but
+// nothing here does that today.
+DebugRepl* g_activeDebugRepl = nullptr;
+
+extern "C" void handleSigint(int) {
+    if (g_activeDebugRepl) g_activeDebugRepl->requestPause();
+}
 
 std::string realpath(const std::string& path) {
     std::error_code ec;
@@ -93,6 +106,11 @@ constexpr const char* kPausedHelp =
 DebugRepl::DebugRepl(const std::string& sourcePath, std::istream& in, std::ostream& out)
     : in_(in), out_(out), sourcePath_(realpath(sourcePath)) {
     sourceLinesByOrigin_[sourcePath_] = readLines(sourcePath);
+}
+
+void DebugRepl::installInterruptHandler() {
+    g_activeDebugRepl = this;
+    std::signal(SIGINT, handleSigint);
 }
 
 std::string DebugRepl::resolveOrigin(const std::string& origin) const { return origin.empty() ? sourcePath_ : realpath(origin); }
@@ -277,15 +295,26 @@ DebugAction DebugRepl::debugHook(int line, int depth, bool forced, const std::st
         stepHit = stepToChildTargets_.count({resolved, line}) > 0 || depth < stepDepth_;
     }
 
-    const bool shouldPause =
-        forced || (breakOnFirst_ && resolved == sourcePath_) || breakpoints_[resolved].count(line) > 0 || stepHit;
+    // Read-and-clear, same as BelfrySCAD's own DebugSession.pause()/
+    // pause_now -- a stray SIGINT that arrives while already blocked on
+    // stdin at a prompt (not mid-evaluate()) just gets consumed here on
+    // the next statement check once the user resumes, causing an
+    // immediate re-pause; a harmless quirk, not a hang or crash.
+    const bool pauseRequested = pauseRequested_.exchange(false, std::memory_order_relaxed);
+
+    const bool shouldPause = forced || pauseRequested || (breakOnFirst_ && resolved == sourcePath_) ||
+                              breakpoints_[resolved].count(line) > 0 || stepHit;
     if (!shouldPause) return DebugAction{};
 
     breakOnFirst_ = false;
     stepCmd_.reset();
 
     DebugFrame frame = getFrame();
-    out_ << "\nBreakpoint hit at " << basename(resolved) << ":" << line << "\n";
+    if (pauseRequested) {
+        out_ << "\nInterrupted at " << basename(resolved) << ":" << line << "\n";
+    } else {
+        out_ << "\nBreakpoint hit at " << basename(resolved) << ":" << line << "\n";
+    }
     listSource("", line, resolved);
     return interact(line, depth, resolved, frame.locals, callStack);
 }

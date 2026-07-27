@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/debug_hooks.hpp"
 
+#include <atomic>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -48,6 +49,28 @@ public:
     // applies) -- matching what happens if the paused call never invokes
     // children() at all.
     void attachEvaluator(Evaluator& ev) { evaluator_ = &ev; }
+
+    // Installs a process-wide SIGINT handler so Ctrl+C during a running
+    // evaluate() call requests a pause at the next statement boundary --
+    // folded into the exact same shouldPause OR-chain debugHook() already
+    // uses for breakpoints/steps, so the result behaves identically to
+    // hitting a breakpoint (print/backtrace/continue/step all just work).
+    // Mirrors BelfrySCAD's own DebugSession::pause(), just signal-triggered
+    // here instead of a GUI button click. The handler itself only sets
+    // pauseRequested_ (an atomic bool -- the async-signal-safe minimum);
+    // only one DebugRepl may have this active at a time (a plain C
+    // function can't capture `this`, so a single "currently active
+    // instance" pointer backs it) -- fine for this CLI's own
+    // single-`--debug`-session-per-process usage.
+    void installInterruptHandler();
+
+    // Sets the exact same flag installInterruptHandler()'s real signal
+    // handler does, without going through a real OS signal -- lets
+    // tests (an in-process istream/ostream harness, no subprocess, so a
+    // genuine Ctrl+C can't be delivered) simulate "the user just pressed
+    // Ctrl+C" and assert the next debugHook() call pauses like a
+    // breakpoint.
+    void requestPause() { pauseRequested_.store(true, std::memory_order_relaxed); }
 
     // Interactive prompt shown before evaluation starts. Returns false if
     // the user quit without running -- the caller shouldn't call
@@ -108,6 +131,7 @@ private:
     int printCount_ = 0;
     bool quit_ = false;
     Evaluator* evaluator_ = nullptr;
+    std::atomic<bool> pauseRequested_{false};
 };
 
 } // namespace oscadeval

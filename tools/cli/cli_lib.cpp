@@ -68,6 +68,7 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
         DebugHooks hooks;
         if (debug) {
             repl.emplace(inputPath, in, out);
+            repl->installInterruptHandler(); // Ctrl+C during evaluate() pauses like a breakpoint
             if (!repl->runPrompt()) return 0; // user quit before "run"
             hooks.debugHook = [&](int line, int depth, bool forced, const std::string& origin,
                                    const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
