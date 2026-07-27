@@ -718,6 +718,45 @@ on stdin at a prompt (not mid-`evaluate()`) still sets the flag, which then gets
 very next statement check once the user resumes, causing an immediate re-pause — harmless, not a
 hang or crash, and not worth a more elaborate "only listen while genuinely running" state machine
 for.
+
+**Arrow-key command history in the debug REPL, added after Ctrl+C**: neither port's `DebugRepl`
+had any line-editing before this — `std::getline`/`input()` on a raw terminal means the up/down
+arrow keys just insert their own ANSI escape bytes into the line instead of recalling a previous
+command. The Python reference's fix is a one-liner: `import readline` at the top of
+`_debug_repl.py` hooks stdlib `input()` into GNU readline (or libedit, what Python's own `readline`
+module actually links against on macOS) for arrow-key history/editing for the rest of the process,
+wrapped in `try`/`except ImportError` since the module doesn't exist on Windows. This port has no
+stdlib equivalent, so it vendors `yhirose/cpp-linenoise` (`linenoise.hpp`, header-only, BSD-2-
+Clause, fetched via `CMakeLists.txt`'s existing `FetchContent` pattern) — a C++ port of
+`antirez/linenoise` with *native* Windows console support (no ANSI-emulation layer needed, unlike
+GNU readline's own Windows story), matching this project's three-platform CI matrix. Its own
+`CMakeLists.txt` already guards its test/example targets behind
+`CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR`, so `FetchContent_MakeAvailable` here only
+exposes its `linenoise` INTERFACE target, no override needed (unlike Manifold's `MANIFOLD_TEST`).
+`DebugRepl::readCommandLine()` (`debug_repl.cpp`) is the one seam both `runPrompt()`/`interact()`
+now share: when `enableLineEditing()` was called, it uses `linenoise::Readline()` (note: returns
+`true` on *quit* — Ctrl-C/Ctrl-D/EOF — inverted from `std::getline`'s own "true means got a line"
+convention, so `readCommandLine()` flips it right there rather than leaking that surprise to
+callers) plus `linenoise::AddHistory()` for non-empty lines; otherwise it falls back to the
+existing `out_`/`std::getline(in_, ...)` path unchanged. `enableLineEditing()` is opt-in, called
+only by `cli_lib.cpp` and only when `&in == &std::cin && &out == &std::cout` — linenoise reads/
+writes the real process stdin/stdout file descriptors directly, not the injected `in_`/`out_`
+themselves, so it would silently do nothing useful (or worse, fight over the real terminal while a
+test expects a scripted istringstream) if ever turned on for `tests/test_cli.cpp`'s injected-stream
+harness; that harness is untouched, still exercising the plain `getline` path exclusively. Verified
+with a real interactive session, not just "it compiles": since neither port's own in-process test
+harness can simulate real keystrokes/arrow-key bytes hitting an actual raw terminal, both were
+checked end to end with a Python `pty.openpty()`-driven harness (writes raw bytes to a real pty
+master/slave pair, not a piped file) sending `print width`, an up-arrow (`\x1b[A`), and Enter,
+confirming the recalled line actually re-submits (`$1 = 10` then `$2 = 10` on the Python side,
+matching `print width` re-echoed on this port's side before Enter). One real pitfall the
+verification harness itself hit, worth remembering for any future terminal-facing test: `pty.
+openpty()` leaves the pty's window size zeroed, which sends linenoise's own `get_columns()` down
+its `ioctl(TIOCGWINSZ)`-failed fallback path (querying the terminal with a cursor-position escape
+sequence and blocking on the response) — a real terminal always reports a nonzero size so never
+takes this path, but the synthetic pty hung indefinitely until the harness explicitly set a window
+size via `TIOCSWINSZ`. Not a bug in this port or in the vendored library, purely an artifact of
+under-specifying a fake terminal.
 - `examples/minimal_debugger.cpp` — a self-checking, runnable demonstration of the `DebugHookFn`
   seam alone (trace every statement, stop at a chosen line, override a variable via the hook's
   returned `mods`), a close port of the reference's own `examples/minimal_debugger.py`.

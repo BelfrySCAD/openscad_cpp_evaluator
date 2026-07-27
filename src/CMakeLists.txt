@@ -48,6 +48,7 @@ target_include_directories(openscad_cpp_evaluator PUBLIC
 target_include_directories(openscad_cpp_evaluator PRIVATE ${stb_SOURCE_DIR} ${CMAKE_BINARY_DIR}/generated)
 
 target_link_libraries(openscad_cpp_evaluator PUBLIC openscad_cpp_parser manifold Boost::polygon)
+target_link_libraries(openscad_cpp_evaluator PRIVATE linenoise)
 target_compile_options(openscad_cpp_evaluator PRIVATE
   $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra>
 )
