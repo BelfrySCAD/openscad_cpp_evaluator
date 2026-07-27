@@ -36,7 +36,7 @@ jobs:
             name: manylinux-aarch64
           - runner: macos-latest
             name: macos-arm64
-          - runner: macos-15-large
+          - runner: macos-15-intel
             name: macos-x86_64
           - runner: windows-latest
             name: windows-x86_64
