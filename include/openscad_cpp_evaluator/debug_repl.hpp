@@ -72,6 +72,16 @@ public:
     // breakpoint.
     void requestPause() { pauseRequested_.store(true, std::memory_order_relaxed); }
 
+    // Turns on real-terminal line editing (arrow-key command history) via
+    // a vendored linenoise for genuine interactive use. Only valid when
+    // in_/out_ are the actual std::cin/std::cout -- linenoise reads/writes
+    // the real process stdin/stdout file descriptors directly, not an
+    // arbitrary istream/ostream, so a caller (cli_lib.cpp) opts in
+    // explicitly, the same way installInterruptHandler() is opt-in. The
+    // test suite's istringstream/ostringstream harness never calls this
+    // and keeps using the plain getline() path unchanged.
+    void enableLineEditing() { lineEditingEnabled_ = true; }
+
     // Interactive prompt shown before evaluation starts. Returns false if
     // the user quit without running -- the caller shouldn't call
     // evaluate() at all in that case. Mirrors run_prompt().
@@ -85,6 +95,13 @@ public:
     void returnHook(const std::string& name, const Value& result, int depth);
 
 private:
+    // Shared by runPrompt()/interact(): writes `prompt` and reads one
+    // command line into `raw`, using linenoise (arrow-key history) when
+    // enableLineEditing() was called, otherwise the plain out_/in_
+    // getline() path. Returns false on EOF/quit (Ctrl-D on an empty
+    // line), matching std::getline's own bool-on-failure convention.
+    bool readCommandLine(const std::string& prompt, std::string& raw);
+
     std::string resolveOrigin(const std::string& origin) const;
     std::pair<std::string, std::optional<int>> parseLocation(const std::string& arg) const;
     void addBreakpoint(const std::string& arg);
@@ -132,6 +149,7 @@ private:
     bool quit_ = false;
     Evaluator* evaluator_ = nullptr;
     std::atomic<bool> pauseRequested_{false};
+    bool lineEditingEnabled_ = false;
 };
 
 } // namespace oscadeval

@@ -125,6 +125,17 @@ FetchContent_MakeAvailable(boost_config boost_polygon)
 FetchContent_Declare(stb GIT_REPOSITORY https://github.com/nothings/stb.git GIT_TAG master GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(stb)
 
+# yhirose/cpp-linenoise: header-only, BSD-2-Clause C++ port of antirez/
+# linenoise with native Windows console support (no ANSI emulation layer,
+# unlike GNU readline's Windows story) -- gives the --debug REPL's real
+# interactive prompt arrow-key command history. Its own CMakeLists.txt
+# already guards its test/example targets behind
+# `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR`, so FetchContent_
+# MakeAvailable here only exposes its `linenoise` INTERFACE target, matching
+# the existing MANIFOLD_TEST-override pattern's intent for free.
+FetchContent_Declare(cpp_linenoise GIT_REPOSITORY https://github.com/yhirose/cpp-linenoise.git GIT_TAG master GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(cpp_linenoise)
+
 # Bakes an absolute path to the bundled default font (resources/fonts/) into
 # a generated header, so StbFontProvider's default constructor doesn't need
 # a runtime-configurable resource search path.

@@ -3,6 +3,8 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
 
+#include <linenoise.hpp>
+
 #include <algorithm>
 #include <csignal>
 #include <filesystem>
@@ -111,6 +113,21 @@ DebugRepl::DebugRepl(const std::string& sourcePath, std::istream& in, std::ostre
 void DebugRepl::installInterruptHandler() {
     g_activeDebugRepl = this;
     std::signal(SIGINT, handleSigint);
+}
+
+bool DebugRepl::readCommandLine(const std::string& prompt, std::string& raw) {
+    if (lineEditingEnabled_) {
+        // linenoise::Readline returns true when the user wants to quit
+        // (Ctrl-C, Ctrl-D on an empty line, or EOF) -- inverted from
+        // std::getline's own "true means got a line" convention, so this
+        // flips it right here rather than leaking that surprise to callers.
+        const bool quit = linenoise::Readline(prompt.c_str(), raw);
+        if (quit) return false;
+        if (!raw.empty()) linenoise::AddHistory(raw.c_str());
+        return true;
+    }
+    out_ << prompt << std::flush;
+    return static_cast<bool>(std::getline(in_, raw));
 }
 
 std::string DebugRepl::resolveOrigin(const std::string& origin) const { return origin.empty() ? sourcePath_ : realpath(origin); }
@@ -246,9 +263,8 @@ void DebugRepl::printBacktrace(const std::vector<CallStackFrame>& callStack, con
 bool DebugRepl::runPrompt() {
     out_ << "Reading symbols from " << sourcePath_ << "...\n";
     for (;;) {
-        out_ << "(scad-dbg) " << std::flush;
         std::string raw;
-        if (!std::getline(in_, raw)) {
+        if (!readCommandLine("(scad-dbg) ", raw)) {
             out_ << "\n";
             return false;
         }
@@ -341,9 +357,8 @@ DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
                                  const std::unordered_map<std::string, Value>& visibleVars,
                                  const std::vector<CallStackFrame>& callStack) {
     for (;;) {
-        out_ << "(scad-dbg) " << std::flush;
         std::string raw;
-        if (!std::getline(in_, raw)) {
+        if (!readCommandLine("(scad-dbg) ", raw)) {
             out_ << "\n";
             quit_ = true;
             return DebugAction{true, {}};

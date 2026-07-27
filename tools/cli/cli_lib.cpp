@@ -69,6 +69,11 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
         if (debug) {
             repl.emplace(inputPath, in, out);
             repl->installInterruptHandler(); // Ctrl+C during evaluate() pauses like a breakpoint
+            // linenoise reads/writes the real stdin/stdout file descriptors
+            // directly, not `in`/`out` themselves -- only turn it on when
+            // those really are std::cin/std::cout (genuine interactive use),
+            // never for the test suite's injected istringstream/ostringstream.
+            if (&in == &std::cin && &out == &std::cout) repl->enableLineEditing();
             if (!repl->runPrompt()) return 0; // user quit before "run"
             hooks.debugHook = [&](int line, int depth, bool forced, const std::string& origin,
                                    const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
