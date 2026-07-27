@@ -426,3 +426,54 @@ TEST(CliDebugRepl, FinishInsideFunctionPrintsReturnedValueAndBacktraceShowsCallF
     std::filesystem::remove(src);
     std::filesystem::remove(out);
 }
+
+TEST(CliDebugRepl, ChildStepsToChildrenCallForwardedStatement) {
+    // Paused at the `wrapper() { cube(1); sphere(1); }` call itself
+    // (line 4), "child" should run until wrapper's own `children();`
+    // (line 2) forwards control to one of that call's own children --
+    // here, cube(1) at line 5, its first child statement -- not stop at
+    // line 2 itself (children() is not one of the snapshotted targets,
+    // only the block's own top-level statements are). "run" itself
+    // already pauses directly at line 4 (break-on-first and the explicit
+    // breakpoint coincide there, since line 1 is a declaration and is
+    // never checked) -- no preceding "continue" needed.
+    auto src = writeScript("children.scad", "module wrapper() {\n"
+                                             "    children();\n"
+                                             "}\n"
+                                             "wrapper() {\n"
+                                             "    cube(1);\n"
+                                             "    sphere(1);\n"
+                                             "}\n");
+    auto out = src.parent_path() / "children_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"break 4", "run", "child", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string log = stdout_.str();
+    EXPECT_NE(log.find("Breakpoint hit at " + src.filename().string() + ":5"), std::string::npos);
+    EXPECT_NE(log.find("cube(1);"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, ChildFallsBackToCallReturnWhenChildrenNeverInvoked) {
+    // A module that never calls children() at all -- the target position
+    // is never reached, so "child" relies purely on the depth-drop
+    // fallback (or, issued at top level with nothing shallower to drop
+    // to, simply lets the rest of the script run normally) -- either way
+    // evaluation must still complete, not hang.
+    auto src = writeScript("noop.scad", "module noop() {\n"
+                                         "}\n"
+                                         "noop() {\n"
+                                         "    cube(1);\n"
+                                         "}\n"
+                                         "sphere(1);\n");
+    auto out = src.parent_path() / "noop_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"break 3", "run", "child", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}

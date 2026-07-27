@@ -25,6 +25,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace oscadeval {
@@ -309,6 +310,23 @@ public:
     // exact statement-level-only scope decision. Mirrors
     // Evaluator._check_debug.
     void checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced = false);
+
+    // (origin, line) for each top-level, non-declaration child of the
+    // node checkDebug() was just called with -- i.e., if that node is a
+    // ModularCall with its own `{ ... }` block, the source positions
+    // children()/children(N) might forward control to. Recomputed
+    // unconditionally on every checkDebug() call (nullopt if the checked
+    // node isn't a ModularCall, or has no non-declaration children) and
+    // stashed here rather than threaded through DebugHookFn's own
+    // signature, so adding it didn't change that callback contract.
+    // Public so debug_repl.cpp's "child" (step-to-child) command can read
+    // it via the Evaluator reference DebugRepl::attachEvaluator() wires in
+    // -- mirrors the reference's Evaluator._last_children_positions
+    // exactly, including the "read via a stashed field, not a parameter"
+    // rationale (see that field's own doc comment).
+    const std::optional<std::vector<std::pair<std::string, int>>>& lastChildrenPositions() const {
+        return lastChildrenPositions_;
+    }
 
     // Whole-evaluate() profiling summary (see profile.hpp), populated by
     // evaluate() when constructed with profiling=true; nullopt otherwise
@@ -786,6 +804,9 @@ private:
     // self._call_stack (there, 4-tuples; here, CallStackFrame -- see
     // eval_error.hpp).
     std::vector<CallStackFrame> callStack_;
+
+    // See lastChildrenPositions()'s own doc comment.
+    std::optional<std::vector<std::pair<std::string, int>>> lastChildrenPositions_;
 
     EchoFn echoFn_;
     std::shared_ptr<FontProvider> fontProvider_; // null until first fontProvider() call if not injected

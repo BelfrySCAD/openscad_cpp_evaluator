@@ -2,6 +2,30 @@
 
 namespace oscadeval {
 
+namespace {
+
+// (origin, line) for each top-level, non-declaration child of `node` (a
+// ModularCall's own `.children` -- the `{ ... }` block passed to a module
+// call), if any. See Evaluator::lastChildrenPositions()'s own doc comment
+// for what this feeds. Mirrors the reference's own
+// Evaluator._child_statement_positions.
+std::optional<std::vector<std::pair<std::string, int>>> childStatementPositions(const oscad::ASTNode& node) {
+    if (node.kind() != oscad::NodeKind::ModularCall) return std::nullopt;
+    const auto& call = static_cast<const oscad::ModularCall&>(node);
+    std::vector<std::pair<std::string, int>> positions;
+    for (const auto& c : call.children) {
+        if (c->kind() == oscad::NodeKind::Assignment || c->kind() == oscad::NodeKind::ModuleDeclaration ||
+            c->kind() == oscad::NodeKind::FunctionDeclaration) {
+            continue;
+        }
+        positions.emplace_back(c->position().origin, c->position().line);
+    }
+    if (positions.empty()) return std::nullopt;
+    return positions;
+}
+
+} // namespace
+
 DebugFrame Evaluator::buildDebugFrame(const EvalContext* ctx) const {
     DebugFrame frame;
     if (!ctx) return frame;
@@ -26,6 +50,7 @@ void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool fo
     const oscad::Position& pos = node.position();
     const int depth = static_cast<int>(callStack_.size());
     const DebugFramesFn getFrame = [this, &ctx]() { return buildDebugFrame(&ctx); };
+    lastChildrenPositions_ = childStatementPositions(node);
 
     DebugAction action = debugHooks_.debugHook(pos.line, depth, forced, pos.origin, callStack_, getFrame);
     for (auto& [k, v] : action.mods) ctx.let_->set(k, v);
