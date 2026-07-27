@@ -90,8 +90,6 @@ jobs:
     needs: [sdist, build_wheels]
     runs-on: ubuntu-latest
     environment: testpypi
-    permissions:
-      id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -104,22 +102,26 @@ jobs:
           pattern: wheel-*
           merge-multiple: true
 
+      # Token auth, not OIDC trusted publishing: GitHub's newer "immutable
+      # subject claims" format (any repo created after 2026-07-15, no
+      # opt-out -- this repo was created 2026-07-24) isn't yet recognized by
+      # PyPI/TestPyPI's trusted-publisher matcher ("invalid-publisher: valid
+      # token, but no corresponding publisher" on every attempt). Switch back
+      # to trusted publishing once that's resolved on PyPI's end.
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
 
   publish-pypi:
     needs: [publish-testpypi]
     runs-on: ubuntu-latest
     # Requires a "pypi" GitHub Environment with a required-reviewer
     # protection rule, so this job pauses for manual approval after the
-    # TestPyPI publish above has been verified -- see the plan's Phase 1
-    # step 5/6 for the one-time PyPI/TestPyPI trusted-publisher setup.
+    # TestPyPI publish above has been verified.
     environment: pypi
-    permissions:
-      id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -132,7 +134,9 @@ jobs:
           pattern: wheel-*
           merge-multiple: true
 
+      # Token auth -- see the comment on publish-testpypi above.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
