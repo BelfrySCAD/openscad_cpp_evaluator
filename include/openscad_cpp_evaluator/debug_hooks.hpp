@@ -55,6 +55,25 @@ struct DebugAction {
     std::unordered_map<std::string, Value> mods;
 };
 
+// The exact message checkDebug() (debug_profile.cpp) throws EvalError with
+// when a DebugAction::stop is honored -- shared so cli_lib.cpp can tell
+// "the debugger itself asked to abort" (its own "stop"/"restart"/"quit"
+// commands) apart from a genuine script error (assert()/etc, possibly also
+// inspected via an errorBreak() pause that happens to have "stop" typed
+// into it) without the two copies of this string ever risking drifting
+// apart. Mirrors the Python reference's own
+// evaluator.DEBUGGING_STOPPED_MESSAGE.
+inline constexpr const char* kDebuggingStoppedMessage = "Debugging stopped.";
+
+// What a paused DebugRepl session decided to do once its own "stop"/
+// "restart"/"quit" command raises the shared kDebuggingStoppedMessage
+// EvalError -- read by cli_lib.cpp (via DebugRepl::takePostRunAction())
+// after catching that specific exception, to decide whether to return to
+// the pre-run prompt (Stopped), immediately re-run (Restart), or actually
+// exit the CLI (Quit). None is the initial/reset state -- also what a
+// genuine (non-debugger-triggered) EvalError leaves it at.
+enum class PostRunAction { None, Stopped, Restart, Quit };
+
 // Called at (approximately) every top-level statement in every block --
 // see Evaluator::evalChildren's single call site for the exact mechanism,
 // and its own comment for why this port checks at statement granularity

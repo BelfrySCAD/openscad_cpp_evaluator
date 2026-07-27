@@ -77,13 +77,16 @@ Value parseValueForRepl(const std::string& s) {
 
 constexpr const char* kPreRunHelp =
     "Commands (before \"run\"):\n"
-    "  run, r                 Start evaluating the script\n"
+    "  run, r, restart        Start evaluating the script\n"
     "  break [file:]line, b   Set a breakpoint\n"
     "  delete [file:]line, d  Delete a breakpoint (no args: delete all)\n"
     "  info breakpoints       List breakpoints\n"
+    "  info modules           List user-defined modules\n"
+    "  info functions         List user-defined functions\n"
     "  list [line], l         Show source around a line (default: start of file)\n"
-    "  quit, q                Exit without running\n"
-    "  help, h                Show this text";
+    "  quit, q, exit          Exit without running\n"
+    "  help, h                Show this text\n"
+    "(Enter on a blank line repeats the last restart/list)";
 
 constexpr const char* kPausedHelp =
     "Commands (while paused):\n"
@@ -94,14 +97,22 @@ constexpr const char* kPausedHelp =
     "  child, sc               Step to child: run until children()/children(N) forwards\n"
     "                          control to one of this call's own { ... } children\n"
     "                          (or it returns, if it never calls children() at all)\n"
+    "  stop                    Abort the current evaluation, return to the pre-run prompt\n"
+    "  restart, r              Abort the current evaluation and run again from the start\n"
     "  print <name>, p         Print a variable's value\n"
     "  backtrace, bt, where    Show the call stack (innermost first)\n"
+    "  info breakpoints        List breakpoints\n"
+    "  info variables          List currently visible variables\n"
+    "  info modules            List user-defined modules\n"
+    "  info functions          List user-defined functions\n"
     "  list [line], l          Show source around a line (default: current line)\n"
     "  break [file:]line, b    Set a breakpoint\n"
     "  delete [file:]line, d   Delete a breakpoint (no args: delete all)\n"
     "  set <name>=<value>      Override a variable's value on resume\n"
-    "  quit, q                 Abort evaluation\n"
-    "  help, h                 Show this text";
+    "  quit, q, exit           Abort evaluation\n"
+    "  help, h                 Show this text\n"
+    "(Enter on a blank line repeats the last step/next/child/restart/\n"
+    " continue/finish/list)";
 
 } // namespace
 
@@ -244,6 +255,36 @@ void DebugRepl::printVar(const std::string& arg, const std::unordered_map<std::s
     out_ << "$" << printCount_ << " = " << fmtValue(it->second) << "\n";
 }
 
+void DebugRepl::printVariables(const std::unordered_map<std::string, Value>& visibleVars) const {
+    if (visibleVars.empty()) {
+        out_ << "No variables in current context.\n";
+        return;
+    }
+    std::vector<std::string> names;
+    names.reserve(visibleVars.size());
+    for (const auto& [name, value] : visibleVars) names.push_back(name);
+    std::sort(names.begin(), names.end()); // unordered_map iteration order isn't deterministic
+    for (const std::string& name : names) out_ << name << " = " << fmtValue(visibleVars.at(name)) << "\n";
+}
+
+void DebugRepl::printDeclaredFunctions() const {
+    if (declaredFunctionLines_.empty()) {
+        out_ << "No user-defined functions.\n";
+        return;
+    }
+    out_ << "User-defined functions:\n";
+    for (const std::string& line : declaredFunctionLines_) out_ << "  " << line << "\n";
+}
+
+void DebugRepl::printDeclaredModules() const {
+    if (declaredModuleLines_.empty()) {
+        out_ << "No user-defined modules.\n";
+        return;
+    }
+    out_ << "User-defined modules:\n";
+    for (const std::string& line : declaredModuleLines_) out_ << "  " << line << "\n";
+}
+
 void DebugRepl::printBacktrace(const std::vector<CallStackFrame>& callStack, const std::string& origin, int line) const {
     const int n = static_cast<int>(callStack.size());
     std::string curOrigin = origin;
@@ -269,17 +310,47 @@ bool DebugRepl::runPrompt() {
             return false;
         }
         auto [cmd, arg] = splitFirstWord(raw);
-        if (cmd.empty()) continue;
-        if (cmd == "run" || cmd == "r") return true;
+        if (cmd.empty()) {
+            // Hitting Enter on a blank line repeats the last "restart"/
+            // "list" (the only two of the repeatable commands valid at
+            // this prompt) -- mirrors gdb's own repeat-last-command
+            // convention. No prior repeatable command yet: unchanged
+            // no-op behavior.
+            if (lastRepeatableCmd_.empty()) continue;
+            cmd = lastRepeatableCmd_;
+            arg = lastRepeatableArg_;
+        }
+        // "restart" is also accepted here (not just "run"/"r") so a user
+        // who just typed "stop" can reflexively type "restart" again --
+        // with nothing currently running, the two commands mean the same
+        // thing at this prompt.
+        if (cmd == "run" || cmd == "r" || cmd == "restart") {
+            lastRepeatableCmd_ = "restart";
+            lastRepeatableArg_.clear();
+            return true;
+        }
         if (cmd == "break" || cmd == "b") {
             addBreakpoint(arg);
         } else if (cmd == "delete" || cmd == "d") {
             deleteBreakpoint(arg);
-        } else if (cmd == "info" && arg.rfind("break", 0) == 0) {
-            printBreakpoints();
+        } else if (cmd == "info") {
+            const std::string sub = trim(arg);
+            if (sub.rfind("break", 0) == 0) {
+                printBreakpoints();
+            } else if (sub == "modules") {
+                printDeclaredModules();
+            } else if (sub == "functions") {
+                printDeclaredFunctions();
+            } else if (sub == "variables") {
+                out_ << "No variables to show before \"run\".\n";
+            } else {
+                out_ << "Undefined info command: \"" << sub << "\". Try \"help\".\n";
+            }
         } else if (cmd == "list" || cmd == "l") {
+            lastRepeatableCmd_ = "list";
+            lastRepeatableArg_ = arg;
             listSource(arg);
-        } else if (cmd == "quit" || cmd == "q") {
+        } else if (cmd == "quit" || cmd == "q" || cmd == "exit") {
             return false;
         } else if (cmd == "help" || cmd == "h") {
             out_ << kPreRunHelp << "\n";
@@ -361,31 +432,77 @@ DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
         if (!readCommandLine("(scad-dbg) ", raw)) {
             out_ << "\n";
             quit_ = true;
+            postRunAction_ = PostRunAction::Quit;
             return DebugAction{true, {}};
         }
         auto [cmd, arg] = splitFirstWord(raw);
-        if (cmd.empty()) continue;
+        if (cmd.empty()) {
+            // Hitting Enter on a blank line repeats the last step/next/
+            // child/restart/continue/finish/list -- mirrors gdb's own
+            // repeat-last-command convention. No prior repeatable command
+            // yet: unchanged no-op behavior.
+            if (lastRepeatableCmd_.empty()) continue;
+            cmd = lastRepeatableCmd_;
+            arg = lastRepeatableArg_;
+        }
 
         if (cmd == "continue" || cmd == "c") {
+            lastRepeatableCmd_ = "continue";
+            lastRepeatableArg_.clear();
             return resume(std::nullopt);
         }
         if (cmd == "step" || cmd == "s") {
+            lastRepeatableCmd_ = "step";
+            lastRepeatableArg_.clear();
             return resume(std::string("into"), line, depth, origin);
         }
         if (cmd == "next" || cmd == "n") {
+            lastRepeatableCmd_ = "next";
+            lastRepeatableArg_.clear();
             return resume(std::string("over"), line, depth, origin);
         }
         if (cmd == "finish" || cmd == "fin") {
+            lastRepeatableCmd_ = "finish";
+            lastRepeatableArg_.clear();
             return resume(std::string("out"), line, depth, origin);
         }
         if (cmd == "child" || cmd == "sc") {
+            lastRepeatableCmd_ = "child";
+            lastRepeatableArg_.clear();
             return resume(std::string("to_child"), line, depth, origin);
+        }
+        if (cmd == "stop") {
+            quit_ = true;
+            postRunAction_ = PostRunAction::Stopped;
+            return DebugAction{true, {}};
+        }
+        if (cmd == "restart" || cmd == "r") {
+            lastRepeatableCmd_ = "restart";
+            lastRepeatableArg_.clear();
+            quit_ = true;
+            postRunAction_ = PostRunAction::Restart;
+            return DebugAction{true, {}};
         }
         if (cmd == "print" || cmd == "p") {
             printVar(arg, visibleVars);
         } else if (cmd == "backtrace" || cmd == "bt" || cmd == "where") {
             printBacktrace(callStack, origin, line);
+        } else if (cmd == "info") {
+            const std::string sub = trim(arg);
+            if (sub.rfind("break", 0) == 0) {
+                printBreakpoints();
+            } else if (sub == "variables") {
+                printVariables(visibleVars);
+            } else if (sub == "modules") {
+                printDeclaredModules();
+            } else if (sub == "functions") {
+                printDeclaredFunctions();
+            } else {
+                out_ << "Undefined info command: \"" << sub << "\". Try \"help\".\n";
+            }
         } else if (cmd == "list" || cmd == "l") {
+            lastRepeatableCmd_ = "list";
+            lastRepeatableArg_ = arg;
             listSource(arg, line, origin);
         } else if (cmd == "break" || cmd == "b") {
             addBreakpoint(arg);
@@ -393,8 +510,9 @@ DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
             deleteBreakpoint(arg);
         } else if (cmd == "set") {
             setVar(arg);
-        } else if (cmd == "quit" || cmd == "q") {
+        } else if (cmd == "quit" || cmd == "q" || cmd == "exit") {
             quit_ = true;
+            postRunAction_ = PostRunAction::Quit;
             return DebugAction{true, {}};
         } else if (cmd == "help" || cmd == "h") {
             out_ << kPausedHelp << "\n";
@@ -402,6 +520,21 @@ DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
             out_ << "Undefined command: \"" << cmd << "\". Try \"help\".\n";
         }
     }
+}
+
+void DebugRepl::prepareForRun() {
+    quit_ = false;
+    postRunAction_ = PostRunAction::None;
+    breakOnFirst_ = true;
+    stepCmd_.reset();
+    stepToChildTargets_.clear();
+    pendingMods_.clear();
+}
+
+PostRunAction DebugRepl::takePostRunAction() {
+    const PostRunAction action = postRunAction_;
+    postRunAction_ = PostRunAction::None;
+    return action;
 }
 
 DebugAction DebugRepl::resume(std::optional<std::string> stepCmd, int line, int depth, const std::string& origin) {

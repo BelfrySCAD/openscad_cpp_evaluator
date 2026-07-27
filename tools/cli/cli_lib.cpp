@@ -160,6 +160,48 @@ std::string formatProfileReport(const std::string& sourcePath, const ProfileResu
     return renderProfileReportText(sourcePath, profile, sites);
 }
 
+// "name(param1, param2=default2, ...)" -- shared by
+// collectDeclaredLines()'s FunctionDeclaration/ModuleDeclaration branches.
+std::string paramSignature(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params) {
+    std::string sig;
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i) sig += ", ";
+        sig += params[i]->name->name;
+        if (params[i]->defaultValue) sig += "=" + params[i]->defaultValue->toString();
+    }
+    return sig;
+}
+
+// "info functions"/"info modules": one "name(params) at file:line" per
+// top-level FunctionDeclaration/ModuleDeclaration node in the fully
+// use-resolved node list, so a `use <file>`-injected declaration shows up
+// too, matching what's actually callable -- sorted for deterministic
+// output (the input list's own order isn't alphabetical). Ported
+// identically to the Python reference's own collect_declared_lines in
+// cli.py.
+std::vector<std::string> collectDeclaredLines(const std::vector<const oscad::ASTNode*>& nodes, oscad::NodeKind kind,
+                                                const std::string& mainPath) {
+    std::vector<std::string> lines;
+    for (const oscad::ASTNode* n : nodes) {
+        if (n->kind() != kind) continue;
+        std::string name, params;
+        if (kind == oscad::NodeKind::FunctionDeclaration) {
+            const auto& decl = static_cast<const oscad::FunctionDeclaration&>(*n);
+            name = decl.name->name;
+            params = paramSignature(decl.parameters);
+        } else {
+            const auto& decl = static_cast<const oscad::ModuleDeclaration&>(*n);
+            name = decl.name->name;
+            params = paramSignature(decl.parameters);
+        }
+        const std::string& origin = n->position().origin.empty() ? mainPath : n->position().origin;
+        lines.push_back(name + "(" + params + ") at " + std::filesystem::path(origin).filename().string() + ":" +
+                         std::to_string(n->position().line));
+    }
+    std::sort(lines.begin(), lines.end());
+    return lines;
+}
+
 } // namespace
 
 int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream& out, std::ostream& err) {
@@ -245,7 +287,6 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
         ResolvedUseScopes used = resolveUseScopes(ast, inputPath, [&out](const std::string& msg) { out << msg << "\n"; });
 
         std::optional<DebugRepl> repl;
-        DebugHooks hooks;
         if (debug) {
             repl.emplace(inputPath, in, out);
             repl->installInterruptHandler(); // Ctrl+C during evaluate() pauses like a breakpoint
@@ -254,54 +295,99 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
             // those really are std::cin/std::cout (genuine interactive use),
             // never for the test suite's injected istringstream/ostringstream.
             if (&in == &std::cin && &out == &std::cout) repl->enableLineEditing();
-            if (!repl->runPrompt()) return 0; // user quit before "run"
-            hooks.debugHook = [&](int line, int depth, bool forced, const std::string& origin,
-                                   const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
-                return repl->debugHook(line, depth, forced, origin, callStack, getFrame);
-            };
-            hooks.errorBreak = [&](int line, const std::string& header, const std::string& origin,
-                                    const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
-                repl->errorBreak(line, header, origin, callStack, getFrame);
-            };
-            hooks.returnHook = [&](const std::string& name, const Value& result, int depth) {
-                repl->returnHook(name, result, depth);
-            };
+            repl->setDeclaredNames(collectDeclaredLines(used.processedNodes, oscad::NodeKind::FunctionDeclaration, inputPath),
+                                    collectDeclaredLines(used.processedNodes, oscad::NodeKind::ModuleDeclaration, inputPath));
         }
 
-        Evaluator evaluator([&out](const std::string& msg) { out << msg << "\n"; }, nullptr, nullptr, hooks,
-                             /*profiling=*/!profilePath.empty());
-        if (repl) repl->attachEvaluator(evaluator); // lets "child" read Evaluator::lastChildrenPositions()
-        EvalContext ctx = EvalContext::makeRoot(used.rootScope.get());
+        // Runs at least once; loops again only when a paused --debug
+        // session issues "stop" (back to the pre-run prompt) or "restart"
+        // (skip the prompt, go straight back into a fresh run) -- both
+        // unwind out of evaluate() via the same shared
+        // kDebuggingStoppedMessage EvalError "quit" already used, caught
+        // below and disambiguated via DebugRepl::takePostRunAction().
+        // Without --debug this loop always runs exactly once (needPrompt/
+        // repl-related branches are all no-ops when !debug), so this is
+        // the same single-pass behavior as before, not a new code path.
+        bool needPrompt = true;
+        for (;;) {
+            if (debug) {
+                if (needPrompt && !repl->runPrompt()) return 0; // user quit before ever running
+                repl->prepareForRun();
+            }
+            needPrompt = true;
 
-        std::vector<ColoredBody> bodies = toRenderableBodies(evaluator.evaluate(used.processedNodes, ctx));
+            DebugHooks hooks;
+            if (debug) {
+                hooks.debugHook = [&](int line, int depth, bool forced, const std::string& origin,
+                                       const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
+                    return repl->debugHook(line, depth, forced, origin, callStack, getFrame);
+                };
+                hooks.errorBreak = [&](int line, const std::string& header, const std::string& origin,
+                                        const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
+                    repl->errorBreak(line, header, origin, callStack, getFrame);
+                };
+                hooks.returnHook = [&](const std::string& name, const Value& result, int depth) {
+                    repl->returnHook(name, result, depth);
+                };
+            }
 
-        if (!profilePath.empty()) {
-            std::ofstream profileFile(profilePath);
-            if (!profileFile) {
-                err << "error: cannot open '" << profilePath << "' for writing\n";
+            Evaluator evaluator([&out](const std::string& msg) { out << msg << "\n"; }, nullptr, nullptr, hooks,
+                                 /*profiling=*/!profilePath.empty());
+            if (repl) repl->attachEvaluator(evaluator); // lets "child" read Evaluator::lastChildrenPositions()
+            EvalContext ctx = EvalContext::makeRoot(used.rootScope.get());
+
+            std::vector<ColoredBody> bodies;
+            try {
+                bodies = toRenderableBodies(evaluator.evaluate(used.processedNodes, ctx));
+            } catch (const EvalError& e) {
+                if (debug && std::string(e.what()) == kDebuggingStoppedMessage) {
+                    switch (repl->takePostRunAction()) {
+                    case PostRunAction::Stopped:
+                        out << "Evaluation stopped.\n";
+                        continue; // needPrompt stays true -> back to the pre-run prompt
+                    case PostRunAction::Restart:
+                        needPrompt = false; // skip the prompt, run again immediately
+                        continue;
+                    case PostRunAction::Quit:
+                    case PostRunAction::None:
+                        break; // fall through to the generic error path below
+                    }
+                }
+                // e.what() is already the fully formatted "ERROR: ...\nTRACE: ..."
+                // message (see eval_error.hpp) -- no extra prefix here, unlike the
+                // generic catch below. Also reached for a genuine (non-debugger)
+                // EvalError, and for "quit" (whose own e.what() is
+                // kDebuggingStoppedMessage, matching this exact behavior from
+                // before restart/stop existed).
+                err << e.what() << "\n";
                 return 1;
             }
-            profileFile << formatProfileReport(inputPath, *evaluator.profileResult, profileOpts);
-        }
 
-        if (fmt == "stl") {
-            writeStl(outputPath, bodies);
-        } else if (fmt == "obj") {
-            writeObj(outputPath, bodies);
-        } else if (fmt == "off") {
-            writeOff(outputPath, bodies);
-        } else {
-            writeThreeMf(outputPath, bodies);
+            if (!profilePath.empty()) {
+                std::ofstream profileFile(profilePath);
+                if (!profileFile) {
+                    err << "error: cannot open '" << profilePath << "' for writing\n";
+                    return 1;
+                }
+                profileFile << formatProfileReport(inputPath, *evaluator.profileResult, profileOpts);
+            }
+
+            if (fmt == "stl") {
+                writeStl(outputPath, bodies);
+            } else if (fmt == "obj") {
+                writeObj(outputPath, bodies);
+            } else if (fmt == "off") {
+                writeOff(outputPath, bodies);
+            } else {
+                writeThreeMf(outputPath, bodies);
+            }
+            out << "Exported to " << outputPath << "\n";
+            return 0;
         }
-        out << "Exported to " << outputPath << "\n";
-        return 0;
     } catch (const oscad::ParseError& e) {
         err << e.what() << "\n";
         return 1;
     } catch (const EvalError& e) {
-        // e.what() is already the fully formatted "ERROR: ...\nTRACE: ..."
-        // message (see eval_error.hpp) -- no extra prefix here, unlike the
-        // generic catch below.
         err << e.what() << "\n";
         return 1;
     } catch (const std::exception& e) {

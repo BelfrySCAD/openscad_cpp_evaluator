@@ -806,6 +806,73 @@ equivalent of `csvField()` needed there) and its `--profile-sort`/`--profile-for
 cross-checked against Anklet.scad (the real-world BOSL2 benchmark script — see this repo's own
 perf-tracking memory): `--profile-format csv --profile-sort cumulative --profile-min-calls 100`
 cuts an 873-line unfiltered report down to 107 lines of just the call sites that actually matter.
+
+**Stop/Restart/`info variables|modules|functions`/blank-line-repeat, added right after**: a
+meaningfully bigger debug-REPL change than any prior one this phase — the first to touch
+`runCli()`'s/`cli.main()`'s own control flow rather than just `DebugRepl` internals. Before this,
+the CLI ran `evaluate()` exactly once per process; "quit" was the only way to abort, and it always
+exited the whole CLI (exit 1, no export). Confirmed with the user up front (a real design decision,
+not an obvious one): **`stop`** aborts the current evaluation but — unlike `quit` — returns to the
+*pre-run* prompt instead of exiting, mirroring gdb's `kill` vs `quit` distinction; **`restart`**
+(while paused) aborts and immediately re-runs from the top with no intervening prompt, and is *also*
+accepted at the pre-run prompt itself (behaving exactly like `run` there) so a user who just typed
+`stop` can reflexively type `restart` again without hitting "Undefined command". `runCli()` is now a
+loop (`for (;;) { ... }`) around one `Evaluator`+`EvalContext`+`evaluate()` attempt per iteration —
+without `--debug` this loop still runs exactly once (every `repl`-related branch is `if (debug)`-
+guarded), so it's the identical single-pass behavior as before, not a new code path for the common
+case. `PostRunAction` (`debug_hooks.hpp`: `None`/`Stopped`/`Restart`/`Quit`) is how `DebugRepl`
+tells `runCli()` *why* `evaluate()` unwound: all three commands (plus `quit`) raise the exact same
+`EvalError(kDebuggingStoppedMessage)` `checkDebug()` already threw for plain `quit` — a new shared
+constant (`kDebuggingStoppedMessage`, `debug_hooks.hpp`) rather than a re-typed string literal,
+specifically because `runCli()`'s catch block must distinguish "the debugger itself asked to abort"
+from a genuine script error by comparing `e.what()` against it. This mattered concretely: `errorBreak()`
+discards its own `interact()`'s return value entirely (evaluation aborts regardless, since the
+*real* error is what's about to throw), so if a user typed `stop` while inspecting a genuine
+`assert()` failure, `DebugRepl`'s own `postRunAction_` member would still get set to `Stopped` as a
+side effect — checking only the exception's *message* (not the mutated member alone) means a real
+error's own text never matches the sentinel, so it can never be misreported as a clean "Evaluation
+stopped." Verified this exact scenario deliberately, not just assumed safe by inspection.
+`DebugRepl::prepareForRun()` resets exactly what a fresh run needs (`breakOnFirst_`/`stepCmd_`/
+`stepToChildTargets_`/`pendingMods_`) — breakpoints, print-counter, and declared-function/module
+names all carry over, matching gdb's own `run`-after-`kill` behavior.
+
+`info variables`/`info modules`/`info functions` extend the existing `info breakpoints` dispatch.
+`info variables` is paused-only (reuses the exact `visibleVars` map `print` already reads — zero
+new plumbing) and reports "No variables to show before \"run\"." at the pre-run prompt rather than
+silently doing nothing. `info functions`/`info modules` are static (available in both prompts):
+`collectDeclaredLines()` (`cli_lib.cpp`) scans the fully use-resolved top-level node list
+(`ResolvedUseScopes::processedNodes`, already available in `runCli()`) for `FunctionDeclaration`/
+`ModuleDeclaration` nodes directly — **deliberately not** a `Scope`-enumeration API added to the
+`openscad_cpp_parser` submodule (the first idea considered): the CLI already owns the exact node
+list it needs, so reaching into a third repository for read access it doesn't actually need would
+have been the wrong lazy call, not the right one, once the actual data dependency was traced through.
+Only *top-level* declarations are listed (matching what's realistically ever declared — nested
+module/function declarations inside another module's body are legal OpenSCAD but vanishingly rare
+in real scripts, including BOSL2) — `DebugRepl::setDeclaredNames()` receives already-formatted,
+already-sorted `"name(params) at file:line"` strings computed once by `cli_lib.cpp` (which has
+direct AST access), keeping `DebugRepl` itself fully decoupled from parser types.
+
+Blank-Enter-repeats-last-command (`step`/`next`/`child`/`restart`/`continue`/`finish`/`list`, plus
+`restart`/`list` specifically at the pre-run prompt too) mirrors gdb's own convention exactly.
+`lastRepeatableCmd_`/`lastRepeatableArg_` are set at each relevant dispatch branch (not looked up
+via a separate command-name set, so alias handling — `c`/`s`/`n`/`fin`/`sc`/`r`/`l` — falls out of
+each branch's own existing alias check rather than needing a second, easy-to-drift-out-of-sync
+enumeration) and persist across the whole debug session (not reset per pause, matching gdb's own
+single persistent "last command" register) — a blank line before any repeatable command has ever
+been issued is an unchanged no-op, exactly like before this feature existed.
+
+Manually verified every one of these end to end (not just via the test suite): a script with a
+recursive function, a module using `children()`, and a breakpoint mid-script — `info functions`/
+`info modules` pre-run, `break`+`run`+`info variables` while paused, `stop` (prints "Evaluation
+stopped.", back to the pre-run prompt, `info functions` still works there), `restart` (same
+breakpoint hit again, proving a genuine fresh run), `continue` to completion; separately, `next`
+followed by two blank lines advancing one statement each; separately, `exit` behaving identically to
+`quit` both before and during a run. Same exact script, same exact command sequence, run against
+both this port's CLI and the Python reference's `cli.py` side by side — outputs matched. Ported
+identically (same command names/aliases, same `PostRunAction`-equivalent string values `"stopped"`/
+`"restart"`/`"quit"`, same `DEBUGGING_STOPPED_MESSAGE` shared constant in `evaluator.py`, same
+`_collect_declared_lines()` scan of the use-resolved node list) to the Python reference — see that
+repo's own `CLAUDE.md` for its side of the writeup.
 - `examples/minimal_debugger.cpp` — a self-checking, runnable demonstration of the `DebugHookFn`
   seam alone (trace every statement, stop at a chosen line, override a variable via the hook's
   returned `mods`), a close port of the reference's own `examples/minimal_debugger.py`.

@@ -82,6 +82,34 @@ public:
     // and keeps using the plain getline() path unchanged.
     void enableLineEditing() { lineEditingEnabled_ = true; }
 
+    // Feeds "info functions"/"info modules" their (already-formatted,
+    // already-sorted) display lines -- computed once by the caller
+    // (cli_lib.cpp, which has direct AST access) from the fully
+    // use-resolved top-level node list, so DebugRepl itself stays fully
+    // decoupled from parser/AST types. Call before runPrompt(); an empty
+    // vector just means "no user-defined functions/modules" (a real,
+    // reportable state, not an error).
+    void setDeclaredNames(std::vector<std::string> functionLines, std::vector<std::string> moduleLines) {
+        declaredFunctionLines_ = std::move(functionLines);
+        declaredModuleLines_ = std::move(moduleLines);
+    }
+
+    // Resets everything that must start fresh for a (re)run: the
+    // break-on-first-statement flag, any in-flight step command, and
+    // pending `set` overrides -- called once per run, including the very
+    // first one, so "restart" is indistinguishable from a genuine fresh
+    // "run" except that breakpoints/history/print-counter carry over
+    // (matching gdb's own `run`-after-`kill` behavior). Does NOT touch
+    // breakpoints_ or printCount_.
+    void prepareForRun();
+
+    // Reads and resets the outcome of the paused session's own "stop"/
+    // "restart"/"quit" command (None if evaluation completed normally, or
+    // hasn't been asked to abort at all) -- see PostRunAction's own doc
+    // comment (debug_hooks.hpp) for how the caller (cli_lib.cpp) uses
+    // this after catching the shared kDebuggingStoppedMessage EvalError.
+    PostRunAction takePostRunAction();
+
     // Interactive prompt shown before evaluation starts. Returns false if
     // the user quit without running -- the caller shouldn't call
     // evaluate() at all in that case. Mirrors run_prompt().
@@ -116,6 +144,13 @@ private:
     void setVar(const std::string& arg);
     void printVar(const std::string& arg, const std::unordered_map<std::string, Value>& visibleVars);
     void printBacktrace(const std::vector<CallStackFrame>& callStack, const std::string& origin, int line) const;
+    // "info variables"/"info modules"/"info functions". printVariables()
+    // is paused-only (needs a live locals snapshot, same data `print`
+    // reads from); the other two are static (from setDeclaredNames()) so
+    // work identically before or during a run.
+    void printVariables(const std::unordered_map<std::string, Value>& visibleVars) const;
+    void printDeclaredFunctions() const;
+    void printDeclaredModules() const;
 
     // The paused-prompt command loop -- shared by debugHook() (returns its
     // result to the evaluator) and errorBreak() (result discarded,
@@ -150,6 +185,18 @@ private:
     Evaluator* evaluator_ = nullptr;
     std::atomic<bool> pauseRequested_{false};
     bool lineEditingEnabled_ = false;
+    std::vector<std::string> declaredFunctionLines_;
+    std::vector<std::string> declaredModuleLines_;
+    PostRunAction postRunAction_ = PostRunAction::None;
+    // Hitting Enter on a blank line re-issues this exact command+arg,
+    // mirroring gdb's own "repeat last command" convention -- only
+    // step/next/child/restart/continue/finish/list ever set this (an
+    // empty name means "nothing to repeat yet", so a blank line before
+    // any of those is a no-op like it always was). Shared across
+    // runPrompt() and interact() rather than reset between them, matching
+    // gdb's own single persistent "last command" register.
+    std::string lastRepeatableCmd_;
+    std::string lastRepeatableArg_;
 };
 
 } // namespace oscadeval
