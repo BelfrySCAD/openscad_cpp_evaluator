@@ -428,29 +428,6 @@ void Evaluator::recordTailCallHop(const std::string& calleeName, const oscad::AS
     profileRecordTailHop("function", calleeName, callPos, &calleeDecl.position());
 }
 
-Value Evaluator::evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode,
-                                       const oscad::Expression& bodyExpr, EvalContext& childCtx,
-                                       const oscad::Position* callPos, int upvalueParent,
-                                       const std::function<Value()>& computeResult) {
-    std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &declNode.position());
-    callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &declNode.position(), &declNode,
-                                         nullptr, upvalueParent});
-    Value result;
-    try {
-        checkDebug(bodyExpr, childCtx);
-        lastCtx_ = &childCtx;
-        result = computeResult();
-        if (debugHooks_.returnHook) debugHooks_.returnHook(name, result, static_cast<int>(callStack_.size()));
-    } catch (...) {
-        callStack_.pop_back();
-        if (prof) profileExit(*prof);
-        throw;
-    }
-    callStack_.pop_back();
-    if (prof) profileExit(*prof);
-    return result;
-}
-
 Value Evaluator::evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
                                    const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                                    const oscad::ASTNode* callNode) {
