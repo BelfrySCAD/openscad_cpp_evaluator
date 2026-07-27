@@ -161,7 +161,7 @@ std::string formatProfileReport(const std::string& sourcePath, const ProfileResu
 }
 
 // "name(param1, param2=default2, ...)" -- shared by
-// collectDeclaredLines()'s FunctionDeclaration/ModuleDeclaration branches.
+// collectDeclarations()'s FunctionDeclaration/ModuleDeclaration branches.
 std::string paramSignature(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params) {
     std::string sig;
     for (size_t i = 0; i < params.size(); ++i) {
@@ -172,34 +172,35 @@ std::string paramSignature(const std::vector<std::unique_ptr<oscad::ParameterDec
     return sig;
 }
 
-// "info functions"/"info modules": one "name(params) at file:line" per
+// "info functions"/"info modules"/"list <name>": one DeclInfo per
 // top-level FunctionDeclaration/ModuleDeclaration node in the fully
 // use-resolved node list, so a `use <file>`-injected declaration shows up
-// too, matching what's actually callable -- sorted for deterministic
-// output (the input list's own order isn't alphabetical). Ported
-// identically to the Python reference's own collect_declared_lines in
-// cli.py.
-std::vector<std::string> collectDeclaredLines(const std::vector<const oscad::ASTNode*>& nodes, oscad::NodeKind kind,
-                                                const std::string& mainPath) {
-    std::vector<std::string> lines;
+// too, matching what's actually callable -- sorted by name for
+// deterministic "info" output (the input list's own order isn't
+// alphabetical; DebugRepl::setDeclaredNames() itself realpath()s each
+// origin, so the raw origin() here is enough). Ported identically to the
+// Python reference's own _collect_declared_lines in cli.py.
+std::vector<DeclInfo> collectDeclarations(const std::vector<const oscad::ASTNode*>& nodes, oscad::NodeKind kind,
+                                           const std::string& mainPath) {
+    std::vector<DeclInfo> decls;
     for (const oscad::ASTNode* n : nodes) {
         if (n->kind() != kind) continue;
-        std::string name, params;
+        DeclInfo d;
         if (kind == oscad::NodeKind::FunctionDeclaration) {
             const auto& decl = static_cast<const oscad::FunctionDeclaration&>(*n);
-            name = decl.name->name;
-            params = paramSignature(decl.parameters);
+            d.name = decl.name->name;
+            d.params = paramSignature(decl.parameters);
         } else {
             const auto& decl = static_cast<const oscad::ModuleDeclaration&>(*n);
-            name = decl.name->name;
-            params = paramSignature(decl.parameters);
+            d.name = decl.name->name;
+            d.params = paramSignature(decl.parameters);
         }
-        const std::string& origin = n->position().origin.empty() ? mainPath : n->position().origin;
-        lines.push_back(name + "(" + params + ") at " + std::filesystem::path(origin).filename().string() + ":" +
-                         std::to_string(n->position().line));
+        d.origin = n->position().origin.empty() ? mainPath : n->position().origin;
+        d.line = n->position().line;
+        decls.push_back(std::move(d));
     }
-    std::sort(lines.begin(), lines.end());
-    return lines;
+    std::sort(decls.begin(), decls.end(), [](const DeclInfo& a, const DeclInfo& b) { return a.name < b.name; });
+    return decls;
 }
 
 } // namespace
@@ -295,8 +296,8 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
             // those really are std::cin/std::cout (genuine interactive use),
             // never for the test suite's injected istringstream/ostringstream.
             if (&in == &std::cin && &out == &std::cout) repl->enableLineEditing();
-            repl->setDeclaredNames(collectDeclaredLines(used.processedNodes, oscad::NodeKind::FunctionDeclaration, inputPath),
-                                    collectDeclaredLines(used.processedNodes, oscad::NodeKind::ModuleDeclaration, inputPath));
+            repl->setDeclaredNames(collectDeclarations(used.processedNodes, oscad::NodeKind::FunctionDeclaration, inputPath),
+                                    collectDeclarations(used.processedNodes, oscad::NodeKind::ModuleDeclaration, inputPath));
         }
 
         // Runs at least once; loops again only when a paused --debug

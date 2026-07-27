@@ -22,6 +22,16 @@ const char* kCubeScript = "cube([10, 10, 10]);\n";
 const char* kModuleScript = "width = 10;\n"
                             "cube([width, width, width]);\n"
                             "echo(\"hi\");\n";
+// A function and a module deliberately sharing the name "fib" -- for
+// "list fib" ambiguity tests.
+const char* kAmbiguousNameScript = "function fib(n) = n < 2 ? n : fib(n-1) + fib(n-2);\n"
+                                    "module thing(x) {\n"
+                                    "    cube(x);\n"
+                                    "}\n"
+                                    "module fib() {\n"
+                                    "    sphere(1);\n"
+                                    "}\n"
+                                    "thing(1);\n";
 
 std::filesystem::path writeScript(const std::string& name, const std::string& text) {
     const std::filesystem::path p = std::filesystem::temp_directory_path() / ("oscad_cli_test_" + name);
@@ -823,6 +833,85 @@ TEST(CliDebugRepl, BlankLineBeforeAnyRepeatableCommandIsANoOp) {
     std::ostringstream stdout_, stderr_;
     EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
     EXPECT_EQ(stdout_.str().find("Undefined command"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+// -- list <name> ----------------------------------------------------------
+
+TEST(CliDebugRepl, ListByNameJumpsToUnambiguousDeclaration) {
+    auto src = writeScript("m.scad", kAmbiguousNameScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"list thing", "quit"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_NE(stdout_.str().find("module thing(x) {"), std::string::npos);
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, ListByAmbiguousNameReportsBothNamespacesAndListsNothing) {
+    auto src = writeScript("m.scad", kAmbiguousNameScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"list fib", "quit"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string text = stdout_.str();
+    EXPECT_NE(text.find("Both a function and a module are named \"fib\""), std::string::npos);
+    EXPECT_NE(text.find("list function:fib"), std::string::npos);
+    EXPECT_NE(text.find("list module:fib"), std::string::npos);
+    // Ambiguous means nothing gets listed -- neither declaration's own
+    // source line should appear.
+    EXPECT_EQ(text.find("function fib(n)"), std::string::npos);
+    EXPECT_EQ(text.find("module fib() {"), std::string::npos);
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, ListWithFunctionQualifierDisambiguatesFromModule) {
+    auto src = writeScript("m.scad", kAmbiguousNameScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"list function:fib", "quit"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_NE(stdout_.str().find("function fib(n)"), std::string::npos);
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, ListWithModuleQualifierDisambiguatesFromFunction) {
+    auto src = writeScript("m.scad", kAmbiguousNameScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"list module:fib", "quit"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_NE(stdout_.str().find("module fib() {"), std::string::npos);
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, ListByUnknownNameReportsNoSymbol) {
+    auto src = writeScript("m.scad", kAmbiguousNameScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"list bogus_name", "quit"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_NE(stdout_.str().find("No symbol \"bogus_name\" in current context."), std::string::npos);
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, ListByNameWorksFromPausedPromptToo) {
+    // Jumping to a named declaration's own source works while paused too,
+    // and shows source from *that* declaration's location, not wherever
+    // the debugger is currently paused.
+    auto src = writeScript("m.scad", kAmbiguousNameScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run", "list thing", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_NE(stdout_.str().find("module thing(x) {"), std::string::npos);
     std::filesystem::remove(src);
     std::filesystem::remove(out);
 }

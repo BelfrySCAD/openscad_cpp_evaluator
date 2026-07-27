@@ -848,9 +848,10 @@ list it needs, so reaching into a third repository for read access it doesn't ac
 have been the wrong lazy call, not the right one, once the actual data dependency was traced through.
 Only *top-level* declarations are listed (matching what's realistically ever declared — nested
 module/function declarations inside another module's body are legal OpenSCAD but vanishingly rare
-in real scripts, including BOSL2) — `DebugRepl::setDeclaredNames()` receives already-formatted,
-already-sorted `"name(params) at file:line"` strings computed once by `cli_lib.cpp` (which has
-direct AST access), keeping `DebugRepl` itself fully decoupled from parser types.
+in real scripts, including BOSL2) — `DebugRepl::setDeclaredNames()` receives already-sorted
+`DeclInfo{name, params, origin, line}` structs (`debug_repl.hpp`) computed once by `cli_lib.cpp`
+(which has direct AST access), keeping `DebugRepl` itself fully decoupled from parser types beyond
+this one struct.
 
 Blank-Enter-repeats-last-command (`step`/`next`/`child`/`restart`/`continue`/`finish`/`list`, plus
 `restart`/`list` specifically at the pre-run prompt too) mirrors gdb's own convention exactly.
@@ -871,8 +872,33 @@ followed by two blank lines advancing one statement each; separately, `exit` beh
 both this port's CLI and the Python reference's `cli.py` side by side — outputs matched. Ported
 identically (same command names/aliases, same `PostRunAction`-equivalent string values `"stopped"`/
 `"restart"`/`"quit"`, same `DEBUGGING_STOPPED_MESSAGE` shared constant in `evaluator.py`, same
-`_collect_declared_lines()` scan of the use-resolved node list) to the Python reference — see that
+`_collect_declarations()` scan of the use-resolved node list) to the Python reference — see that
 repo's own `CLAUDE.md` for its side of the writeup.
+
+**`list <name>`, added right after**: the user's own follow-up question ("Can you do a `list
+funcname`?") surfaced a real gap — `listSource()` only ever accepted a line number, silently
+falling back to the current/start line for anything else (including a function name — not an
+error, just quietly wrong). Fixed with a `[line|name]` argument: an unparsable-as-int `arg` is now
+looked up by name in `declaredFunctions_`/`declaredModules_` (the same `DeclInfo` data `info
+functions`/`info modules` already has) and jumps to *that declaration's own* file:line — which may
+be a completely different file than wherever the debugger happens to be paused right now (e.g. a
+`use <file>`-injected declaration), so `listOrigin` is set from `decl->origin`, not the caller's own
+`origin` parameter. The one real design question, flagged by the user up front: OpenSCAD's function
+and module namespaces are genuinely separate (`function foo(x)=x;` and `module foo(){}` can
+coexist), so an unqualified `list foo` must handle real ambiguity, not just pick one arbitrarily.
+Solved with `function:name`/`module:name` qualifiers — reusing this REPL's own existing
+`[file:]line` colon convention (`break`/`delete` already parse a `prefix:rest` this exact way) rather
+than inventing a new syntax — and an explicit "Both a function and a module are named ..." error
+(listing nothing) when `list foo` is ambiguous and unqualified. No `"->"` marker is drawn for a
+name-based jump (`currentLine` is cleared) since it's not the paused line. An unrecognized, non-
+numeric `arg` (name matches neither namespace) now prints `No symbol "..." in current context.`
+instead of the old silent current/start-line fallback — a small, deliberate behavior change on an
+edge case with no prior test depending on its output. Manually verified all five cases (unambiguous
+name, ambiguous name error, `function:`-qualified, `module:`-qualified, unknown name) plus that this
+still works identically while paused (jumping to a declaration in a completely different location
+than the current pause point). Ported identically (same qualifier syntax, same error messages,
+`DeclInfo` as a `@dataclass` in `_debug_repl.py`) to the Python reference — see that repo's own
+`CLAUDE.md` for its side of the writeup.
 - `examples/minimal_debugger.cpp` — a self-checking, runnable demonstration of the `DebugHookFn`
   seam alone (trace every statement, stop at a chosen line, override a variable via the hook's
   returned `mods`), a close port of the reference's own `examples/minimal_debugger.py`.

@@ -37,6 +37,24 @@ std::string realpath(const std::string& path) {
 
 std::string basename(const std::string& path) { return std::filesystem::path(path).filename().string(); }
 
+const DeclInfo* findDecl(const std::vector<DeclInfo>& decls, const std::string& name) {
+    for (const DeclInfo& d : decls) {
+        if (d.name == name) return &d;
+    }
+    return nullptr;
+}
+
+void printDecls(std::ostream& out, const std::vector<DeclInfo>& decls, const char* kindLabel) {
+    if (decls.empty()) {
+        out << "No user-defined " << kindLabel << ".\n";
+        return;
+    }
+    out << "User-defined " << kindLabel << ":\n";
+    for (const DeclInfo& d : decls) {
+        out << "  " << d.name << "(" << d.params << ") at " << basename(d.origin) << ":" << d.line << "\n";
+    }
+}
+
 std::vector<std::string> readLines(const std::string& path) {
     std::vector<std::string> lines;
     std::ifstream file(path);
@@ -83,7 +101,8 @@ constexpr const char* kPreRunHelp =
     "  info breakpoints       List breakpoints\n"
     "  info modules           List user-defined modules\n"
     "  info functions         List user-defined functions\n"
-    "  list [line], l         Show source around a line (default: start of file)\n"
+    "  list [line|name], l    Show source around a line, or a function/module\n"
+    "                          (\"foo\" if unambiguous, else \"function:foo\"/\"module:foo\")\n"
     "  quit, q, exit          Exit without running\n"
     "  help, h                Show this text\n"
     "(Enter on a blank line repeats the last restart/list)";
@@ -105,7 +124,8 @@ constexpr const char* kPausedHelp =
     "  info variables          List currently visible variables\n"
     "  info modules            List user-defined modules\n"
     "  info functions          List user-defined functions\n"
-    "  list [line], l          Show source around a line (default: current line)\n"
+    "  list [line|name], l     Show source around a line, or a function/module\n"
+    "                          (\"foo\" if unambiguous, else \"function:foo\"/\"module:foo\")\n"
     "  break [file:]line, b    Set a breakpoint\n"
     "  delete [file:]line, d   Delete a breakpoint (no args: delete all)\n"
     "  set <name>=<value>      Override a variable's value on resume\n"
@@ -124,6 +144,18 @@ DebugRepl::DebugRepl(const std::string& sourcePath, std::istream& in, std::ostre
 void DebugRepl::installInterruptHandler() {
     g_activeDebugRepl = this;
     std::signal(SIGINT, handleSigint);
+}
+
+void DebugRepl::setDeclaredNames(std::vector<DeclInfo> functions, std::vector<DeclInfo> modules) {
+    // The caller (cli_lib.cpp) doesn't realpath() these -- it has no
+    // access to this class's own private realpath() helper -- so every
+    // origin gets normalized here, the same way every other origin this
+    // class stores/compares (sourcePath_, breakpoints_' keys, stepOrigin_,
+    // ...) already is.
+    for (DeclInfo& d : functions) d.origin = realpath(d.origin);
+    for (DeclInfo& d : modules) d.origin = realpath(d.origin);
+    declaredFunctions_ = std::move(functions);
+    declaredModules_ = std::move(modules);
 }
 
 bool DebugRepl::readCommandLine(const std::string& prompt, std::string& raw) {
@@ -207,15 +239,52 @@ void DebugRepl::printBreakpoints() const {
 }
 
 void DebugRepl::listSource(const std::string& arg, std::optional<int> currentLine, const std::string& origin) const {
-    const std::vector<std::string>& lines = linesFor(origin.empty() ? sourcePath_ : origin);
+    std::string listOrigin = origin.empty() ? sourcePath_ : origin;
     int target = currentLine.value_or(1);
     const std::string t = trim(arg);
+
     if (!t.empty()) {
+        size_t consumed = 0;
+        bool isNumber = false;
+        int parsed = 0;
         try {
-            target = std::stoi(t);
+            parsed = std::stoi(t, &consumed);
+            isNumber = consumed == t.size();
         } catch (...) {
         }
+        if (isNumber) {
+            target = parsed;
+        } else {
+            // "function:name" / "module:name" qualifies which namespace to
+            // search -- reuses this REPL's existing "prefix:rest" colon
+            // convention (break/delete's own [file:]line parsing).
+            // Unqualified: search both, erroring if the name exists in
+            // both (a function and a module CAN share a name in OpenSCAD).
+            std::string qualifier, name = t;
+            const size_t colon = t.find(':');
+            if (colon != std::string::npos) {
+                qualifier = t.substr(0, colon);
+                name = t.substr(colon + 1);
+            }
+            const DeclInfo* fn = (qualifier.empty() || qualifier == "function") ? findDecl(declaredFunctions_, name) : nullptr;
+            const DeclInfo* mod = (qualifier.empty() || qualifier == "module") ? findDecl(declaredModules_, name) : nullptr;
+            if (fn && mod) {
+                out_ << "Both a function and a module are named \"" << name << "\" -- use \"list function:" << name
+                     << "\" or \"list module:" << name << "\".\n";
+                return;
+            }
+            const DeclInfo* decl = fn ? fn : mod;
+            if (!decl) {
+                out_ << "No symbol \"" << name << "\" in current context.\n";
+                return;
+            }
+            listOrigin = decl->origin;
+            target = decl->line;
+            currentLine = std::nullopt; // jumping to a declaration, not the paused line -- no "->" marker
+        }
     }
+
+    const std::vector<std::string>& lines = linesFor(listOrigin);
     if (lines.empty()) {
         out_ << "No source available.\n";
         return;
@@ -267,23 +336,9 @@ void DebugRepl::printVariables(const std::unordered_map<std::string, Value>& vis
     for (const std::string& name : names) out_ << name << " = " << fmtValue(visibleVars.at(name)) << "\n";
 }
 
-void DebugRepl::printDeclaredFunctions() const {
-    if (declaredFunctionLines_.empty()) {
-        out_ << "No user-defined functions.\n";
-        return;
-    }
-    out_ << "User-defined functions:\n";
-    for (const std::string& line : declaredFunctionLines_) out_ << "  " << line << "\n";
-}
+void DebugRepl::printDeclaredFunctions() const { printDecls(out_, declaredFunctions_, "functions"); }
 
-void DebugRepl::printDeclaredModules() const {
-    if (declaredModuleLines_.empty()) {
-        out_ << "No user-defined modules.\n";
-        return;
-    }
-    out_ << "User-defined modules:\n";
-    for (const std::string& line : declaredModuleLines_) out_ << "  " << line << "\n";
-}
+void DebugRepl::printDeclaredModules() const { printDecls(out_, declaredModules_, "modules"); }
 
 void DebugRepl::printBacktrace(const std::vector<CallStackFrame>& callStack, const std::string& origin, int line) const {
     const int n = static_cast<int>(callStack.size());

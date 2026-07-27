@@ -16,6 +16,21 @@ namespace oscadeval {
 
 class Evaluator;
 
+// One user-defined function/module declaration -- backs both
+// "info functions"/"info modules" (display) and "list <name>" (lookup by
+// name, jumping to wherever it's actually declared, which may be a
+// different file than wherever the debugger happens to be paused right
+// now -- e.g. a `use <file>`-injected declaration). Constructed by the
+// caller (cli_lib.cpp, which has direct AST access) and handed to
+// setDeclaredNames(); `origin` need not be pre-resolved -- setDeclaredNames()
+// canonicalizes it the same way every other origin in this class is.
+struct DeclInfo {
+    std::string name;
+    std::string params; // "a, b=2" (empty if no parameters)
+    std::string origin;
+    int line = 0;
+};
+
 // A minimal, gdb-style interactive debugger for the CLI's `--debug` flag.
 // Wires into Evaluator via the same DebugHooks contract any caller uses
 // (see examples/minimal_debugger.cpp). Unlike a GUI debugger, which needs
@@ -82,17 +97,14 @@ public:
     // and keeps using the plain getline() path unchanged.
     void enableLineEditing() { lineEditingEnabled_ = true; }
 
-    // Feeds "info functions"/"info modules" their (already-formatted,
-    // already-sorted) display lines -- computed once by the caller
+    // Feeds "info functions"/"info modules" (display) and "list <name>"
+    // (lookup) their declaration data -- computed once by the caller
     // (cli_lib.cpp, which has direct AST access) from the fully
     // use-resolved top-level node list, so DebugRepl itself stays fully
-    // decoupled from parser/AST types. Call before runPrompt(); an empty
-    // vector just means "no user-defined functions/modules" (a real,
-    // reportable state, not an error).
-    void setDeclaredNames(std::vector<std::string> functionLines, std::vector<std::string> moduleLines) {
-        declaredFunctionLines_ = std::move(functionLines);
-        declaredModuleLines_ = std::move(moduleLines);
-    }
+    // decoupled from parser/AST types beyond this one struct. Call before
+    // runPrompt(); an empty vector just means "no user-defined
+    // functions/modules" (a real, reportable state, not an error).
+    void setDeclaredNames(std::vector<DeclInfo> functions, std::vector<DeclInfo> modules);
 
     // Resets everything that must start fresh for a (re)run: the
     // break-on-first-statement flag, any in-flight step command, and
@@ -139,6 +151,12 @@ private:
     // A breakpoint/step can land inside a `use <file>`-injected function or
     // module's own body, which lives in a different file than sourcePath_;
     // this must show *that* file's lines, not always the main script's.
+    // `arg` also accepts a name instead of a line number -- "fib" (looked
+    // up unqualified, erroring if ambiguous between the function/module
+    // namespaces) or "function:fib"/"module:fib" (explicit), jumping to
+    // that declaration's own file:line regardless of the current pause
+    // location. See DeclInfo's own doc comment for why this needs
+    // declaredFunctions_/declaredModules_, not just a line number.
     void listSource(const std::string& arg, std::optional<int> currentLine = std::nullopt, const std::string& origin = "") const;
     const std::vector<std::string>& linesFor(const std::string& origin) const;
     void setVar(const std::string& arg);
@@ -185,8 +203,8 @@ private:
     Evaluator* evaluator_ = nullptr;
     std::atomic<bool> pauseRequested_{false};
     bool lineEditingEnabled_ = false;
-    std::vector<std::string> declaredFunctionLines_;
-    std::vector<std::string> declaredModuleLines_;
+    std::vector<DeclInfo> declaredFunctions_;
+    std::vector<DeclInfo> declaredModules_;
     PostRunAction postRunAction_ = PostRunAction::None;
     // Hitting Enter on a blank line re-issues this exact command+arg,
     // mirroring gdb's own "repeat last command" convention -- only
