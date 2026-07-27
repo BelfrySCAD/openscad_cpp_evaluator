@@ -1,0 +1,125 @@
+name: Wheels
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - name: Check metadata
+        run: pipx run twine check dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  build_wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            name: manylinux-x86_64
+          - runner: ubuntu-24.04-arm
+            name: manylinux-aarch64
+          - runner: macos-latest
+            name: macos-arm64
+          - runner: macos-13
+            name: macos-x86_64
+          - runner: windows-latest
+            name: windows-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@v4
+        env:
+          # STABLE_ABI (bindings/CMakeLists.txt) needs CPython >=3.12; build
+          # once against cp312 and the resulting abi3 wheel covers every
+          # later 3.x. Skip musllinux -- Manifold/Boost.Polygon are untested
+          # against musl.
+          CIBW_BUILD: "cp312-*"
+          CIBW_SKIP: "*-musllinux*"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          # manylinux_2_28 (AlmaLinux 8) uses dnf, not apt.
+          CIBW_BEFORE_ALL_LINUX: "dnf install -y bison flex"
+          # Mirrors ci.yml's macOS step: the hosted runner image ships an
+          # untrusted aws/tap pre-tapped; untap before installing.
+          CIBW_BEFORE_ALL_MACOS: "brew untap aws/tap || true; brew install bison flex"
+          # Mirrors ci.yml's Windows step: windows-latest ships MSYS2 at
+          # C:\msys64 (not on PATH); its bison/flex satisfy the parser
+          # submodule's grammar version requirement.
+          CIBW_BEFORE_ALL_WINDOWS: 'C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm bison flex"'
+          CIBW_TEST_COMMAND: "python -c \"import openscad_cpp_evaluator\""
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.name }}
+          path: wheelhouse/*.whl
+
+  publish-testpypi:
+    needs: [sdist, build_wheels]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: sdist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+
+  publish-pypi:
+    needs: [publish-testpypi]
+    runs-on: ubuntu-latest
+    # Requires a "pypi" GitHub Environment with a required-reviewer
+    # protection rule, so this job pauses for manual approval after the
+    # TestPyPI publish above has been verified -- see the plan's Phase 1
+    # step 5/6 for the one-time PyPI/TestPyPI trusted-publisher setup.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: sdist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
