@@ -54,7 +54,7 @@ void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool fo
 
     DebugAction action = debugHooks_.debugHook(pos.line, depth, forced, pos.origin, callStack_, getFrame);
     for (auto& [k, v] : action.mods) ctx.let_->set(k, v);
-    if (action.stop) throw EvalError("Debugging stopped.");
+    if (action.stop) throw EvalError(kDebuggingStoppedMessage);
 }
 
 std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::string& kind, const std::string& name,

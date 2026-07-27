@@ -443,6 +443,7 @@ TEST(CliDebugRepl, PreRunCommandDispatchCoversAllBranches) {
         "delete 2",
         "info breakpoints",
         "delete",
+        "info bogus_sub_command",
         "list 2",
         "list abc",
         "help",
@@ -458,6 +459,7 @@ TEST(CliDebugRepl, PreRunCommandDispatchCoversAllBranches) {
     EXPECT_NE(log.find("breakpoint at"), std::string::npos);
     EXPECT_NE(log.find("No breakpoints set."), std::string::npos);
     EXPECT_NE(log.find("All breakpoints deleted"), std::string::npos);
+    EXPECT_NE(log.find("Undefined info command: \"bogus_sub_command\""), std::string::npos);
     EXPECT_NE(log.find("Commands (before"), std::string::npos);
     EXPECT_NE(log.find("Undefined command: \"totally_unknown_command\""), std::string::npos);
     EXPECT_FALSE(std::filesystem::exists(out));
@@ -497,6 +499,7 @@ TEST(CliDebugRepl, PausedCommandDispatchCoversAllBranches) {
         "set width=\"hi\"",
         "set width=not_a_number",
         "delete",
+        "info bogus_sub_command",
         "help",
         "totally_unknown_command",
         "continue",
@@ -509,6 +512,7 @@ TEST(CliDebugRepl, PausedCommandDispatchCoversAllBranches) {
     EXPECT_NE(log.find("Usage: set <name>=<value>"), std::string::npos);
     EXPECT_NE(log.find("width will be set to"), std::string::npos);
     EXPECT_NE(log.find("All breakpoints deleted"), std::string::npos);
+    EXPECT_NE(log.find("Undefined info command: \"bogus_sub_command\""), std::string::npos);
     EXPECT_NE(log.find("Commands (while paused)"), std::string::npos);
     EXPECT_NE(log.find("Undefined command: \"totally_unknown_command\""), std::string::npos);
     ASSERT_TRUE(std::filesystem::exists(out));
@@ -628,4 +632,197 @@ TEST(CliDebugRepl, RequestPauseCausesNextDebugHookCallToPauseLikeABreakpoint) {
     EXPECT_FALSE(action.stop);
     EXPECT_NE(out.str().find("Interrupted at"), std::string::npos);
     std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, StopReturnsToPreRunPromptThenRunExports) {
+    // "stop" aborts the current evaluation but -- unlike "quit" -- returns
+    // to the pre-run prompt instead of exiting the CLI; a plain "run" from
+    // there starts a fresh evaluation that completes normally.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run", "stop", "run", "continue", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_NE(stdout_.str().find("Evaluation stopped."), std::string::npos);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    EXPECT_GT(std::filesystem::file_size(out), 0u);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, StopThenQuitAbortsWithoutExporting) {
+    // If the user never restarts after "stop", quitting from the pre-run
+    // prompt behaves exactly like never having run at all -- no export,
+    // but a clean exit (0), matching QuitBeforeRunExitsCleanlyWithoutExporting.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run", "stop", "quit"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_FALSE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, RestartWhilePausedAbortsAndRunsAgainFromStart) {
+    // "restart" while paused aborts the current run and immediately
+    // re-runs (no intervening pre-run prompt) -- breakpoints carry over,
+    // so the fresh run pauses at the same breakpoint again before
+    // finally being allowed to complete.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"break 2", "run", "continue", "restart", "continue", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    // Each full run pauses twice (break-on-first at line 1, then the
+    // explicit breakpoint at line 2); running twice (once before "restart",
+    // once after) means "Breakpoint hit" must appear exactly 4 times --
+    // proving the second run genuinely started over from the top rather
+    // than "restart" being a no-op or immediately finishing.
+    const std::string text = stdout_.str();
+    int hitCount = 0;
+    for (size_t pos = text.find("Breakpoint hit"); pos != std::string::npos; pos = text.find("Breakpoint hit", pos + 1)) {
+        ++hitCount;
+    }
+    EXPECT_EQ(hitCount, 4);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    EXPECT_GT(std::filesystem::file_size(out), 0u);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, RestartAcceptedAtPreRunPromptAfterStop) {
+    // A user who just typed "stop" naturally reaches for "restart" again
+    // out of habit -- with nothing currently running, it must behave
+    // exactly like "run" at the pre-run prompt, not "Undefined command".
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run", "stop", "restart", "continue", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_EQ(stdout_.str().find("Undefined command"), std::string::npos);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, ExitAliasWorksLikeQuitBeforeAndDuringRun) {
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out1 = src.parent_path() / "m_out1.stl";
+    auto out2 = src.parent_path() / "m_out2.stl";
+    std::filesystem::remove(out1);
+    std::filesystem::remove(out2);
+    {
+        std::istringstream stdin_ = feedInput({"exit"});
+        std::ostringstream stdout_, stderr_;
+        EXPECT_EQ(runCli({src.string(), "-o", out1.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+        EXPECT_FALSE(std::filesystem::exists(out1));
+    }
+    {
+        std::istringstream stdin_ = feedInput({"run", "exit"});
+        std::ostringstream stdout_, stderr_;
+        EXPECT_EQ(runCli({src.string(), "-o", out2.string(), "--debug"}, stdin_, stdout_, stderr_), 1);
+        EXPECT_FALSE(std::filesystem::exists(out2));
+    }
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, InfoFunctionsAndModulesListUserDeclarationsBeforeAndDuringRun) {
+    auto src = writeScript(
+        "m.scad",
+        "function fib(n) = n < 2 ? n : fib(n-1) + fib(n-2);\n"
+        "module wrapper(s) {\n"
+        "    children();\n"
+        "}\n"
+        "wrapper(1) {\n"
+        "    cube(1);\n"
+        "}\n");
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"info functions", "info modules", "run", "info functions", "info modules", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    // writeScript()'s actual filename is "oscad_cli_test_m.scad", not
+    // literally "m.scad" -- "fib(n) at " and "m.scad:1" are checked as
+    // separate substrings rather than one combined string spanning across
+    // that filename, which a literal "at m.scad:1" would require (and
+    // never find, since "at " isn't immediately followed by "m.scad").
+    const std::string text = stdout_.str();
+    EXPECT_NE(text.find("User-defined functions:"), std::string::npos);
+    EXPECT_NE(text.find("fib(n) at "), std::string::npos);
+    EXPECT_NE(text.find("m.scad:1"), std::string::npos);
+    EXPECT_NE(text.find("User-defined modules:"), std::string::npos);
+    EXPECT_NE(text.find("wrapper(s) at "), std::string::npos);
+    EXPECT_NE(text.find("m.scad:2"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, InfoFunctionsAndModulesReportNoneWhenScriptDeclaresNeither) {
+    auto src = writeScript("m.scad", kCubeScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"info functions", "info modules", "quit"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string text = stdout_.str();
+    EXPECT_NE(text.find("No user-defined functions."), std::string::npos);
+    EXPECT_NE(text.find("No user-defined modules."), std::string::npos);
+    std::filesystem::remove(src);
+}
+
+TEST(CliDebugRepl, InfoVariablesShowsCurrentlyVisibleVariablesOnlyWhilePaused) {
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    // Pre-run: no variables to show yet (nothing has executed). Paused
+    // after "next" (past the `width` assignment): `width` is visible.
+    std::istringstream stdin_ = feedInput({"info variables", "run", "next", "info variables", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string text = stdout_.str();
+    EXPECT_NE(text.find("No variables to show before \"run\"."), std::string::npos);
+    EXPECT_NE(text.find("width = 10"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, BlankLineRepeatsLastStepCommand) {
+    // "next" once, then two blank lines -- mirrors gdb's own repeat-last-
+    // command convention. Four statement lines means four total pauses
+    // (break-on-first at line 1, then one "next" advance per subsequent
+    // command) if the repeat genuinely re-issued "next" each time.
+    auto src = writeScript("m.scad", "a = 1;\nb = 2;\nc = 3;\ncube(1);\n");
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run", "next", "", "", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    const std::string text = stdout_.str();
+    EXPECT_NE(text.find("m.scad:1"), std::string::npos);
+    EXPECT_NE(text.find("m.scad:2"), std::string::npos);
+    EXPECT_NE(text.find("m.scad:3"), std::string::npos);
+    EXPECT_NE(text.find("m.scad:4"), std::string::npos);
+    ASSERT_TRUE(std::filesystem::exists(out));
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliDebugRepl, BlankLineBeforeAnyRepeatableCommandIsANoOp) {
+    // A blank line before any of step/next/child/restart/continue/finish/
+    // list has ever been issued has nothing to repeat -- must fall back
+    // to the pre-feature behavior (silently re-prompt), not crash or
+    // treat it as some other command.
+    auto src = writeScript("m.scad", kModuleScript);
+    auto out = src.parent_path() / "m_out.stl";
+    std::filesystem::remove(out);
+    std::istringstream stdin_ = feedInput({"run", "", "print width", "continue"});
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--debug"}, stdin_, stdout_, stderr_), 0);
+    EXPECT_EQ(stdout_.str().find("Undefined command"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
 }
