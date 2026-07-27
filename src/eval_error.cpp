@@ -8,7 +8,7 @@ void Evaluator::error(const std::string& msg, const oscad::ASTNode& node, const 
     const oscad::Position& pos = node.position();
     if (debugHooks_.errorBreak) {
         const std::string header = "ERROR: " + msg + locSuffix(&pos);
-        const DebugFramesFn getFrame = [this]() { return buildDebugFrame(lastCtx_); };
+        const DebugFramesFn getFrame = [this]() { return buildDebugFrames(lastCtx_); };
         debugHooks_.errorBreak(pos.line, header, pos.origin, callStack_, getFrame);
     }
     throw EvalError(formatError(msg, &pos, callStack_, innermostFrame));

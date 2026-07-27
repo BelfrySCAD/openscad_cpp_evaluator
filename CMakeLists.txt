@@ -69,6 +69,17 @@ if(MSVC)
   add_compile_definitions(_USE_MATH_DEFINES)
 endif()
 
+# The nanobind Python extension (bindings/) links the static evaluator lib
+# into a shared module, so every static target it pulls in -- this project's
+# own libs plus the FetchContent deps (Manifold, parser, Boost.Polygon,
+# linenoise) -- must be built position-independent. Set globally, before any
+# add_subdirectory/FetchContent below, so the subtargets inherit it. OFF by
+# default: the plain static-lib/CLI/test build is untouched.
+option(BUILD_PYTHON_BINDINGS "Build the nanobind Python extension module" OFF)
+if(BUILD_PYTHON_BINDINGS)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 add_subdirectory(external/openscad_cpp_parser)
 
 # openscad_cpp_parser's own src/CMakeLists.txt exposes its public headers via
@@ -165,4 +176,8 @@ endif()
 
 if(BUILD_EXAMPLES)
   add_subdirectory(examples)
+endif()
+
+if(BUILD_PYTHON_BINDINGS)
+  add_subdirectory(bindings)
 endif()

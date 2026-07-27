@@ -48,7 +48,8 @@ void traceEveryStatement() {
     DebugHooks hooks;
     hooks.debugHook = [](int line, int depth, bool, const std::string&, const std::vector<CallStackFrame>&,
                           const DebugFramesFn& getFrame) {
-        DebugFrame frame = getFrame();
+        std::vector<DebugFrame> frames = getFrame();
+        DebugFrame frame = frames.empty() ? DebugFrame{} : frames.front();
         std::cout << "  line " << line << "  depth=" << depth << "  locals=" << fmtLocals(frame.locals) << "\n";
         return DebugAction{};
     };

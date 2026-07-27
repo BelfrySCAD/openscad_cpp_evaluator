@@ -120,8 +120,11 @@ constexpr const char* kPausedHelp =
     "  restart, r              Abort the current evaluation and run again from the start\n"
     "  print <name>, p         Print a variable's value\n"
     "  backtrace, bt, where    Show the call stack (innermost first)\n"
+    "  up                      Select the caller frame (view its variables)\n"
+    "  down                    Select the callee frame\n"
+    "  frame [n], f            Select frame #n (no arg: show the current frame)\n"
     "  info breakpoints        List breakpoints\n"
-    "  info variables          List currently visible variables\n"
+    "  info variables          List the selected frame's variables\n"
     "  info modules            List user-defined modules\n"
     "  info functions          List user-defined functions\n"
     "  list [line|name], l     Show source around a line, or a function/module\n"
@@ -340,19 +343,26 @@ void DebugRepl::printDeclaredFunctions() const { printDecls(out_, declaredFuncti
 
 void DebugRepl::printDeclaredModules() const { printDecls(out_, declaredModules_, "modules"); }
 
+std::pair<std::string, int> DebugRepl::frameLocation(int k, const std::vector<CallStackFrame>& callStack,
+                                                      const std::string& pauseOrigin, int pauseLine) const {
+    const int n = static_cast<int>(callStack.size());
+    std::string curOrigin = pauseOrigin;
+    int curLine = pauseLine;
+    for (int i = 0; i < k && i < n; ++i) {
+        const oscad::Position* callPos = callStack[static_cast<size_t>(n - 1 - i)].callPosition;
+        curOrigin = callPos ? callPos->origin : sourcePath_;
+        curLine = callPos ? callPos->line : 0;
+    }
+    return {curOrigin, curLine};
+}
+
 void DebugRepl::printBacktrace(const std::vector<CallStackFrame>& callStack, const std::string& origin, int line) const {
     const int n = static_cast<int>(callStack.size());
-    std::string curOrigin = origin;
-    int curLine = line;
     for (int k = 0; k <= n; ++k) {
         const bool haveFrame = k < n;
         const std::string label = haveFrame ? callStack[static_cast<size_t>(n - 1 - k)].name + "()" : "<toplevel>";
-        out_ << "#" << k << "  " << label << " at " << (curOrigin.empty() ? "?" : basename(curOrigin)) << ":" << curLine << "\n";
-        if (haveFrame) {
-            const oscad::Position* callPos = callStack[static_cast<size_t>(n - 1 - k)].callPosition;
-            curOrigin = callPos ? callPos->origin : sourcePath_;
-            curLine = callPos ? callPos->line : 0;
-        }
+        auto [o, l] = frameLocation(k, callStack, origin, line);
+        out_ << "#" << k << "  " << label << " at " << (o.empty() ? "?" : basename(o)) << ":" << l << "\n";
     }
 }
 
@@ -451,14 +461,14 @@ DebugAction DebugRepl::debugHook(int line, int depth, bool forced, const std::st
     breakOnFirst_ = false;
     stepCmd_.reset();
 
-    DebugFrame frame = getFrame();
+    std::vector<DebugFrame> frames = getFrame();
     if (pauseRequested) {
         out_ << "\nInterrupted at " << basename(resolved) << ":" << line << "\n";
     } else {
         out_ << "\nBreakpoint hit at " << basename(resolved) << ":" << line << "\n";
     }
     listSource("", line, resolved);
-    return interact(line, depth, resolved, frame.locals, callStack);
+    return interact(line, depth, resolved, frames, callStack);
 }
 
 void DebugRepl::errorBreak(int line, const std::string& header, const std::string& origin,
@@ -467,9 +477,9 @@ void DebugRepl::errorBreak(int line, const std::string& header, const std::strin
     const std::string resolved = resolveOrigin(origin);
     out_ << "\n" << header << "\n";
     listSource("", line, resolved);
-    DebugFrame frame = getFrame();
+    std::vector<DebugFrame> frames = getFrame();
     out_ << "(evaluation will abort once you resume; inspect state, then continue/quit)\n";
-    interact(line, static_cast<int>(callStack.size()), resolved, frame.locals, callStack);
+    interact(line, static_cast<int>(callStack.size()), resolved, frames, callStack);
 }
 
 void DebugRepl::returnHook(const std::string&, const Value& result, int depth) {
@@ -480,8 +490,23 @@ void DebugRepl::returnHook(const std::string&, const Value& result, int depth) {
 }
 
 DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
-                                 const std::unordered_map<std::string, Value>& visibleVars,
+                                 const std::vector<DebugFrame>& frames,
                                  const std::vector<CallStackFrame>& callStack) {
+    // Which frame `print`/`info variables` inspect. 0 = innermost (the paused
+    // statement); `up`/`down`/`frame N` move it. Aligns with backtrace #k.
+    size_t curFrame = 0;
+    static const std::unordered_map<std::string, Value> kEmptyVars;
+    auto visibleVars = [&]() -> const std::unordered_map<std::string, Value>& {
+        return curFrame < frames.size() ? frames[curFrame].locals : kEmptyVars;
+    };
+    auto printFrameHeader = [&]() {
+        const int n = static_cast<int>(callStack.size());
+        const int k = static_cast<int>(curFrame);
+        const std::string label =
+            (k < n) ? callStack[static_cast<size_t>(n - 1 - k)].name + "()" : "<toplevel>";
+        auto [o, l] = frameLocation(k, callStack, origin, line);
+        out_ << "#" << curFrame << "  " << label << " at " << (o.empty() ? "?" : basename(o)) << ":" << l << "\n";
+    };
     for (;;) {
         std::string raw;
         if (!readCommandLine("(scad-dbg) ", raw)) {
@@ -539,7 +564,38 @@ DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
             return DebugAction{true, {}};
         }
         if (cmd == "print" || cmd == "p") {
-            printVar(arg, visibleVars);
+            printVar(arg, visibleVars());
+        } else if (cmd == "up") {
+            if (curFrame + 1 < frames.size()) {
+                ++curFrame;
+                printFrameHeader();
+            } else {
+                out_ << "Already at the outermost frame.\n";
+            }
+        } else if (cmd == "down") {
+            if (curFrame > 0) {
+                --curFrame;
+                printFrameHeader();
+            } else {
+                out_ << "Already at the innermost frame.\n";
+            }
+        } else if (cmd == "frame" || cmd == "f") {
+            const std::string a = trim(arg);
+            if (a.empty()) {
+                printFrameHeader();
+            } else {
+                try {
+                    const size_t idx = static_cast<size_t>(std::stoul(a));
+                    if (idx < frames.size()) {
+                        curFrame = idx;
+                        printFrameHeader();
+                    } else {
+                        out_ << "No frame #" << a << " (have 0.." << (frames.empty() ? 0 : frames.size() - 1) << ").\n";
+                    }
+                } catch (...) {
+                    out_ << "Usage: frame <n>\n";
+                }
+            }
         } else if (cmd == "backtrace" || cmd == "bt" || cmd == "where") {
             printBacktrace(callStack, origin, line);
         } else if (cmd == "info") {
@@ -547,7 +603,7 @@ DebugAction DebugRepl::interact(int line, int depth, const std::string& origin,
             if (sub.rfind("break", 0) == 0) {
                 printBreakpoints();
             } else if (sub == "variables") {
-                printVariables(visibleVars);
+                printVariables(visibleVars());
             } else if (sub == "modules") {
                 printDeclaredModules();
             } else if (sub == "functions") {
