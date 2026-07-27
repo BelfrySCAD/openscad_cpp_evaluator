@@ -117,6 +117,13 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
           password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          # TestPyPI is a dry-run index we iterate against under the same
+          # version while fixing build issues; a filename already uploaded
+          # from an earlier attempt (e.g. the sdist, which is unaffected by
+          # wheel-only fixes) isn't a real problem, just re-upload noise.
+          # Never set this on publish-pypi below -- a real PyPI collision
+          # should fail loudly, not skip silently.
+          skip-existing: true
 
   publish-pypi:
     needs: [publish-testpypi]
