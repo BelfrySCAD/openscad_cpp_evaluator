@@ -474,9 +474,40 @@ private:
     // CallStackFrame::upvalueParent's own doc comment; the caller computes
     // this from callCtxFor's `usedChildCtx` out-param, since the decision
     // needs to be known before the new frame is pushed here.
+    //
+    // Templated on the callable rather than taking `const
+    // std::function<Value()>&`: every call site passes a `[&]() -> Value
+    // {...}` lambda capturing several variables by reference, which
+    // std::function's small-buffer optimization can't always absorb --
+    // erasing its type would then cost a real heap allocation on every
+    // single user function call (hundreds of thousands in a BOSL2-heavy
+    // script), just to invoke a callback exactly once, synchronously, in
+    // the same stack frame. A template parameter keeps the concrete
+    // closure type all the way through, so the compiler can call (and
+    // often inline) `computeResult()` directly -- no erasure, no
+    // allocation, same one-call-site-per-caller shape as before.
+    template <typename F>
     Value evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode, const oscad::Expression& bodyExpr,
                                 EvalContext& childCtx, const oscad::Position* callPos, int upvalueParent,
-                                const std::function<Value()>& computeResult);
+                                F&& computeResult) {
+        std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &declNode.position());
+        callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &declNode.position(), &declNode,
+                                             nullptr, upvalueParent});
+        Value result;
+        try {
+            checkDebug(bodyExpr, childCtx);
+            lastCtx_ = &childCtx;
+            result = computeResult();
+            if (debugHooks_.returnHook) debugHooks_.returnHook(name, result, static_cast<int>(callStack_.size()));
+        } catch (...) {
+            callStack_.pop_back();
+            if (prof) profileExit(*prof);
+            throw;
+        }
+        callStack_.pop_back();
+        if (prof) profileExit(*prof);
+        return result;
+    }
 
     // -- Tail-call optimization (interpreter path) -----------------------
     //
