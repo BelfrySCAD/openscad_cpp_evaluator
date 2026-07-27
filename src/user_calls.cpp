@@ -218,6 +218,7 @@ void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad
     std::optional<ProfileHandle> prof = profileEnter("module", call.name->name, &call.position(), &decl.position());
     callStack_.push_back(
         CallStackFrame{CallStackFrame::Kind::Module, call.name->name, &call.position(), &decl.position()});
+    callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
     try {
         evalChildren(decl.children, childCtx);
     } catch (...) {

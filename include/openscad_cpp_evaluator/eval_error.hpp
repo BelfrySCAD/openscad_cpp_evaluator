@@ -12,6 +12,8 @@ class ASTNode;
 
 namespace oscadeval {
 
+struct EvalContext; // for CallStackFrame::bodyCtx (non-owning debug-frame ptr)
+
 // Thrown for any OpenSCAD-level runtime error (assertion failure, a raised
 // error(), a debugger "stop" command in a later phase). Carries the fully
 // formatted "ERROR: ...\nTRACE: ..." message -- the same text a caller
@@ -72,6 +74,13 @@ struct CallStackFrame {
     // closure's own chain (parent = apply's frame) terminates there
     // without ever reaching make, matching the interpreter byte-for-byte.
     int upvalueParent = -1;
+
+    // The body EvalContext of this active call, set right after the frame is
+    // pushed -- lets the debugger build per-frame local variable snapshots
+    // for the whole call stack (not just the innermost frame). Non-owning;
+    // valid only while this call is on callStack_ (same lifetime as every
+    // other pointer here).
+    const EvalContext* bodyCtx = nullptr;
 };
 
 // " in file {origin}, line {line}" -- "" if pos is null. Mirrors the Python

@@ -26,30 +26,59 @@ std::optional<std::vector<std::pair<std::string, int>>> childStatementPositions(
 
 } // namespace
 
-DebugFrame Evaluator::buildDebugFrame(const EvalContext* ctx) const {
+DebugFrame Evaluator::buildDebugFrame(const EvalContext* ctx, bool includeOuter) const {
     DebugFrame frame;
     if (!ctx) return frame;
-    for (const auto& [k, v] : ctx->let_->items()) frame.locals[k] = v;
-    for (const auto& [k, v] : ctx->dyn->items()) {
-        if (!k.empty() && k[0] == '$') frame.locals[k] = v;
+    // localScope: this frame's own let-bound locals (also the editable
+    // dynNames) plus its $-dynamic vars.
+    for (const auto& [k, v] : ctx->let_->items()) {
+        frame.localScope[k] = v;
+        frame.dynNames.push_back(k);
     }
-    // Top-level script variables not shadowed by a nested call's own
-    // locals -- lets `print` reach a script-level variable while paused
-    // deep inside a module/function call, matching the reference's own
-    // outer_scope merge for the innermost frame.
-    if (!callStack_.empty() && rootCtx_ != nullptr) {
+    for (const auto& [k, v] : ctx->dyn->items()) {
+        if (!k.empty() && k[0] == '$') frame.localScope[k] = v;
+    }
+    // outerScope: top-level script variables not shadowed by this frame's
+    // locals -- only for the innermost (paused) frame, matching the
+    // reference's own outer_scope merge. Lets `print` / the vars pane reach
+    // a script-level variable while paused deep inside a call.
+    if (includeOuter && !callStack_.empty() && rootCtx_ != nullptr) {
         for (const auto& [k, v] : rootCtx_->let_->items()) {
-            if (!frame.locals.count(k)) frame.locals[k] = v;
+            if (!frame.localScope.count(k)) frame.outerScope[k] = v;
         }
     }
+    // Merged view for the CLI REPL (localScope wins on collision).
+    frame.locals = frame.localScope;
+    for (const auto& [k, v] : frame.outerScope) frame.locals.emplace(k, v);
     return frame;
+}
+
+std::vector<DebugFrame> Evaluator::buildDebugFrames(const EvalContext* ctx) const {
+    std::vector<DebugFrame> frames;
+    // Frame 0: the paused statement's own scope (with outerScope merged in).
+    DebugFrame current = buildDebugFrame(ctx, /*includeOuter=*/true);
+    // Enclosing calls, inner-to-outer -- every active call except the
+    // innermost (frame 0 already represents that call's body). Mirrors the
+    // reference's reversed(_frame_ctxs[:-1]).
+    frames.push_back(current);
+    for (int i = static_cast<int>(callStack_.size()) - 2; i >= 0; --i) {
+        frames.push_back(buildDebugFrame(callStack_[i].bodyCtx, /*includeOuter=*/false));
+    }
+    // A final top-level frame (the script's own globals) when inside a call.
+    if (!callStack_.empty()) {
+        DebugFrame top;
+        top.localScope = current.outerScope;
+        top.locals = current.outerScope;
+        frames.push_back(std::move(top));
+    }
+    return frames;
 }
 
 void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced) {
     if (!debugHooks_.debugHook) return;
     const oscad::Position& pos = node.position();
     const int depth = static_cast<int>(callStack_.size());
-    const DebugFramesFn getFrame = [this, &ctx]() { return buildDebugFrame(&ctx); };
+    const DebugFramesFn getFrame = [this, &ctx]() { return buildDebugFrames(&ctx); };
     lastChildrenPositions_ = childStatementPositions(node);
 
     DebugAction action = debugHooks_.debugHook(pos.line, depth, forced, pos.origin, callStack_, getFrame);

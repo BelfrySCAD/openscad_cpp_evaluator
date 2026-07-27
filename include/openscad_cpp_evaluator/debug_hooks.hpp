@@ -36,14 +36,26 @@ using EchoFn = std::function<void(const std::string& message)>;
 // _debug_repl.py ever look past frame 0 (only backtrace walks the rest,
 // and that only needs names/positions, already on CallStackFrame).
 struct DebugFrame {
+    // Merged localScope + outerScope, for consumers that want one flat map
+    // (debug_repl.cpp's `print`/`info variables`).
     std::unordered_map<std::string, Value> locals;
+    // Split view mirroring the Python reference's per-frame frame_data: this
+    // frame's own `let` locals plus its `$`-dynamic vars (localScope), the
+    // unshadowed top-level script vars (outerScope, innermost frame only),
+    // and the subset of localScope names that are `let`-bound and hence
+    // editable at a pause (dynNames). A GUI debugger separates these; the
+    // CLI REPL only reads `locals`.
+    std::unordered_map<std::string, Value> localScope;
+    std::unordered_map<std::string, Value> outerScope;
+    std::vector<std::string> dynNames;
 };
 
-// Lazily computes DebugFrame -- mirrors the reference's own `get_frames`
-// callable parameter: a hook that only traces line numbers (never
-// inspects variables) shouldn't pay for a locals snapshot on every
-// statement.
-using DebugFramesFn = std::function<DebugFrame()>;
+// Lazily computes the per-frame DebugFrame snapshot, innermost frame first
+// (frame 0 = the paused statement's own scope, then each enclosing user
+// call, then a final top-level frame when inside a call) -- mirrors the
+// reference's own `get_frames` returning all_frame_locals. A hook that only
+// traces line numbers (never inspects variables) shouldn't call this at all.
+using DebugFramesFn = std::function<std::vector<DebugFrame>()>;
 
 // A debug hook's response: `stop` aborts the whole evaluate() call
 // (mirrors returning cmd="stop", which raises EvalError); `mods` are

@@ -78,7 +78,8 @@ TEST(DebugHooks, FiresInsideModuleBodyWithCorrectDepthAndLocals) {
         if (line == 3) { // the `cube([w, h, 3]);` statement inside module bracket
             hit.line = line;
             hit.depth = depth;
-            DebugFrame frame = getFrame();
+            std::vector<DebugFrame> frames = getFrame();
+            DebugFrame frame = frames.empty() ? DebugFrame{} : frames.front();
             auto it = frame.locals.find("h");
             if (it != frame.locals.end()) {
                 hit.sawH = true;

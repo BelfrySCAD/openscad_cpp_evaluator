@@ -174,8 +174,16 @@ private:
     // result to the evaluator) and errorBreak() (result discarded,
     // evaluation is aborting regardless; used only for its printing/
     // inspection side effects).
-    DebugAction interact(int line, int depth, const std::string& origin, const std::unordered_map<std::string, Value>& visibleVars,
+    // `frames` is the whole call-stack's per-frame locals, innermost first
+    // (frame 0 = the paused statement). `up`/`down`/`frame N` select which
+    // frame `print`/`info variables` inspect. Frame index k lines up with
+    // `backtrace`'s own #k.
+    DebugAction interact(int line, int depth, const std::string& origin, const std::vector<DebugFrame>& frames,
                           const std::vector<CallStackFrame>& callStack);
+    // (origin, line) shown for backtrace/frame level `k` -- walks call
+    // positions outward exactly like printBacktrace. Shared by both.
+    std::pair<std::string, int> frameLocation(int k, const std::vector<CallStackFrame>& callStack,
+                                                const std::string& pauseOrigin, int pauseLine) const;
     DebugAction resume(std::optional<std::string> stepCmd, int line = 0, int depth = 0, const std::string& origin = "");
 
     std::istream& in_;

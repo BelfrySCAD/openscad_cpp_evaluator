@@ -467,12 +467,18 @@ private:
     void bindCallArgsInto(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, BoundArgs bound,
                            EvalContext& childCtx);
 
-    // Shared by checkDebug() and error()'s own errorBreak hook call: `let`
-    // + `$`-prefixed `dyn` entries from `ctx`, plus (if there's an active
-    // user call) any top-level script variable not shadowed locally.
-    // `ctx` may be null (error()'s lastCtx_ fallback can itself be null
-    // before any statement has ever run) -- returns an empty frame then.
-    DebugFrame buildDebugFrame(const EvalContext* ctx) const;
+    // One frame's snapshot: `let` + `$`-prefixed `dyn` entries from `ctx`
+    // (localScope, with dynNames = the let-bound subset), plus (when
+    // `includeOuter` and inside a call) unshadowed top-level script vars
+    // (outerScope); `locals` is the merged view. `ctx` may be null (returns
+    // an empty frame then).
+    DebugFrame buildDebugFrame(const EvalContext* ctx, bool includeOuter) const;
+
+    // The whole call stack's per-frame snapshots, innermost first: frame 0
+    // from `ctx` (the paused statement's scope, with outerScope), then each
+    // enclosing call's own bodyCtx, then a top-level frame when inside a
+    // call. Mirrors the reference's _build_frame_locals' all_frame_locals.
+    std::vector<DebugFrame> buildDebugFrames(const EvalContext* ctx) const;
 
     // Shared by evalUserFunction/evalUserFunctionFromBound/
     // evalFunctionLiteral: the callstack/profile/debug bracket, factored
@@ -511,6 +517,7 @@ private:
         std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &declNode.position());
         callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &declNode.position(), &declNode,
                                              nullptr, upvalueParent});
+        callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
         Value result;
         try {
             checkDebug(bodyExpr, childCtx);

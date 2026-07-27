@@ -1,0 +1,24 @@
+[build-system]
+requires = ["scikit-build-core >=0.10", "nanobind >=2.0.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "openscad_cpp_evaluator"
+version = "0.1.0"
+description = "C++ OpenSCAD evaluator with Python bindings"
+requires-python = ">=3.11"
+dependencies = ["numpy"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/skbuild/{wheel_tag}"
+wheel.packages = ["python/openscad_cpp_evaluator"]
+# NOTE: editable.rebuild (rebuild-on-import) is intentionally NOT enabled --
+# under uv's build isolation the cached build-dir references a ninja/toolchain
+# in an ephemeral env that gets cleaned up, so rebuild-on-import fails. Rebuild
+# after a C++ change with: uv pip install --reinstall -e <this repo>.
+
+[tool.scikit-build.cmake.define]
+BUILD_PYTHON_BINDINGS = "ON"
+BUILD_TESTING = "OFF"
+BUILD_EXAMPLES = "OFF"
