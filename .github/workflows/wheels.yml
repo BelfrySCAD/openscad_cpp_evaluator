@@ -47,7 +47,7 @@ jobs:
           submodules: recursive
 
       - name: Build wheel
-        uses: pypa/cibuildwheel@v4
+        uses: pypa/cibuildwheel@v4.1.1
         env:
           # STABLE_ABI (bindings/CMakeLists.txt) needs CPython >=3.12; build
           # once against cp312 and the resulting abi3 wheel covers every
