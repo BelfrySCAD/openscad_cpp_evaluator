@@ -75,5 +75,77 @@ TEST(IndexedScopeTrailStorage, SetAtSameLevelDoesNotAccumulateEntries) {
     EXPECT_EQ(*storage.lookup("$fn", level), 999);
 }
 
+// A captured (closure) level's own ancestor must stay alive even after
+// EVERY other TrailView referencing that ancestor has gone out of scope --
+// see TrailView::openChild's own doc comment (parentView_) for why. This
+// reproduces the exact level shape a real escaping-closure scenario builds
+// (traced from `function make(x,table)=let(table=...) x!=undef?
+// make(table=table)(v=x) : function(v) v!=undef?
+// let(nt=concat(table,[v])) make(table=nt) : table;`), with each C++ scope
+// block standing in for one step of Evaluator::evalFunctionBodyTrampoline's
+// own `chain` vector going out of scope once its owning call returns:
+//   1) M1_CALL (isolated call level for the outer make(10))
+//   2) M1_LET  (its own let(table=...) child level)
+//   3) M2_CALL (a NESTED, non-tail recursive make(table=table) call --
+//      isolated, since callCtxFor's sameSpan check correctly refuses to
+//      treat same-function recursion as "still nested")
+//   4) M2_LET  (that call's own let(table=...))
+//   5) C1_CALL (capturedLet-rooted: invoking the closure captured at
+//      M2_LET, continuing ITS ancestry rather than the caller's)
+//   6) C1_LET  (that invocation's own let(newtable=...))
+//   7) M3_CALL (a SECOND tail-hop into the NAMED function make(table=
+//      newtable) -- also isolated, not capturedLet-based)
+//   8) M3_LET  (that hop's own let(table=...) -- this is the level the
+//      SECOND closure, C2, actually captures)
+// After every one of 1-8 goes out of scope except the shared_ptr a
+// "Closure" would hold (mirroring M3_LET, i.e. what capturedLet points
+// to), invoking that closure must still resolve `table` -- bound all the
+// way back at M3_LET itself, so this specific case doesn't even need to
+// walk past one level, but the SURROUNDING chain (steps 1-7) must not have
+// corrupted or blocked that walk on its own way out.
+TEST(TrailView, EscapingClosureThroughDoubleTailHopStillSeesAncestorAfterChainUnwinds) {
+    std::shared_ptr<TrailView<int>> capturedLet;
+    {
+        auto root = TrailView<int>::makeRoot();
+        auto m1Call = root->openChild(/*isolate=*/true);
+        m1Call->set("x", 10);
+        auto m1Let = m1Call->openChild(/*isolate=*/false);
+        m1Let->set("table", 123);
+        auto m2Call = m1Let->openChild(/*isolate=*/true);
+        m2Call->set("table", 123);
+        auto m2Let = m2Call->openChild(/*isolate=*/false);
+        m2Let->set("table", 123);
+        auto c1Call = m2Let->openChild(/*isolate=*/false);
+        c1Call->set("v", 10);
+        auto c1Let = c1Call->openChild(/*isolate=*/false);
+        c1Let->set("newtable", 1230);
+        auto m3Call = c1Let->openChild(/*isolate=*/true);
+        m3Call->set("table", 1230);
+        auto m3Let = m3Call->openChild(/*isolate=*/false);
+        m3Let->set("table", 1230);
+        capturedLet = m3Let;
+    } // every level above except capturedLet's own (m3Let) goes out of scope here
+
+    auto c2Call = capturedLet->openChild(/*isolate=*/false);
+    ASSERT_NE(c2Call->find("table"), nullptr);
+    EXPECT_EQ(*c2Call->find("table"), 1230);
+}
+
+TEST(TrailView, MinimalTwoLevelKeepAlive) {
+    std::shared_ptr<TrailView<int>> captured;
+    {
+        auto root = TrailView<int>::makeRoot();
+        auto parent = root->openChild(/*isolate=*/true);
+        parent->set("x", 42);
+        auto child = parent->openChild(/*isolate=*/false);
+        captured = child;
+    }
+    auto grandchild = captured->openChild(/*isolate=*/false);
+    ASSERT_NE(grandchild->find("x"), nullptr);
+    EXPECT_EQ(*grandchild->find("x"), 42);
+}
+
 } // namespace
 } // namespace oscadeval
+
+

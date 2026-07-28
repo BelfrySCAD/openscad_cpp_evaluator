@@ -79,18 +79,46 @@ public:
 
     // Pops every entry pushed at `level`, across every name that was
     // touched at that level (dirty_[level], recorded by set() above) --
-    // O(bindings made at this level), not O(total names). Left-in-place,
-    // possibly-now-empty per-name vectors are NOT erased from `stacks_`:
-    // ponytail: real scripts rebind the same small name set repeatedly
-    // (loop vars, $fn, ...), so paying one erase+reinsert per pop is pure
-    // waste; revisit only if memory footprint (not speed) ever measurably
-    // matters for a script with a huge, non-repeating variable vocabulary.
+    // O(bindings made at this level) in the common case, not O(total
+    // names). Left-in-place, possibly-now-empty per-name vectors are NOT
+    // erased from `stacks_`: ponytail: real scripts rebind the same small
+    // name set repeatedly (loop vars, $fn, ...), so paying one
+    // erase+reinsert per pop is pure waste; revisit only if memory
+    // footprint (not speed) ever measurably matters for a script with a
+    // huge, non-repeating variable vocabulary.
+    //
+    // Removes the entry matching THIS level specifically, not just
+    // whatever's currently last -- these can differ once an escaping
+    // closure is in play (TrailView::parentView_, see its own doc
+    // comment): a closure can keep one ancestor level alive well past its
+    // own natural (LIFO, call/return-order) lifetime, while an EARLIER,
+    // otherwise-unrelated level that happens to touch the same NAME pops
+    // normally in the meantime. If that earlier level's own entry is no
+    // longer physically last in `vec` (the kept-alive later one is still
+    // sitting on top), a blind pop_back() would silently remove the WRONG
+    // entry -- the still-live, captured one, not the one actually being
+    // popped. Caught by a real repro: `function make(x,table)=
+    // let(table=...) x!=undef? make(table=table)(v=x) : function(v)
+    // v!=undef? let(nt=concat(table,[v])) make(table=nt) : table;` --
+    // invoking the returned closure read undef for a `table` that was
+    // bound directly at the closure's OWN captured level (not even an
+    // ancestor hop away), because an unrelated, earlier `table` push from
+    // a sibling recursive call got popped out of order and silently ate
+    // it. Scans from the back (the common case -- this level's own push
+    // usually IS at or near the top) rather than assuming position 0.
     void popLevel(int level) {
         auto it = dirty_.find(level);
         if (it != dirty_.end()) {
             for (const std::string& name : it->second) {
                 auto sit = stacks_.find(name);
-                if (sit != stacks_.end() && !sit->second.empty()) sit->second.pop_back();
+                if (sit == stacks_.end()) continue;
+                std::vector<Entry>& vec = sit->second;
+                for (auto rit = vec.rbegin(); rit != vec.rend(); ++rit) {
+                    if (rit->level == level) {
+                        vec.erase(std::next(rit).base());
+                        break;
+                    }
+                }
             }
             dirty_.erase(it);
         }
@@ -191,7 +219,7 @@ private:
 // allocations each down to 4 trails * 1) with no change to the
 // ancestry-walk/isolation logic itself.
 template <typename T>
-class TrailView {
+class TrailView : public std::enable_shared_from_this<TrailView<T>> {
 public:
     static std::shared_ptr<TrailView<T>> makeRoot() {
         auto storage = std::make_shared<ScopeTrailStorage<T>>();
@@ -206,9 +234,36 @@ public:
     // chain through this view's own level (childCtx()/letChildCtx() --
     // reads see through to the caller's own bindings, while only this
     // scope's own writes get popped away on exit).
+    //
+    // The child also holds a shared_ptr back to THIS view (parentView_,
+    // isolate=false only) -- not just the ancestor level NUMBER already
+    // tracked in ScopeTrailStorage::parent_. Ancestry-chain VISIBILITY
+    // (lookup()'s walk) only needs the number; but an escaping closure
+    // (Closure::capturedLet, value.hpp) keeps exactly one TrailView alive
+    // past its own scope's normal exit by holding an extra shared_ptr
+    // reference to it -- and that view is very often an intermediate
+    // level (e.g. a let()'s own child level, one hop below the call level
+    // that actually bound the captured variable, see EvalContext::
+    // letChildCtx()), not the outermost one. Without parentView_, nothing
+    // keeps that OUTER level's own TrailView alive once its own creating
+    // call returns; ~TrailView() pops ITS bindings from ScopeTrailStorage
+    // (erasing the very data the still-alive child's ancestry walk needs)
+    // even though the walk can still numerically reach that ancestor level
+    // via ScopeTrailStorage::parent_ (that map entry is untouched -- only
+    // the DATA is gone). Caught by a closure created inside a let()
+    // nested one level inside its own enclosing call reading undef for a
+    // variable bound at the call's own (now-popped) level, not the let()'s
+    // (kept alive) one. Holding parentView_ makes keeping a leaf level
+    // alive transitively keep its whole ancestor chain's data alive too,
+    // cascading in the same reverse-of-creation order an ordinary nested
+    // call/return already unwinds in (member destruction order below), so
+    // normal (non-escaping) scopes pop exactly as before -- this only
+    // changes what happens when something holds an EXTRA reference.
     std::shared_ptr<TrailView<T>> openChild(bool isolate) const {
         int level = storage_->openLevel(isolate ? 0 : level_);
-        return std::make_shared<TrailView<T>>(storage_, level);
+        auto child = std::make_shared<TrailView<T>>(storage_, level);
+        if (!isolate) child->parentView_ = this->shared_from_this();
+        return child;
     }
 
     TrailView(std::shared_ptr<ScopeTrailStorage<T>> storage, int level)
@@ -233,6 +288,15 @@ public:
 private:
     std::shared_ptr<ScopeTrailStorage<T>> storage_;
     int level_;
+    // Declared LAST so it's destroyed FIRST (reverse declaration order),
+    // i.e. immediately after ~TrailView()'s own body (which pops THIS
+    // view's own level) -- releasing (and, if this was the last
+    // reference, cascading into) the parent's own pop right away, in the
+    // same order a normal nested call/return already unwinds in. `const`:
+    // openChild() is itself const, so shared_from_this() resolves to the
+    // const overload -- only lifetime-extension is needed here, never
+    // mutation through this pointer.
+    std::shared_ptr<const TrailView<T>> parentView_;
 };
 
 // Shared bidirectional name<->small-int interning table for $-prefixed
