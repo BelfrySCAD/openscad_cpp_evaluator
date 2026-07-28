@@ -60,6 +60,31 @@ EvalContext EvalContext::callCtx(const oscad::Scope* newScope, std::optional<std
     return result;
 }
 
+EvalContext EvalContext::callCtxFromCapturedLet(const std::shared_ptr<TrailView<Value>>& capturedLet,
+                                                 const oscad::Scope* newScope,
+                                                 std::optional<std::array<double, 4>> newColor,
+                                                 std::shared_ptr<const ChildrenNodeList> newChildrenNodes,
+                                                 const EvalContext* newChildrenCallerCtx) const {
+    EvalContext result;
+    result.scope = newScope ? newScope : scope;
+    auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false); // stays dynamically scoped through the CALL SITE
+    result.dyn = DynValueView(newDynTrail);
+    result.dynExplicit = DynExplicitView(newDynTrail);
+    // isolate=false: continue the ancestry chain THROUGH capturedLet, not
+    // terminate at it -- the entire point is inheriting the closure's own
+    // captured bindings (isolate=true would sever that immediately,
+    // making the capture pointless; the isolation this needs -- NOT
+    // seeing the call SITE's own locals -- already comes for free from
+    // rooting at capturedLet instead of at `this->let_` in the first
+    // place).
+    result.let_ = capturedLet->openChild(/*isolate=*/false);
+    result.dynPositions = dynPositions->openChild(true);
+    result.color = newColor.has_value() ? newColor : color;
+    result.childrenNodes = newChildrenNodes ? newChildrenNodes : std::make_shared<const ChildrenNodeList>();
+    result.childrenCallerCtx = newChildrenCallerCtx;
+    return result;
+}
+
 EvalContext EvalContext::letChildCtx() const {
     EvalContext result = *this;
     auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false);

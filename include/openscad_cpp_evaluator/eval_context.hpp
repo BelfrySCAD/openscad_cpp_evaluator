@@ -105,6 +105,23 @@ struct EvalContext {
                          std::shared_ptr<const ChildrenNodeList> newChildrenNodes = nullptr,
                          const EvalContext* newChildrenCallerCtx = nullptr) const;
 
+    // Identical to callCtx() except `let_`'s new isolated level is opened
+    // from `capturedLet` (a closure's own captured defining-scope trail,
+    // see Closure's doc comment in value.hpp) instead of `this->let_`.
+    // Needed specifically for an ESCAPED closure call -- one where
+    // callCtxFor's own closure-nesting check (still-live enclosing call on
+    // callStack_) comes back false, meaning the ordinary ancestry walk from
+    // `this` (the CALL SITE's context) has no path back to wherever the
+    // closure's own captured variables live. `dyn`/`dynPositions` still
+    // derive from `this` exactly like callCtx() -- $-vars are dynamically
+    // scoped (the caller's own $-vars, not the closure's definer's), so
+    // they're unaffected by where the closure came from.
+    EvalContext callCtxFromCapturedLet(const std::shared_ptr<TrailView<Value>>& capturedLet,
+                                        const oscad::Scope* newScope = nullptr,
+                                        std::optional<std::array<double, 4>> newColor = std::nullopt,
+                                        std::shared_ptr<const ChildrenNodeList> newChildrenNodes = nullptr,
+                                        const EvalContext* newChildrenCallerCtx = nullptr) const;
+
     // let(...)/list-comprehension let() scoping: opens a new level for all
     // four trails, floor unchanged on every one (reads see through to the
     // parent; this let-body's own writes -- including to dyn/dynPositions/

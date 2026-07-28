@@ -372,23 +372,27 @@ TEST(BytecodeCompiler, ClosureCapturesLetBindingNotJustParameter) {
               "ECHO: 7");
 }
 
-TEST(BytecodeCompiler, ClosurePassedThroughAnUnrelatedIntermediaryFunctionDoesNotCaptureAcrossIt) {
+TEST(BytecodeCompiler, ClosurePassedThroughAnUnrelatedIntermediaryFunctionStillCaptures) {
     ScopedVm vm(true);
     // `apply` is a genuinely SEPARATE, top-level function -- not lexically
-    // nested inside `make` -- so real OpenSCAD's own "no escaping
-    // closures, only reaches through an UNBROKEN chain of lexically-nested
-    // calls" rule means `x` must NOT be visible when `f(v)` runs inside
-    // apply's own (isolated) frame, even though make's frame is still
-    // technically active on the call stack. Confirmed against the
-    // unmodified interpreter directly (VM off) before writing this
-    // expectation, not assumed -- this is exactly the case a naive
-    // "scan the whole call stack for a matching declaration" upvalue
-    // search gets wrong (see CallStackFrame::upvalueParent's own doc
-    // comment for the story). `undef + 100` -> undef.
+    // nested inside `make` -- and its own call scope is isolated from
+    // make's (an ordinary call boundary, see EvalContext::callCtx's own
+    // isolate=true). Real OpenSCAD gives 105 here (verified against
+    // ~/Desktop/OpenSCAD-dev.app), confirming a genuine closure carries
+    // its captured environment through an arbitrary intermediary, not
+    // just an unbroken chain of lexically-nested calls -- an earlier
+    // version of this test asserted `undef`, describing this evaluator's
+    // own bug as if it were real OpenSCAD's rule. This exact case is why
+    // Evaluator::callCtxFor checks the closure's own capturedLet FIRST,
+    // before any live-call-stack walk: make's own frame can still be
+    // technically live on callStack_ while apply's own ctx is isolated
+    // from it, so continuing ancestry from the CALLER's ctx (apply's)
+    // rather than from the closure's own captured environment would
+    // silently lose `x`.
     EXPECT_EQ(runCapturingEcho("function apply(f, v) = f(v);\n"
                                 "function make(x) = apply(function(y) y + x, 100);\n"
                                 "echo(make(5));"),
-              "ECHO: undef");
+              "ECHO: 105");
 }
 
 TEST(BytecodeCompiler, NestedClosureCapturesBothEnclosingLevels) {
@@ -415,17 +419,27 @@ TEST(BytecodeCompiler, RecursiveClosureCapturingOuterParameterWorks) {
               "ECHO: 40");
 }
 
-TEST(BytecodeCompiler, ClosureOverNonActiveEnclosingCallResolvesToUndef) {
+TEST(BytecodeCompiler, ClosureOverNonActiveEnclosingCallResolvesCorrectly) {
     ScopedVm vm(true);
-    // No escaping closures: `outer`'s own call has already returned by
-    // the time `stored(3)` runs (a separate top-level statement) -- `n`
-    // must resolve to undef, exactly matching the pre-existing
-    // interpreter limitation (not something this phase is expected to
-    // fix). `undef + 3` -> undef via AdditionOp's non-numeric fallback.
+    // A genuine escaping closure: `outer`'s own call has already
+    // returned by the time `stored(3)` runs (a separate top-level
+    // statement), yet `n` must still resolve to 5 -- real OpenSCAD gives
+    // 8 here (verified against ~/Desktop/OpenSCAD-dev.app). An earlier
+    // version of this test asserted `undef`, describing a since-fixed gap
+    // (no escaping-closure support) as if it were the intended contract.
+    // The fix: Value's FunctionLiteral alternative became a real Closure
+    // (node + capturedLet, a shared_ptr<TrailView<Value>> snapshot of
+    // ctx.let_ at creation time, see value.hpp), and every FunctionLiteral
+    // whose body reads any enclosing-scope variable (non-empty upvalues)
+    // is now deliberately kept off the VM's compiled path (thrown as
+    // NotCompilable in bytecode_compiler.cpp) since Op::LoadUpvalue can
+    // only resolve a still-live call frame, never a captured environment --
+    // such a closure always runs through the interpreter, which reads its
+    // capturedLet directly.
     EXPECT_EQ(runCapturingEcho("function outer(n) = function(y) y + n;\n"
                                 "stored = outer(5);\n"
                                 "echo(stored(3));"),
-              "ECHO: undef");
+              "ECHO: 8");
 }
 
 TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnClosureCases) {
