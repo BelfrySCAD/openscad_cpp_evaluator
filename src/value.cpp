@@ -328,9 +328,25 @@ std::string fmtValue(const Value& v) {
     return "<function-literal>"; // const FunctionLiteral* -- no meaningful textual form in the reference either
 }
 
-IterableValues expandIterable(const Value& v) {
+// (Range::numValues()'s own count, closed-form) -- 1 + floor((end-start)/step),
+// the same epsilon IterableValues::inRange uses so this agrees exactly with
+// how many elements a lazy walk of the same range would actually produce.
+// nullopt for a step of 0 or a direction that disagrees with start/end (a
+// naturally-empty range -- 0 elements, never "too many").
+std::optional<size_t> rangeElementCount(const OscRange& r) {
+    if (r.step == 0.0) return std::nullopt;
+    const double n = (r.end - r.start) / r.step;
+    if (n < -1e-10) return std::nullopt; // wrong direction -- naturally empty
+    return static_cast<size_t>(std::floor(n + 1e-10)) + 1;
+}
+
+IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany) {
     if (std::holds_alternative<std::monostate>(v)) return IterableValues{};
     if (const OscRange* r = std::get_if<OscRange>(&v)) {
+        if (const std::optional<size_t> count = rangeElementCount(*r); count && *count >= 1'000'000) {
+            if (onTooMany) onTooMany(*count);
+            return IterableValues{};
+        }
         // Lazy -- IterableValues itself reproduces this exact
         // termination condition (a zero step is naturally empty: neither
         // `x <= end` nor `x >= end` branch ever fires for it) without

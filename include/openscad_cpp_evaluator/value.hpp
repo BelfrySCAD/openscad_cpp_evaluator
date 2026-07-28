@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/osc_range.hpp"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -265,6 +266,13 @@ private:
     mutable std::optional<Cursor> cursor_;
 };
 
+// Called (count = the range's own requested element count) when a range
+// would be rejected for having too many elements -- see expandIterable's
+// own doc comment. The caller's own warn(message, position) already knows
+// how to format/emit a WARNING; this just hands back the number to put in
+// it, keeping expandIterable() itself free of any Evaluator/echo coupling.
+using RangeTooManyFn = std::function<void(size_t count)>;
+
 // Converts a for()/intersection_for() loop assignment's evaluated RHS into
 // the sequence of values to iterate: undef -> empty, range -> a LAZY
 // sequence (matching OscRange's own start/step/end iteration, half-open
@@ -275,7 +283,22 @@ private:
 // IterableValues), anything else (a bare scalar) -> a single-element
 // list. Mirrors the shared expansion logic duplicated across the
 // reference's _eval_for/_resolve_intersection_for.
-IterableValues expandIterable(const Value& v);
+//
+// A range whose own element count would be >= 1,000,000 is rejected
+// entirely (onTooMany called, empty result returned) rather than iterated
+// -- verified empirically against real OpenSCAD.app: a range producing
+// exactly 999,999 elements iterates fine; exactly 1,000,000 emits
+// "WARNING: Bad range parameter in for statement: too many elements (N)"
+// and contributes zero iterations (not a truncation to 999,999, not an
+// error like the C-style for's own _MAX_CFOR_ITERATIONS limit -- a
+// different mechanism entirely, checked per-range, not against a
+// cartesian-product total across a multi-variable for()). The Python
+// reference (openscad_evaluator) has no equivalent check at all -- this
+// was a real gap in both ports, closed here first since this port is the
+// one with a live consumer (BelfrySCAD) that surfaced it. The count is
+// computed in closed form (not IterableValues::size()'s O(n) walk) so a
+// legitimate huge-but-under-the-limit range never pays an eager pass.
+IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany = nullptr);
 
 // `each <body>`'s own flatten-one-level rule, shared by the AST interpreter
 // (evalListLiteral/evalListElement's ListCompEach handling, expr_eval.cpp)

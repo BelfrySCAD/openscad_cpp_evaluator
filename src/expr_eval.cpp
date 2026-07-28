@@ -136,7 +136,10 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             pairs.reserve(n.assignments.size());
             for (const auto& assign : n.assignments) {
                 Value values = evalExpr(*assign->expr, ctx);
-                pairs.push_back(Pair{assign->name->name, expandIterable(values)});
+                const oscad::Position* pos = &assign->position();
+                pairs.push_back(Pair{assign->name->name, expandIterable(values, [&](size_t count) {
+                    warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
+                })});
             }
             const bool isNestedLc = (n.body->kind() == oscad::NodeKind::ListComprehension);
 

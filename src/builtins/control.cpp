@@ -101,7 +101,10 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
     varSeqs.reserve(node.assignments.size());
     for (const auto& assign : node.assignments) {
         Value values = ev.evalExpr(*assign->expr, ctx);
-        varSeqs.emplace_back(assign->name->name, expandIterable(values));
+        const oscad::Position* pos = &assign->position();
+        varSeqs.emplace_back(assign->name->name, expandIterable(values, [&](size_t count) {
+            ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
+        }));
     }
 
     std::vector<const oscad::ASTNode*> bodyNodes;
