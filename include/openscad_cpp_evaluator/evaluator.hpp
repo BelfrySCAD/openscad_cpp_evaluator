@@ -336,6 +336,15 @@ public:
     // reference's Evaluator.profile_result.
     std::optional<ProfileResult> profileResult;
 
+    // The resolved (and, after evaluate() runs, generated) CSG tree from the
+    // most recent evaluate() call -- moved here from evaluateImpl's local
+    // `tree` after generateTree() populates each node's own `bodies`, so a
+    // caller can inspect tree shape/params after evaluate() returns (CSG-tree
+    // dump, live partial-render). Empty for direct resolveTree()/
+    // generateTree() callers that bypass evaluate() -- same scoping as
+    // profileResult above. Mirrors the reference's Evaluator.csg_tree.
+    std::vector<std::unique_ptr<CSGNode>> csgTree;
+
 private:
     // Shared body for resolveTree()'s/evaluate()'s two overloads (owning vs.
     // raw-pointer node list) -- a template rather than duplicating each

@@ -13,8 +13,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import _openscad_cpp_evaluator as _ext
+from ._openscad_cpp_evaluator import ManifoldCache
 
-__all__ = ["Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies"]
+__all__ = [
+    "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
+    "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree",
+]
 
 
 class EvalError(Exception):
@@ -114,6 +118,133 @@ class RootScope:
         return self.modules.get(name)
 
 
+class _CSGNode:
+    """One resolved (and, after evaluate(), generated) node in the CSG tree --
+    mirrors the reference's CSGNode dataclass. `bodies` is a list of already-
+    converted ColoredBody dicts (see bodyToDict on the C++ side); `params` is
+    plain Python data (numbers/strings/bools/lists/dicts/OscObject), never an
+    AST pointer -- eagerly converted, no lifetime tie to the Evaluator that
+    produced it. Used by format_csg_tree(); not otherwise part of the public
+    API surface (no generate_tree()-on-a-subset support yet -- see the
+    reference's own "Phase 3" partial-render note, not implemented here)."""
+    __slots__ = ("kind", "params", "bodies", "is_builtin", "children")
+
+    def __init__(self, kind, params, bodies, is_builtin, children):
+        self.kind = kind
+        self.params = params
+        self.bodies = [ColoredBody(_BodyShim(d), d["color"], None, d["flat_preview"]) for d in bodies]
+        self.is_builtin = is_builtin
+        self.children = children
+
+
+@dataclass
+class CallSiteProfile:
+    """Aggregated profiling data for one call site. Mirrors the reference's
+    CallSiteProfile -- see ProfileResult's own docstring."""
+    kind: str            # "module" | "function"
+    name: str
+    caller_name: str
+    call_origin: str
+    call_line: int
+    decl_origin: str
+    decl_line: int
+    call_count: int = 0
+    self_time: float = 0.0
+    cumulative_time: float = 0.0
+
+
+@dataclass
+class ProfileResult:
+    """Whole-evaluate() profiling summary, populated when Evaluator(profile=True).
+    `resolve_time` always equals sum(s.self_time for s in call_sites) +
+    `unattributed_time`, so a UI's percentages honestly sum to 100%. Mirrors
+    the reference's ProfileResult."""
+    call_sites: list
+    resolve_time: float
+    generate_time: float
+    total_time: float
+    unattributed_time: float
+
+
+def _summarize_param(value, max_items: int = 6, max_len: int = 40) -> str:
+    """Compact one-line repr for a _CSGNode.params value, used by
+    format_csg_tree -- collapses long lists/dicts (e.g. polyhedron points,
+    imported STL verts, surface() height grids) to "<... of N>" instead of
+    dumping them in full. Mirrors the reference's _summarize_param."""
+    import numpy as np
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        if len(value) > max_items:
+            kind = "tuple" if isinstance(value, tuple) else "list"
+            return f"<{kind} of {len(value)}>"
+        return "[" + ", ".join(_summarize_param(v) for v in value) + "]"
+    if isinstance(value, dict):
+        if len(value) > max_items:
+            return f"<dict of {len(value)}>"
+        return "{" + ", ".join(f"{k!r}: {_summarize_param(v)}" for k, v in value.items()) + "}"
+    text = repr(value)
+    return text if len(text) <= max_len else text[:max_len - 1] + "…"
+
+
+# Params keys never shown in format_csg_tree's per-node summary, regardless
+# of kind -- pure internal bookkeeping or already represented structurally
+# elsewhere in the tree. Mirrors the reference's _DUMP_HIDDEN_PARAM_KEYS.
+_DUMP_HIDDEN_PARAM_KEYS = frozenset({"color", "op", "name", "group_sizes"})
+
+# Auto-generated tessellation data (not user-authored) for every kind except
+# polyhedron, where the equivalent data *is* the user's own points/faces.
+# Mirrors the reference's _DUMP_TESSELLATION_KEYS.
+_DUMP_TESSELLATION_KEYS = frozenset({"verts", "tris", "tri_arr"})
+
+# Display-only key renames. Mirrors the reference's _DUMP_KEY_RENAMES.
+_DUMP_KEY_RENAMES = {"segs": "$fn"}
+
+
+def _format_call_args(args: dict) -> str:
+    """Render a resolved-args-shaped dict ({0: v0, 1: v1, 'name': v, ...} --
+    positional args keyed by index, named args keyed by name) as OpenSCAD
+    call-argument syntax. Mirrors the reference's _format_call_args."""
+    parts = []
+    for k, v in args.items():
+        if isinstance(k, int):
+            parts.append(_summarize_param(v))
+        else:
+            parts.append(f"{k}={_summarize_param(v)}")
+    return ", ".join(parts)
+
+
+def format_csg_tree(tree: list, indent: int = 0) -> str:
+    """Human-readable recursive dump of a resolved CSG tree (list of
+    _CSGNode) -- kind and a compact params summary. Used by a "Dump CSG Tree
+    to Console" command. Mirrors the reference's format_csg_tree, including
+    its indent-offset convention (+1 unit for every non-root line) and its
+    deliberate omission of a generated-body count (a ManifoldCache hit skips
+    recursing into that ancestor's children entirely -- see
+    _DUMP_HIDDEN_PARAM_KEYS's neighboring reference doc comment for the full
+    rationale)."""
+    lines = []
+    pad = "  " * (indent + 1) if indent > 0 else ""
+    for node in tree:
+        shown = {
+            k: v for k, v in node.params.items()
+            if k not in _DUMP_HIDDEN_PARAM_KEYS
+            and not (k in _DUMP_TESSELLATION_KEYS and node.kind != "polyhedron")
+        }
+        parts = [
+            _format_call_args(v) if k == "args" and isinstance(v, dict)
+            else f"{_DUMP_KEY_RENAMES.get(k, k)}={_summarize_param(v)}"
+            for k, v in shown.items()
+        ]
+        params_str = ", ".join(parts)
+        lines.append(f"{pad}{node.kind}({params_str})")
+        if node.children:
+            lines.append(format_csg_tree(node.children, indent + 1))
+    return "\n".join(lines)
+
+
 def parse(path: str) -> RootScope:
     """Parse a .scad file with the C++ parser; return its root scope (top-level
     declarations) for the editor. Raises ParseError on a syntax error."""
@@ -164,14 +295,38 @@ class Evaluator:
     Unlike the Python evaluator (which took a pre-parsed AST), `evaluate`
     takes a source file PATH -- the C++ backend parses internally. echo/
     warning output is batched and replayed through `echo_fn` after the run.
-    debug_hook/error_break_fn are accepted for API parity and wired in the
-    debugger phase.
+
+    `manifold_cache`: opt-in ManifoldCache (see manifold_cache.hpp), shared
+    across evaluate() calls on possibly-different Evaluator instances --
+    construct one and pass the same instance into every render/debug
+    Evaluator() a host creates.
+    `profile`: opt-in per-call-site timing; after evaluate() returns,
+    `self.profile_result` is a ProfileResult, or None if profile=False.
+    `return_hook`: fires after a user function/function-literal call
+    computes its result, before returning -- (name, value, depth). Only
+    meaningful with debug_hook set (the plain evaluate() path never calls it).
+
+    After evaluate() returns, `self.csg_tree` (list of _CSGNode, see
+    format_csg_tree), `self.dyn` (dict of every currently-visible
+    $-prefixed variable), and `self.dyn_explicit` (the subset the script
+    itself assigned, vs. merely seeded via viewport_params) are also set.
+    Unlike the reference (whose root EvalContext is constructed inside its
+    own evaluate(), needing a separate `_root_ctx` escape hatch), this
+    port's `dyn`/`dyn_explicit` are exposed directly -- no such indirection.
     """
 
-    def __init__(self, echo_fn=None, debug_hook=None, error_break_fn=None):
+    def __init__(self, echo_fn=None, debug_hook=None, error_break_fn=None, return_hook=None,
+                 manifold_cache=None, profile=False):
         self._echo_fn = echo_fn
         self._debug_hook = debug_hook
         self._error_break_fn = error_break_fn
+        self._return_hook = return_hook
+        self._manifold_cache = manifold_cache
+        self._profile = profile
+        self.csg_tree = []
+        self.profile_result = None
+        self.dyn = {}
+        self.dyn_explicit = set()
 
     def evaluate(self, source_path: str, viewport_params: Optional[dict] = None):
         vp = viewport_params or {}
@@ -179,15 +334,23 @@ class Evaluator:
             if self._debug_hook is not None:
                 # Debugger path: callbacks fire live under the GIL; echo is
                 # delivered through echo_fn, not batched.
-                body_dicts, echoes, id_spans = _ext.debug_evaluate(
+                body_dicts, echoes, id_spans, dyn, dyn_explicit = _ext.debug_evaluate(
                     source_path, vp, self._debug_hook,
                     self._error_break_fn or (lambda *a, **k: None),
-                    self._echo_fn or (lambda _m: None))
+                    self._echo_fn or (lambda _m: None),
+                    self._manifold_cache, self._return_hook)
+                self.csg_tree = []
+                self.profile_result = None
             else:
-                body_dicts, echoes, id_spans = _ext.evaluate(source_path, vp)
+                body_dicts, echoes, id_spans, csg_tree, profile_result, dyn, dyn_explicit = _ext.evaluate(
+                    source_path, vp, self._manifold_cache, self._profile)
                 if self._echo_fn:
                     for line in echoes:
                         self._echo_fn(line)
+                self.csg_tree = csg_tree
+                self.profile_result = profile_result
+            self.dyn = dyn
+            self.dyn_explicit = dyn_explicit
         except EvalError:
             raise
         except Exception as e:  # ParseError/EvalError from C++ arrive as RuntimeError

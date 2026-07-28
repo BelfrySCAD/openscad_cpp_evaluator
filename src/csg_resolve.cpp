@@ -191,6 +191,7 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     const Clock::time_point resolveEnd = profiling_ ? Clock::now() : Clock::time_point{};
     std::vector<ColoredBody> result = generateTree(tree);
     const Clock::time_point generateEnd = profiling_ ? Clock::now() : Clock::time_point{};
+    csgTree = std::move(tree); // stash for caller inspection -- see the member's own doc comment
 
     if (profiling_) {
         const double resolveTime = std::chrono::duration<double>(resolveEnd - resolveStart).count();

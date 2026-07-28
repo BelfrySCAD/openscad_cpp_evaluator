@@ -82,7 +82,7 @@ jobs:
           # C:\msys64 (not on PATH); its bison/flex satisfy the parser
           # submodule's grammar version requirement.
           CIBW_BEFORE_ALL_WINDOWS: 'C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm bison flex"'
-          CIBW_TEST_COMMAND: "python -c \"import openscad_cpp_evaluator\""
+          CIBW_TEST_COMMAND: "python {package}/tests/test_python_bindings.py"
 
       - uses: actions/upload-artifact@v7
         with:
