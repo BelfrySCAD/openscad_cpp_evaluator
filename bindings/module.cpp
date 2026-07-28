@@ -109,6 +109,20 @@ nb::object posToPy(const oscad::Position* p) {
     return facadeAttr("_Position")(p->line, p->column, p->origin, p->start_offset, p->end_offset);
 }
 
+// Mirrors the reference's ColoredBody.role string values exactly (minus
+// "highlight_ghost" -- see BodyRole's own ponytail comment in
+// colored_body.hpp for why that 5th, renderer-overlay-only state isn't
+// modeled here yet).
+const char* roleToString(oscadeval::BodyRole role) {
+    switch (role) {
+        case oscadeval::BodyRole::Highlight:  return "highlight";
+        case oscadeval::BodyRole::Background: return "background";
+        case oscadeval::BodyRole::ShowOnly:   return "show_only";
+        case oscadeval::BodyRole::Normal:
+        default:                              return "normal";
+    }
+}
+
 // One evaluated body's mesh + attributes, shaped to match what the renderer
 // already reads off a manifold3d mesh (vert_properties (nVert, numProp),
 // tri_verts (nTri, 3), run_original_id (nRun,), run_index (nRun+1,) -- the
@@ -126,6 +140,7 @@ nb::dict bodyToDict(oscadeval::ColoredBody& cb) {
     d["run_index"] = vecToNumpy(std::move(mesh.runIndex), {mesh.runIndex.size()});
     d["num_prop"] = static_cast<int>(numProp);
     d["flat_preview"] = cb.flatPreview;
+    d["role"] = roleToString(cb.role);
     if (cb.color)
         d["color"] = nb::make_tuple((*cb.color)[0], (*cb.color)[1], (*cb.color)[2], (*cb.color)[3]);
     else
