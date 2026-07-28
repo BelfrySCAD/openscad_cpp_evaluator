@@ -13,12 +13,16 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 
 #include "openscad_cpp_evaluator/colored_body.hpp"
+#include "openscad_cpp_evaluator/csg_node.hpp"
 #include "openscad_cpp_evaluator/eval_context.hpp"
 #include "openscad_cpp_evaluator/eval_use.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/manifold_cache.hpp"
+#include "openscad_cpp_evaluator/profile.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
 
 #include "openscad_cpp_parser/api.hpp"
@@ -65,6 +69,44 @@ std::unordered_map<std::string, oscadeval::Value> toViewportParams(nb::dict d) {
     std::unordered_map<std::string, oscadeval::Value> out;
     for (auto [k, v] : d) out.emplace(nb::cast<std::string>(k), pyToValue(v));
     return out;
+}
+
+// A facade class handle (openscad_cpp_evaluator.<name>), imported lazily at
+// first use and leaked deliberately -- never destroyed, so no nb::object
+// destructor runs after Python finalization (the app exits via os._exit,
+// which skips finalizers; a normal-shutdown consumer would otherwise crash).
+nb::object facadeAttr(const char* name) {
+    static nb::object* mod = new nb::object(nb::module_::import_("openscad_cpp_evaluator"));
+    return mod->attr(name);
+}
+
+nb::object valueToPy(const oscadeval::Value& v); // recursive
+
+nb::object valueToPy(const oscadeval::Value& v) {
+    if (std::holds_alternative<std::monostate>(v)) return nb::none();
+    if (const bool* b = std::get_if<bool>(&v)) return nb::cast(*b);
+    if (const double* d = std::get_if<double>(&v)) return nb::cast(*d);
+    if (const std::string* s = std::get_if<std::string>(&v)) return nb::cast(*s);
+    if (const oscadeval::ListPtr* lp = std::get_if<oscadeval::ListPtr>(&v)) {
+        nb::list out;
+        if (*lp)
+            for (const oscadeval::Value& item : (*lp)->items) out.append(valueToPy(item));
+        return out;
+    }
+    if (const oscadeval::ObjectPtr* op = std::get_if<oscadeval::ObjectPtr>(&v)) {
+        nb::dict data;
+        if (*op)
+            for (const auto& [k, val] : (*op)->items) data[nb::str(k.c_str())] = valueToPy(val);
+        return facadeAttr("OscObject")(data);
+    }
+    // OscRange / FunctionLiteral: no direct Python analog -- wrap the
+    // OpenSCAD text so the debugger displays it cleanly (unquoted).
+    return facadeAttr("_ScadValue")(oscadeval::fmtValue(v));
+}
+
+nb::object posToPy(const oscad::Position* p) {
+    if (!p) return nb::none();
+    return facadeAttr("_Position")(p->line, p->column, p->origin, p->start_offset, p->end_offset);
 }
 
 // One evaluated body's mesh + attributes, shaped to match what the renderer
@@ -124,74 +166,104 @@ nb::dict idSpansToDict(const std::vector<IdSpan>& idSpans) {
     return d;
 }
 
-// (list[body-dict], list[echo-str], dict[int, span]). Raises the C++ error
+// CSGNode -> a facade `_CSGNode` (kind/params/bodies/is_builtin/children),
+// recursively, eagerly converting every field to plain Python data. No
+// lifetime extension needed -- CSGParams (Value-only, see csg_node.hpp) and
+// ColoredBody never hold AST pointers, so the result is fully self-contained
+// once built, unlike CSGNode::node itself (deliberately not exposed: the AST
+// it points into does not outlive this binding call, and the CSG-tree dump
+// consumer only ever needs kind/params/children/bodies -- see
+// format_csg_tree's own doc comment).
+nb::object csgNodeToPy(const oscadeval::CSGNode& node) {
+    nb::dict params;
+    for (const auto& [k, v] : node.params) params[nb::str(k.c_str())] = valueToPy(v);
+    nb::list bodies;
+    for (const oscadeval::ColoredBody& cb : node.bodies) {
+        if (!cb.body || cb.body->IsEmpty()) continue;
+        // ColoredBody here is const in this walk (tree ownership stays with
+        // the caller) -- GetMeshGL() itself is logically read-only, so a
+        // const_cast here is safe/local, mirroring bodyToDict's mutating
+        // signature only because manifold3d's own API isn't const-qualified.
+        bodies.append(bodyToDict(const_cast<oscadeval::ColoredBody&>(cb)));
+    }
+    nb::list children;
+    for (const std::unique_ptr<oscadeval::CSGNode>& child : node.children) children.append(csgNodeToPy(*child));
+    return facadeAttr("_CSGNode")(node.kind, params, bodies, node.isBuiltin, children);
+}
+
+nb::list csgTreeToPy(const std::vector<std::unique_ptr<oscadeval::CSGNode>>& tree) {
+    nb::list out;
+    for (const std::unique_ptr<oscadeval::CSGNode>& node : tree) out.append(csgNodeToPy(*node));
+    return out;
+}
+
+nb::object profileResultToPy(const std::optional<oscadeval::ProfileResult>& pr) {
+    if (!pr) return nb::none();
+    nb::list sites;
+    for (const oscadeval::CallSiteProfile& s : pr->callSites) {
+        sites.append(facadeAttr("CallSiteProfile")(s.kind, s.name, s.callerName, s.callOrigin, s.callLine, s.declOrigin,
+                                                     s.declLine, s.callCount, s.selfTime, s.cumulativeTime));
+    }
+    return facadeAttr("ProfileResult")(sites, pr->resolveTime, pr->generateTime, pr->totalTime, pr->unattributedTime);
+}
+
+// ctx.dyn / ctx.dynExplicit -> (dict[str, Any], set[str]) -- every currently-
+// visible $-prefixed dynamic variable, and the subset the script itself
+// assigned (vs. merely seeded by viewportParams). ctx is caller-owned in this
+// port (see evaluate()'s own doc comment in evaluator.hpp), so this is a
+// direct readback, not a separate tracking mechanism.
+std::pair<nb::dict, nb::object> dynStateToPy(const oscadeval::EvalContext& ctx) {
+    nb::dict dyn;
+    for (const auto& [name, v] : ctx.dyn.items()) dyn[nb::str(name.c_str())] = valueToPy(v);
+    nb::set explicitNames;
+    for (const auto& [name, isExplicit] : ctx.dynExplicit.items())
+        if (isExplicit) explicitNames.add(nb::str(name.c_str()));
+    return {dyn, explicitNames};
+}
+
+// (list[body-dict], list[echo-str], dict[int, span], list[_CSGNode],
+// ProfileResult|None, dict[str, Any], set[str]). Raises the C++ error
 // message as a Python exception on ParseError/EvalError (nanobind maps
 // std::exception -> RuntimeError, whose str() is the already-formatted
 // "ERROR:..."/caret diagnostic; the facade re-raises as EvalError).
-nb::object evaluate(const std::string& path, nb::dict viewportParams) {
+nb::object evaluate(const std::string& path, nb::dict viewportParams,
+                     std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
     std::vector<std::string> echoes;
     std::vector<IdSpan> idSpans;
+    std::vector<std::unique_ptr<oscadeval::CSGNode>> csgTree;
+    std::optional<oscadeval::ProfileResult> profileResult;
+    nb::dict dyn;
+    nb::object dynExplicit;
     {
         nb::gil_scoped_release rel;
         auto logFn = [&echoes](const std::string& m) { echoes.push_back(m); };
         std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
         oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, logFn);
-        oscadeval::Evaluator ev(logFn);
+        oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile);
         oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
         bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
         collectIdSpans(ev, idSpans);
+        csgTree = std::move(ev.csgTree);
+        profileResult = std::move(ev.profileResult);
+        {
+            nb::gil_scoped_acquire g; // building Python objects needs the GIL back
+            std::tie(dyn, dynExplicit) = dynStateToPy(ctx);
+        }
     }
 
     nb::list echoList;
     for (const std::string& s : echoes) echoList.append(s);
-    return nb::make_tuple(bodiesToList(bodies), echoList, idSpansToDict(idSpans));
+    return nb::make_tuple(bodiesToList(bodies), echoList, idSpansToDict(idSpans), csgTreeToPy(csgTree),
+                           profileResultToPy(profileResult), dyn, dynExplicit);
 }
 
 // ------------------------------------------------------------------------
 // Debugger: DebugHooks trampolines calling back into Python, plus Value ->
 // Python conversion for locals inspection.
 // ------------------------------------------------------------------------
-
-// A facade class handle (openscad_cpp_evaluator.<name>), imported lazily at
-// first use and leaked deliberately -- never destroyed, so no nb::object
-// destructor runs after Python finalization (the app exits via os._exit,
-// which skips finalizers; a normal-shutdown consumer would otherwise crash).
-nb::object facadeAttr(const char* name) {
-    static nb::object* mod = new nb::object(nb::module_::import_("openscad_cpp_evaluator"));
-    return mod->attr(name);
-}
-
-nb::object valueToPy(const oscadeval::Value& v); // recursive
-
-nb::object valueToPy(const oscadeval::Value& v) {
-    if (std::holds_alternative<std::monostate>(v)) return nb::none();
-    if (const bool* b = std::get_if<bool>(&v)) return nb::cast(*b);
-    if (const double* d = std::get_if<double>(&v)) return nb::cast(*d);
-    if (const std::string* s = std::get_if<std::string>(&v)) return nb::cast(*s);
-    if (const oscadeval::ListPtr* lp = std::get_if<oscadeval::ListPtr>(&v)) {
-        nb::list out;
-        if (*lp)
-            for (const oscadeval::Value& item : (*lp)->items) out.append(valueToPy(item));
-        return out;
-    }
-    if (const oscadeval::ObjectPtr* op = std::get_if<oscadeval::ObjectPtr>(&v)) {
-        nb::dict data;
-        if (*op)
-            for (const auto& [k, val] : (*op)->items) data[nb::str(k.c_str())] = valueToPy(val);
-        return facadeAttr("OscObject")(data);
-    }
-    // OscRange / FunctionLiteral: no direct Python analog -- wrap the
-    // OpenSCAD text so the debugger displays it cleanly (unquoted).
-    return facadeAttr("_ScadValue")(oscadeval::fmtValue(v));
-}
-
-nb::object posToPy(const oscad::Position* p) {
-    if (!p) return nb::none();
-    return facadeAttr("_Position")(p->line, p->column, p->origin, p->start_offset, p->end_offset);
-}
 
 // One debug frame -> {"local_scope", "outer_scope", "dyn_names"}, the shape
 // the debugger pane's _filtered_vars consumes.
@@ -262,18 +334,28 @@ void callPyErrorBreak(nb::handle errorBreak, int line, const std::string& header
     errorBreak(line, header, allFrameLocals, callStackToPy(callStack), nb::arg("origin") = origin);
 }
 
+// Trampoline: C++ returnHook -> the Python DebugSession return hook. Only
+// fires for user function/function-literal calls (never modules, never
+// builtins -- see DebugHooks::returnHook's own doc comment).
+void callPyReturnHook(nb::handle returnHook, const std::string& name, const oscadeval::Value& result, int depth) {
+    returnHook(name, valueToPy(result), depth);
+}
+
 // evaluate() with the debugger wired in. echo is delivered live via echoFn
 // (not batched), so a paused session can still print. Returns (bodies, [],
-// id_to_node). The GIL is released around the C++ evaluate and reacquired
-// inside every callback trampoline; the actual pause blocks on the Python
-// side (threading.Event) so the GUI thread keeps running.
+// id_to_node, dyn, dyn_explicit). The GIL is released around the C++
+// evaluate and reacquired inside every callback trampoline; the actual pause
+// blocks on the Python side (threading.Event) so the GUI thread keeps running.
 nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::callable debugHook,
-                          nb::callable errorBreak, nb::callable echoFn) {
+                          nb::callable errorBreak, nb::callable echoFn,
+                          std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, nb::object returnHook) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
     std::vector<IdSpan> idSpans;
     std::exception_ptr err;
+    nb::dict dyn;
+    nb::object dynExplicit;
     {
         nb::gil_scoped_release rel;
         auto echoCpp = [&echoFn](const std::string& m) {
@@ -292,20 +374,30 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             nb::gil_scoped_acquire g;
             callPyErrorBreak(errorBreak, line, header, origin, cs, gf);
         };
+        if (!returnHook.is_none()) {
+            hooks.returnHook = [&](const std::string& name, const oscadeval::Value& result, int depth) {
+                nb::gil_scoped_acquire g;
+                callPyReturnHook(returnHook, name, result, depth);
+            };
+        }
         try {
             std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, echoCpp);
-            oscadeval::Evaluator ev(echoCpp, nullptr, nullptr, hooks, false);
+            oscadeval::Evaluator ev(echoCpp, nullptr, manifoldCache, hooks, false);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
             collectIdSpans(ev, idSpans);
+            {
+                nb::gil_scoped_acquire g;
+                std::tie(dyn, dynExplicit) = dynStateToPy(ctx);
+            }
         } catch (...) {
             err = std::current_exception();
         }
     }
     if (err) std::rethrow_exception(err); // re-raised with the GIL held -> Python exception
 
-    return nb::make_tuple(bodiesToList(bodies), nb::list(), idSpansToDict(idSpans));
+    return nb::make_tuple(bodiesToList(bodies), nb::list(), idSpansToDict(idSpans), dyn, dynExplicit);
 }
 
 // Top-level declaration names + source spans, for the editor's completion and
@@ -358,11 +450,21 @@ nb::list parseDecls(const std::string& path) {
 
 NB_MODULE(_openscad_cpp_evaluator, m) {
     m.doc() = "C++ OpenSCAD evaluator (nanobind binding)";
-    m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"),
-          "Evaluate a .scad file; return (list of body dicts with raw mesh arrays, list of echo strings).");
+
+    // Opt-in, shared across evaluate() calls -- see manifold_cache.hpp.
+    // Only a constructor and clear() are ever called from Python (get/put
+    // are internal to generateTree()'s own C++ implementation).
+    nb::class_<oscadeval::ManifoldCache>(m, "ManifoldCache")
+        .def(nb::init<>())
+        .def("clear", &oscadeval::ManifoldCache::clear);
+
+    m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
+          nb::arg("profile") = false,
+          "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).");
     m.def("parse_decls", &parseDecls, nb::arg("path"),
           "Parse a .scad file; return top-level declaration (namespace, name, start, end, line, column, origin) tuples.");
     m.def("debug_evaluate", &debugEvaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("debug_hook"),
-          nb::arg("error_break"), nb::arg("echo_fn"),
-          "Evaluate with the debugger wired in; returns (bodies, [], id_to_node). Callbacks fire under the GIL.");
+          nb::arg("error_break"), nb::arg("echo_fn"), nb::arg("manifold_cache") = nullptr,
+          nb::arg("return_hook") = nb::none(),
+          "Evaluate with the debugger wired in; returns (bodies, [], id_to_node, dyn, dyn_explicit). Callbacks fire under the GIL.");
 }

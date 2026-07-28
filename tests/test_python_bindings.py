@@ -1,0 +1,140 @@
+"""Tests for the Python-binding surface added on top of the already-tested
+C++ engine (ManifoldCache/csg_tree, profiling, return_hook, dyn/dyn_explicit
+readback -- see bindings/module.cpp). The underlying algorithms have full
+gtest coverage (tests/test_manifold_cache.cpp, test_profiling.cpp,
+test_debug_hooks.cpp, test_viewport_params.cpp); this file only exercises the
+nanobind plumbing that exposes them to Python, which has no coverage of its
+own otherwise.
+
+No test framework: plain functions + assert, run via `python
+tests/test_python_bindings.py`. This project has no existing Python test
+infrastructure (pure C++/gtest via CMake/ctest) -- adding pytest just for
+this would be a new dependency for a handful of checks; wired into
+wheels.yml's CIBW_TEST_COMMAND instead, which already builds+installs the
+package on every release platform.
+"""
+import sys
+import tempfile
+from pathlib import Path
+
+from openscad_cpp_evaluator import Evaluator, ManifoldCache, format_csg_tree
+
+
+def _write(src: str) -> str:
+    f = tempfile.NamedTemporaryFile(suffix=".scad", mode="w", encoding="utf-8", delete=False)
+    f.write(src)
+    f.close()
+    return f.name
+
+
+def test_manifold_cache_reuse_across_evaluates():
+    path = _write("cube([10, 20, 30]);")
+    cache = ManifoldCache()
+    ev1 = Evaluator(manifold_cache=cache)
+    bodies1, _ = ev1.evaluate(path)
+    ev2 = Evaluator(manifold_cache=cache)
+    bodies2, _ = ev2.evaluate(path)
+    assert len(bodies1) == len(bodies2) == 1
+    m1, m2 = bodies1[0].body.to_mesh(), bodies2[0].body.to_mesh()
+    assert m1.vert_properties.shape == m2.vert_properties.shape
+    assert m1.tri_verts.shape == m2.tri_verts.shape
+    cache.clear()  # must not raise
+
+
+def test_csg_tree_shape_and_format():
+    path = _write("""
+        difference() {
+            union() { square(100); circle(100); }
+            union() { square(50); circle(50); }
+        }
+    """)
+    ev = Evaluator()
+    ev.evaluate(path)
+    assert len(ev.csg_tree) == 1
+    root = ev.csg_tree[0]
+    assert root.kind == "difference"
+    assert len(root.children) == 2
+    assert root.children[0].kind == "union"
+    assert {c.kind for c in root.children[0].children} == {"square", "circle"}
+
+    dump = format_csg_tree(ev.csg_tree)
+    assert dump.startswith("difference()")
+    assert "square(" in dump and "circle(" in dump
+    assert "union()" in dump
+
+
+def test_csg_tree_empty_for_direct_evaluate_bypass_is_not_applicable():
+    # evaluate() always populates csg_tree (it's resolveTree()+generateTree()
+    # internally) -- a fresh Evaluator() starts with an empty csg_tree before
+    # any evaluate() call, mirroring the reference's own "populated only
+    # after evaluate() runs" contract.
+    ev = Evaluator()
+    assert ev.csg_tree == []
+
+
+def test_profiling_records_user_function_call_site():
+    path = _write("function double(x) = x * 2; y = double(21); cube(y);")
+    ev = Evaluator(profile=True)
+    ev.evaluate(path)
+    assert ev.profile_result is not None
+    sites = {s.name: s for s in ev.profile_result.call_sites}
+    assert "double" in sites
+    assert sites["double"].call_count == 1
+    assert sites["double"].kind == "function"
+    assert ev.profile_result.resolve_time >= 0.0
+    assert ev.profile_result.total_time >= ev.profile_result.resolve_time
+
+
+def test_profiling_off_by_default():
+    path = _write("cube(1);")
+    ev = Evaluator()
+    ev.evaluate(path)
+    assert ev.profile_result is None
+
+
+def test_return_hook_fires_for_user_function():
+    path = _write("function double(x) = x * 2; y = double(21); cube(y);")
+    returns = []
+
+    def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None):
+        return ("continue", {})
+
+    def return_hook(name, value, depth):
+        returns.append((name, value, depth))
+
+    ev = Evaluator(debug_hook=debug_hook, return_hook=return_hook)
+    ev.evaluate(path)
+    assert returns == [("double", 42.0, 1)]
+
+
+def test_dyn_explicit_distinguishes_seeded_from_script_assigned():
+    path = _write("$fn = 72; cube(1);")
+    ev = Evaluator()
+    ev.evaluate(path, {"$vpt": [1.0, 2.0, 3.0]})
+    assert ev.dyn["$fn"] == 72.0
+    assert "$fn" in ev.dyn_explicit
+    # $vpt was seeded via viewport_params, not assigned by the script itself.
+    assert ev.dyn.get("$vpt") == [1.0, 2.0, 3.0]
+    assert "$vpt" not in ev.dyn_explicit
+    # $fa was never touched at all -- still present (default-seeded), still not explicit.
+    assert "$fa" in ev.dyn
+    assert "$fa" not in ev.dyn_explicit
+
+
+def main():
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    failures = []
+    for t in tests:
+        try:
+            t()
+            print(f"PASS {t.__name__}")
+        except Exception as e:
+            failures.append((t.__name__, e))
+            print(f"FAIL {t.__name__}: {e}")
+    print(f"\n{len(tests) - len(failures)}/{len(tests)} passed")
+    if failures:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
