@@ -103,7 +103,23 @@ Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* 
     if (const Value* v = ctx.let_->find(name)) return *v;
 
     if (!name.empty() && name[0] == '$') {
-        if (const Value* v = ctx.dyn->find(name)) return *v;
+        // $-prefixed names are dynamic variables: a completely separate
+        // namespace from lexically-scoped identifiers, never requiring a
+        // scope declaration (unlike a bare identifier). Found via
+        // BelfrySCAD/BOSL2's constants.scad `get_slop()`
+        // (`is_undef($slop) ? 0 : $slop` with $slop never assigned
+        // anywhere) producing a spurious "Ignoring unknown variable
+        // '$slop'" warning here but not through the bytecode VM's
+        // Op::LoadDyn (bytecode_vm.cpp), which already does exactly
+        // this -- find in ctx.dyn, undef if absent, no scope-lookup
+        // fallback, no warning, ever. Verified against real OpenSCAD.app:
+        // no warning for a never-set $-variable. Must return here
+        // unconditionally rather than falling through to the
+        // scope->lookupVariable() check below, which can never resolve a
+        // $-name anyway (dynamic variables aren't scope-declarable) and
+        // exists only for plain identifiers.
+        const Value* v = ctx.dyn->find(name);
+        return v ? *v : Value{};
     }
 
     if (name == "PI") return Value{std::numbers::pi};
