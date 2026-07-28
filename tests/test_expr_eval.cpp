@@ -52,6 +52,23 @@ TEST(ExprEvalIdentifiers, UnknownVariableWarnsAndIsUndef) {
     EXPECT_NE(lastWarning.find("Ignoring unknown variable 'nope'"), std::string::npos);
 }
 
+TEST(ExprEvalIdentifiers, UndefinedDollarVariableIsUndefWithNoWarning) {
+    // Found via BOSL2's constants.scad: `function get_slop() = is_undef($slop)
+    // ? 0 : $slop;` with $slop never assigned anywhere in the script. Real
+    // OpenSCAD.app produces no warning at all -- $-prefixed names are a
+    // separate, always-implicitly-available namespace, never requiring a
+    // scope declaration the way a bare identifier does. This port's
+    // bytecode VM (Op::LoadDyn, bytecode_vm.cpp) already got this right by
+    // construction; the plain interpreter incorrectly fell through to the
+    // same "Ignoring unknown variable" path a genuinely undeclared bare
+    // identifier hits.
+    std::string lastWarning;
+    Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
+    Value v = evalSrc("$slop", ev);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(v));
+    EXPECT_TRUE(lastWarning.empty());
+}
+
 TEST(ExprEvalIdentifiers, ResolvesViaScopeFallbackWhenNotEagerlyBound) {
     // "a" is a real top-level declaration but evalChildren() was never run,
     // so ctx.let_ has no eager binding for it -- this exercises
