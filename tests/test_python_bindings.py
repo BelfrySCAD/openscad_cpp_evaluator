@@ -97,7 +97,7 @@ def test_return_hook_fires_for_user_function():
     returns = []
 
     def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
-                   generate_partial=None):
+                   generate_partial=None, get_children_positions=None):
         return ("continue", {})
 
     def return_hook(name, value, depth):
@@ -120,7 +120,7 @@ def test_generate_partial_during_a_live_pause():
     seen_partial_counts = []
 
     def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
-                   generate_partial=None):
+                   generate_partial=None, get_children_positions=None):
         if forced:
             bodies = generate_partial()
             seen_partial_counts.append(len(bodies))
@@ -144,7 +144,7 @@ def test_generate_partial_on_an_empty_tree_returns_empty_not_an_error():
     seen = []
 
     def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
-                   generate_partial=None):
+                   generate_partial=None, get_children_positions=None):
         if forced:
             seen.append(generate_partial())
         return ("continue", {})
@@ -152,6 +152,30 @@ def test_generate_partial_on_an_empty_tree_returns_empty_not_an_error():
     ev = Evaluator(debug_hook=debug_hook)
     ev.evaluate(path)
     assert seen == [[]]
+
+
+def test_get_children_positions_reports_module_call_block_children():
+    # wrapper()'s own { cube(1); } block is what children() inside wrapper's
+    # body would forward control to -- get_children_positions() should
+    # report that block's own child statement's (origin, line) the moment
+    # the debug hook checks the wrapper() call node itself (forced=False,
+    # first hook call at line 4 -- the top-level ModularCall).
+    path = _write("module wrapper() { children(); }\nwrapper() {\n  cube(1);\n}")
+    seen = []
+
+    def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
+                   generate_partial=None, get_children_positions=None):
+        positions = get_children_positions()
+        if positions:
+            seen.append((line, positions))
+        return ("continue", {})
+
+    ev = Evaluator(debug_hook=debug_hook)
+    ev.evaluate(path)
+    assert seen, "expected at least one hook call where get_children_positions() was non-empty"
+    line, positions = seen[0]
+    assert line == 2  # the wrapper() call itself
+    assert any(p[1] == 3 for p in positions)  # cube(1)'s own line inside the block
 
 
 def test_dyn_explicit_distinguishes_seeded_from_script_assigned():
