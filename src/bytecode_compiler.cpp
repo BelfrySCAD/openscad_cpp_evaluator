@@ -676,6 +676,27 @@ public:
                     int slot = declareLocal(scope, assign->name->name);
                     out.push_back({Op::StoreLocal, slot, 0, &assign->position()});
                 }
+                // Pre-declare every incr-list name NOW, before compiling the
+                // condition/body/incr expressions below -- an incr name
+                // introduced fresh (not in the init list, e.g. BOSL2's
+                // skin.scad: `best_i = result[0]<bestcost ? i : best_i,`)
+                // can be READ, including by its OWN incr assignment's RHS
+                // (a self-reference to its prior iteration's value) or by
+                // the loop body, before its OWN StoreLocal below would
+                // otherwise have declared it. Without this, that read
+                // compiles to Op::LoadFree (the "not a known local/upvalue/
+                // dyn-var, might be dynamic, warn if truly missing"
+                // fallback) -- permanently, since compilation happens once
+                // but the resulting instruction runs every iteration: every
+                // read silently misses the real value stored into the
+                // local slot moments later at runtime, not just an extra
+                // warning but a genuinely wrong result (confirmed: BOSL2's
+                // own best_i accumulator came back undef on every read).
+                // Declaring the slot here first means the SAME reads below
+                // resolve as ordinary Op::LoadLocal instead.
+                for (const auto& assign : n.incrs) {
+                    if (!scope.resolve(assign->name->name)) declareLocal(scope, assign->name->name);
+                }
                 int counterSlot = nextSlot_++;
                 out.push_back({Op::PushConst, internConst(Value{0.0}), 0, nullptr});
                 out.push_back({Op::StoreLocal, counterSlot, 0, nullptr});
