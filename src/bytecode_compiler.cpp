@@ -675,11 +675,20 @@ public:
                 for (const auto& assign : n.incrs) {
                     compileExpr(*assign->expr, out, scope);
                     auto slot = scope.resolve(assign->name->name);
-                    // incrs always reference an already-declared init name
-                    // (real OpenSCAD grammar guarantees this); resolve()
-                    // returning nullopt would mean a malformed AST, not a
-                    // reachable runtime state.
-                    out.push_back({Op::StoreLocal, *slot, 0, &assign->position()});
+                    // An incr assignment can introduce a brand-new name
+                    // never present in the init list, then have a LATER
+                    // incr expression in the same list read it -- e.g.
+                    // BOSL2's nurbs.scad: `inc_k = ...; kind = inc_k ? ...
+                    // : kind;` (verified against real OpenSCAD and this
+                    // port's own AST interpreter, evalListElement's
+                    // ListCompCFor case in expr_eval.cpp -- both handle it
+                    // correctly). The old assumption here ("incrs always
+                    // reference an already-declared init name") was wrong
+                    // and silently dereferenced a disengaged optional (UB)
+                    // whenever it didn't hold. Declare a fresh slot on
+                    // first appearance, exactly like an init assignment.
+                    int resolvedSlot = slot ? *slot : declareLocal(scope, assign->name->name);
+                    out.push_back({Op::StoreLocal, resolvedSlot, 0, &assign->position()});
                 }
                 out.push_back({Op::Jump, static_cast<int>(loopStart), 0, nullptr});
                 out[jend].a = static_cast<int>(out.size());
