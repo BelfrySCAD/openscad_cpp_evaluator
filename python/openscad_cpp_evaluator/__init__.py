@@ -287,6 +287,7 @@ class ColoredBody:
     color: Optional[tuple]             # RGBA 0-1, or None to follow the theme
     section: object = None             # kept for API parity (always None here)
     flat_preview: bool = False
+    tri_colors: Optional[object] = None  # (numTri, 4) float32 ndarray, real multi-color CSG merges only
 
 
 def bodies_from_dicts(body_dicts) -> list:
@@ -295,7 +296,7 @@ def bodies_from_dicts(body_dicts) -> list:
     instances. Shared by Evaluator.evaluate() and a debug session's own live
     partial-render (see debug_evaluate()'s `generate_partial` hook kwarg,
     module.cpp) so both paths convert identically."""
-    return [ColoredBody(_BodyShim(d), d["color"], None, d["flat_preview"]) for d in body_dicts]
+    return [ColoredBody(_BodyShim(d), d["color"], None, d["flat_preview"], d.get("tri_colors")) for d in body_dicts]
 
 
 class Evaluator:
