@@ -10,6 +10,7 @@ FetchContent_MakeAvailable(googletest)
 add_executable(oscad_eval_tests
   test_value.cpp
   test_eval_context.cpp
+  test_scope_trail.cpp
   test_scoping.cpp
   test_bytecode_compiler.cpp
   test_expr_eval.cpp
