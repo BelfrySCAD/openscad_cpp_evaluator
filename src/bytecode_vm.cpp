@@ -240,7 +240,9 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 Value v = std::move(stack.back());
                 stack.pop_back();
                 IterList& il = iterLists[static_cast<size_t>(ins.a)];
-                il.values = expandIterable(v);
+                il.values = expandIterable(v, [&](size_t count) {
+                    ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", ins.pos);
+                });
                 il.index = 0;
                 ++pc;
                 break;

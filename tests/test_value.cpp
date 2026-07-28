@@ -364,16 +364,73 @@ TEST(ExpandIterable, OutOfOrderIndexAccessStillReturnsCorrectValue) {
 }
 
 TEST(ExpandIterable, LargeRangePartialIterationStaysLazy) {
-    // A huge range must not eagerly materialize a vector: constructing
-    // expandIterable() and reading only the first few elements has to
-    // stay instant regardless of the range's nominal size (a billion
-    // elements here). If this regresses to eager expansion, this test
-    // times out/OOMs instead of merely failing an assertion.
-    auto items = expandIterable(Value{OscRange{0, 1, 1'000'000'000.0}});
+    // A huge (but under the 1,000,000-element "too many" limit -- see the
+    // TooManyElements tests below) range must not eagerly materialize a
+    // vector: constructing expandIterable() and reading only the first few
+    // elements has to stay instant regardless of the range's nominal size
+    // (999,999 elements here, the largest value that doesn't trigger
+    // rejection). If this regresses to eager expansion, this test times
+    // out/OOMs instead of merely failing an assertion.
+    auto items = expandIterable(Value{OscRange{0, 1, 999'998.0}});
     auto it = items.begin();
     EXPECT_DOUBLE_EQ(asNum(*it), 0.0);
     ++it;
     EXPECT_DOUBLE_EQ(asNum(*it), 1.0);
     ++it;
     EXPECT_DOUBLE_EQ(asNum(*it), 2.0);
+}
+
+TEST(ExpandIterable, RangeUnderOneMillionElementsIteratesNormally) {
+    // 999,999 elements (indices 0..999998) -- the largest range that must
+    // NOT be rejected. Verified against real OpenSCAD.app: this exact size
+    // iterates fine, one more element does not (see the next two tests).
+    bool warned = false;
+    auto items = expandIterable(Value{OscRange{0, 1, 999'998.0}}, [&](size_t) { warned = true; });
+    EXPECT_FALSE(warned);
+    EXPECT_EQ(items.size(), 999'999u);
+}
+
+TEST(ExpandIterable, RangeOfExactlyOneMillionElementsIsRejected) {
+    // 1,000,000 elements (indices 0..999999) -- real OpenSCAD.app rejects
+    // the whole range at exactly this size (WARNING + zero iterations, not
+    // a truncation to 999,999) -- a different mechanism from the C-style
+    // for loop's own _MAX_CFOR_ITERATIONS, which instead ALLOWS exactly
+    // 1,000,000 iterations and only errors past it. Verified empirically:
+    // these are genuinely different thresholds in real OpenSCAD, not a
+    // copy-paste of the same constant.
+    size_t warnedCount = 0;
+    auto items = expandIterable(Value{OscRange{0, 1, 999'999.0}}, [&](size_t count) { warnedCount = count; });
+    EXPECT_EQ(warnedCount, 1'000'000u);
+    EXPECT_EQ(items.size(), 0u);
+}
+
+TEST(ExpandIterable, HugeRangeIsRejectedInConstantTime) {
+    // The rejection check itself must be O(1) (closed-form), not a lazy
+    // walk to find out the count -- a billion-element range must reject
+    // instantly, not time out. This is exactly the case
+    // LargeRangePartialIterationStaysLazy used to (wrongly) exercise as
+    // "still iterable"; real OpenSCAD.app rejects it outright.
+    size_t warnedCount = 0;
+    auto items = expandIterable(Value{OscRange{0, 1, 1'000'000'000.0}}, [&](size_t count) { warnedCount = count; });
+    EXPECT_EQ(warnedCount, 1'000'000'001u);
+    EXPECT_EQ(items.size(), 0u);
+}
+
+TEST(ExpandIterable, NegativeStepRangeTooManyElementsIsRejectedToo) {
+    // Verified against real OpenSCAD.app: the too-many-elements check
+    // applies symmetrically to a descending range, with the correct count.
+    size_t warnedCount = 0;
+    auto items = expandIterable(Value{OscRange{1'099'999.0, -1, 0}}, [&](size_t count) { warnedCount = count; });
+    EXPECT_EQ(warnedCount, 1'100'000u);
+    EXPECT_EQ(items.size(), 0u);
+}
+
+TEST(ExpandIterable, ZeroStepRangeIsNaturallyEmptyNotTooMany) {
+    // A zero step never terminates by walking, but must not be
+    // misclassified as "too many" either -- it's naturally empty (0
+    // elements), no warning.
+    bool warned = false;
+    auto items = expandIterable(Value{OscRange{0, 0, 10}}, [&](size_t) { warned = true; });
+    EXPECT_FALSE(warned);
+    EXPECT_EQ(items.size(), 0u);
 }

@@ -79,7 +79,10 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
     pairs.reserve(node.assignments.size());
     for (const auto& assign : node.assignments) {
         Value values = evalExpr(*assign->expr, ctx);
-        pairs.push_back(AssignPair{assign->name->name, expandIterable(values)});
+        const oscad::Position* pos = &assign->position();
+        pairs.push_back(AssignPair{assign->name->name, expandIterable(values, [&](size_t count) {
+            warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
+        })});
     }
 
     std::vector<const oscad::ASTNode*> bodyNodes;
