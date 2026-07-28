@@ -205,12 +205,14 @@ TEST(TailCalls, TailRecursiveProfilingCallCountIsAccuratePerSite) {
     EXPECT_EQ(isEvenCalls, 101);
 }
 
-TEST(TailCalls, DebugHookFiresOnceForWholeTailChainNotPerHop) {
+TEST(TailCalls, DebugHookFiresPerHopInsideATailChain) {
     ScopedVm vm(false);
-    int calls = 0;
+    int calls = 0, bodyEntry = 0;
     DebugHooks hooks;
-    hooks.debugHook = [&](int, int, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [&](int line, int, bool, bool exprLevel, const std::string&, const std::vector<CallStackFrame>&,
+                           const DebugFramesFn&) {
         ++calls;
+        if (line == 1 && !exprLevel) ++bodyEntry;
         return DebugAction{};
     };
     Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
@@ -218,11 +220,21 @@ TEST(TailCalls, DebugHookFiresOnceForWholeTailChainNotPerHop) {
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     ev.evaluate(ast, ctx);
-    // A tail chain of 500 logical calls fires checkDebug exactly ONCE for
-    // the whole chain (evalUserFunctionCore's single checkDebug call,
-    // before evalFunctionBodyTrampoline's loop starts) -- not once per
-    // hop, unlike ordinary (non-tail) recursion. Asserting "small" rather
-    // than an exact count sidesteps needing to also predict how many
-    // top-level-statement-boundary firings happen outside the function.
-    EXPECT_LT(calls, 10);
+    // Each of the 500 logical hops fires its own ternary stop, chosen-branch
+    // stop and (for the 499 recursive ones) call-site stop, matching the
+    // reference's per-call _check_debug placement -- a tail chain is NOT
+    // debug-invisible just because it runs on the trampoline instead of the
+    // C++ stack. (The reference can't be run as a baseline at this depth:
+    // 500 nested _eval_function_call frames blow Python's recursion limit.)
+    //
+    // The one thing the trampoline still collapses is
+    // evalUserFunctionCore's body-entry stop: pushed once for the whole
+    // chain, since the chain never leaves that single core call. Documented
+    // divergence, not an accident -- restoring it per-hop would mean
+    // abandoning TCO whenever a debugger is attached.
+    EXPECT_GT(calls, 1000);
+    // All statement-level stops on line 1 (the whole function declaration):
+    // 501 ternary stops (n = 500..0), 500 recursive call-site stops, and the
+    // single body-entry stop.
+    EXPECT_EQ(bodyEntry, 501 + 500 + 1);
 }

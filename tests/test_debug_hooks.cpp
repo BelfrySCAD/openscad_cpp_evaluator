@@ -5,34 +5,95 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <ostream>
+#include <string>
+#include <vector>
+
 using namespace oscadeval;
 using namespace oscadeval::test;
 
-TEST(DebugHooks, HookFiresOnceForEachStatementAtEveryNestingLevel) {
-    // 4, not 3: `translate(...) sphere(...)` is two statements from
-    // checkDebug's perspective -- the top-level translate() ModularCall
-    // itself (checked by the outer evalChildren) AND its nested sphere()
-    // child (checked again when resolveTransform's own resolve function
-    // calls evalChildren on its .children) -- see evalChildren's own doc
-    // comment on why this is the port's single, but recursively-applied,
-    // statement-level checkpoint.
-    int calls = 0;
+// Records (line, exprLevel, forced) for every debug-hook call, in order --
+// the shape every parity test below asserts on. Sequences here were taken
+// from the Python reference (openscad_evaluator) run over the same source
+// with an equivalent recording hook, not derived from this port's own
+// behavior.
+struct Stop {
+    int line;
+    bool exprLevel;
+    bool forced;
+    bool operator==(const Stop&) const = default;
+};
+
+std::ostream& operator<<(std::ostream& os, const Stop& s) {
+    return os << "{" << s.line << ", " << (s.exprLevel ? "expr" : "stmt") << (s.forced ? ", forced" : "") << "}";
+}
+
+std::vector<Stop> recordStops(const std::string& src) {
+    std::vector<Stop> stops;
     DebugHooks hooks;
-    hooks.debugHook = [&](int, int, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
-        ++calls;
+    hooks.debugHook = [&](int line, int, bool forced, bool exprLevel, const std::string&,
+                           const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        stops.push_back(Stop{line, exprLevel, forced});
         return DebugAction{};
     };
     Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
-    auto ast = parseSrc("cube(1);\ntranslate([1,0,0]) sphere(r=1,$fn=8);\necho(\"x\");");
+    auto ast = parseSrc(src);
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     ev.evaluate(ast, ctx);
-    EXPECT_EQ(calls, 4);
+    return stops;
+}
+
+// Just the statement-level (non-exprLevel) stops -- what a stepping
+// debugger actually pauses on.
+std::vector<Stop> stmtStops(const std::vector<Stop>& stops) {
+    std::vector<Stop> out;
+    for (const Stop& s : stops) {
+        if (!s.exprLevel) out.push_back(s);
+    }
+    return out;
+}
+
+// Stops filtered to a set of source lines, for tests where unrelated lines
+// (an enclosing assignment, a function body elsewhere) would add noise.
+std::vector<Stop> stopsOnLines(const std::vector<Stop>& stops, const std::vector<int>& lines) {
+    std::vector<Stop> out;
+    for (const Stop& s : stops) {
+        if (std::find(lines.begin(), lines.end(), s.line) != lines.end()) out.push_back(s);
+    }
+    return out;
+}
+
+size_t countOnLine(const std::vector<Stop>& stops, int line) {
+    return static_cast<size_t>(std::count_if(stops.begin(), stops.end(), [line](const Stop& s) { return s.line == line; }));
+}
+
+TEST(DebugHooks, HookFiresOnceForEachStatementAtEveryNestingLevel) {
+    // 4 statement-level stops, not 3: `translate(...) sphere(...)` is two
+    // statements from checkDebug's perspective -- the top-level
+    // translate() ModularCall itself (checked by the outer evalChildren)
+    // AND its nested sphere() child (checked again when resolveTransform's
+    // own resolve function calls evalChildren on its .children).
+    //
+    // The 3 extra expr-level stops on line 2 are `[1,0,0]`'s own list
+    // elements: a list literal is a ListComprehension of three bare
+    // element expressions, each of which gets _eval_list_comp's
+    // `_check_debug(elem, ctx, expr_level=True)`. Verified against the
+    // reference: identical 7-stop sequence.
+    EXPECT_EQ(recordStops("cube(1);\ntranslate([1,0,0]) sphere(r=1,$fn=8);\necho(\"x\");"),
+              (std::vector<Stop>{{1, false, false},
+                                 {2, false, false},
+                                 {2, true, false},
+                                 {2, true, false},
+                                 {2, true, false},
+                                 {2, false, false},
+                                 {3, false, false}}));
 }
 
 TEST(DebugHooks, StopAbortsEvaluation) {
     DebugHooks hooks;
-    hooks.debugHook = [](int line, int, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [](int line, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         DebugAction a;
         a.stop = (line == 2);
         return a;
@@ -49,7 +110,7 @@ TEST(DebugHooks, ModsOverrideVariableForThatScope) {
     // demo exactly: override `width` just before the cube() statement
     // that uses it, verify the resulting geometry reflects the override.
     DebugHooks hooks;
-    hooks.debugHook = [](int line, int, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [](int line, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         DebugAction a;
         if (line == 2) a.mods["width"] = Value{2.0};
         return a;
@@ -73,7 +134,7 @@ TEST(DebugHooks, FiresInsideModuleBodyWithCorrectDepthAndLocals) {
     };
     Hit hit;
     DebugHooks hooks;
-    hooks.debugHook = [&](int line, int depth, bool, const std::string&, const std::vector<CallStackFrame>&,
+    hooks.debugHook = [&](int line, int depth, bool, bool, const std::string&, const std::vector<CallStackFrame>&,
                            const DebugFramesFn& getFrame) {
         if (line == 3) { // the `cube([w, h, 3]);` statement inside module bracket
             hit.line = line;
@@ -103,7 +164,7 @@ TEST(DebugHooks, FiresInsideModuleBodyWithCorrectDepthAndLocals) {
 TEST(DebugHooks, ForcedBreakpointFiresExactlyOnce) {
     int forcedCalls = 0, normalCalls = 0;
     DebugHooks hooks;
-    hooks.debugHook = [&](int, int, bool forced, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [&](int, int, bool forced, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         (forced ? forcedCalls : normalCalls)++;
         return DebugAction{};
     };
@@ -119,7 +180,7 @@ TEST(DebugHooks, ForcedBreakpointFiresExactlyOnce) {
 TEST(DebugHooks, BreakpointConditionFalseSkipsThePause) {
     int forcedCalls = 0;
     DebugHooks hooks;
-    hooks.debugHook = [&](int, int, bool forced, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [&](int, int, bool forced, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         if (forced) ++forcedCalls;
         return DebugAction{};
     };
@@ -167,4 +228,195 @@ TEST(DebugHooks, NoHooksInstalledMeansZeroOverheadCodePathStillWorks) {
     // before this phase -- checkDebug()'s null-hook early return.
     Evaluated e = evalSrc("cube(2);");
     EXPECT_EQ(e.bodies.size(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// Full parity with the Python reference's _check_debug call sites.
+//
+// Every expected sequence below was captured by running the reference
+// (openscad_evaluator's Evaluator) over the exact same source with a hook
+// recording (line, expr_level, forced), then pasted here verbatim. They are
+// not this port's own output written down after the fact.
+// ---------------------------------------------------------------------------
+
+// (1) ModularIf / ModularIfElse: an expr-level branch-entry marker on the
+// chosen branch's first statement, after the condition, before the branch's
+// own statement checks.
+TEST(DebugHooksParity, ModularIfFiresExprLevelBranchEntryMarker) {
+    EXPECT_EQ(recordStops("if (true)\n  echo(\"yes\");\n"),
+              (std::vector<Stop>{{1, false, false}, {2, true, false}, {2, false, false}}));
+}
+
+TEST(DebugHooksParity, ModularIfElseMarksWhicheverBranchWasChosen) {
+    // false -> the else branch (line 4), never the true branch (line 2).
+    EXPECT_EQ(recordStops("if (false)\n  echo(\"yes\");\nelse\n  echo(\"no\");\n"),
+              (std::vector<Stop>{{1, false, false}, {4, true, false}, {4, false, false}}));
+}
+
+// (2) breakpoint() -- already ported; guards against the forced flag being
+// lost while everything around it was rewired.
+TEST(DebugHooksParity, BreakpointStillForcesExactlyOnePauseAfterItsOwnStatementStop) {
+    // Assignments run before other statements in a scope, hence 1, 3, 2, 2.
+    EXPECT_EQ(recordStops("a = 1;\nbreakpoint();\nb = 2;\n"),
+              (std::vector<Stop>{{1, false, false}, {3, false, false}, {2, false, false}, {2, false, true}}));
+}
+
+// (3) Statement for() with two loop variables: one statement-level stop per
+// variable binding per combination, PLUS an expr-level body-entry marker per
+// full iteration.
+TEST(DebugHooksParity, ModularForStopsAtEachVariableBindingAndEachBodyEntry) {
+    const std::vector<Stop> stops = recordStops("for(\ni=[0:2],\nj=[0:1]\n)\necho(i*3+j);\n");
+    // i binds 3 times (line 2); j binds twice per i (line 3).
+    EXPECT_EQ(countOnLine(stmtStops(stops), 2), 3u);
+    EXPECT_EQ(countOnLine(stmtStops(stops), 3), 6u);
+    // Outer variable advances only after the inner one exhausts its range.
+    EXPECT_EQ(stopsOnLines(stops, {2, 3}),
+              (std::vector<Stop>{{2, false, false}, {3, false, false}, {3, false, false},
+                                 {2, false, false}, {3, false, false}, {3, false, false},
+                                 {2, false, false}, {3, false, false}, {3, false, false}}));
+    // 6 iterations, each with one expr-level body-entry marker on the echo.
+    EXPECT_EQ(std::count(stops.begin(), stops.end(), Stop{5, true, false}), 6);
+}
+
+// (4) intersection_for: ONE expr-level body-entry marker per full cartesian
+// iteration and nothing per individual variable binding -- deliberately
+// unlike (3), matching _resolve_intersection_for.
+TEST(DebugHooksParity, IntersectionForMarksBodyEntryOnlyNotEachBinding) {
+    EXPECT_EQ(recordStops("intersection_for(\ni=[0:1]\n)\ncube(1);\n"),
+              (std::vector<Stop>{{1, false, false},
+                                 {4, true, false},
+                                 {4, false, false},
+                                 {4, true, false},
+                                 {4, false, false}}));
+}
+
+// (5) Statement-form let() { }: one statement-level stop per assignment.
+TEST(DebugHooksParity, LetBlockStopsAtEachAssignment) {
+    EXPECT_EQ(recordStops("let(a = 1, b = 2)\n  echo(a + b);\n"),
+              (std::vector<Stop>{{1, false, false}, {1, false, false}, {2, false, false}}));
+}
+
+// (6) Ternary: statement-level on the whole ternary, then expr-level on the
+// chosen branch.
+TEST(DebugHooksParity, TernaryStopsOnConditionThenChosenBranch) {
+    EXPECT_EQ(recordStops("a = true ? 1 : 2;\n"),
+              (std::vector<Stop>{{1, false, false}, {1, false, false}, {1, true, false}}));
+}
+
+// (7) Expression-form let(): one statement-level stop per assignment, no
+// expr-level body marker.
+TEST(DebugHooksParity, LetExprStopsAtEachAssignment) {
+    EXPECT_EQ(recordStops("a = let(x = 10, y = 20) x + y;\n"),
+              (std::vector<Stop>{{1, false, false}, {1, false, false}, {1, false, false}}));
+}
+
+// (8)/(9) Expression-form echo()/assert(): one statement-level stop each.
+TEST(DebugHooksParity, EchoAndAssertExpressionFormsEachAddOneStatementStop) {
+    EXPECT_EQ(recordStops("a = echo(\"hi\") 42;\n"), (std::vector<Stop>{{1, false, false}, {1, false, false}}));
+    EXPECT_EQ(recordStops("a = assert(true) 42;\n"), (std::vector<Stop>{{1, false, false}, {1, false, false}}));
+}
+
+// (10a) List-comp if: statement-level on the clause before its condition,
+// then expr-level on the body when the condition passes. The body's
+// expr-level stop appears TWICE (the clause's own marker plus the
+// bare-element marker the body dispatch adds) -- the reference does the
+// same; not a bug.
+TEST(DebugHooksParity, ListCompIfStopsPerIterationAndOnlyEntersBodyWhenTrue) {
+    // i in 0..2, condition true for 0 and 1 only.
+    EXPECT_EQ(recordStops("a = [\n    for (i = [0:2])\n        if (i <= 1)\n            i * 10\n];\n"),
+              (std::vector<Stop>{{1, false, false},
+                                 {2, false, false}, {3, false, false}, {4, true, false}, {4, true, false},
+                                 {2, false, false}, {3, false, false}, {4, true, false}, {4, true, false},
+                                 {2, false, false}, {3, false, false}}));
+}
+
+// (10b) List-comp if/else: same, but always takes a branch.
+TEST(DebugHooksParity, ListCompIfElseMarksWhicheverBranchWasChosen) {
+    EXPECT_EQ(recordStops("a = [\n    for (i = [0:1])\n        if (i == 1)\n            99\n        else\n            i\n];\n"),
+              (std::vector<Stop>{{1, false, false},
+                                 {2, false, false}, {3, false, false}, {6, true, false}, {6, true, false},
+                                 {2, false, false}, {3, false, false}, {4, true, false}, {4, true, false}}));
+}
+
+// (10c) List-comp let: per-assignment statement stops, and (unlike if/each)
+// no expr-level marker of its own -- the body's bare-element check supplies
+// the only expr-level stop.
+TEST(DebugHooksParity, ListCompLetStopsAtAssignmentsWithNoOwnBodyMarker) {
+    EXPECT_EQ(recordStops("a = [let(x=1) x];\n"),
+              (std::vector<Stop>{{1, false, false}, {1, true, false}, {1, false, false}}));
+}
+
+// (10d) `each`: exactly one expr-level marker, before the body.
+TEST(DebugHooksParity, ListCompEachFiresOneExprLevelMarker) {
+    // 4 = assignment, the `each` marker, and the inner list's 2 elements.
+    EXPECT_EQ(recordStops("a = [each [1,2]];\n"),
+              (std::vector<Stop>{{1, false, false}, {1, true, false}, {1, true, false}, {1, true, false}}));
+}
+
+// (11) List-comp for() with two variables: per-binding statement stops, and
+// -- unlike the statement for() in (3) -- NO separate body-entry marker.
+TEST(DebugHooksParity, ListCompForStopsPerBindingWithNoSeparateBodyEntryMarker) {
+    EXPECT_EQ(recordStops("x = [\nfor(\ni=[0:2],\nj=[0:1]\n)\ni*3+j\n];\n"),
+              (std::vector<Stop>{{1, false, false},
+                                 {3, false, false}, {4, false, false}, {6, true, false},
+                                                    {4, false, false}, {6, true, false},
+                                 {3, false, false}, {4, false, false}, {6, true, false},
+                                                    {4, false, false}, {6, true, false},
+                                 {3, false, false}, {4, false, false}, {6, true, false},
+                                                    {4, false, false}, {6, true, false}}));
+}
+
+// (12) List-comp C-style for -- the most intricate case, and the one that
+// previously got ZERO debug checks anywhere inside it. Exact per-iteration
+// order: init(s) -> [cond(true) -> body -> incr(s)]* -> cond(false).
+TEST(DebugHooksParity, ListCompCForStopOrderAcrossTwoIterations) {
+    //   line 1  a = [
+    //   line 2      for (            <- body-entry stop uses the CFor node
+    //   line 3          i = 0;       <- init assignment
+    //   line 4          i < 2;       <- condition (expr-level, every check)
+    //   line 5          i = i + 1    <- incr assignment
+    //   line 6      ) i              <- body expression
+    //   line 7  ];
+    EXPECT_EQ(recordStops("a = [\n    for (\n        i = 0;\n        i < 2;\n        i = i + 1\n    ) i\n];\n"),
+              (std::vector<Stop>{{1, false, false},
+                                 {3, false, false},                                    // init, once
+                                 {4, true, false}, {2, false, false}, {6, true, false}, // iter 1
+                                 {5, false, false},                                    // iter 1 incr
+                                 {4, true, false}, {2, false, false}, {6, true, false}, // iter 2
+                                 {5, false, false},
+                                 {4, true, false}})); // final false check ends the loop
+}
+
+TEST(DebugHooksParity, ListCompCForFiresEveryInitAndIncrSeparately) {
+    // 2 inits (once each) + 2 incrs per iteration x 2 iterations.
+    const std::vector<Stop> stops = recordStops("a = [for (i = 0, j = 0; i < 2; i = i + 1, j = j + 2) i + j];\n");
+    EXPECT_EQ(stmtStops(stops).size(), 9u); // outer assign + 2 inits + 2 body entries + 4 incrs
+    EXPECT_EQ(stops.size(), 14u);           // + 3 condition checks + 2 body expressions
+}
+
+// (13) User function / function-literal call sites: a statement-level stop
+// in the CALLER's context, before the callee's own body-entry stop.
+TEST(DebugHooksParity, UserFunctionCallSiteStopsBeforeDescendingIntoTheCallee) {
+    // line 2 twice (assignment, then call site), then line 1 (body entry).
+    EXPECT_EQ(recordStops("function double(x) = x * 2;\na = double(5);\n"),
+              (std::vector<Stop>{{2, false, false}, {2, false, false}, {1, false, false}}));
+}
+
+TEST(DebugHooksParity, FunctionLiteralCallSiteAlsoStops) {
+    EXPECT_EQ(recordStops("f = function(x) x * 2;\na = f(5);\n"),
+              (std::vector<Stop>{{1, false, false}, {2, false, false}, {2, false, false}, {1, false, false}}));
+}
+
+TEST(DebugHooksParity, BuiltinFunctionCallGetsNoCallSiteStop) {
+    // Only the assignment is statement-level; the 3 expr-level stops are
+    // the argument list literal's own elements, not a call-site stop.
+    const std::vector<Stop> stops = recordStops("a = len([1,2,3]);\n");
+    EXPECT_EQ(stmtStops(stops), (std::vector<Stop>{{1, false, false}}));
+    EXPECT_EQ(stops.size(), 4u);
+}
+
+// A modifier's wrapped child gets its own statement-level stop, in addition
+// to the modifier node's own -- `#cube(1);` pauses twice, not once.
+TEST(DebugHooksParity, ModifierAndItsWrappedChildBothStop) {
+    EXPECT_EQ(recordStops("#cube(1);\n"), (std::vector<Stop>{{1, false, false}, {1, false, false}}));
 }

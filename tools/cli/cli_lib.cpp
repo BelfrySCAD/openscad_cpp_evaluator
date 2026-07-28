@@ -319,9 +319,9 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
 
             DebugHooks hooks;
             if (debug) {
-                hooks.debugHook = [&](int line, int depth, bool forced, const std::string& origin,
+                hooks.debugHook = [&](int line, int depth, bool forced, bool exprLevel, const std::string& origin,
                                        const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
-                    return repl->debugHook(line, depth, forced, origin, callStack, getFrame);
+                    return repl->debugHook(line, depth, forced, exprLevel, origin, callStack, getFrame);
                 };
                 hooks.errorBreak = [&](int line, const std::string& header, const std::string& origin,
                                         const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {

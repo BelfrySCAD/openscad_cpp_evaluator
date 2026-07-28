@@ -262,9 +262,15 @@ std::optional<Evaluator::TailStep> Evaluator::tryTailStepFor(
 std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simplifyTailStep(
     const oscad::Expression& node, EvalContext& ctx) {
     switch (node.kind()) {
+        // Each of these 5 cases duplicates its evalExpr counterpart's own
+        // debug checkpoints too -- a tail-position ternary/let/echo/assert/
+        // call would otherwise silently lose the stops the reference (which
+        // has no TCO at all) fires on every hop.
         case oscad::NodeKind::TernaryOp: {
             auto& n = static_cast<const oscad::TernaryOp&>(node);
+            checkDebug(n, ctx);
             const oscad::Expression* branch = truthy(evalExpr(*n.condition, ctx)) ? n.trueExpr.get() : n.falseExpr.get();
+            checkDebug(*branch, ctx, /*forced=*/false, /*exprLevel=*/true);
             TailStep step;
             step.nextExpr = branch;
             step.ctx = ctx;
@@ -274,6 +280,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
             auto& n = static_cast<const oscad::LetOp&>(node);
             EvalContext childCtx = ctx.letChildCtx();
             for (const auto& assign : n.assignments) {
+                checkDebug(*assign, childCtx);
                 Value v = evalExpr(*assign->expr, childCtx);
                 bindLetName(childCtx, assign->name->name, v);
             }
@@ -284,6 +291,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
         }
         case oscad::NodeKind::EchoOp: {
             auto& n = static_cast<const oscad::EchoOp&>(node);
+            checkDebug(n, ctx);
             doEcho(n.arguments, ctx);
             TailStep step;
             step.nextExpr = n.body.get();
@@ -296,6 +304,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
             // function's own header comment on why it doesn't delegate to
             // evalExpr for these 5 node kinds).
             auto& n = static_cast<const oscad::AssertOp&>(node);
+            checkDebug(n, ctx);
             const auto& raw = n.arguments;
             const bool condition = raw.empty() || truthy(evalExpr(*argExpr(*raw[0]), ctx));
             if (!condition) {
@@ -331,7 +340,8 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
                 const oscad::ASTNode* declNode = ctx.scope->lookupFunction(leftId->name);
                 if (declNode && declNode->kind() == oscad::NodeKind::FunctionDeclaration) {
                     const auto& decl = static_cast<const oscad::FunctionDeclaration&>(*declNode);
-                    const bool hasChunk = bytecodeVmEnabled() && lookupOrCompileChunk(decl) != nullptr;
+                    checkDebug(n, ctx); // call-site stop, per hop (see evalFunctionCall's)
+                    const bool hasChunk = useBytecodeVm() && lookupOrCompileChunk(decl) != nullptr;
                     std::optional<TailStep> step = tryTailStepFor(leftId->name, decl, decl.parameters, *decl.expr,
                                                                    hasChunk, n.arguments, ctx, n.position());
                     if (step) return std::move(*step);
@@ -352,7 +362,8 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
             Value funcVal = leftId ? evalIdentifier(leftId->name, &leftId->position(), ctx, false) : evalExpr(*n.left, ctx);
             if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&funcVal); flPtr && *flPtr) {
                 const oscad::FunctionLiteral& funcNode = **flPtr;
-                const bool hasChunk = bytecodeVmEnabled() && lookupCompiledLiteralChunk(funcNode) != nullptr;
+                checkDebug(n, ctx); // call-site stop, function-literal callee
+                const bool hasChunk = useBytecodeVm() && lookupCompiledLiteralChunk(funcNode) != nullptr;
                 std::optional<TailStep> step = tryTailStepFor("<function literal>", funcNode, funcNode.parameters,
                                                                *funcNode.body, hasChunk, n.arguments, ctx, n.position());
                 if (step) return std::move(*step);
@@ -443,7 +454,7 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
     // does its own, see bytecode_vm.cpp) -- nullptr (VM off, or this
     // declaration doesn't compile -- see tryCompileFunction) falls back to
     // the unchanged interpreter path below.
-    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupOrCompileChunk(decl) : nullptr;
+    const CompiledChunk* chunk = useBytecodeVm() ? lookupOrCompileChunk(decl) : nullptr;
     if (!chunk) {
         bindCallArgsInto(decl.parameters, bindArgs(decl.parameters, arguments, ctx), childCtx);
     }
@@ -462,7 +473,7 @@ Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad:
     bool usedChildCtx = false;
     EvalContext childCtx = callCtxFor(decl, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
     const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
-    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupOrCompileChunk(decl) : nullptr;
+    const CompiledChunk* chunk = useBytecodeVm() ? lookupOrCompileChunk(decl) : nullptr;
     if (!chunk) {
         bindCallArgsInto(decl.parameters, std::move(bound), childCtx);
         return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent,
@@ -488,7 +499,7 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
     // -- a bare top-level literal (never reached by any compiled container)
     // has no cache entry and always falls to the interpreter below,
     // unconditionally correct either way.
-    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
+    const CompiledChunk* chunk = useBytecodeVm() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
     if (!chunk) {
         bindCallArgsInto(funcNode.parameters, bindArgs(funcNode.parameters, arguments, ctx), childCtx);
     }
@@ -515,7 +526,7 @@ Value Evaluator::evalFunctionLiteralFromBound(const oscad::FunctionLiteral& func
     bool usedChildCtx = false;
     EvalContext childCtx = callCtxFor(funcNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
     const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
-    const CompiledChunk* chunk = bytecodeVmEnabled() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
+    const CompiledChunk* chunk = useBytecodeVm() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
     if (!chunk) {
         bindCallArgsInto(funcNode.parameters, std::move(bound), childCtx);
         return evalUserFunctionCore(
@@ -552,6 +563,12 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
         }
         const oscad::ASTNode* decl = ctx.scope->lookupFunction(leftId->name);
         if (decl && decl->kind() == oscad::NodeKind::FunctionDeclaration) {
+            // Call-site stop, in the CALLER's context, before descending
+            // into the callee (whose own body-entry stop comes later, from
+            // evalUserFunctionCore). Builtins deliberately get none --
+            // mirrors _eval_function_call, where only the user-function and
+            // function-literal branches call _check_debug.
+            checkDebug(node, ctx);
             return evalUserFunction(leftId->name, static_cast<const oscad::FunctionDeclaration&>(*decl), node.arguments,
                                      ctx, &node);
         }
@@ -564,6 +581,7 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
     // unknown callee gets exactly one warning below, not two.
     Value funcNode = leftId ? evalIdentifier(leftId->name, &leftId->position(), ctx, false) : evalExpr(*node.left, ctx);
     if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&funcNode); flPtr && *flPtr) {
+        checkDebug(node, ctx); // same call-site stop, function-literal callee
         return evalFunctionLiteral(**flPtr, node.arguments, ctx, &node);
     }
 

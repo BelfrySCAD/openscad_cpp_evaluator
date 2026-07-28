@@ -241,15 +241,32 @@ Roman:style=Bold"`) silently gets Liberation Sans instead under this default pro
 path needed in this repo: the fix is a Qt host application supplying its own `FontProvider`, which
 is exactly what the injection seam exists for.
 
-**Debugger/profiler, Phase 9 (the last phase)**: `checkDebug()` fires from exactly one call site
-(`evalChildren`'s `runAll`, plus one explicit call each at user-function/function-literal body entry
-and inside `breakpoint()`'s resolve) rather than the reference's several dozen `_check_debug` call
-sites scattered across nearly every statement/expression-eval function — a deliberate scope
-reduction (see `debug_hooks.hpp`'s `DebugHookFn` doc comment for the full reasoning): the reference's
-extra sites exist for `expr_level` sub-statement stepping (individual list-comprehension clauses,
-ternary branches) that neither this port's own `debug_repl.cpp` REPL nor the reference's own
-`_debug_repl.py` REPL ever actually uses (both only ever pause/step at statement granularity in
-practice). Verified this is a faithful, not just simplified, port by running an *identical*
+**Debugger/profiler, Phase 9 (the last phase)**: `checkDebug()` fires at **full parity with the
+reference's `_check_debug` call sites** — the statement checkpoint in `evalChildren`'s `runAll`,
+user-function/function-literal body entry, `breakpoint()`'s resolve, *and* the reference's
+sub-statement sites: if/else branch entry (`evalStatement`), for-loop per-variable bindings and
+per-iteration body entry (`evalFor`), `intersection_for` body entry, statement- and
+expression-form `let()` assignments, expression-form `echo()`/`assert()`, ternary
+condition/chosen-branch, every list-comprehension clause including the C-style `for`
+(`evalListElement`), modifier-wrapped children (`evalModifier`), and user function/function-literal
+call sites (`evalFunctionCall`, plus their duplicates in `simplifyTailStep` so a tail chain isn't
+debug-invisible). Each carries the reference's `expr_level` flag, threaded all the way through
+`DebugHookFn` and the nanobind trampoline. `expr_depth` is *not* tracked (hardcoded 0 through the
+Python surface) — no consumer reads it.
+
+An earlier revision of this file argued the sub-statement sites were unnecessary because no REPL
+steps at that granularity. That was wrong: BelfrySCAD's debugger UI consumes them, and one case was
+an outright bug — a C-style `for` *inside a list comprehension* got zero debug checks anywhere,
+so a breakpoint set on it never fired. Two consequences of full parity worth knowing:
+`useBytecodeVm()` returns false whenever a debug hook is installed (compiled chunks flatten away the
+AST nodes these checkpoints hang off, so debugging always takes the interpreter path), and
+`evalChildren` deliberately skips its own check for `ModularLet` — the reference's
+`_eval_statement_impl` skips it too, pausing on the let's assignments instead. Parity is verified
+test-by-test in `tests/test_debug_hooks.cpp`'s `DebugHooksParity` suite, whose expected
+`(line, expr_level, forced)` sequences were captured by running the Python reference over the same
+sources, not written down from this port's own output.
+
+The port was also verified end to end by running an *identical*
 `--debug` session (same script, same `break`/`run`/`print`/`continue`/`step`/`backtrace`/`set`
 sequence) against both this port's CLI and the real Python reference's own `openscad-evaluator
 --debug` side by side: transcripts matched exactly, **including** an unexpected extra pause neither

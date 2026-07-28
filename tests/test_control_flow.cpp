@@ -830,7 +830,7 @@ TEST(Render, PassesChildrenThroughUnchanged) {
 TEST(ControlBreakpoint, TruthyConditionStillForcesPause) {
     int forcedCalls = 0;
     DebugHooks hooks;
-    hooks.debugHook = [&](int, int, bool forced, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [&](int, int, bool forced, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         if (forced) ++forcedCalls;
         return DebugAction{};
     };
@@ -846,7 +846,7 @@ namespace {
 int countForced(const std::string& src) {
     int forcedCalls = 0;
     DebugHooks hooks;
-    hooks.debugHook = [&](int, int, bool forced, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [&](int, int, bool forced, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         if (forced) ++forcedCalls;
         return DebugAction{};
     };
