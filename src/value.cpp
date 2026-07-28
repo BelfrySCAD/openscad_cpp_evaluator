@@ -53,7 +53,7 @@ std::string oscTypeName(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return "string";
     if (std::holds_alternative<ListPtr>(v)) return "vector";
     if (std::holds_alternative<ObjectPtr>(v)) return "object";
-    return "undefined"; // OscRange, FunctionLiteral*
+    return "undefined"; // OscRange, ClosurePtr
 }
 
 bool oscEqual(const Value& a, const Value& b) {
@@ -88,9 +88,21 @@ bool oscEqual(const Value& a, const Value& b) {
         return true;
     }
 
-    // Neither operand is a list or object here, so this only ever compares
-    // monostate/bool/double/string/OscRange/FunctionLiteral* against its own
-    // kind (variant::operator== checks the active index first).
+    // ClosurePtr is a shared_ptr -- its own operator== compares the pointee
+    // ADDRESS, not Closure::operator==(), so two independently-created
+    // closures over the identical AST node (the semantics this mirrors --
+    // see Closure's own doc comment) would wrongly compare unequal via the
+    // variant fallthrough below. Dereference and compare explicitly.
+    const ClosurePtr* ca = std::get_if<ClosurePtr>(&a);
+    const ClosurePtr* cb = std::get_if<ClosurePtr>(&b);
+    if (ca || cb) {
+        if (!ca || !cb || !*ca || !*cb) return false;
+        return **ca == **cb;
+    }
+
+    // Neither operand is a list, object, or closure here, so this only ever
+    // compares monostate/bool/double/string/OscRange against its own kind
+    // (variant::operator== checks the active index first).
     return a == b;
 }
 
@@ -107,7 +119,7 @@ bool truthy(const Value& v) {
     if (const ListPtr* l = std::get_if<ListPtr>(&v)) return *l && !(*l)->items.empty();
     if (const ObjectPtr* o = std::get_if<ObjectPtr>(&v)) return *o && !(*o)->items.empty();
     if (std::holds_alternative<std::monostate>(v)) return false;
-    return true; // OscRange, FunctionLiteral*
+    return true; // OscRange, ClosurePtr
 }
 
 bool oscComparable(const Value& a, const Value& b) {
@@ -325,7 +337,7 @@ std::string fmtValue(const Value& v) {
         return s + ")";
     }
     if (const std::string* s = std::get_if<std::string>(&v)) return "\"" + *s + "\"";
-    return "<function-literal>"; // const FunctionLiteral* -- no meaningful textual form in the reference either
+    return "<function-literal>"; // OscRange handled above; ClosurePtr has no meaningful textual form either
 }
 
 // (Range::numValues()'s own count, closed-form) -- 1 + floor((end-start)/step),

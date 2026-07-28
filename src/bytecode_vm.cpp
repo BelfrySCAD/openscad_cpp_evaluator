@@ -342,22 +342,23 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 Value callee = std::move(stack.back());
                 stack.pop_back();
                 Value result;
-                if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&callee); flPtr && *flPtr) {
+                if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
+                    const Closure& closure = **closurePtr;
                     BoundArgs bound;
                     bound.reserve(argCount);
                     size_t positionalIdx = 0;
-                    const size_t nparams = (*flPtr)->parameters.size();
+                    const size_t nparams = closure.node->parameters.size();
                     for (size_t i = 0; i < argCount; ++i) {
                         if (site.argNames[i]) {
                             bound.set(*site.argNames[i], std::move(args[i]));
                         } else {
                             if (positionalIdx < nparams) {
-                                bound.set((*flPtr)->parameters[positionalIdx]->name->name, std::move(args[i]));
+                                bound.set(closure.node->parameters[positionalIdx]->name->name, std::move(args[i]));
                             }
                             ++positionalIdx;
                         }
                     }
-                    result = ev.evalFunctionLiteralFromBound(**flPtr, std::move(bound), ctx, ins.pos);
+                    result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
                 } else if (!site.calleeName.empty()) {
                     ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
                 }
@@ -424,8 +425,9 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 Value callee = std::move(stack.back());
                 stack.pop_back();
                 Value result;
-                if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&callee); flPtr && *flPtr) {
-                    const oscad::FunctionLiteral& funcNode = **flPtr;
+                if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
+                    const Closure& closure = **closurePtr;
+                    const oscad::FunctionLiteral& funcNode = *closure.node;
                     BoundArgs bound;
                     bound.reserve(argCount);
                     size_t positionalIdx = 0;
@@ -441,7 +443,7 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                         }
                     }
                     if (tailOut != nullptr) {
-                        if (auto hopCtx = ev.isolatedCallCtxFor(funcNode, ctx)) {
+                        if (auto hopCtx = ev.isolatedCallCtxFor(funcNode, ctx, capturedLetTrail(closure))) {
                             if (ev.lookupCompiledLiteralChunk(funcNode) != nullptr) {
                                 tailOut->decl = nullptr;
                                 tailOut->literal = &funcNode;
@@ -453,7 +455,7 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                             }
                         }
                     }
-                    result = ev.evalFunctionLiteralFromBound(funcNode, std::move(bound), ctx, ins.pos);
+                    result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
                 } else if (!site.calleeName.empty()) {
                     ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
                 }

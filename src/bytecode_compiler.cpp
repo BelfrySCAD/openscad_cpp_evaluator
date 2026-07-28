@@ -261,8 +261,33 @@ public:
                                           *n.body)) {
                     throw NotCompilable{};
                 }
+                // A nested literal that reads ANY enclosing variable
+                // (literalChunk.upvalues non-empty) is compiled via
+                // Op::LoadUpvalue -- a live-call-stack walk (findUpvalue)
+                // that only ever resolves a still-active enclosing call,
+                // never a captured environment (see LoadUpvalue/
+                // findUpvalue's own doc comments: "this codebase has no
+                // escaping closures"). A closure that escapes its creating
+                // call (returned, stored, passed on -- see Closure's own
+                // doc comment, value.hpp, for the motivating BOSL2
+                // example) would silently read undef for every captured
+                // variable through this path. Bailing the WHOLE containing
+                // compilation here forces such a function to run through
+                // the interpreter instead, which DOES support escaping
+                // closures correctly (evalExpr's FunctionLiteral case
+                // captures ctx.let_ itself). A literal with no upvalues at
+                // all (doesn't reference anything from an enclosing scope)
+                // has nothing that needs escaping-capture support, so it's
+                // unaffected and keeps compiling normally.
+                if (!literalChunk.upvalues.empty()) throw NotCompilable{};
                 chunk_.nestedLiterals.emplace_back(&n, std::move(literalChunk));
-                out.push_back({Op::PushConst, internConst(Value{&n}), 0, nullptr});
+                // No captured `let_` trail here (nullptr) -- a compile-time
+                // constant can't carry per-invocation runtime state, but
+                // (per the upvalues check just above) this literal doesn't
+                // reference anything outside itself, so there is nothing
+                // capture. Not a regression; just not (yet) extended here.
+                out.push_back({Op::PushConst, internConst(Value{std::make_shared<const Closure>(Closure{&n, nullptr})}),
+                               0, nullptr});
                 return;
             }
             case NodeKind::RangeLiteral: {

@@ -84,9 +84,9 @@ std::string canonValue(const Value& v) {
                 }
                 out += ")";
                 return out;
-            } else { // const oscad::FunctionLiteral*
+            } else { // ClosurePtr
                 char buf[32];
-                std::snprintf(buf, sizeof(buf), "F%p", static_cast<const void*>(val));
+                std::snprintf(buf, sizeof(buf), "F%p", val ? static_cast<const void*>(val->node) : nullptr);
                 return buf;
             }
         },

@@ -391,11 +391,17 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
         case NodeKind::ListComprehension:
             return evalListLiteral(static_cast<const oscad::ListComprehension&>(node), ctx);
         case NodeKind::FunctionLiteral:
-            // A function-literal *value* is the AST node pointer itself --
-            // no closure-capture wrapper (evalFunctionLiteral re-resolves
-            // the node's own lexical scope at call time). Mirrors
-            // _expr_function_literal's `return node` exactly.
-            return Value{static_cast<const oscad::FunctionLiteral*>(&node)};
+            // A function-literal *value* captures ctx.let_ (extending that
+            // trail level's lifetime for as long as this Closure is
+            // reachable -- see Closure's own doc comment, value.hpp) so a
+            // closure that escapes this call (returned, stored, passed on)
+            // can still resolve variables from its defining scope after
+            // this call has returned. `dyn`/scope are NOT captured: $-vars
+            // are dynamically scoped (see the caller's own ctx.dyn at call
+            // time, matching real OpenSCAD), and the lexical scope is
+            // static AST data already reachable via the node itself.
+            return Value{std::make_shared<const Closure>(
+                Closure{static_cast<const oscad::FunctionLiteral*>(&node), ctx.let_})};
         case NodeKind::PrimaryCall:
             return evalFunctionCall(static_cast<const oscad::PrimaryCall&>(node), ctx);
         case NodeKind::LetOp:

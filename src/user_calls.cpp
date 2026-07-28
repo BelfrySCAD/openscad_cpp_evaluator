@@ -104,7 +104,30 @@ BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::Parameter
 
 EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, const oscad::Scope* scope,
                                    std::shared_ptr<const ChildrenNodeList> childrenNodes,
-                                   const EvalContext* childrenCallerCtx, bool* usedChildCtx) {
+                                   const EvalContext* childrenCallerCtx, bool* usedChildCtx,
+                                   const std::shared_ptr<TrailView<Value>>& capturedLet) {
+    // A closure's own captured environment (capturedLet, non-null for
+    // every interpreter-evaluated FunctionLiteral -- see expr_eval.cpp's
+    // own FunctionLiteral case) is always the correct root for this call,
+    // full stop -- checked BEFORE the live-call-stack walk below.
+    // callCtxFromCapturedLet roots the new scope at `capturedLet` itself,
+    // never at `ctx.let_`, so it's already correct regardless of whether
+    // `ctx` (the CALLER's own context) happens to be ancestor-linked back
+    // to the closure's declaring call or not. That distinction matters in
+    // exactly the case the live-frame walk below gets wrong: a closure
+    // declared inside function A, passed as a Value into a plain function
+    // B, and invoked from inside B's body. B's own ctx is isolated from
+    // A's (an ordinary call boundary, see EvalContext::callCtx's own
+    // isolate=true), so even though A's own frame may still be technically
+    // live on callStack_ (matching the containment check below) and this
+    // WOULD take the childCtx() branch, `ctx.childCtx()` continues B's own
+    // (isolated) ancestry, not A's -- silently losing every variable the
+    // closure captured from A. Skipping straight to capturedLet avoids
+    // this regardless of which frames happen to still be live.
+    if (capturedLet) {
+        if (usedChildCtx) *usedChildCtx = false;
+        return ctx.callCtxFromCapturedLet(capturedLet, scope, std::nullopt, std::move(childrenNodes), childrenCallerCtx);
+    }
     const oscad::Position& declPos = decl.position();
     for (const CallStackFrame& frame : callStack_) {
         const oscad::Position* outer = frame.declPosition;
@@ -119,9 +142,10 @@ EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, 
     return ctx.callCtx(scope, std::nullopt, std::move(childrenNodes), childrenCallerCtx);
 }
 
-std::optional<EvalContext> Evaluator::isolatedCallCtxFor(const oscad::ASTNode& declNode, EvalContext& ctx) {
+std::optional<EvalContext> Evaluator::isolatedCallCtxFor(const oscad::ASTNode& declNode, EvalContext& ctx,
+                                                          const std::shared_ptr<TrailView<Value>>& capturedLet) {
     bool usedChildCtx = false;
-    EvalContext result = callCtxFor(declNode, ctx, ctx.scope, nullptr, nullptr, &usedChildCtx);
+    EvalContext result = callCtxFor(declNode, ctx, ctx.scope, nullptr, nullptr, &usedChildCtx, capturedLet);
     if (usedChildCtx) return std::nullopt;
     return result;
 }
@@ -242,11 +266,11 @@ std::optional<Evaluator::TailStep> Evaluator::tryTailStepFor(
     const std::string& calleeName, const oscad::ASTNode& declNode,
     const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, const oscad::Expression& body,
     bool hasCompiledChunk, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
-    const oscad::Position& callPos) {
+    const oscad::Position& callPos, const std::shared_ptr<TrailView<Value>>& capturedLet) {
     if (hasCompiledChunk) return std::nullopt;
     const oscad::Scope* fnScope = declNode.scope() ? declNode.scope() : ctx.scope;
     bool usedChildCtx = false;
-    EvalContext childCtx = callCtxFor(declNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    EvalContext childCtx = callCtxFor(declNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx, capturedLet);
     if (usedChildCtx) return std::nullopt;
     bindCallArgsInto(params, bindArgs(params, arguments, ctx), childCtx);
     TailStep step;
@@ -360,14 +384,16 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
             // directly. Never re-evaluate n.left below this point -- it
             // may itself be an arbitrary (side-effecting) expression.
             Value funcVal = leftId ? evalIdentifier(leftId->name, &leftId->position(), ctx, false) : evalExpr(*n.left, ctx);
-            if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&funcVal); flPtr && *flPtr) {
-                const oscad::FunctionLiteral& funcNode = **flPtr;
+            if (const auto* closurePtr = std::get_if<ClosurePtr>(&funcVal); closurePtr && *closurePtr) {
+                const Closure& closure = **closurePtr;
+                const oscad::FunctionLiteral& funcNode = *closure.node;
                 checkDebug(n, ctx); // call-site stop, function-literal callee
                 const bool hasChunk = useBytecodeVm() && lookupCompiledLiteralChunk(funcNode) != nullptr;
-                std::optional<TailStep> step = tryTailStepFor("<function literal>", funcNode, funcNode.parameters,
-                                                               *funcNode.body, hasChunk, n.arguments, ctx, n.position());
+                std::optional<TailStep> step =
+                    tryTailStepFor("<function literal>", funcNode, funcNode.parameters, *funcNode.body, hasChunk,
+                                   n.arguments, ctx, n.position(), capturedLetTrail(closure));
                 if (step) return std::move(*step);
-                return Value{evalFunctionLiteral(funcNode, n.arguments, ctx, &n)};
+                return Value{evalFunctionLiteral(closure, n.arguments, ctx, &n)};
             }
 
             if (leftId) warn("Ignoring unknown function '" + leftId->name + "'", &n.position());
@@ -484,13 +510,15 @@ Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad:
     });
 }
 
-Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
+Value Evaluator::evalFunctionLiteral(const Closure& closure,
                                       const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                                       const oscad::ASTNode* callNode) {
+    const oscad::FunctionLiteral& funcNode = *closure.node;
     const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;
-    EvalContext childCtx = callCtxFor(funcNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    EvalContext childCtx =
+        callCtxFor(funcNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx, capturedLetTrail(closure));
     const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
 
     // A literal only ever has a compiled chunk if some OTHER declaration's
@@ -519,12 +547,14 @@ Value Evaluator::evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
                                  });
 }
 
-Value Evaluator::evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode, BoundArgs bound,
+Value Evaluator::evalFunctionLiteralFromBound(const Closure& closure, BoundArgs bound,
                                                EvalContext& ctx, const oscad::Position* callPos) {
+    const oscad::FunctionLiteral& funcNode = *closure.node;
     const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;
-    EvalContext childCtx = callCtxFor(funcNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
+    EvalContext childCtx =
+        callCtxFor(funcNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx, capturedLetTrail(closure));
     const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
     const CompiledChunk* chunk = useBytecodeVm() ? lookupCompiledLiteralChunk(funcNode) : nullptr;
     if (!chunk) {
@@ -579,10 +609,10 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
     // g(3)`). warnIfUndef=false: probing here shouldn't itself warn
     // "unknown variable" if `left` isn't bound to anything -- a genuinely
     // unknown callee gets exactly one warning below, not two.
-    Value funcNode = leftId ? evalIdentifier(leftId->name, &leftId->position(), ctx, false) : evalExpr(*node.left, ctx);
-    if (const auto* flPtr = std::get_if<const oscad::FunctionLiteral*>(&funcNode); flPtr && *flPtr) {
+    Value funcVal = leftId ? evalIdentifier(leftId->name, &leftId->position(), ctx, false) : evalExpr(*node.left, ctx);
+    if (const auto* closurePtr = std::get_if<ClosurePtr>(&funcVal); closurePtr && *closurePtr) {
         checkDebug(node, ctx); // same call-site stop, function-literal callee
-        return evalFunctionLiteral(**flPtr, node.arguments, ctx, &node);
+        return evalFunctionLiteral(**closurePtr, node.arguments, ctx, &node);
     }
 
     if (leftId) {

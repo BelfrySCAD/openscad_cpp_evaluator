@@ -18,19 +18,23 @@ namespace oscadeval {
 
 struct ValueList;
 struct ValueObject;
+struct Closure;
 
 using ListPtr = std::shared_ptr<const ValueList>;
 using ObjectPtr = std::shared_ptr<const ValueObject>;
+using ClosurePtr = std::shared_ptr<const Closure>;
 
 // The OpenSCAD dynamic value type. `bool` is a distinct alternative from
 // `double` throughout the evaluator -- never implicitly coerced, unlike
 // Python's own bool-is-int -- see every free function below.
 //
-// A function-literal *value* (`g = function(x) x*2;`) is the AST node
-// pointer itself, mirroring the Python reference's _expr_function_literal
-// (`return node`) -- no separate closure-capture wrapper. Non-owning; valid
-// as long as the parsed AST it points into is alive (see evaluator.hpp's
-// ownership contract, added in a later phase).
+// A function-literal *value* (`g = function(x) x*2;`) is a Closure: the AST
+// node pointer plus a captured snapshot of its defining scope's own `let_`
+// trail (see Closure's own doc comment below) -- unlike the Python
+// reference's _expr_function_literal (a bare `return node`, no capture at
+// all), needed for a closure that outlives the call that created it (see
+// Closure's doc comment for the motivating BOSL2 example and why the
+// simpler bare-pointer approach silently breaks that pattern).
 using Value = std::variant<std::monostate, // undef
                             bool,
                             double, // OpenSCAD has one numeric type
@@ -38,7 +42,52 @@ using Value = std::variant<std::monostate, // undef
                             ListPtr,
                             OscRange,
                             ObjectPtr,
-                            const oscad::FunctionLiteral*>;
+                            ClosurePtr>;
+
+// A function-literal value: the AST node (params/body, non-owning -- valid
+// as long as the parsed AST it points into is alive, same ownership
+// contract as every other raw AST pointer this evaluator holds) plus
+// `capturedLet`, a type-erased `shared_ptr<TrailView<Value>>` (see
+// scope_trail.hpp) snapshotting the `let_` trail live at the moment this
+// literal was evaluated into a value. Type-erased here (not
+// `shared_ptr<TrailView<Value>>` directly) purely to avoid a value.hpp <->
+// scope_trail.hpp circular include (scope_trail.hpp already includes
+// value.hpp for Value itself); callers that need the typed pointer back
+// (eval_context.cpp, user_calls.cpp, bytecode_vm.cpp -- anywhere
+// scope_trail.hpp is already visible) use capturedLetTrail() below.
+//
+// WHY this exists: a plain `TrailView` level is popped (and its bindings
+// destroyed) the instant the EvalContext holding it goes out of scope --
+// fine for ordinary nested evaluation, wrong for a closure that ESCAPES
+// its creating call, e.g. BOSL2's `hashmap()`:
+//   function make_closure(captured) = function(k) captured + k;
+//   c = make_closure(10);
+//   echo(c(5));  // must be 15 -- `captured` has to survive make_closure()
+//                // having already returned by the time c(5) runs.
+// Holding this shared_ptr copy keeps that trail level's refcount above
+// zero for as long as ANY closure value referencing it is still reachable,
+// so `captured` stays resolvable via the ordinary ancestry-walk lookup
+// long after the call that bound it has returned -- no snapshot/copy of
+// the bindings themselves needed, just extending what already exists.
+// `Closure::operator==` compares `node` only (matching the old bare-
+// pointer equality exactly) -- two closures over the same AST node are
+// still "the same function", regardless of what each captured.
+struct Closure {
+    const oscad::FunctionLiteral* node = nullptr;
+    std::shared_ptr<void> capturedLet;
+
+    friend bool operator==(const Closure& a, const Closure& b) { return a.node == b.node; }
+};
+
+template <typename T>
+class TrailView;
+
+// Typed access to Closure::capturedLet -- see its own doc comment for why
+// the field itself is type-erased. Only ever called where scope_trail.hpp
+// is already included.
+inline std::shared_ptr<TrailView<Value>> capturedLetTrail(const Closure& c) {
+    return std::static_pointer_cast<TrailView<Value>>(c.capturedLet);
+}
 
 // Defined after Value so both can hold Value by value -- the standard
 // recursive-variant pattern (indirection through a forward-declared,

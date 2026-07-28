@@ -615,7 +615,7 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         }
         case BuiltinFnId::IsFunction: {
             const Value x = getArg(args, 0, "x", Value{});
-            return Value{std::holds_alternative<const oscad::FunctionLiteral*>(x) && std::get<const oscad::FunctionLiteral*>(x) != nullptr};
+            return Value{std::holds_alternative<ClosurePtr>(x) && std::get<ClosurePtr>(x) != nullptr};
         }
         case BuiltinFnId::IsObject: {
             const Value x = getArg(args, 0, "x", Value{});

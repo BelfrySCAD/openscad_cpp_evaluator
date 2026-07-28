@@ -303,7 +303,7 @@ public:
     // for) -- `bound` is matched against `funcNode`'s OWN parameters
     // (discovered now, not at compile time, since the callee wasn't
     // statically known). Mirrors evalFunctionLiteral exactly otherwise.
-    Value evalFunctionLiteralFromBound(const oscad::FunctionLiteral& funcNode, BoundArgs bound, EvalContext& ctx,
+    Value evalFunctionLiteralFromBound(const Closure& closure, BoundArgs bound, EvalContext& ctx,
                                         const oscad::Position* callPos);
 
     // Testing-only override, checked before the (once-cached) env var --
@@ -466,9 +466,18 @@ private:
     // (see CallStackFrame::upvalueParent's own doc comment for the real
     // scenario this was caught on -- a closure passed through an
     // unrelated intermediary function).
+    // `capturedLet`: non-null only for a FunctionLiteral *value* callee
+    // (see Closure's doc comment, value.hpp) -- when the closure-nesting
+    // check below comes back false (the defining call has already
+    // returned -- an ESCAPED closure), the isolated call context is rooted
+    // at `capturedLet` instead of `ctx`'s own trail, so the closure's
+    // captured variables stay resolvable. Ignored (as if null) when the
+    // check comes back true: an actually-still-live enclosing call is
+    // already reachable via `ctx`'s own ancestry, the ordinary path.
     EvalContext callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, const oscad::Scope* scope,
                             std::shared_ptr<const ChildrenNodeList> childrenNodes = nullptr,
-                            const EvalContext* childrenCallerCtx = nullptr, bool* usedChildCtx = nullptr);
+                            const EvalContext* childrenCallerCtx = nullptr, bool* usedChildCtx = nullptr,
+                            const std::shared_ptr<TrailView<Value>>& capturedLet = nullptr);
 
     // Fills in any parameter not already present in `bound` (bindArgs'
     // own return value -- the authoritative "did the caller actually
@@ -629,7 +638,8 @@ private:
                                             const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
                                             const oscad::Expression& body, bool hasCompiledChunk,
                                             const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
-                                            EvalContext& ctx, const oscad::Position& callPos);
+                                            EvalContext& ctx, const oscad::Position& callPos,
+                                            const std::shared_ptr<TrailView<Value>>& capturedLet = nullptr);
 
     // Marker for "not one of the 5 trampolinable node kinds" -- the
     // trampoline falls back to a genuine evalExpr(node, ctx) call for
@@ -655,7 +665,7 @@ private:
     Value evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
                             const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                             const oscad::ASTNode* callNode);
-    Value evalFunctionLiteral(const oscad::FunctionLiteral& funcNode,
+    Value evalFunctionLiteral(const Closure& closure,
                                const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                                const oscad::ASTNode* callNode);
 
@@ -741,7 +751,11 @@ public:
     // nullopt if `declNode` is closure-nested inside the currently-active
     // call, in which case the caller must fall back to a real recursive
     // call (evalUserFunctionFromBound/evalFunctionLiteralFromBound).
-    std::optional<EvalContext> isolatedCallCtxFor(const oscad::ASTNode& declNode, EvalContext& ctx);
+    // `capturedLet`: see callCtxFor's own doc comment -- pass the callee
+    // closure's captured trail for a FunctionLiteral-value callee (nullptr
+    // for a named FunctionDeclaration callee, which has none).
+    std::optional<EvalContext> isolatedCallCtxFor(const oscad::ASTNode& declNode, EvalContext& ctx,
+                                                   const std::shared_ptr<TrailView<Value>>& capturedLet = nullptr);
 
     // Shared per-hop bookkeeping for BOTH trampolines (evalFunctionBodyTrampoline,
     // user_calls.cpp, AND runCompiledFunctionTrampoline/
