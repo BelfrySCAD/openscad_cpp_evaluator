@@ -22,10 +22,18 @@ std::vector<ColoredBody> flattenCsgTree(const std::vector<std::unique_ptr<CSGNod
     return result;
 }
 
-std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_ptr<CSGNode>>& tree) {
+// Shared bottom-up walk behind generateTree() (owning unique_ptr tree) and
+// generatePartialTree() (a live, still-being-resolved treeStack_ level,
+// which the resolve pass -- not this function -- continues to own): takes
+// non-owning CSGNode* so both callers share one implementation without
+// either transferring ownership. unique_ptr's constness doesn't propagate
+// to the pointee, so mutating node.bodies here is legal even from a const
+// vector<unique_ptr<CSGNode>>& (see csg_node.hpp) -- this overload just
+// makes that non-owning access explicit for the treeStack_ caller too.
+std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>& tree) {
     std::vector<ColoredBody> topLevelBodies;
     const auto& dispatch = generateDispatch();
-    for (const auto& nodePtr : tree) {
+    for (CSGNode* nodePtr : tree) {
         CSGNode& node = *nodePtr;
 
         // ManifoldCache lookup: node.uncacheable (rands() taint, set
@@ -43,10 +51,11 @@ std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_p
         } else {
             // Recurse into children first (bottom-up) -- populates each
             // child's own .bodies in place so flattenCsgTree/a GenerateFn
-            // can read them back. unique_ptr's constness doesn't propagate
-            // to the pointee, so this mutation is legal even though `tree`
-            // is a const& (see csg_node.hpp).
-            generateTree(node.children);
+            // can read them back.
+            std::vector<CSGNode*> childPtrs;
+            childPtrs.reserve(node.children.size());
+            for (const std::unique_ptr<CSGNode>& c : node.children) childPtrs.push_back(c.get());
+            generateTreeImpl(childPtrs);
 
             auto it = dispatch.find(node.kind);
             if (node.isBuiltin && it != dispatch.end()) {
@@ -64,6 +73,28 @@ std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_p
         for (const ColoredBody& b : node.bodies) topLevelBodies.push_back(b);
     }
     return topLevelBodies;
+}
+
+std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_ptr<CSGNode>>& tree) {
+    std::vector<CSGNode*> ptrs;
+    ptrs.reserve(tree.size());
+    for (const std::unique_ptr<CSGNode>& n : tree) ptrs.push_back(n.get());
+    return generateTreeImpl(ptrs);
+}
+
+std::vector<ColoredBody> Evaluator::generatePartialTree() {
+    // Flatten treeStack_ across every nesting level (mirrors the reference's
+    // `[node for level in ev._tree_stack for node in level]`): a CSGNode
+    // only lands in its parent's own accumulator once the parent's resolve
+    // finishes, so for a script whose whole geometry is one deeply-nested
+    // top-level statement, the *top* of the tree stays empty for the entire
+    // time spent stepping through its innermost leaves -- flattening every
+    // level picks up already-resolved leaves (e.g. a finished cube() sitting
+    // in a still-in-progress union()'s accumulator) regardless of how deep.
+    std::vector<CSGNode*> flat;
+    for (const std::vector<std::unique_ptr<CSGNode>>& level : treeStack_)
+        for (const std::unique_ptr<CSGNode>& node : level) flat.push_back(node.get());
+    return generateTreeImpl(flat);
 }
 
 ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue) {
