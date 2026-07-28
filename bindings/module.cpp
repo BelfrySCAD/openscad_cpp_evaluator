@@ -313,13 +313,20 @@ nb::object generatePartialTrampoline(const GeneratePartialFn& generatePartial) {
 }
 
 // Trampoline: C++ debug hook -> the Python DebugSession hook. Runs with the
-// GIL held (reacquired by the caller). `getFrame`/`callStack`/`generatePartial`
-// are valid only for this synchronous call, so the get_frames/generate_partial
+// (origin, line) targets children()/children(N) might forward control to
+// from the just-checked debug-hook node, for the "step to child" command.
+// See Evaluator::lastChildrenPositions()'s own doc comment: valid only
+// synchronously within the current hook call, same as get_frames.
+using GetChildrenPositionsFn = std::function<const std::optional<std::vector<std::pair<std::string, int>>>&()>;
+
+// GIL held (reacquired by the caller). `getFrame`/`callStack`/`generatePartial`/
+// `getChildrenPositions` are valid only for this synchronous call, so their
 // closures are only ever invoked from within the Python hook, before it returns.
 oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, bool forced, const std::string& origin,
                                         const std::vector<oscadeval::CallStackFrame>& callStack,
                                         const oscadeval::DebugFramesFn& getFrame,
-                                        const GeneratePartialFn& generatePartial) {
+                                        const GeneratePartialFn& generatePartial,
+                                        const GetChildrenPositionsFn& getChildrenPositions) {
     auto getFramesPy = nb::cpp_function([&callStack, &getFrame]() -> nb::object {
         std::vector<oscadeval::DebugFrame> frames = getFrame();
         nb::list allFrameLocals;
@@ -335,10 +342,18 @@ oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, boo
         return nb::make_tuple(nb::make_tuple(lastLocals, allFrameLocals), callStackToPy(callStack));
     });
     nb::object generatePartialPy = generatePartialTrampoline(generatePartial);
+    auto getChildrenPositionsPy = nb::cpp_function([&getChildrenPositions]() -> nb::object {
+        const std::optional<std::vector<std::pair<std::string, int>>>& positions = getChildrenPositions();
+        if (!positions) return nb::none();
+        nb::list out;
+        for (const auto& [origin, line] : *positions) out.append(nb::make_tuple(origin, line));
+        return out;
+    });
 
     nb::object ret = hook(line, depth, nb::arg("forced") = forced, nb::arg("expr_level") = false,
                           nb::arg("expr_depth") = 0, nb::arg("origin") = origin, nb::arg("get_frames") = getFramesPy,
-                          nb::arg("generate_partial") = generatePartialPy);
+                          nb::arg("generate_partial") = generatePartialPy,
+                          nb::arg("get_children_positions") = getChildrenPositionsPy);
     nb::tuple t = nb::cast<nb::tuple>(ret);
     oscadeval::DebugAction action;
     action.stop = (nb::cast<std::string>(t[0]) == "stop");
@@ -399,12 +414,16 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
         GeneratePartialFn generatePartial = [&evPtr]() -> std::vector<oscadeval::ColoredBody> {
             return evPtr->generatePartialTree();
         };
+        GetChildrenPositionsFn getChildrenPositions =
+            [&evPtr]() -> const std::optional<std::vector<std::pair<std::string, int>>>& {
+            return evPtr->lastChildrenPositions();
+        };
         oscadeval::DebugHooks hooks;
         hooks.debugHook = [&](int line, int depth, bool forced, const std::string& origin,
                               const std::vector<oscadeval::CallStackFrame>& cs,
                               const oscadeval::DebugFramesFn& gf) -> oscadeval::DebugAction {
             nb::gil_scoped_acquire g;
-            return callPyDebugHook(debugHook, line, depth, forced, origin, cs, gf, generatePartial);
+            return callPyDebugHook(debugHook, line, depth, forced, origin, cs, gf, generatePartial, getChildrenPositions);
         };
         hooks.errorBreak = [&](int line, const std::string& header, const std::string& origin,
                                const std::vector<oscadeval::CallStackFrame>& cs, const oscadeval::DebugFramesFn& gf) {
