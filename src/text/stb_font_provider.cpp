@@ -1,11 +1,10 @@
 #include "openscad_cpp_evaluator/stb_font_provider.hpp"
 
-#include "openscad_cpp_evaluator/bundled_font_path.hpp"
+#include "openscad_cpp_evaluator/bundled_font_data.hpp"
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb_truetype.h>
 
-#include <fstream>
 #include <stdexcept>
 
 namespace oscadeval {
@@ -82,16 +81,14 @@ struct StbFontProvider::Impl {
 };
 
 StbFontProvider::StbFontProvider() : impl_(std::make_unique<Impl>()) {
-    std::ifstream in(kBundledFontPath, std::ios::binary);
-    if (!in) throw std::runtime_error(std::string("could not open bundled font '") + kBundledFontPath + "'");
-    in.seekg(0, std::ios::end);
-    const auto size = in.tellg();
-    in.seekg(0);
-    impl_->data.resize(static_cast<size_t>(size));
-    in.read(reinterpret_cast<char*>(impl_->data.data()), size);
+    // Embedded at build time (cmake/embed_font.cmake) -- no runtime file
+    // path to resolve, so this works identically whether running from this
+    // repo's own build tree or a packaged/installed wheel on another
+    // machine entirely.
+    impl_->data.assign(kBundledFontData, kBundledFontData + kBundledFontDataSize);
 
     if (!stbtt_InitFont(&impl_->info, impl_->data.data(), 0)) {
-        throw std::runtime_error(std::string("failed to parse bundled font '") + kBundledFontPath + "'");
+        throw std::runtime_error("failed to parse bundled font");
     }
     impl_->family = fontNameString(impl_->info, 1);
     impl_->style = fontNameString(impl_->info, 2);

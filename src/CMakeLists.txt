@@ -47,6 +47,8 @@ target_include_directories(openscad_cpp_evaluator PUBLIC
 )
 target_include_directories(openscad_cpp_evaluator PRIVATE ${stb_SOURCE_DIR} ${CMAKE_BINARY_DIR}/generated)
 
+add_dependencies(openscad_cpp_evaluator generate_bundled_font)
+
 target_link_libraries(openscad_cpp_evaluator PUBLIC openscad_cpp_parser manifold Boost::polygon)
 target_link_libraries(openscad_cpp_evaluator PRIVATE linenoise)
 target_compile_options(openscad_cpp_evaluator PRIVATE
