@@ -219,6 +219,19 @@ def test_tri_colors_is_none_for_an_ordinary_single_color_body():
     assert bodies[0].tri_colors is None
 
 
+def test_role_defaults_to_normal_and_reflects_modifiers():
+    # Found in the same pass as tri_colors: bodyToDict() never exposed
+    # ColoredBody.role either, crashing the renderer on any real render
+    # (it reads cb.role for every body, not just modified ones).
+    path = _write("cube(1);\n#sphere(1);\n%cylinder(h=1,r=1);\n!cube(2);\n")
+    ev = Evaluator()
+    bodies, _ = ev.evaluate(path)
+    roles = sorted(b.role for b in bodies)
+    # show_only (!) present anywhere -> only show_only + highlight bodies
+    # survive evaluate()'s own filter (see anyShowOnly in csg_resolve.cpp).
+    assert roles == ["highlight", "show_only"]
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = []
