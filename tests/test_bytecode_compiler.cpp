@@ -4,6 +4,7 @@
 
 #include "test_helpers.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -720,4 +721,59 @@ TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnEchoAssertImportObjectCases) {
     }
     EXPECT_EQ(offResult, onResult);
     std::filesystem::remove(path);
+}
+
+TEST(BytecodeCompiler, RangeBasedForListCompDoesNotReMaterializeRangeSizePerIteration) {
+    ScopedVm vm(true);
+    // Op::IterNext used to bound-check via `il.index < il.values.size()`
+    // every single iteration. IterableValues::size() is O(1) for a
+    // materialized list, but for a RANGE it walks the whole sequence from
+    // scratch (its own doc comment already flagged this as a stale
+    // assumption: "no caller in this codebase actually calls size() on a
+    // range today" -- Op::IterNext was exactly that caller). Recomputing an
+    // O(n) size every one of n iterations is O(n^2) overall -- a
+    // 100,000-element range list comprehension took ~9.5s compiled vs
+    // ~0.03s interpreted before the fix (caught via a BOSL2 corpus sweep,
+    // test_math.scadtest's gaussian_rands()). Fixed by caching the size
+    // once at IterMaterialize time (IterList::total). 200,000 elements
+    // finishes in well under a second now; the old behavior would have
+    // taken tens of seconds, so a generous 5s bound cleanly separates
+    // "fixed" from "regressed" without making this test itself slow.
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(runCapturingEcho("function myrange(n) = [for (i=[0:1:n-1]) i];\n"
+                                "r = myrange(200000);\n"
+                                "echo(len(r));"),
+              "ECHO: 200000");
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 5000);
+}
+
+TEST(BytecodeCompiler, CStyleForIncrNameCanReadItsOwnPriorValueInTheSameAssignment) {
+    ScopedVm vm(true);
+    // A C-style for's incr list can introduce a name that reads its OWN
+    // not-yet-assigned-this-iteration value on the right-hand side (its
+    // prior iteration's value) -- e.g. BOSL2's skin.scad: `best_i =
+    // result[0]<bestcost ? i : best_i,`. The compiler used to compile each
+    // incr assignment's RHS BEFORE declaring that assignment's own local
+    // slot (declareLocal ran only after compileExpr), so a self-reference
+    // like this -- and the loop BODY's own read, compiled even earlier --
+    // resolved via Op::LoadFree (the "not a known local, might be dynamic"
+    // fallback) instead of Op::LoadLocal. That's not just an extra
+    // "unknown variable" warning: LoadFree runs identically on every
+    // iteration once compiled, so it NEVER saw what Op::StoreLocal had
+    // written moments earlier at runtime -- a genuinely wrong final
+    // result (undef), not merely a cosmetic warning-count mismatch. Real
+    // OpenSCAD gives [4] here (one "unknown variable" warning for the
+    // first, genuinely-unassigned read, then the accumulator works
+    // correctly from there). Fixed by pre-declaring every incr name's slot
+    // before compiling the condition/body/incr expressions at all.
+    EXPECT_EQ(runCapturingEcho("function myloop(n) =\n"
+                                "    [for (i=0, bestcost=1/0;\n"
+                                "          i<=n;\n"
+                                "          bestcost = (i==2||i==4) ? i : bestcost,\n"
+                                "          best_i = (i==2||i==4) ? i : best_i,\n"
+                                "          i=i+1)\n"
+                                "          if (i==n) best_i];\n"
+                                "echo(myloop(5));"),
+              "ECHO: [4]");
 }

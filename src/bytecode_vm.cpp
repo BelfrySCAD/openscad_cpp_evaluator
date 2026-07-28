@@ -40,6 +40,16 @@ private:
 struct IterList {
     IterableValues values;
     size_t index = 0;
+    // Cached once at IterMaterialize time -- IterableValues::size() is O(1)
+    // for a list/owned vector, but walks a RANGE's whole sequence from
+    // scratch every call (its own doc comment: "no caller in this codebase
+    // actually calls size() on a range today" -- Op::IterNext, below, used
+    // to be exactly that stale caller). Recomputing it once per IterNext
+    // call turned a single range-based for()/list-comp `for` into an O(n^2)
+    // walk (a 100,000-element range: interpreter ~0.03s, VM ~9.5s) -- caught
+    // via a BOSL2 corpus sweep (test_math.scadtest's own gaussian_rands(),
+    // which builds a 100,000-element list via `count()`).
+    size_t total = 0;
 };
 
 // Shared by Op::CallFn's isBuiltin (evalBuiltinFunction) and isImport
@@ -244,6 +254,7 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                     ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", ins.pos);
                 });
                 il.index = 0;
+                il.total = il.values.size(); // once here, never per-iteration -- see IterList's own doc comment
                 ++pc;
                 break;
             }
@@ -254,7 +265,7 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
             }
             case Op::IterNext: {
                 IterList& il = iterLists[static_cast<size_t>(ins.b)];
-                if (il.index < il.values.size()) {
+                if (il.index < il.total) {
                     slots[static_cast<size_t>(ins.a)] = il.values[il.index];
                     ++il.index;
                     ++pc;
