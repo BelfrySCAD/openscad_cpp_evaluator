@@ -130,6 +130,21 @@ nb::dict bodyToDict(oscadeval::ColoredBody& cb) {
         d["color"] = nb::make_tuple((*cb.color)[0], (*cb.color)[1], (*cb.color)[2], (*cb.color)[3]);
     else
         d["color"] = nb::none();
+    // Per-triangle RGBA, set only for a real multi-color CSG merge (see
+    // Evaluator::attachTriColors) -- None for the common single-material
+    // case, matching the reference's ColoredBody.tri_colors exactly (an
+    // (numTri, 4) float32 array or None). The renderer reads this to split
+    // one merged body's triangles across separate opaque/translucent draw
+    // buffers.
+    if (cb.triColors) {
+        const std::vector<std::array<float, 4>>& src = *cb.triColors;
+        std::vector<float> flat;
+        flat.reserve(src.size() * 4);
+        for (const auto& rgba : src) flat.insert(flat.end(), rgba.begin(), rgba.end());
+        d["tri_colors"] = vecToNumpy(std::move(flat), {src.size(), 4});
+    } else {
+        d["tri_colors"] = nb::none();
+    }
     return d;
 }
 

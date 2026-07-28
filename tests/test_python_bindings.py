@@ -192,6 +192,33 @@ def test_dyn_explicit_distinguishes_seeded_from_script_assigned():
     assert "$fa" not in ev.dyn_explicit
 
 
+def test_tri_colors_populated_for_a_real_multicolor_csg_merge():
+    # Found via BelfrySCAD's own renderer crashing on ColoredBody.tri_colors
+    # missing entirely -- the C++ core (Evaluator::attachTriColors,
+    # booleans.cpp) already computes this, bodyToDict() just never exposed
+    # it. union()-ing an opaque cube with a translucent sphere forces a real
+    # merge with two distinct triangle colors.
+    path = _write("union() { color([1,0,0,1]) cube(10); "
+                   "color([0,1,0,0.5]) translate([5,5,5]) sphere(8); }")
+    ev = Evaluator()
+    bodies, _ = ev.evaluate(path)
+    assert len(bodies) == 1
+    tri_colors = bodies[0].tri_colors
+    assert tri_colors is not None
+    num_tris = bodies[0].body.to_mesh().tri_verts.shape[0]
+    assert tri_colors.shape == (num_tris, 4)
+    # Two distinct colors actually present, not e.g. all-default filler.
+    assert len({tuple(row) for row in tri_colors}) >= 2
+
+
+def test_tri_colors_is_none_for_an_ordinary_single_color_body():
+    path = _write("cube(1);")
+    ev = Evaluator()
+    bodies, _ = ev.evaluate(path)
+    assert len(bodies) == 1
+    assert bodies[0].tri_colors is None
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = []
