@@ -17,7 +17,7 @@ from ._openscad_cpp_evaluator import ManifoldCache
 
 __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
-    "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree",
+    "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
 ]
 
 
@@ -132,7 +132,7 @@ class _CSGNode:
     def __init__(self, kind, params, bodies, is_builtin, children):
         self.kind = kind
         self.params = params
-        self.bodies = [ColoredBody(_BodyShim(d), d["color"], None, d["flat_preview"]) for d in bodies]
+        self.bodies = bodies_from_dicts(bodies)
         self.is_builtin = is_builtin
         self.children = children
 
@@ -289,6 +289,15 @@ class ColoredBody:
     flat_preview: bool = False
 
 
+def bodies_from_dicts(body_dicts) -> list:
+    """Convert raw body-dicts (the shape both evaluate()/debug_evaluate() and
+    a debug hook's `generate_partial()` callable return) to ColoredBody
+    instances. Shared by Evaluator.evaluate() and a debug session's own live
+    partial-render (see debug_evaluate()'s `generate_partial` hook kwarg,
+    module.cpp) so both paths convert identically."""
+    return [ColoredBody(_BodyShim(d), d["color"], None, d["flat_preview"]) for d in body_dicts]
+
+
 class Evaluator:
     """Drop-in for belfryscad.engine.evaluator.Evaluator, backed by C++.
 
@@ -355,7 +364,7 @@ class Evaluator:
             raise
         except Exception as e:  # ParseError/EvalError from C++ arrive as RuntimeError
             raise EvalError(str(e)) from e
-        bodies = [ColoredBody(_BodyShim(d), d["color"], None, d["flat_preview"]) for d in body_dicts]
+        bodies = bodies_from_dicts(body_dicts)
         # originalID -> a node with `.position` (start/end offsets) for WYSIWYG
         # picking and gizmo write-back.
         id_to_node = {

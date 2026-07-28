@@ -174,6 +174,26 @@ public:
     // top-level show_only filter -- see evaluate().
     std::vector<ColoredBody> generateTree(const std::vector<std::unique_ptr<CSGNode>>& tree);
 
+    // Best-effort generate over whatever's been resolved SO FAR, for a live
+    // partial render while genuinely paused inside a debug hook mid-
+    // evaluation (resolveTree()/evaluate() haven't returned yet) -- flattens
+    // treeStack_ across every nesting level and runs the same bottom-up
+    // generate walk generateTree() uses, via generateTreeImpl(), over
+    // non-owning pointers into nodes treeStack_ (not this call) still owns.
+    // Safe to call mid-resolve: the resolve pass never reads CSGNode::bodies,
+    // only ever writes kind/params/children, so populating .bodies early
+    // here cannot corrupt or race the resolve that's paused around this
+    // call -- and if a ManifoldCache is set, the real generateTree() call at
+    // the end of evaluate() gets a cache hit for any subtree this already
+    // generated, so a debug session pays no repeated Manifold work session-
+    // wide (see manifold_cache.hpp's own doc comment on this exact use
+    // case). Only meaningful to call synchronously from within a
+    // DebugHookFn/ErrorBreakFn callback; the caller must not retain a
+    // reference into anything treeStack_ owns past that callback's return.
+    // Mirrors the reference's `ev.generate_tree(partial_nodes)` called from
+    // `_generate_partial_render`.
+    std::vector<ColoredBody> generatePartialTree();
+
     // Provenance tables populated by tagGenerated() during generate --
     // originalID -> the AST node that produced it / that node's own
     // resolved color. Public, read by a caller (CLI, WYSIWYG picking) after
@@ -356,6 +376,12 @@ private:
     template <typename NodeList>
     std::vector<ColoredBody> evaluateImpl(const NodeList& nodes, EvalContext& ctx,
                                            const std::unordered_map<std::string, Value>& viewportParams);
+
+    // Shared bottom-up generate walk behind generateTree()/generatePartialTree()
+    // -- see generatePartialTree()'s own doc comment and this function's
+    // definition (csg_generate.cpp) for why non-owning pointers, not
+    // unique_ptr, let both callers share one implementation.
+    std::vector<ColoredBody> generateTreeImpl(const std::vector<CSGNode*>& tree);
 
     // Evaluates one top-level element of a `[...]` list literal (a plain
     // expression, or one of the 6 list-comprehension clause kinds --

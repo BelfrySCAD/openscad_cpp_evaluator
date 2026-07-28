@@ -292,13 +292,34 @@ nb::list callStackToPy(const std::vector<oscadeval::CallStackFrame>& cs) {
     return out;
 }
 
+// Called from within a debug_hook/error_break callback (never after it
+// returns) to best-effort generate a live render of whatever's been
+// resolved so far -- see Evaluator::generatePartialTree()'s own doc
+// comment for why this is safe to call mid-resolve.
+using GeneratePartialFn = std::function<std::vector<oscadeval::ColoredBody>()>;
+
+// Wraps a GeneratePartialFn as a Python callable returning a plain list of
+// body-dicts (bodiesToList's own shape) -- the facade's _generate_partial_render
+// converts these to ColoredBody and catches whatever exception a GenerateFn
+// raises, the same try/except shape it already had calling generate_tree()
+// directly. No error handling needed here: a C++ exception crossing into
+// Python via this cpp_function is nanobind's normal std::exception ->
+// RuntimeError mapping, which that Python try/except already catches.
+nb::object generatePartialTrampoline(const GeneratePartialFn& generatePartial) {
+    return nb::cpp_function([&generatePartial]() -> nb::list {
+        std::vector<oscadeval::ColoredBody> bodies = generatePartial();
+        return bodiesToList(bodies);
+    });
+}
+
 // Trampoline: C++ debug hook -> the Python DebugSession hook. Runs with the
-// GIL held (reacquired by the caller). `getFrame`/`callStack` are valid only
-// for this synchronous call, so the get_frames closure is only ever invoked
-// from within the Python hook, before it returns.
+// GIL held (reacquired by the caller). `getFrame`/`callStack`/`generatePartial`
+// are valid only for this synchronous call, so the get_frames/generate_partial
+// closures are only ever invoked from within the Python hook, before it returns.
 oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, bool forced, const std::string& origin,
                                         const std::vector<oscadeval::CallStackFrame>& callStack,
-                                        const oscadeval::DebugFramesFn& getFrame) {
+                                        const oscadeval::DebugFramesFn& getFrame,
+                                        const GeneratePartialFn& generatePartial) {
     auto getFramesPy = nb::cpp_function([&callStack, &getFrame]() -> nb::object {
         std::vector<oscadeval::DebugFrame> frames = getFrame();
         nb::list allFrameLocals;
@@ -313,9 +334,11 @@ oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, boo
         }
         return nb::make_tuple(nb::make_tuple(lastLocals, allFrameLocals), callStackToPy(callStack));
     });
+    nb::object generatePartialPy = generatePartialTrampoline(generatePartial);
 
     nb::object ret = hook(line, depth, nb::arg("forced") = forced, nb::arg("expr_level") = false,
-                          nb::arg("expr_depth") = 0, nb::arg("origin") = origin, nb::arg("get_frames") = getFramesPy);
+                          nb::arg("expr_depth") = 0, nb::arg("origin") = origin, nb::arg("get_frames") = getFramesPy,
+                          nb::arg("generate_partial") = generatePartialPy);
     nb::tuple t = nb::cast<nb::tuple>(ret);
     oscadeval::DebugAction action;
     action.stop = (nb::cast<std::string>(t[0]) == "stop");
@@ -327,11 +350,13 @@ oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, boo
 // Trampoline: C++ errorBreak -> the Python DebugSession error hook.
 void callPyErrorBreak(nb::handle errorBreak, int line, const std::string& header, const std::string& origin,
                        const std::vector<oscadeval::CallStackFrame>& callStack,
-                       const oscadeval::DebugFramesFn& getFrame) {
+                       const oscadeval::DebugFramesFn& getFrame, const GeneratePartialFn& generatePartial) {
     std::vector<oscadeval::DebugFrame> frames = getFrame();
     nb::list allFrameLocals;
     for (const oscadeval::DebugFrame& f : frames) allFrameLocals.append(frameToDict(f));
-    errorBreak(line, header, allFrameLocals, callStackToPy(callStack), nb::arg("origin") = origin);
+    nb::object generatePartialPy = generatePartialTrampoline(generatePartial);
+    errorBreak(line, header, allFrameLocals, callStackToPy(callStack), nb::arg("origin") = origin,
+               nb::arg("generate_partial") = generatePartialPy);
 }
 
 // Trampoline: C++ returnHook -> the Python DebugSession return hook. Only
@@ -362,17 +387,29 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             nb::gil_scoped_acquire g;
             echoFn(m);
         };
+        // Set right after `ev` is constructed below, before evaluate() runs
+        // -- every hook fires only from within that call, by which point
+        // this is always valid. Needed because `hooks` (captured by the
+        // lambdas below) must be fully built and passed into Evaluator's
+        // constructor before `ev` exists, so the lambdas can't capture `ev`
+        // itself; they capture this pointer's address instead, which DOES
+        // already exist (see generatePartial's own doc comment on why
+        // GeneratePartialFn needs a live Evaluator& at all).
+        oscadeval::Evaluator* evPtr = nullptr;
+        GeneratePartialFn generatePartial = [&evPtr]() -> std::vector<oscadeval::ColoredBody> {
+            return evPtr->generatePartialTree();
+        };
         oscadeval::DebugHooks hooks;
         hooks.debugHook = [&](int line, int depth, bool forced, const std::string& origin,
                               const std::vector<oscadeval::CallStackFrame>& cs,
                               const oscadeval::DebugFramesFn& gf) -> oscadeval::DebugAction {
             nb::gil_scoped_acquire g;
-            return callPyDebugHook(debugHook, line, depth, forced, origin, cs, gf);
+            return callPyDebugHook(debugHook, line, depth, forced, origin, cs, gf, generatePartial);
         };
         hooks.errorBreak = [&](int line, const std::string& header, const std::string& origin,
                                const std::vector<oscadeval::CallStackFrame>& cs, const oscadeval::DebugFramesFn& gf) {
             nb::gil_scoped_acquire g;
-            callPyErrorBreak(errorBreak, line, header, origin, cs, gf);
+            callPyErrorBreak(errorBreak, line, header, origin, cs, gf, generatePartial);
         };
         if (!returnHook.is_none()) {
             hooks.returnHook = [&](const std::string& name, const oscadeval::Value& result, int depth) {
@@ -384,6 +421,7 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, echoCpp);
             oscadeval::Evaluator ev(echoCpp, nullptr, manifoldCache, hooks, false);
+            evPtr = &ev;
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
             collectIdSpans(ev, idSpans);

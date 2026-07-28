@@ -96,7 +96,8 @@ def test_return_hook_fires_for_user_function():
     path = _write("function double(x) = x * 2; y = double(21); cube(y);")
     returns = []
 
-    def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None):
+    def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
+                   generate_partial=None):
         return ("continue", {})
 
     def return_hook(name, value, depth):
@@ -105,6 +106,52 @@ def test_return_hook_fires_for_user_function():
     ev = Evaluator(debug_hook=debug_hook, return_hook=return_hook)
     ev.evaluate(path)
     assert returns == [("double", 42.0, 1)]
+
+
+def test_generate_partial_during_a_live_pause():
+    # Two statements: by the time the hook fires on line 2 (forced=True,
+    # the breakpoint() call), cube(1) has already fully resolved and
+    # generated once via the normal resolve pass -- but sphere(5) on the
+    # next line hasn't been reached yet. generate_partial() should return
+    # geometry from whatever's ALREADY been resolved at that exact moment
+    # (just the cube), proving it reads live in-progress state, not a
+    # snapshot from a completed evaluate().
+    path = _write("cube(1);\nbreakpoint();\nsphere(5);")
+    seen_partial_counts = []
+
+    def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
+                   generate_partial=None):
+        if forced:
+            bodies = generate_partial()
+            seen_partial_counts.append(len(bodies))
+        return ("continue", {})
+
+    ev = Evaluator(debug_hook=debug_hook)
+    bodies, _ = ev.evaluate(path)
+    assert seen_partial_counts == [1]  # only the cube, at the moment breakpoint() paused
+    assert len(bodies) == 2  # both cube and sphere in the final, complete result
+
+
+def test_generate_partial_on_an_empty_tree_returns_empty_not_an_error():
+    # At the very first statement's forced pause, nothing has resolved yet --
+    # generate_partial() must handle an empty tree gracefully (empty list),
+    # not raise. (A genuine GenerateFn exception mid-partial-render is real
+    # error-propagation behavior too -- see generatePartialTrampoline's own
+    # doc comment in module.cpp -- but isn't exercised here: this backend's
+    # builtins are permissive about invalid dimensions, same as real OpenSCAD,
+    # so there's no reliable way to force one from a script.)
+    path = _write("breakpoint();\ncube(1);")
+    seen = []
+
+    def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
+                   generate_partial=None):
+        if forced:
+            seen.append(generate_partial())
+        return ("continue", {})
+
+    ev = Evaluator(debug_hook=debug_hook)
+    ev.evaluate(path)
+    assert seen == [[]]
 
 
 def test_dyn_explicit_distinguishes_seeded_from_script_assigned():
