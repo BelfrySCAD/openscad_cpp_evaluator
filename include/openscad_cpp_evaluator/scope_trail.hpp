@@ -55,7 +55,25 @@ public:
     }
 
     void set(const std::string& name, T value, int level) {
-        stacks_[name].push_back(Entry{std::move(value), level});
+        std::vector<Entry>& vec = stacks_[name];
+        // A rebind of the SAME name at the level that's already current
+        // (a for-loop variable set every iteration without opening a new
+        // level each time, e.g. C-style for's init/incr -- see
+        // expr_eval.cpp's ListCompCFor case) overwrites the existing
+        // top-of-stack entry in place instead of pushing another one: a
+        // 999,999-iteration loop used to accumulate 999,999 Entry objects
+        // (and 999,999 duplicate name copies in dirty_[level]) that were
+        // never read again, all held until the level closed and popLevel()
+        // walked and popped every one of them in a single O(N) sweep.
+        // Nothing ever reads a stale same-level entry once a newer one at
+        // that same level exists (a level is one scope instantiation,
+        // never reopened), so this is a pure win, not just a memory
+        // optimization: it also collapses that O(N) unwind to O(1).
+        if (!vec.empty() && vec.back().level == level) {
+            vec.back().value = std::move(value);
+            return;
+        }
+        vec.push_back(Entry{std::move(value), level});
         dirty_[level].push_back(name);
     }
 
@@ -116,6 +134,17 @@ public:
     }
 
     bool has(const std::string& name, int myLevel) const { return lookup(name, myLevel) != nullptr; }
+
+    // Test-only introspection: how many physical Entry objects exist for
+    // `name` (across every level, not just the current one) -- lets
+    // ScopeTrailStorageTest assert the same-level-overwrite optimization
+    // actually bounds growth (a for-loop variable set N times at one level
+    // should hold ~1 entry, not N), not just that lookup() still returns
+    // the right value either way.
+    size_t debugEntryCountForTesting(const std::string& name) const {
+        auto it = stacks_.find(name);
+        return it == stacks_.end() ? 0 : it->second.size();
+    }
 
     // Ancestry-filtered snapshot -- O(total distinct names ever bound so
     // far in the whole evaluation), not O(names visible now). Only used
@@ -258,7 +287,20 @@ public:
     void set(const std::string& name, T value, int level) {
         int id = intern_->idFor(name);
         ensureSize(id);
-        stacks_[static_cast<size_t>(id)].push_back(Entry{std::move(value), level});
+        std::vector<Entry>& vec = stacks_[static_cast<size_t>(id)];
+        // Same same-level-overwrite optimization as ScopeTrailStorage::set()
+        // -- see that one's doc comment for the full rationale. Applies
+        // here too: e.g. `$fn = 1; $fn = 2;` as sibling top-level
+        // statements share one level (evalChildren's per-statement
+        // EvalContext only swaps `scope`, aliasing the same trail/level --
+        // see EvalContext::withScope's own doc comment), so repeated
+        // same-block reassignment of a $-variable used to accumulate
+        // entries here exactly like a for-loop's plain variable did.
+        if (!vec.empty() && vec.back().level == level) {
+            vec.back().value = std::move(value);
+            return;
+        }
+        vec.push_back(Entry{std::move(value), level});
         dirty_[level].push_back(id);
     }
 
@@ -298,6 +340,12 @@ public:
     }
 
     bool has(const std::string& name, int myLevel) const { return lookup(name, myLevel) != nullptr; }
+
+    // See ScopeTrailStorage::debugEntryCountForTesting's own doc comment.
+    size_t debugEntryCountForTesting(const std::string& name) const {
+        int id = intern_->idFor(name);
+        return id >= 0 && static_cast<size_t>(id) < stacks_.size() ? stacks_[static_cast<size_t>(id)].size() : 0;
+    }
 
     std::vector<std::pair<std::string, T>> items(int myLevel) const {
         std::vector<std::pair<std::string, T>> result;
