@@ -74,14 +74,14 @@ std::vector<DebugFrame> Evaluator::buildDebugFrames(const EvalContext* ctx) cons
     return frames;
 }
 
-void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced) {
+void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced, bool exprLevel) {
     if (!debugHooks_.debugHook) return;
     const oscad::Position& pos = node.position();
     const int depth = static_cast<int>(callStack_.size());
     const DebugFramesFn getFrame = [this, &ctx]() { return buildDebugFrames(&ctx); };
     lastChildrenPositions_ = childStatementPositions(node);
 
-    DebugAction action = debugHooks_.debugHook(pos.line, depth, forced, pos.origin, callStack_, getFrame);
+    DebugAction action = debugHooks_.debugHook(pos.line, depth, forced, exprLevel, pos.origin, callStack_, getFrame);
     for (auto& [k, v] : action.mods) ctx.let_->set(k, v);
     if (action.stop) throw EvalError(kDebuggingStoppedMessage);
 }

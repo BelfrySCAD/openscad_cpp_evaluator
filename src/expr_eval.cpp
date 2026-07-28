@@ -119,6 +119,11 @@ Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* 
 
 // -- List comprehensions ----------------------------------------------
 
+// Debug checkpoints below mirror the reference's _eval_list_comp AND its
+// near-duplicate twin _eval_list_comp_body (both dispatch over the same
+// ListComp* kinds with identical _check_debug placement; this port folds
+// them into this one function plus evalListCompBody's ListComprehension
+// early-out, so one set of calls covers both).
 void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, std::vector<Value>& out) {
     switch (elem.kind()) {
         case oscad::NodeKind::ListCompFor: {
@@ -147,6 +152,11 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                 for (const Value& val : pairs[depth].values) {
                     EvalContext childCtx = parentCtx.letChildCtx();
                     childCtx.let_->set(pairs[depth].name, val);
+                    // Per-binding stop, same shape as evalFor's -- but with
+                    // NO separate body-entry marker at depth == pairs.size()
+                    // (_eval_listcomp_for has none; the body's own element
+                    // check below supplies the expr-level stop instead).
+                    checkDebug(*n.assignments[depth], childCtx);
                     recurse(depth + 1, childCtx);
                 }
             };
@@ -154,47 +164,73 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             return;
         }
         case oscad::NodeKind::ListCompCFor: {
+            // Stop order per _eval_listcomp_cfor, exactly:
+            //   init(s) -> [cond(true) -> body -> incr(s)]* -> cond(false)
+            // The condition is checked (expr-level) on EVERY pass including
+            // the final false one that ends the loop; body entry uses the
+            // whole ListCompCFor node, not the body expression.
             auto& n = static_cast<const oscad::ListCompCFor&>(elem);
             EvalContext loopCtx = ctx.letChildCtx();
-            for (const auto& assign : n.inits) loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
+            for (const auto& assign : n.inits) {
+                checkDebug(*assign, loopCtx);
+                loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
+            }
 
             const bool isNestedLc = (n.body->kind() == oscad::NodeKind::ListComprehension);
             constexpr int kMaxCForIterations = 1'000'000;
             int iterations = 0;
-            while (truthy(evalExpr(*n.condition, loopCtx))) {
+            while (true) {
+                checkDebug(*n.condition, loopCtx, /*forced=*/false, /*exprLevel=*/true);
+                if (!truthy(evalExpr(*n.condition, loopCtx))) break;
                 ++iterations;
                 if (iterations > kMaxCForIterations) {
                     error("C-style for loop exceeded maximum iteration count", n);
                 }
+                checkDebug(n, loopCtx);
                 if (isNestedLc) {
                     out.push_back(evalListLiteral(static_cast<const oscad::ListComprehension&>(*n.body), loopCtx));
                 } else {
                     appendAll(out, evalListCompBody(*n.body, loopCtx));
                 }
-                for (const auto& assign : n.incrs) loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
+                for (const auto& assign : n.incrs) {
+                    checkDebug(*assign, loopCtx);
+                    loopCtx.let_->set(assign->name->name, evalExpr(*assign->expr, loopCtx));
+                }
             }
             return;
         }
         case oscad::NodeKind::ListCompIf: {
             auto& n = static_cast<const oscad::ListCompIf&>(elem);
-            if (truthy(evalExpr(*n.condition, ctx))) appendAll(out, evalListCompBody(*n.trueExpr, ctx));
+            checkDebug(n, ctx);
+            if (truthy(evalExpr(*n.condition, ctx))) {
+                checkDebug(*n.trueExpr, ctx, /*forced=*/false, /*exprLevel=*/true);
+                appendAll(out, evalListCompBody(*n.trueExpr, ctx));
+            }
             return;
         }
         case oscad::NodeKind::ListCompIfElse: {
             auto& n = static_cast<const oscad::ListCompIfElse&>(elem);
+            checkDebug(n, ctx);
             const oscad::ASTNode& branch = truthy(evalExpr(*n.condition, ctx)) ? *n.trueExpr : *n.falseExpr;
+            checkDebug(branch, ctx, /*forced=*/false, /*exprLevel=*/true);
             appendAll(out, evalListCompBody(branch, ctx));
             return;
         }
         case oscad::NodeKind::ListCompLet: {
             auto& n = static_cast<const oscad::ListCompLet&>(elem);
             EvalContext letCtx = ctx.letChildCtx();
-            for (const auto& assign : n.assignments) bindLetName(letCtx, assign->name->name, evalExpr(*assign->expr, letCtx));
+            // Per-assignment stops only -- no expr-level body marker here,
+            // unlike the if/if-else/each clauses (matches the reference).
+            for (const auto& assign : n.assignments) {
+                checkDebug(*assign, letCtx);
+                bindLetName(letCtx, assign->name->name, evalExpr(*assign->expr, letCtx));
+            }
             appendAll(out, evalListCompBody(*n.body, letCtx));
             return;
         }
         case oscad::NodeKind::ListCompEach: {
             auto& n = static_cast<const oscad::ListCompEach&>(elem);
+            checkDebug(n, ctx, /*forced=*/false, /*exprLevel=*/true);
             const oscad::ASTNode& inner = *n.body;
             if (isListCompClauseKind(inner.kind())) {
                 for (const Value& item : evalListCompBody(inner, ctx)) appendEachInto(out, item);
@@ -204,6 +240,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             return;
         }
         default:
+            checkDebug(elem, ctx, /*forced=*/false, /*exprLevel=*/true);
             out.push_back(evalExpr(static_cast<const oscad::Expression&>(elem), ctx));
             return;
     }
@@ -265,6 +302,9 @@ Value Evaluator::evalLetExpr(const oscad::LetOp& node, EvalContext& ctx) {
         // Unlike the *statement* form (evalLetBlock), which does not --
         // see that method's own doc comment for why this isn't a copy/paste
         // mistake in one direction or the other.
+        // Checked against childCtx (not ctx) -- _expr_let does the same,
+        // the mirror image of _eval_let_block's `_check_debug(assign, ctx)`.
+        checkDebug(*assign, childCtx);
         Value v = evalExpr(*assign->expr, childCtx);
         bindLetName(childCtx, assign->name->name, v);
     }
@@ -272,6 +312,7 @@ Value Evaluator::evalLetExpr(const oscad::LetOp& node, EvalContext& ctx) {
 }
 
 Value Evaluator::evalEchoExpr(const oscad::EchoOp& node, EvalContext& ctx) {
+    checkDebug(node, ctx); // _expr_echo
     doEcho(node.arguments, ctx);
     return evalExpr(*node.body, ctx);
 }
@@ -281,6 +322,7 @@ Value Evaluator::evalAssertExpr(const oscad::AssertOp& node, EvalContext& ctx) {
     // arguments via getArg()/CallArgs, the expression form indexes raw
     // arguments positionally -- mirrors the reference's _expr_assert
     // exactly (`raw[0].expr`/`raw[1].expr`, not _get_arg).
+    checkDebug(node, ctx); // _expr_assert, before the condition is evaluated
     const auto& raw = node.arguments;
     const bool condition = raw.empty() || truthy(evalExpr(*argExpr(*raw[0]), ctx));
     if (!condition) {
@@ -431,8 +473,14 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
         }
 
         case NodeKind::TernaryOp: {
+            // Mirrors _expr_ternary: a statement-level stop on the whole
+            // ternary before the condition runs, then an expr-level one on
+            // whichever branch was chosen, before evaluating it.
             auto& n = static_cast<const oscad::TernaryOp&>(node);
-            return truthy(evalExpr(*n.condition, ctx)) ? evalExpr(*n.trueExpr, ctx) : evalExpr(*n.falseExpr, ctx);
+            checkDebug(n, ctx);
+            const oscad::Expression& branch = truthy(evalExpr(*n.condition, ctx)) ? *n.trueExpr : *n.falseExpr;
+            checkDebug(branch, ctx, /*forced=*/false, /*exprLevel=*/true);
+            return evalExpr(branch, ctx);
         }
 
         case NodeKind::BitwiseOrOp: {

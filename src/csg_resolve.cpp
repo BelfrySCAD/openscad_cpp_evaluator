@@ -140,6 +140,16 @@ void Evaluator::evalModifier(const oscad::ModuleInstantiation& child, const osca
     // always empty (role tagging happens entirely in the matching
     // generate function -- generateHighlight/Background/ShowOnly).
     buildTreeNode(kind, wrapperNode, [&]() {
+        // The wrapped child gets its own statement-level stop, in addition
+        // to the modifier node's (which evalChildren already fired before
+        // dispatching here) -- so `#cube(1);` pauses twice, like the
+        // reference. There, _resolve_modifier_child has no _check_debug of
+        // its own: it calls _eval_statement(node.child, ctx), and _that_
+        // dispatcher independently checks every _TREE_NODE_TYPES node it
+        // is handed. This port's evalStatement has no such blanket check
+        // (evalChildren owns it), so the equivalent stop is made explicit
+        // here.
+        checkDebug(child, ctx);
         evalStatement(child, ctx);
         return CSGParams{};
     });

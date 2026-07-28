@@ -46,7 +46,7 @@ std::string fmtLocals(const std::unordered_map<std::string, Value>& locals) {
 void traceEveryStatement() {
     std::cout << "1. trace every statement:\n";
     DebugHooks hooks;
-    hooks.debugHook = [](int line, int depth, bool, const std::string&, const std::vector<CallStackFrame>&,
+    hooks.debugHook = [](int line, int depth, bool, bool, const std::string&, const std::vector<CallStackFrame>&,
                           const DebugFramesFn& getFrame) {
         std::vector<DebugFrame> frames = getFrame();
         DebugFrame frame = frames.empty() ? DebugFrame{} : frames.front();
@@ -69,7 +69,7 @@ void stopAtBreakpoint() {
     constexpr int kBreakLine = 3; // the `translate(...) sphere(...)` statement
 
     DebugHooks hooks;
-    hooks.debugHook = [](int line, int, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [](int line, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         DebugAction action;
         if (line == kBreakLine) {
             std::cout << "  breakpoint hit at line " << line << "\n";
@@ -97,7 +97,7 @@ void stopAtBreakpoint() {
 void overrideVariableViaMods() {
     std::cout << "3. override a variable via mods:\n";
     DebugHooks hooks;
-    hooks.debugHook = [](int line, int, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+    hooks.debugHook = [](int line, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
         DebugAction action;
         if (line == 2) action.mods["width"] = Value{2.0}; // about to run `cube([width, width, width])`
         return action;

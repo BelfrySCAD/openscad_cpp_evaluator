@@ -323,13 +323,16 @@ public:
     // filtering, which lives entirely in the injected hook, not here) --
     // it's simply passed through so the hook itself can distinguish an
     // unconditional breakpoint()/function-entry pause from a normal
-    // statement-boundary check. Public: called from evalChildren() (every
-    // ordinary statement), evalUserFunction()/evalFunctionLiteral() (function
-    // body entry), and builtins/control.cpp's resolveBreakpoint (a free
-    // function). See debug_hooks.hpp's DebugHookFn doc comment for the
-    // exact statement-level-only scope decision. Mirrors
-    // Evaluator._check_debug.
-    void checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced = false);
+    // statement-boundary check. `exprLevel=true` marks a sub-statement
+    // (expression-granularity) checkpoint that a stepping debugger should
+    // not treat as a statement boundary -- see debug_hooks.hpp's
+    // DebugHookFn doc comment for the full list of call sites and the
+    // exprLevel contract. Public: called from evalChildren() (every
+    // ordinary statement), evalUserFunction()/evalFunctionLiteral()
+    // (function body entry), and builtins/control.cpp's
+    // resolveBreakpoint/resolveIntersectionFor (free functions). Mirrors
+    // Evaluator._check_debug, including its parameter defaults.
+    void checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced = false, bool exprLevel = false);
 
     // (origin, line) for each top-level, non-declaration child of the
     // node checkDebug() was just called with -- i.e., if that node is a
@@ -788,6 +791,17 @@ private:
     // (see this phase's own plan notes on the differential-run validation
     // strategy this enables).
     static bool bytecodeVmEnabled();
+
+    // Per-evaluator gate actually consulted before using a compiled chunk.
+    // Compiled bytecode has no per-AST-node debug checkpoints (its whole
+    // point is to flatten those nodes away), so a function body run on the
+    // VM would silently skip every checkDebug() call site the interpreter
+    // path makes -- ternary branches, let()/echo()/assert() expression
+    // forms, list-comprehension clauses, nested call sites. Debugging
+    // therefore always takes the interpreter path, where the port matches
+    // the reference's _check_debug placement exactly. Costs nothing when
+    // no debugger is attached, which is every non-debug render.
+    bool useBytecodeVm() const { return !debugHooks_.debugHook && bytecodeVmEnabled(); }
 
     // -- Profiling (Phase 9) --------------------------------------------
 

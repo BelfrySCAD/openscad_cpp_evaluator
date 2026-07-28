@@ -112,6 +112,11 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
 
     std::function<void(size_t, EvalContext&)> recurse = [&](size_t depth, EvalContext& parentCtx) {
         if (depth == varSeqs.size()) {
+            // One body-entry marker per full cartesian-product iteration
+            // and nothing per individual variable binding (unlike
+            // evalFor) -- mirrors _resolve_intersection_for's single
+            // `_check_debug(body_node[0], loop_ctx, expr_level=True)`.
+            if (!bodyNodes.empty()) ev.checkDebug(*bodyNodes.front(), parentCtx, /*forced=*/false, /*exprLevel=*/true);
             const size_t before = ev.currentTreeFrameSize();
             ev.evalChildren(bodyNodes, parentCtx);
             const size_t after = ev.currentTreeFrameSize();

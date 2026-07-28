@@ -95,12 +95,22 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
     // `let_`.
     std::function<void(size_t, EvalContext&)> recurse = [&](size_t depth, EvalContext& parentCtx) {
         if (depth == pairs.size()) {
+            // Per-full-iteration "entering the body" marker, separate from
+            // (and before) the body's own per-statement checks in
+            // evalChildren -- mirrors _eval_for's
+            // `_check_debug(node.body[0], parent_ctx, expr_level=True)`.
+            if (!bodyNodes.empty()) checkDebug(*bodyNodes.front(), parentCtx, /*forced=*/false, /*exprLevel=*/true);
             evalChildren(bodyNodes, parentCtx);
             return;
         }
         for (const Value& val : pairs[depth].values) {
             EvalContext childCtx = parentCtx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
             childCtx.let_->set(pairs[depth].name, val);
+            // One statement-level stop per (bound-so-far) combination, on
+            // the loop-variable assignment itself -- so a breakpoint set
+            // directly on an `i=[0:2],`/`j=[0:1]` line fires. Mirrors
+            // _eval_for's `_check_debug(assign_node, child)`.
+            checkDebug(*node.assignments[depth], childCtx);
             recurse(depth + 1, childCtx);
         }
     };
@@ -119,6 +129,9 @@ void Evaluator::evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx) {
     // _eval_let_block, not an oversight -- it evaluates every RHS against
     // `ctx` in the loop, only ever writing into `child_ctx`.
     for (const auto& assign : node.assignments) {
+        // Checked against the ORIGINAL ctx (like the RHS eval below), not
+        // childCtx -- mirrors _eval_let_block's `_check_debug(assign, ctx)`.
+        checkDebug(*assign, ctx);
         Value v = evalExpr(*assign->expr, ctx);
         const std::string& name = assign->name->name;
         if (!name.empty() && name[0] == '$') {
@@ -163,18 +176,25 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
         case oscad::NodeKind::ModularIntersectionFor:
             evalIntersectionForNode(static_cast<const oscad::ModularIntersectionFor&>(node), ctx);
             return;
+        // Both if-forms fire a branch-entry marker after the condition and
+        // before the branch's own per-statement checks, on the branch's
+        // first statement (or the if node itself for an empty branch) --
+        // mirrors _eval_statement_impl's
+        // `_check_debug(branch[0] if branch else node, ctx, expr_level=True)`.
         case oscad::NodeKind::ModularIf: {
             auto& n = static_cast<const oscad::ModularIf&>(node);
-            if (truthy(evalExpr(*n.condition, ctx))) evalChildren(n.trueBranch, ctx);
+            if (truthy(evalExpr(*n.condition, ctx))) {
+                checkDebug(n.trueBranch.empty() ? node : *n.trueBranch.front(), ctx, /*forced=*/false,
+                            /*exprLevel=*/true);
+                evalChildren(n.trueBranch, ctx);
+            }
             return;
         }
         case oscad::NodeKind::ModularIfElse: {
             auto& n = static_cast<const oscad::ModularIfElse&>(node);
-            if (truthy(evalExpr(*n.condition, ctx))) {
-                evalChildren(n.trueBranch, ctx);
-            } else {
-                evalChildren(n.falseBranch, ctx);
-            }
+            const auto& branch = truthy(evalExpr(*n.condition, ctx)) ? n.trueBranch : n.falseBranch;
+            checkDebug(branch.empty() ? node : *branch.front(), ctx, /*forced=*/false, /*exprLevel=*/true);
+            evalChildren(branch, ctx);
             return;
         }
         case oscad::NodeKind::ModularFor:
@@ -220,15 +240,20 @@ void Evaluator::evalChildren(const std::vector<const oscad::ASTNode*>& children,
             // always overwrites it before any subsequent read could see a
             // dangling value.
             lastCtx_ = &childCtx;
-            // Every real statement flows through this one call site
-            // (module/function bodies, for-loop bodies, if/else branches,
-            // let-block bodies, the top-level script) -- see
-            // debug_hooks.hpp's DebugHookFn doc comment for why this is
-            // the port's single statement-level debug checkpoint rather
-            // than the reference's many. Declarations are pure no-ops at
-            // statement-eval time (already hoisted into scope), so
-            // there's nothing useful to pause on.
-            if (child->kind() != oscad::NodeKind::ModuleDeclaration && child->kind() != oscad::NodeKind::FunctionDeclaration) {
+            // The port's statement-level debug checkpoint: every real
+            // statement flows through here (module/function bodies,
+            // for-loop bodies, if/else branches, let-block bodies, the
+            // top-level script). Declarations are pure no-ops at
+            // statement-eval time (already hoisted into scope), so there's
+            // nothing useful to pause on. ModularLet is excluded for a
+            // different reason: the reference's _eval_statement_impl
+            // explicitly skips it too (`t is not ModularLet` in its own
+            // guard) because evalLetBlock pauses on each of the let's
+            // ASSIGNMENTS instead -- checking here as well would produce
+            // one extra stop the reference never fires.
+            const oscad::NodeKind k = child->kind();
+            if (k != oscad::NodeKind::ModuleDeclaration && k != oscad::NodeKind::FunctionDeclaration &&
+                k != oscad::NodeKind::ModularLet) {
                 checkDebug(*child, childCtx);
             }
             evalStatement(*child, childCtx);

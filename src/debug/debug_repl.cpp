@@ -425,18 +425,24 @@ bool DebugRepl::runPrompt() {
     }
 }
 
-DebugAction DebugRepl::debugHook(int line, int depth, bool forced, const std::string& origin,
+DebugAction DebugRepl::debugHook(int line, int depth, bool forced, bool exprLevel, const std::string& origin,
                                   const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
     if (quit_) return DebugAction{true, {}};
 
+    // Every step/breakpoint/first-statement decision below is gated on
+    // !exprLevel -- a sub-expression marker (chosen ternary/if branch,
+    // loop body entry, list-comprehension body element) is not a statement
+    // this REPL steps to or breaks on. Only `forced` (breakpoint()) and an
+    // async pause request ignore it. Mirrors _debug_repl.py's debug_hook
+    // exactly, clause for clause.
     const std::string resolved = resolveOrigin(origin);
     bool stepHit = false;
     if (stepCmd_ == "over") {
-        stepHit = depth <= stepDepth_ && resolved == stepOrigin_ && line != stepLine_;
+        stepHit = depth <= stepDepth_ && resolved == stepOrigin_ && line != stepLine_ && !exprLevel;
     } else if (stepCmd_ == "into") {
-        stepHit = line != stepLine_ || resolved != stepOrigin_;
+        stepHit = (line != stepLine_ || resolved != stepOrigin_) && !exprLevel;
     } else if (stepCmd_ == "out") {
-        stepHit = depth < stepDepth_;
+        stepHit = depth < stepDepth_ && !exprLevel;
     } else if (stepCmd_ == "to_child") {
         // Pause the first time control reaches one of the paused call's
         // own children (wherever children()/children(N) forwards to
@@ -444,7 +450,7 @@ DebugAction DebugRepl::debugHook(int line, int depth, bool forced, const std::st
         // back to the same "call returned" safety net step-out uses, so
         // this can never hang. Mirrors BelfrySCAD's DebugSession::
         // _make_hook exactly.
-        stepHit = stepToChildTargets_.count({resolved, line}) > 0 || depth < stepDepth_;
+        stepHit = !exprLevel && (stepToChildTargets_.count({resolved, line}) > 0 || depth < stepDepth_);
     }
 
     // Read-and-clear, same as BelfrySCAD's own DebugSession.pause()/
@@ -454,8 +460,8 @@ DebugAction DebugRepl::debugHook(int line, int depth, bool forced, const std::st
     // immediate re-pause; a harmless quirk, not a hang or crash.
     const bool pauseRequested = pauseRequested_.exchange(false, std::memory_order_relaxed);
 
-    const bool shouldPause = forced || pauseRequested || (breakOnFirst_ && resolved == sourcePath_) ||
-                              breakpoints_[resolved].count(line) > 0 || stepHit;
+    const bool shouldPause = forced || pauseRequested || (breakOnFirst_ && !exprLevel && resolved == sourcePath_) ||
+                              (breakpoints_[resolved].count(line) > 0 && !exprLevel) || stepHit;
     if (!shouldPause) return DebugAction{};
 
     breakOnFirst_ = false;

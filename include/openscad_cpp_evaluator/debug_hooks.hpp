@@ -86,25 +86,31 @@ inline constexpr const char* kDebuggingStoppedMessage = "Debugging stopped.";
 // genuine (non-debugger-triggered) EvalError leaves it at.
 enum class PostRunAction { None, Stopped, Restart, Quit };
 
-// Called at (approximately) every top-level statement in every block --
-// see Evaluator::evalChildren's single call site for the exact mechanism,
-// and its own comment for why this port checks at statement granularity
-// only, not the reference's additional expr_level sub-expression checks
-// (list-comprehension clauses, ternary branches, ...): those exist in the
-// reference to let a debugger single-step through individual expression
-// evaluation, which no consumer of this seam (debug_repl.cpp's REPL,
-// nor a plausible future GUI one) actually needs -- "pause on any
-// statement, inspect locals, set a breakpoint" is fully served by
-// statement-level granularity alone, at a small fraction of the
-// reference's own call-site count. Also called once, with `forced=true`,
-// right before evaluating a user function/function-literal's body
-// expression (functions have no statement-level granularity to hang a
-// hook off otherwise) and by breakpoint() (forced=true, unconditionally,
-// matching the reference's own _check_debug(..., forced=True) call).
+// Called at every point the Python reference calls _check_debug: every
+// top-level statement in every block (Evaluator::evalChildren's single
+// statement checkpoint), plus the reference's finer-grained sub-statement
+// sites -- ternary condition and chosen branch, if/else branch entry,
+// for-loop per-variable bindings and per-iteration body entry,
+// statement- and expression-form let() assignments, expression-form
+// echo()/assert(), every list-comprehension clause (if / if-else / let /
+// each / for / C-style-for, plus bare elements), modifier-wrapped
+// children, and user function / function-literal call sites. Also called
+// once right before evaluating a user function/function-literal's body
+// expression, and by breakpoint() (forced=true, unconditionally, matching
+// the reference's own _check_debug(..., forced=True) call).
+//
+// `exprLevel` mirrors the reference's `expr_level` keyword exactly: true
+// for the sub-expression markers a debugger should NOT treat as a
+// steppable/breakpointable statement (a chosen ternary or if branch, a
+// for-loop body entry, a list-comprehension body element, a C-style-for
+// condition re-check). Both this port's own debug_repl.cpp and the
+// reference's _debug_repl.py gate every step/breakpoint decision on
+// `!exprLevel`, while still pausing unconditionally on `forced`.
+//
 // `depth` is the live user-call-stack depth (Evaluator::callStack_.size())
 // at the pause point. Mirrors Evaluator._check_debug/the debug_hook
 // callback contract.
-using DebugHookFn = std::function<DebugAction(int line, int depth, bool forced, const std::string& origin,
+using DebugHookFn = std::function<DebugAction(int line, int depth, bool forced, bool exprLevel, const std::string& origin,
                                                const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame)>;
 
 // Called from Evaluator::error() right before it throws, if set -- gives a

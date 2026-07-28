@@ -128,7 +128,7 @@ public:
     bool runPrompt();
 
     // Wire these three into Evaluator's DebugHooks (see debug_hooks.hpp).
-    DebugAction debugHook(int line, int depth, bool forced, const std::string& origin,
+    DebugAction debugHook(int line, int depth, bool forced, bool exprLevel, const std::string& origin,
                            const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame);
     void errorBreak(int line, const std::string& header, const std::string& origin, const std::vector<CallStackFrame>& callStack,
                      const DebugFramesFn& getFrame);

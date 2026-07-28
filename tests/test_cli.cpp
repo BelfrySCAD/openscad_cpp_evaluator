@@ -638,7 +638,7 @@ TEST(CliDebugRepl, RequestPauseCausesNextDebugHookCallToPauseLikeABreakpoint) {
     repl.requestPause();
     std::vector<CallStackFrame> callStack;
     DebugAction action =
-        repl.debugHook(5, 0, /*forced=*/false, "/some/other/file.scad", callStack,
+        repl.debugHook(5, 0, /*forced=*/false, /*exprLevel=*/false, "/some/other/file.scad", callStack,
                        [] { return std::vector<DebugFrame>{}; });
     EXPECT_FALSE(action.stop);
     EXPECT_NE(out.str().find("Interrupted at"), std::string::npos);
