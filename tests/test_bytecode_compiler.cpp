@@ -243,6 +243,22 @@ TEST(BytecodeCompiler, CStyleForAccumulates) {
               "ECHO: [0, 0, 1, 3, 6]");
 }
 
+TEST(BytecodeCompiler, CStyleForIncrCanIntroduceAndUseANewNameInTheSamePass) {
+    // Real bug found via BOSL2's nurbs.scad hanging in BelfrySCAD (produced
+    // no geometry there, silently, until traced to this): the compiler
+    // assumed every incr assignment's target name was already declared in
+    // the init list, dereferencing a disengaged scope.resolve() optional
+    // (UB) whenever an incr introduced a brand-new name -- e.g. `k` here,
+    // read by the very next incr in the same list. Verified against real
+    // OpenSCAD and this port's own AST interpreter (both handle it
+    // correctly) before fixing the compiler to match.
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho(
+                  "function f() = [for (a = 0, i = 0; i < 5; k = i >= 2, a = k ? a + 10 : a + 1, i = i + 1) a];\n"
+                  "echo(f());"),
+              "ECHO: [0, 1, 2, 12, 22]");
+}
+
 TEST(BytecodeCompiler, CStyleForExceedingMaxIterationsThrows) {
     ScopedVm vm(true);
     EXPECT_THROW(runCapturingEcho("function f() = [for (a = 0; true; a = a + 1) a];\necho(f());"), EvalError);
