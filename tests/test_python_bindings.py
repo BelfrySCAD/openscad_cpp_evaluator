@@ -97,7 +97,7 @@ def test_return_hook_fires_for_user_function():
     returns = []
 
     def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
-                   generate_partial=None, get_children_positions=None):
+                   generate_partial=None, get_children_positions=None, set_fast_continue=None):
         return ("continue", {})
 
     def return_hook(name, value, depth):
@@ -120,7 +120,7 @@ def test_generate_partial_during_a_live_pause():
     seen_partial_counts = []
 
     def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
-                   generate_partial=None, get_children_positions=None):
+                   generate_partial=None, get_children_positions=None, set_fast_continue=None):
         if forced:
             bodies = generate_partial()
             seen_partial_counts.append(len(bodies))
@@ -144,7 +144,7 @@ def test_generate_partial_on_an_empty_tree_returns_empty_not_an_error():
     seen = []
 
     def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
-                   generate_partial=None, get_children_positions=None):
+                   generate_partial=None, get_children_positions=None, set_fast_continue=None):
         if forced:
             seen.append(generate_partial())
         return ("continue", {})
@@ -164,7 +164,7 @@ def test_get_children_positions_reports_module_call_block_children():
     seen = []
 
     def debug_hook(line, depth, forced=False, expr_level=False, expr_depth=0, origin=None, get_frames=None,
-                   generate_partial=None, get_children_positions=None):
+                   generate_partial=None, get_children_positions=None, set_fast_continue=None):
         positions = get_children_positions()
         if positions:
             seen.append((line, positions))
