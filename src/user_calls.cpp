@@ -14,12 +14,20 @@ const CompiledChunk* Evaluator::lookupOrCompileChunk(const oscad::FunctionDeclar
         it = chunkCache_.emplace(&decl, tryCompileFunction(decl)).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
-    return it->second ? &*it->second : nullptr;
+    if (!it->second) return nullptr;
+    // Compilation itself is cached forever above (never depends on
+    // debugger state); ELIGIBILITY to actually use that compiled chunk
+    // right now is re-checked every call instead -- see chunkEligibleNow's
+    // own doc comment for why that's still cheap (no debugger: one bool
+    // check; fast-continue mode: a handful of integer comparisons against
+    // whatever breakpoints happen to be set right now).
+    return chunkEligibleNow(*it->second) ? &*it->second : nullptr;
 }
 
 const CompiledChunk* Evaluator::lookupCompiledLiteralChunk(const oscad::FunctionLiteral& node) const {
     auto it = literalChunkCache_.find(&node);
-    return it != literalChunkCache_.end() ? &it->second : nullptr;
+    if (it == literalChunkCache_.end()) return nullptr;
+    return chunkEligibleNow(it->second) ? &it->second : nullptr;
 }
 
 void Evaluator::flattenNestedLiterals(CompiledChunk& chunk) {
