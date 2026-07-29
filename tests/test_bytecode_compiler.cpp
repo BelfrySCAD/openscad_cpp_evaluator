@@ -49,6 +49,33 @@ std::string runCapturingEcho(const std::string& code) {
     return captured;
 }
 
+// Counts total debugHook invocations (statement- and expr-level combined)
+// running `code` with a debugger attached. A VM-compiled function call
+// gets exactly ONE stop -- evalUserFunctionCore's own unconditional
+// body-entry checkDebug(), the only checkpoint compiled bytecode has left
+// (see useBytecodeVm()/chunkEligibleNow's own doc comments, evaluator.hpp)
+// -- while an interpreted call additionally hits every sub-expression
+// checkpoint inside it (ternary condition + chosen branch, at minimum, for
+// the functions these tests use). That gap is the only observable,
+// black-box signal these tests have for "did this call actually run
+// compiled or interpreted" -- there's no other public introspection point.
+int countDebugHookStops(const std::string& code, std::optional<std::unordered_map<std::string, std::set<int>>> fastContinueBreakpoints) {
+    int stops = 0;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&,
+                          const DebugFramesFn&) {
+        ++stops;
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    if (fastContinueBreakpoints) ev.setFastContinueBreakpoints(std::move(fastContinueBreakpoints));
+    auto ast = parseSrc(code);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    return stops;
+}
+
 std::filesystem::path tempPath(const std::string& name) {
     return std::filesystem::temp_directory_path() / ("oscad_bytecode_compiler_test_" + name);
 }
@@ -746,6 +773,83 @@ TEST(BytecodeCompiler, RangeBasedForListCompDoesNotReMaterializeRangeSizePerIter
               "ECHO: 200000");
     const auto elapsed = std::chrono::steady_clock::now() - start;
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 5000);
+}
+
+// -- Debug "fast continue" per-function VM gating --------------------------
+//
+// A debugger attached AND actively single-stepping needs every checkDebug()
+// checkpoint the interpreter provides (a compiled function has none for a
+// step to land on) -- that's the pre-existing, always-safe, never-changed
+// behavior when Evaluator::setFastContinueBreakpoints is never called at
+// all (fastContinueBreakpoints_ stays nullopt). But a plain "Continue,
+// pause only at a known breakpoint line" doesn't need that: a function
+// whose own compiled span contains none of the currently-set breakpoint
+// lines can safely run on the VM, since nothing inside it could possibly
+// need a checkpoint right now.
+
+// Expected stop counts below are empirically verified (via a temporary
+// direct instrumentation pass through lookupOrCompileChunk/evalUserFunction,
+// not guessed): calling `f(5)` for `function f(x) = x > 0 ? x + 1 : x - 1;`
+// as the lone argument of a top-level `echo(...)` produces 3 checkDebug
+// stops when f runs compiled (the top-level echo statement's own stop,
+// f's call-site stop from evalFunctionCall, and evalUserFunctionCore's
+// unconditional body-entry stop -- no others, since compiled bytecode has
+// no sub-expression checkpoints) versus 5 when f runs interpreted (those
+// same 3, plus the ternary's own condition-check and chosen-branch-entry
+// sub-expression stops). A FunctionDeclaration statement itself never adds
+// its own top-level stop (evalChildren's per-statement checkpoint skips
+// declarations, mirroring $children's own count -- see
+// Evaluator::evalUserModule's childrenCount loop), so adding a second,
+// uncalled function declaration to a script doesn't change either count.
+
+TEST(BytecodeCompiler, DebugAttachedWithoutFastContinueAlwaysInterprets) {
+    ScopedVm vm(true);
+    // No setFastContinueBreakpoints call at all (nullopt, the default):
+    // must behave exactly as before this feature existed -- always
+    // interpreted -- regardless of the function's own line having no
+    // breakpoint anywhere near it.
+    const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
+                                           "echo(f(5));",
+                                           std::nullopt);
+    EXPECT_EQ(stops, 5);
+}
+
+TEST(BytecodeCompiler, FastContinueWithNoBreakpointInFunctionUsesVm) {
+    ScopedVm vm(true);
+    // Breakpoint set, but only on line 2 (the echo statement) -- f's own
+    // body is entirely on line 1, outside that set, so it's eligible to
+    // run compiled.
+    const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
+                                           "echo(f(5));",
+                                           std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
+    EXPECT_EQ(stops, 3);
+}
+
+TEST(BytecodeCompiler, FastContinueWithBreakpointInsideFunctionStillInterprets) {
+    ScopedVm vm(true);
+    // Breakpoint on line 1 itself -- inside f's own compiled span -- must
+    // still force the interpreter for f specifically, even in fast-continue
+    // mode: something on that exact line could need a real checkpoint.
+    const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
+                                           "echo(f(5));",
+                                           std::unordered_map<std::string, std::set<int>>{{"<string>", {1}}});
+    EXPECT_EQ(stops, 5);
+}
+
+TEST(BytecodeCompiler, FastContinueWithBreakpointInDifferentFunctionUsesVmForThisOne) {
+    ScopedVm vm(true);
+    // Two ternary-bodied functions (so both would show the same VM-vs-
+    // interpreter stop-count gap if called), breakpoint only inside g's
+    // body (line 2) -- f (line 1) must still run compiled since its own
+    // span doesn't contain line 2, even though SOME breakpoint exists in
+    // this same file. Confirms the gating is genuinely per-function, not
+    // "any breakpoint anywhere disables the whole file." Only f is ever
+    // called, so g's own eligibility is never directly observed here.
+    const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
+                                           "function g(x) = x > 0 ? x + 1 : x - 1;\n"
+                                           "echo(f(5));",
+                                           std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
+    EXPECT_EQ(stops, 3);
 }
 
 TEST(BytecodeCompiler, CStyleForIncrNameCanReadItsOwnPriorValueInTheSameAssignment) {

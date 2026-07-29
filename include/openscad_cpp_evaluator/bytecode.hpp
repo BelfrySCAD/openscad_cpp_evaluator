@@ -4,6 +4,7 @@
 
 #include "openscad_cpp_parser/ast/ast_node.hpp"
 
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -251,6 +252,23 @@ struct CompiledChunk {
     // this whole chunk (see IterMaterialize/IterReset/IterNext) -- runChunk
     // sizes its own native iterLists/iterIndex scratch vectors to this.
     int numIterLists = 0;
+
+    // Source-file/line span this chunk's own body+defaults were compiled
+    // from -- the min/max of every AST node's own position().line actually
+    // visited during compilation (see Compiler::trackSpan, bytecode_compiler.cpp),
+    // not just the declaration's own header line. Used by Evaluator::
+    // chunkEligibleNow (debug "fast continue" mode) to decide, per
+    // function, whether ANY currently-set breakpoint line could fall
+    // inside this chunk's own body -- a plain integer-range check, chosen
+    // specifically so that decision never needs the original source text
+    // or an offset->line conversion at eligibility-check time (called on
+    // every single compiled call, not just once). origin empty / minLine >
+    // maxLine (never updated) should not happen for any chunk that
+    // actually compiled a real body -- every function has at least one
+    // expression to visit.
+    std::string origin;
+    int minLine = std::numeric_limits<int>::max();
+    int maxLine = 0;
 
     // FunctionLiteral chunks discovered while compiling THIS chunk (a
     // FunctionLiteral expression appearing anywhere in its body/defaults),

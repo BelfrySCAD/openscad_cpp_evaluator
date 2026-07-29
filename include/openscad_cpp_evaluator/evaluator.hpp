@@ -315,6 +315,28 @@ public:
     // the env var.
     static void setBytecodeVmEnabledForTesting(std::optional<bool> enabled);
 
+    // Tells this Evaluator it's safe to speed up function calls with the
+    // bytecode VM even though a debugger is attached, PROVIDED the caller
+    // has already verified none of the reasons that's normally unsafe
+    // apply right now: no step command (`into`/`over`/`out`/`to_child`)
+    // pending, no explicit pause requested, and the session's own initial
+    // break-on-first stop already consumed. `breakpoints` is exactly the
+    // caller's own current breakpoint set (origin file -> line numbers) --
+    // see useBytecodeVm()/chunkEligibleNow's own doc comments for how it's
+    // used (a per-function span check, not a blanket switch: a function
+    // whose own body could contain one of these lines still always runs
+    // interpreted). Call with std::nullopt to go back to "no debugger
+    // exception at all" (today's original, always-safe behavior) --
+    // e.g. the instant a step command starts or a pause is requested.
+    // Cheap to call as often as the debugger's own state changes: this
+    // just updates one member, no cache invalidation needed (chunkEligibleNow
+    // is re-checked on every lookupOrCompileChunk/lookupCompiledLiteralChunk
+    // call, not cached itself -- only the compiled bytecode ITSELF, which
+    // never depends on debugger state, is cached forever).
+    void setFastContinueBreakpoints(std::optional<std::unordered_map<std::string, std::set<int>>> breakpoints) {
+        fastContinueBreakpoints_ = std::move(breakpoints);
+    }
+
     // Checks whether a debug pause should happen at `node` (via the
     // injected DebugHooks::debugHook, if any -- a no-op otherwise),
     // applying any `mods` the hook returns to `ctx.let_` and throwing
@@ -815,7 +837,46 @@ private:
     // therefore always takes the interpreter path, where the port matches
     // the reference's _check_debug placement exactly. Costs nothing when
     // no debugger is attached, which is every non-debug render.
-    bool useBytecodeVm() const { return !debugHooks_.debugHook && bytecodeVmEnabled(); }
+    //
+    // EXCEPT: a caller that knows none of that applies right now -- no
+    // step command pending, no explicit pause requested, the session's
+    // own initial break-on-first stop already consumed -- can call
+    // setFastContinueBreakpoints() with the CURRENT breakpoint set instead
+    // of leaving it unset. That alone doesn't turn the VM on for
+    // everything; see chunkEligibleNow, which still forces the
+    // interpreter for any specific function whose own compiled span could
+    // contain one of those lines. This only ever helps a plain "Continue,
+    // pause only at a known breakpoint" -- the far more common case in a
+    // long debug session than active single-stepping, and exactly the
+    // case where "every function pays the interpreter tax because a
+    // debugger happens to be attached somewhere" wastes the most time
+    // (see docs/debugger.md and this method's own callers for the full
+    // story).
+    bool useBytecodeVm() const {
+        return bytecodeVmEnabled() && (!debugHooks_.debugHook || fastContinueBreakpoints_.has_value());
+    }
+
+    // The fine-grained half of the check above: even when useBytecodeVm()
+    // says compiling/using bytecode is on the table at all, a SPECIFIC
+    // chunk is only actually safe to run compiled if nothing about it
+    // could matter to the debugger right now. No debugger attached at
+    // all -- always fine, unaffected by any of this. Debugger attached: only
+    // safe in fast-continue mode (useBytecodeVm() already checked that),
+    // and only if the chunk's own [minLine, maxLine] span (see
+    // CompiledChunk's own doc comment, bytecode.hpp) contains none of the
+    // breakpoint lines currently set for its origin file -- a checkpoint
+    // for one of those lines could fire mid-body, and compiled code has no
+    // way to stop there.
+    bool chunkEligibleNow(const CompiledChunk& chunk) const {
+        if (!debugHooks_.debugHook) return true;
+        if (!fastContinueBreakpoints_) return false;
+        auto it = fastContinueBreakpoints_->find(chunk.origin);
+        if (it == fastContinueBreakpoints_->end()) return true;
+        for (int line : it->second) {
+            if (line >= chunk.minLine && line <= chunk.maxLine) return false;
+        }
+        return true;
+    }
 
     // -- Profiling (Phase 9) --------------------------------------------
 
@@ -886,6 +947,11 @@ private:
     // -- Debugging (Phase 9) --------------------------------------------
 
     DebugHooks debugHooks_;
+    // See setFastContinueBreakpoints's own doc comment. nullopt (the
+    // default, and what a plain debugger attach without ever calling that
+    // setter leaves it at) means "no fast-continue exception" -- exactly
+    // today's original, always-safe behavior.
+    std::optional<std::unordered_map<std::string, std::set<int>>> fastContinueBreakpoints_;
     // The root EvalContext resolveTree() was called with -- lets
     // checkDebug()'s locals snapshot fall back to top-level script
     // variables when paused inside a nested user call, the same way the

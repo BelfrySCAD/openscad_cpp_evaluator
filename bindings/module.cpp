@@ -349,6 +349,51 @@ nb::object generatePartialTrampoline(const GeneratePartialFn& generatePartial) {
 // synchronously within the current hook call, same as get_frames.
 using GetChildrenPositionsFn = std::function<const std::optional<std::vector<std::pair<std::string, int>>>&()>;
 
+// Trampoline: lets the Python hook tell the Evaluator it's safe to speed
+// up function calls with the bytecode VM right now -- see
+// Evaluator::setFastContinueBreakpoints's own doc comment (evaluator.hpp)
+// for the exact contract (only when no step is pending/no pause was
+// requested/the initial break-on-first stop is already consumed) and
+// Evaluator::chunkEligibleNow for how the breakpoint set is used (a
+// per-function span check, not a blanket switch). `breakpoints=None`
+// means "no exception right now" -- i.e. every function call runs
+// interpreted, same as if this were never called at all. A callable
+// (not a return-tuple field) so DebugSession's own hook() can call it
+// exactly where it already computes should_pause, without needing to
+// widen hook()'s existing (cmd, mods) return-tuple contract -- mirrors
+// generate_partial/get_children_positions's own "extra kwarg the Python
+// side may or may not call" shape.
+using SetFastContinueFn = std::function<void(std::optional<std::unordered_map<std::string, std::set<int>>>)>;
+
+// Wraps a SetFastContinueFn as a Python callable taking either a
+// dict[str, set[int]]/dict[str, list[int]] (origin -> breakpoint lines) or
+// None. Mirrors generatePartialTrampoline's own shape.
+nb::object setFastContinueTrampoline(const SetFastContinueFn& setFastContinue) {
+    return nb::cpp_function(
+        [&setFastContinue](nb::object breakpoints) {
+            if (breakpoints.is_none()) {
+                setFastContinue(std::nullopt);
+                return;
+            }
+            std::unordered_map<std::string, std::set<int>> bp;
+            for (auto [k, v] : nb::cast<nb::dict>(breakpoints)) {
+                std::set<int> lines;
+                for (nb::handle line : v) lines.insert(nb::cast<int>(line));
+                bp.emplace(nb::cast<std::string>(k), std::move(lines));
+            }
+            setFastContinue(std::move(bp));
+        },
+        // Without .none(), nanobind rejects a Python `None` argument for an
+        // `nb::object`-typed parameter registered this ad-hoc way (unlike a
+        // `.def()`-declared function parameter, which accepts None by
+        // default) -- confirmed via a real call: "incompatible function
+        // arguments ... Invoked with types: NoneType" the first time this
+        // was called with breakpoints=None (DebugSession's own
+        // _apply_fast_continue calls it with None whenever fast-continue
+        // mode isn't safe right now -- see debugger.py).
+        nb::arg("breakpoints").none());
+}
+
 // GIL held (reacquired by the caller). `getFrame`/`callStack`/`generatePartial`/
 // `getChildrenPositions` are valid only for this synchronous call, so their
 // closures are only ever invoked from within the Python hook, before it returns.
@@ -357,7 +402,8 @@ oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, boo
                                         const std::vector<oscadeval::CallStackFrame>& callStack,
                                         const oscadeval::DebugFramesFn& getFrame,
                                         const GeneratePartialFn& generatePartial,
-                                        const GetChildrenPositionsFn& getChildrenPositions) {
+                                        const GetChildrenPositionsFn& getChildrenPositions,
+                                        const SetFastContinueFn& setFastContinue) {
     auto getFramesPy = nb::cpp_function([&callStack, &getFrame]() -> nb::object {
         std::vector<oscadeval::DebugFrame> frames = getFrame();
         nb::list allFrameLocals;
@@ -380,6 +426,7 @@ oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, boo
         for (const auto& [origin, line] : *positions) out.append(nb::make_tuple(origin, line));
         return out;
     });
+    nb::object setFastContinuePy = setFastContinueTrampoline(setFastContinue);
 
     // expr_depth stays hardcoded at 0 -- this port deliberately doesn't
     // track the reference's _expr_depth counter (no consumer reads it);
@@ -387,7 +434,8 @@ oscadeval::DebugAction callPyDebugHook(nb::handle hook, int line, int depth, boo
     nb::object ret = hook(line, depth, nb::arg("forced") = forced, nb::arg("expr_level") = exprLevel,
                           nb::arg("expr_depth") = 0, nb::arg("origin") = origin, nb::arg("get_frames") = getFramesPy,
                           nb::arg("generate_partial") = generatePartialPy,
-                          nb::arg("get_children_positions") = getChildrenPositionsPy);
+                          nb::arg("get_children_positions") = getChildrenPositionsPy,
+                          nb::arg("set_fast_continue") = setFastContinuePy);
     nb::tuple t = nb::cast<nb::tuple>(ret);
     oscadeval::DebugAction action;
     action.stop = (nb::cast<std::string>(t[0]) == "stop");
@@ -452,13 +500,17 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             [&evPtr]() -> const std::optional<std::vector<std::pair<std::string, int>>>& {
             return evPtr->lastChildrenPositions();
         };
+        SetFastContinueFn setFastContinue =
+            [&evPtr](std::optional<std::unordered_map<std::string, std::set<int>>> breakpoints) {
+            evPtr->setFastContinueBreakpoints(std::move(breakpoints));
+        };
         oscadeval::DebugHooks hooks;
         hooks.debugHook = [&](int line, int depth, bool forced, bool exprLevel, const std::string& origin,
                               const std::vector<oscadeval::CallStackFrame>& cs,
                               const oscadeval::DebugFramesFn& gf) -> oscadeval::DebugAction {
             nb::gil_scoped_acquire g;
             return callPyDebugHook(debugHook, line, depth, forced, exprLevel, origin, cs, gf, generatePartial,
-                                    getChildrenPositions);
+                                    getChildrenPositions, setFastContinue);
         };
         hooks.errorBreak = [&](int line, const std::string& header, const std::string& origin,
                                const std::vector<oscadeval::CallStackFrame>& cs, const oscadeval::DebugFramesFn& gf) {

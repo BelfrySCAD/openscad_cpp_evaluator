@@ -128,6 +128,20 @@ public:
         return slot;
     }
 
+    // Widens chunk_'s own [minLine, maxLine] span to include `node` --
+    // called at the top of every AST-node-visiting entry point
+    // (compileExpr/compileListElement/compileListCompBody) so the chunk's
+    // final span covers every line actually compiled into it, not just the
+    // declaration's own header line. See CompiledChunk::origin/minLine/
+    // maxLine's own doc comment (bytecode.hpp) for why this matters --
+    // Evaluator::chunkEligibleNow's debug "fast continue" check.
+    void trackSpan(const oscad::ASTNode& node) {
+        const oscad::Position& pos = node.position();
+        chunk_.origin = pos.origin;
+        if (pos.line < chunk_.minLine) chunk_.minLine = pos.line;
+        if (pos.line > chunk_.maxLine) chunk_.maxLine = pos.line;
+    }
+
     // Walks `enclosing_` from innermost (back()) to outermost, looking for
     // a level whose own CompileScope resolves `name` -- the first (most
     // deeply nested, i.e. most recently active at runtime) match wins,
@@ -171,6 +185,7 @@ public:
     void compileExpr(const oscad::Expression& node, std::vector<Instruction>& out, CompileScope& scope,
                       bool tail = false) {
         using oscad::NodeKind;
+        trackSpan(node);
         switch (node.kind()) {
             case NodeKind::NumberLiteral:
                 out.push_back({Op::PushConst, internConst(Value{static_cast<const oscad::NumberLiteral&>(node).val}), 0,
@@ -609,6 +624,7 @@ public:
     // list too, when reached via a clause's own nested body.
     void compileListElement(const oscad::ASTNode& elem, std::vector<Instruction>& out, CompileScope& scope) {
         using oscad::NodeKind;
+        trackSpan(elem);
         switch (elem.kind()) {
             case NodeKind::ListCompFor: {
                 auto& n = static_cast<const oscad::ListCompFor&>(elem);
