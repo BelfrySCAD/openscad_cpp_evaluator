@@ -380,14 +380,27 @@ TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnListComprehensionCases) {
 }
 
 // -- Phase 2: closures/upvalues --------------------------------------------
-// A closure has no practical payoff unless something can call it BACK
-// while its capturing frame is still active (this codebase has no
-// escaping closures) -- the natural, most common shape is calling a
-// locally-held function value directly (`g(5)` where `g` is a let/param
-// bound to a FunctionLiteral), which needed its own dynamic-dispatch
-// opcode (CALL_DYNAMIC) alongside LOAD_UPVALUE to be reachable at all; see
-// bytecode_compiler.cpp's PrimaryCall case and bytecode_vm.cpp's
-// CallDynamic handler.
+// The natural, most common shape is calling a locally-held function value
+// directly (`g(5)` where `g` is a let/param bound to a FunctionLiteral),
+// which needed its own dynamic-dispatch opcode (CALL_DYNAMIC) alongside
+// LOAD_UPVALUE to be reachable at all; see bytecode_compiler.cpp's
+// PrimaryCall case and bytecode_vm.cpp's CallDynamic handler.
+//
+// Phase 2b (Op::MakeClosure) then made the CONTAINING function compilable
+// even when it creates a closure that escapes (returned, stored, passed on)
+// -- previously ANY FunctionLiteral referencing enclosing state bailed the
+// whole container, unconditionally, since Op::LOAD_UPVALUE's live-call-
+// stack walk (findUpvalue) can only resolve a still-active call frame,
+// never survive past it. Op::MakeClosure instead snapshots the exact
+// values a literal needs into a real TrailView<Value> at the moment of
+// creation (see bytecode.hpp's own doc comment), reusing Closure::
+// capturedLet/callCtxFor's existing capture-rooting unchanged -- so the
+// closure's own BODY still always runs interpreted when invoked (never
+// itself compiled), but the function that CREATES it no longer has to.
+// Several tests below predate Phase 2b and were written to describe the
+// OLD bail-and-fall-back behavior; their own comments now note what
+// actually happens post-Phase-2b instead of describing stale behavior as
+// if it were still current.
 
 TEST(BytecodeCompiler, ClosureCapturesParameterAndIsCalledDirectly) {
     ScopedVm vm(true);
@@ -457,13 +470,12 @@ TEST(BytecodeCompiler, ClosureOverNonActiveEnclosingCallResolvesCorrectly) {
     // (no escaping-closure support) as if it were the intended contract.
     // The fix: Value's FunctionLiteral alternative became a real Closure
     // (node + capturedLet, a shared_ptr<TrailView<Value>> snapshot of
-    // ctx.let_ at creation time, see value.hpp), and every FunctionLiteral
-    // whose body reads any enclosing-scope variable (non-empty upvalues)
-    // is now deliberately kept off the VM's compiled path (thrown as
-    // NotCompilable in bytecode_compiler.cpp) since Op::LoadUpvalue can
-    // only resolve a still-live call frame, never a captured environment --
-    // such a closure always runs through the interpreter, which reads its
-    // capturedLet directly.
+    // ctx.let_ at creation time, see value.hpp). Post-Phase-2b, `outer`
+    // itself now compiles too (Op::MakeClosure builds an equivalent
+    // snapshot from compiled code, see bytecode.hpp) -- only the returned
+    // closure's own body (`function(y) y + n`) still always runs
+    // interpreted when invoked, reading its capturedLet directly via the
+    // same callCtxFor path an interpreter-created closure always has.
     EXPECT_EQ(runCapturingEcho("function outer(n) = function(y) y + n;\n"
                                 "stored = outer(5);\n"
                                 "echo(stored(3));"),
@@ -488,6 +500,100 @@ TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnClosureCases) {
         onResult = runCapturingEcho(script);
     }
     EXPECT_EQ(offResult, onResult);
+}
+
+TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteNonEscapingClosure) {
+    ScopedVm vm(true);
+    // `make` creates AND immediately calls `g` -- before Op::MakeClosure
+    // this bailed `make` entirely (any non-empty upvalues did, escaping or
+    // not). A debug hook alone forces the interpreter regardless of
+    // compilability (see DebugAttachedWithoutFastContinueAlwaysInterprets
+    // above), so fast-continue must be enabled (an empty breakpoint map --
+    // fast-continue "on", nothing set) to actually observe whether `make`
+    // runs compiled here.
+    const int stops = countDebugHookStops("function make(x) = let(g = function(y) y + x) g(5);\n"
+                                           "echo(make(10));",
+                                           std::unordered_map<std::string, std::set<int>>{});
+    EXPECT_EQ(stops, 4);
+}
+
+TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteEscapingClosure) {
+    ScopedVm vm(true);
+    // `outer` returns a closure that escapes past its own call entirely
+    // (called later, from a separate top-level statement, see
+    // ClosureOverNonActiveEnclosingCallResolvesCorrectly above for the
+    // correctness side of this same shape) -- `outer` itself now compiles
+    // too (fast-continue enabled for the same reason as the non-escaping
+    // case above). The ternary is needed here purely to make compiled-vs-
+    // interpreted OBSERVABLE via stop count: a body that's nothing but
+    // "return a closure" has no sub-expression checkpoints in the
+    // interpreter either way (a FunctionLiteral's own creation isn't itself
+    // a checkpoint), so it produces the SAME stop count whether `outer`
+    // compiled or not -- confirmed empirically, not assumed, by diffing
+    // this test's own result against the pre-Op::MakeClosure compiler.
+    const int stops = countDebugHookStops(
+        "function outer(n) = n > 0 ? function(y) y + n : function(y) y - n;\n"
+        "stored = outer(5);\n"
+        "echo(stored(3));",
+        std::unordered_map<std::string, std::set<int>>{});
+    EXPECT_EQ(stops, 6);
+}
+
+TEST(BytecodeCompiler, MakeClosureCapturesFreshValuePerInvocation) {
+    ScopedVm vm(true);
+    // Op::MakeClosure runs fresh every time the instruction is actually
+    // reached (never a compile-time constant) -- a closure built once per
+    // list-comprehension iteration must capture THAT iteration's own `i`,
+    // not all share whatever `i` ended at. `make_adders(3)` returns
+    // [function(y) y+0, function(y) y+1, function(y) y+2]; calling each
+    // with 10 and summing proves each closed over its OWN value.
+    EXPECT_EQ(runCapturingEcho("function make_adders(n) = [for (i = [0:1:n-1]) function(y) y + i];\n"
+                                "fns = make_adders(3);\n"
+                                "echo(fns[0](10) + fns[1](10) + fns[2](10));"),
+              "ECHO: 33");
+}
+
+TEST(BytecodeCompiler, MakeClosureBubblesCaptureThroughAnIntermediateClosureLevel) {
+    ScopedVm vm(true);
+    // `inner` (nested inside `mid`, nested inside `outer`) references
+    // `outer`'s own `x` DIRECTLY, skipping `mid` entirely -- exercising
+    // bubbleEscapingCaptures' own transitive merge (bytecode_compiler.cpp):
+    // `mid`'s own ClosureSite must bubble this capture up so `outer`'s own
+    // Op::MakeClosure (for `mid`) snapshots `x` too, even though `mid`
+    // itself never reads `x`. Same values/shape as
+    // NestedClosureCapturesBothEnclosingLevels above, but this time
+    // `mid` escapes `outer` (returned, called from a separate statement)
+    // rather than being called back immediately -- so `outer` itself must
+    // now compile, and the correctness depends on the bubbled capture
+    // actually reaching `mid`'s own snapshot correctly.
+    const std::string script = "function outer(x) = let(mid = function(y) let(inner = function(z) x + y + z) "
+                                "inner(1)) mid;\n"
+                                "stored = outer(100);\n"
+                                "echo(stored(10));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 111");
+}
+
+TEST(BytecodeCompiler, ClosureWithDollarParameterStillBailsContainer) {
+    ScopedVm vm(true);
+    // Residual, deliberate limitation: a FunctionLiteral with its OWN
+    // dollar-prefixed parameter still fails compileFunctionLike outright
+    // (same $-prefixed-parameter rule as a plain named function, see
+    // DollarPrefixedParameterBailsCompilationAndStillWorks above) -- there's
+    // no lighter way left to discover what it captures in that case, so the
+    // WHOLE containing declaration still bails (throw NotCompilable), same
+    // as before Op::MakeClosure. Value must still be correct via the
+    // interpreter fallback.
+    const int stops = countDebugHookStops(
+        "function outer(x) = let(g = function(y, $fn) y + x + $fn) g(5, $fn=2);\n"
+        "echo(outer(10));",
+        std::nullopt);
+    // `outer` never compiles at all here (more than 1 stop for its own
+    // call), unlike MakeClosureLetsContainerCompileDespiteNonEscapingClosure
+    // above where the analogous ($-free) container compiles to 1.
+    EXPECT_GT(stops, 2);
+    EXPECT_EQ(runCapturingEcho("function outer(x) = let(g = function(y, $fn) y + x + $fn) g(5, $fn=2);\n"
+                                "echo(outer(10));"),
+              "ECHO: 17");
 }
 
 // -- Tail-call optimization, VM path (Phase B) -----------------------------
@@ -537,13 +643,17 @@ TEST(BytecodeCompiler, MixedCompiledInterpretedTailChainStaysCorrect) {
 
 TEST(BytecodeCompiler, ClosureNestedTailCallUnderVmFallsBackAndStillResolves) {
     ScopedVm vm(true);
-    // Same closure-nesting hazard as the interpreter path's own
+    // `g` (a closure over `make`'s own `x`) is called in tail position from
+    // `make`'s own compiled body -- but `g`'s own body is never itself
+    // compiled post-Phase-2b (Op::MakeClosure's whole point is to let
+    // `make` compile despite creating `g`; `g` still always runs
+    // interpreted when invoked, see Op::MakeClosure's own doc comment,
+    // bytecode.hpp). CallDynamicTail's handler therefore finds no compiled
+    // chunk for `g` (Evaluator::lookupCompiledLiteralChunk returns nullptr)
+    // and falls back to a real evalFunctionLiteralFromBound call instead of
+    // trampolining, exactly like the interpreter path's own
     // ClosureNestedTailCallFallsBackToRealRecursionAndStillResolves
-    // (test_tail_calls.cpp) -- g's own call is lexically nested inside
-    // make's body (a closure over `x`, read via Op::LoadUpvalue), so
-    // isolatedCallCtxFor must return nullopt for it, and CallDynamicTail's
-    // handler must fall back to a real evalFunctionLiteralFromBound call
-    // instead of trampolining.
+    // (test_tail_calls.cpp).
     const std::string script = "function make(x) = let(g = function(y) y + x) g(5);\necho(make(10));";
     EXPECT_EQ(runCapturingEcho(script), "ECHO: 15");
 }

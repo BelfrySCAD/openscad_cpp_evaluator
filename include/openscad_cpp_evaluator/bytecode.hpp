@@ -100,15 +100,46 @@ enum class Op {
     // a = index into CompiledChunk::upvalues. At runtime, searches the live
     // call stack (Evaluator::findUpvalue) for a still-active call of the
     // upvalue's own target declaration and reads that call's own slot --
-    // undef if that call already returned (this codebase has no escaping
-    // closures, matching the interpreter's existing childCtx()-based
-    // semantics exactly; see scope_trail.hpp's own module comment). Never
-    // needs a STORE counterpart: a captured variable is always a
-    // parameter/let-binding of some ENCLOSING, already-executing call,
-    // and nothing this phase compiles ever writes back into an enclosing
-    // call's own slot (let/ListCompLet assignments always target a
-    // freshly-opened scope of their OWN, never a parent's).
+    // undef if that call already returned. Never needs a STORE counterpart:
+    // a captured variable is always a parameter/let-binding of some
+    // ENCLOSING, already-executing call, and nothing this phase compiles
+    // ever writes back into an enclosing call's own slot (let/ListCompLet
+    // assignments always target a freshly-opened scope of their OWN, never
+    // a parent's).
+    //
+    // NOTE: as of Op::MakeClosure (below), no CompiledChunk that's ever
+    // actually registered (chunkCache_/literalChunkCache_) has a non-empty
+    // `upvalues` list any more -- a FunctionLiteral with any real capture
+    // need (direct or transitively bubbled up from a nested literal, see
+    // bytecode_compiler.cpp's FunctionLiteral case) is now handled via
+    // Op::MakeClosure instead, and always runs interpreted when invoked
+    // (Evaluator::lookupCompiledLiteralChunk finds no entry for it). This
+    // opcode and Evaluator::findUpvalue/CallStackFrame::upvalueParent are
+    // therefore unreachable dead code today, left in place rather than
+    // removed in the same change that made them unreachable -- deleting
+    // them is a distinct, lower-risk cleanup, not bundled in here.
     LoadUpvalue,
+
+    // Escaping-closure support. a = index into CompiledChunk::closureSites.
+    // Builds a FRESH captured environment every time this instruction
+    // actually runs (never a compile-time constant -- a loop creating one
+    // closure per iteration must capture THAT iteration's own values, not
+    // share one snapshot) by reading each of the site's own captures
+    // straight out of the CURRENTLY EXECUTING frame's own `slots` (see
+    // ClosureSite's own doc comment for why every capture, however deeply
+    // the literal was originally nested, always resolves against the one
+    // chunk actually running Op::MakeClosure), and constructs
+    // Closure{node, capturedTrail} -- reusing Closure::capturedLet (value.hpp)
+    // and callCtxFor's existing capturedLet-rooting (user_calls.cpp)
+    // UNCHANGED: invoking this closure later (always via the interpreter,
+    // see ClosureSite's own doc comment for why its body is never itself
+    // compiled) works exactly like any interpreter-created escaping closure
+    // always has, no new invocation-side code needed at all. Replaces
+    // Op::PushConst's frozen `Closure{&n, nullptr}` specifically for a
+    // literal whose (transitively merged) capture set is non-empty; a
+    // literal that closes over nothing at all -- even transitively -- still
+    // takes the cheaper PushConst path, unchanged.
+    MakeClosure,
 
     // A call whose callee isn't statically resolvable to a builtin or a
     // named FunctionDeclaration (see CallFn) -- the callee expression is
@@ -225,10 +256,47 @@ struct CompiledChunk {
     // inside AT COMPILE TIME (matched at runtime via Evaluator::
     // findUpvalue's exact-identity search over the live call stack, the
     // same identity CallStackFrame::declNode is stamped with), `slot` is
-    // that declaration's own slot number for the captured variable.
+    // that declaration's own slot number for the captured variable. `name`
+    // is that same variable's source name -- unused by Op::LoadUpvalue
+    // itself, needed by Op::MakeClosure's ClosureSite (below), which builds
+    // a NAME-keyed captured environment (Closure::capturedLet is a
+    // TrailView<Value>, looked up by name at invocation time, exactly like
+    // every other escaping closure) rather than a slot-indexed one.
     struct UpvalueRef {
         const oscad::ASTNode* targetDecl = nullptr;
         int slot = 0;
+        std::string name;
+    };
+
+    // One FunctionLiteral's own capture list for Op::MakeClosure, computed
+    // at compile time (bytecode_compiler.cpp's FunctionLiteral case) as the
+    // TRANSITIVE union of: every free variable `node` itself references
+    // from outside its own body, PLUS -- for each FunctionLiteral nested
+    // anywhere within `node` (however deep) -- whatever THAT nested
+    // literal's own ClosureSite still needed from beyond `node`'s own scope
+    // (i.e. any capture whose resolution target isn't `node` itself). This
+    // "bubbling" is what makes a closure nested inside another compiled-
+    // creating closure resolve correctly even though the inner one's body
+    // is never itself compiled (see this struct's own body-compilation
+    // note below): by the time a real, running CompiledChunk executes
+    // Op::MakeClosure for `node`, every one of `captures`'s entries is
+    // guaranteed to resolve against THAT SAME running chunk's own `slots`
+    // array, regardless of how many literal-within-literal levels `node`
+    // was originally nested through in the source.
+    //
+    // `node`'s own BODY is deliberately never itself compiled/registered
+    // once it has any capture need (even an empty one bubbled up from
+    // something it contains) -- it always runs via the ordinary AST
+    // interpreter when invoked (Evaluator::lookupCompiledLiteralChunk finds
+    // no cache entry for it), using Closure::capturedLet exactly like any
+    // other escaping closure the interpreter creates directly. This keeps
+    // the whole feature to "make closure CREATION safe to compile"; a
+    // closure's own body additionally getting compiled too (its captures
+    // would need to read from this snapshot instead of a live-stack walk)
+    // is a natural follow-on, not attempted here.
+    struct ClosureSite {
+        const oscad::FunctionLiteral* node = nullptr;
+        std::vector<UpvalueRef> captures;
     };
 
     // One echo() expression form's own argument names, in source order --
@@ -246,6 +314,7 @@ struct CompiledChunk {
     std::vector<std::string> names;
     std::vector<CallSite> callSites;
     std::vector<UpvalueRef> upvalues;
+    std::vector<ClosureSite> closureSites;
     std::vector<EchoSite> echoSites;
     int numSlots = 0;
     // Count of distinct ListCompFor-assignment iterLists allocated across
