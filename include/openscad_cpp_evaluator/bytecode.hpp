@@ -266,6 +266,17 @@ struct CompiledChunk {
         const oscad::ASTNode* targetDecl = nullptr;
         int slot = 0;
         std::string name;
+        // Set only when this entry is a `let(name = function(...) ...)`
+        // closure's own reference to ITSELF (bytecode_compiler.cpp's LetOp
+        // case, the letrec-style pre-declared-slot path) -- Op::MakeClosure
+        // can't read this one out of `slots` the way it does every other
+        // capture: at the moment it runs, the closure it's building hasn't
+        // been constructed yet (StoreLocal for `name` hasn't executed), so
+        // `slots[slot]` would still hold whatever was there before this
+        // call. See Op::MakeClosure's own runtime doc comment
+        // (bytecode_vm.cpp) for how this is actually resolved (deferred,
+        // then patched in after construction).
+        bool isSelfReference = false;
     };
 
     // One FunctionLiteral's own capture list for Op::MakeClosure, computed

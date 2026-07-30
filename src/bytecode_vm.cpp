@@ -173,7 +173,20 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 // created escaping closure already uses, unchanged.
                 const CompiledChunk::ClosureSite& site = chunk.closureSites[static_cast<size_t>(ins.a)];
                 auto capturedTrail = TrailView<Value>::makeRoot();
+                // A letrec-style self-reference (UpvalueRef::isSelfReference,
+                // see its own doc comment) is skipped here, not read -- the
+                // closure it names is THIS instruction's own result, which
+                // doesn't exist until the shared_ptr below is constructed.
+                // Patched in immediately afterward via the exact same
+                // capturedTrail (a live, shared TrailView -- mutating it
+                // after `closure` wraps it is exactly as visible to that
+                // closure's own later invocations as any other entry).
+                std::vector<const std::string*> selfNames;
                 for (const auto& cap : site.captures) {
+                    if (cap.isSelfReference) {
+                        selfNames.push_back(&cap.name);
+                        continue;
+                    }
                     if (cap.targetDecl == chunk.selfDecl) {
                         capturedTrail->set(cap.name, slots[static_cast<size_t>(cap.slot)]);
                         continue;
@@ -182,7 +195,11 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                     if (!v) v = ctx.let_->find(cap.name);
                     capturedTrail->set(cap.name, v ? *v : Value{});
                 }
-                stack.push_back(Value{std::make_shared<const Closure>(Closure{site.node, std::move(capturedTrail)})});
+                auto closure = std::make_shared<const Closure>(Closure{site.node, capturedTrail});
+                for (const std::string* selfName : selfNames) {
+                    capturedTrail->set(*selfName, Value{closure});
+                }
+                stack.push_back(Value{std::move(closure)});
                 ++pc;
                 break;
             }
