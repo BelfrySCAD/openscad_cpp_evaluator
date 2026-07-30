@@ -131,15 +131,32 @@ enum class Op {
     // chunk actually running Op::MakeClosure), and constructs
     // Closure{node, capturedTrail} -- reusing Closure::capturedLet (value.hpp)
     // and callCtxFor's existing capturedLet-rooting (user_calls.cpp)
-    // UNCHANGED: invoking this closure later (always via the interpreter,
-    // see ClosureSite's own doc comment for why its body is never itself
-    // compiled) works exactly like any interpreter-created escaping closure
-    // always has, no new invocation-side code needed at all. Replaces
+    // UNCHANGED: invoking this closure later works through the exact same
+    // machinery any interpreter-created escaping closure always has, no new
+    // invocation-side code needed at all (its own body may itself run
+    // compiled too now, see Evaluator::lookupCompiledLiteralChunk). Replaces
     // Op::PushConst's frozen `Closure{&n, nullptr}` specifically for a
     // literal whose (transitively merged) capture set is non-empty; a
     // literal that closes over nothing at all -- even transitively -- still
     // takes the cheaper PushConst path, unchanged.
     MakeClosure,
+
+    // Letrec support for TWO OR MORE sibling `let`-bound closures that
+    // reference each other by name (fnliterals.scad-style mutual
+    // recursion, e.g. isEven/isOdd each calling the other) -- see the
+    // LetOp compile case's own doc comment (bytecode_compiler.cpp) for why
+    // a forward reference (an EARLIER closure referencing a LATER sibling
+    // that doesn't exist yet at the point the earlier one is constructed)
+    // can't be resolved by Op::MakeClosure itself the way a self-reference
+    // is: there's nothing to read OR self-patch into, since the later
+    // sibling hasn't even been created yet. a = consumer's own local slot
+    // (already holds a MakeClosure-created closure, via a preceding
+    // Op::StoreLocal), b = name pool index (the captured name, inside the
+    // consumer's own capturedTrail, that's finally ready), c = the local
+    // slot the just-constructed sibling was JUST stored into (also via a
+    // preceding Op::StoreLocal) -- patches slots[a]'s own capturedTrail
+    // with slots[c], keyed by name b.
+    PatchClosureCapture,
 
     // A call whose callee isn't statically resolvable to a builtin or a
     // named FunctionDeclaration (see CallFn) -- the callee expression is
