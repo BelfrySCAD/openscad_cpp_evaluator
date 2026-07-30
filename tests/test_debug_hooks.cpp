@@ -6,8 +6,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <ostream>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace oscadeval;
@@ -228,6 +232,122 @@ TEST(DebugHooks, NoHooksInstalledMeansZeroOverheadCodePathStillWorks) {
     // before this phase -- checkDebug()'s null-hook early return.
     Evaluated e = evalSrc("cube(2);");
     EXPECT_EQ(e.bodies.size(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// Fast-continue's hook-skippable mode (issue found via BelfrySCAD's own
+// nurbs.scad-heavy debug session: 462k checkDebug() calls survived even
+// with per-function VM fast-continue fully engaged, since module/geometry
+// evaluation never compiles and every one of those still crossed into
+// Python just to be told "continue"). See setFastContinueBreakpoints's own
+// doc comment (evaluator.hpp) for the full contract.
+// ---------------------------------------------------------------------------
+
+TEST(DebugHooks, FastContinueHookSkippableSkipsCheckpointsWithNoMatchingBreakpoint) {
+    int calls = 0;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        ++calls;
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{}, /*hookSkippable=*/true);
+    auto ast = parseSrc("cube(1);\ntranslate([1,0,0]) sphere(r=1,$fn=8);\necho(\"x\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    // Same script as HookFiresOnceForEachStatementAtEveryNestingLevel (7
+    // checkpoints without fast-continue) -- with hook-skippable mode and no
+    // breakpoints anywhere, every single one is a plain C++ skip.
+    EXPECT_EQ(calls, 0);
+}
+
+TEST(DebugHooks, FastContinueHookSkippableStillFiresAtMatchingBreakpointLine) {
+    std::vector<int> firedLines;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int line, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        firedLines.push_back(line);
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}}, /*hookSkippable=*/true);
+    auto ast = parseSrc("cube(1);\ntranslate([1,0,0]) sphere(r=1,$fn=8);\necho(\"x\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    // Every line-2 checkpoint (translate itself, its 3 expr-level [1,0,0]
+    // list elements, and the nested sphere child -- 5 total, matching
+    // HookFiresOnceForEachStatementAtEveryNestingLevel's own sequence)
+    // survives the skip; line 1 (cube) and line 3 (echo) have no
+    // breakpoint and are skipped entirely.
+    EXPECT_EQ(firedLines, (std::vector<int>{2, 2, 2, 2, 2}));
+}
+
+TEST(DebugHooks, FastContinueNotHookSkippableStillFiresEveryCheckpoint) {
+    int calls = 0;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        ++calls;
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    // Mirrors step_over/step_out: a real (here, empty) breakpoints set is
+    // provided -- so chunkEligibleNow/useBytecodeVm still apply -- but
+    // hookSkippable stays false, since both need checkDebug() to keep
+    // calling into the hook on every statement so their own step_hit logic
+    // (line/depth comparison against the step's own starting point) can
+    // run; there is no way to decide that in advance.
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{}, /*hookSkippable=*/false);
+    auto ast = parseSrc("cube(1);\ntranslate([1,0,0]) sphere(r=1,$fn=8);\necho(\"x\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    EXPECT_EQ(calls, 7); // unaffected -- same total as HookFiresOnceForEachStatementAtEveryNestingLevel
+}
+
+TEST(DebugHooks, FastContinueInterruptFlagForcesTheNextCheckpointThrough) {
+    std::vector<int> firedLines;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int line, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        firedLines.push_back(line);
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{}, /*hookSkippable=*/true);
+    // Pre-armed, as if Pause (or a breakpoint edit) was requested from the
+    // main thread before this run even started -- see
+    // setFastContinueInterruptFlag's own doc comment (evaluator.hpp) for
+    // why this exists: there is no other way to reach a running
+    // debug_evaluate() call from outside a hook invocation.
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    ev.setFastContinueInterruptFlag(flag);
+    auto ast = parseSrc("cube(1);\ntranslate([1,0,0]) sphere(r=1,$fn=8);\necho(\"x\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    // Only the FIRST checkpoint (line 1, cube) fires -- checkDebug's own
+    // test-and-clear means the flag is consumed there, so every subsequent
+    // checkpoint goes back to being skipped normally (no breakpoints
+    // anywhere).
+    EXPECT_EQ(firedLines, (std::vector<int>{1}));
+    EXPECT_FALSE(flag->load());
+}
+
+TEST(DebugHooks, ForcedBreakpointBuiltinAlwaysFiresEvenInHookSkippableMode) {
+    int forcedCalls = 0, normalCalls = 0;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int, int, bool forced, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        (forced ? forcedCalls : normalCalls)++;
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{}, /*hookSkippable=*/true);
+    auto ast = parseSrc("cube(1);\nbreakpoint();\nsphere(r=1,$fn=8);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    EXPECT_EQ(forcedCalls, 1); // breakpoint() always bypasses hook-skippable mode
+    EXPECT_EQ(normalCalls, 0); // cube/breakpoint()-as-statement/sphere: no breakpoint line matches, all skipped
 }
 
 // ---------------------------------------------------------------------------

@@ -13,11 +13,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import _openscad_cpp_evaluator as _ext
-from ._openscad_cpp_evaluator import ManifoldCache
+from ._openscad_cpp_evaluator import FastContinueSignal, ManifoldCache
 
 __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
+    "FastContinueSignal",
 ]
 
 
@@ -317,6 +318,16 @@ class Evaluator:
     `return_hook`: fires after a user function/function-literal call
     computes its result, before returning -- (name, value, depth). Only
     meaningful with debug_hook set (the plain evaluate() path never calls it).
+    `fast_continue_signal`: an optional FastContinueSignal the caller keeps
+    across the whole debug session and calls `.request()` on (e.g. from
+    DebugSession.pause()/set_breakpoints(), BelfrySCAD's own debugger.py)
+    any time a checkDebug() checkpoint skipped via hook-skippable fast-
+    continue mode (see debug_hook's own `set_fast_continue(breakpoints,
+    hook_skippable)` kwarg) needs to stop skipping and consult Python
+    again -- there is no other way to reach a running debug_evaluate() call
+    from outside a hook invocation, since it runs as one single blocking
+    call with the GIL released for its duration. Only meaningful with
+    debug_hook set; ignored otherwise.
 
     After evaluate() returns, `self.csg_tree` (list of _CSGNode, see
     format_csg_tree), `self.dyn` (dict of every currently-visible
@@ -328,13 +339,14 @@ class Evaluator:
     """
 
     def __init__(self, echo_fn=None, debug_hook=None, error_break_fn=None, return_hook=None,
-                 manifold_cache=None, profile=False):
+                 manifold_cache=None, profile=False, fast_continue_signal=None):
         self._echo_fn = echo_fn
         self._debug_hook = debug_hook
         self._error_break_fn = error_break_fn
         self._return_hook = return_hook
         self._manifold_cache = manifold_cache
         self._profile = profile
+        self._fast_continue_signal = fast_continue_signal
         self.csg_tree = []
         self.profile_result = None
         self.dyn = {}
@@ -350,7 +362,7 @@ class Evaluator:
                     source_path, vp, self._debug_hook,
                     self._error_break_fn or (lambda *a, **k: None),
                     self._echo_fn or (lambda _m: None),
-                    self._manifold_cache, self._return_hook)
+                    self._manifold_cache, self._return_hook, self._fast_continue_signal)
                 self.csg_tree = []
                 self.profile_result = None
             else:
