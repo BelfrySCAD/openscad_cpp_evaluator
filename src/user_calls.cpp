@@ -443,6 +443,32 @@ Value Evaluator::evalFunctionBodyTrampoline(const oscad::Expression& bodyExpr, E
     // dropped there) if memory ever measurably matters more than this
     // simpler all-or-nothing approach.
     std::vector<EvalContext> chain{ctx};
+    // Tears `chain` down back-to-front on EVERY exit path -- normal return
+    // OR exception unwind (recordTailCallHop's own recursion-guard error,
+    // below, is the exact case that matters: an infinite tail-recursive
+    // function with no base case throws out of this loop entirely,
+    // bypassing any teardown code placed after it). Relying on `chain`
+    // simply falling out of scope instead is NOT equivalent: std::vector<T>'s
+    // own element-destruction order is unspecified by the standard --
+    // libc++ destroys back-to-front (matching ScopeTrailStorage::popLevel's
+    // own "scan from the back" doc comment, which assumes the level being
+    // popped is usually the most recently pushed one -- O(1) per pop that
+    // way), but libstdc++ destroys front-to-back, the adversarial order for
+    // that same scan -- each pop then walks almost the entire remaining
+    // vector, turning an intended O(N) teardown into a real, measured
+    // O(N^2) (see issue #50: an N-scaling experiment plus a minimal repro
+    // proving libc++/libstdc++ disagree on std::vector<T>::clear()'s
+    // destruction order for identical source). Popping back-to-front
+    // explicitly, via a destructor that always runs before `chain`'s own,
+    // is correct AND O(N) on every standard library and every exit path,
+    // not just the ones that happen to agree with libc++ and return
+    // normally.
+    struct ChainTeardown {
+        std::vector<EvalContext>& chain;
+        ~ChainTeardown() {
+            while (!chain.empty()) chain.pop_back();
+        }
+    } teardown{chain};
     unsigned recursionGuard = 0;
     while (true) {
         auto result = simplifyTailStep(*expr, ctx);
