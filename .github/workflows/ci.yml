@@ -12,6 +12,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Bounds the whole job well above any legitimate run (macOS finishes in
+    # well under a minute) rather than the 6-hour GitHub default, so a
+    # genuine hang fails fast with a job-timeout signal instead of silently
+    # consuming the runner for hours -- see the per-test --timeout below for
+    # the finer-grained signal (which specific test, not just "the job").
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,11 +63,15 @@ jobs:
       # see evaluator.hpp's own bytecodeVmEnabled() comment) and off
       # (OSCAD_BYTECODE_VM=0), so a regression in either the compiled or
       # the interpreted path fails CI, not just whichever happens to be
-      # default at the time.
+      # default at the time. --timeout: every real test here runs in well
+      # under a second locally (the full suite is ~8s); 60s per test is a
+      # generous margin that still fails FAST, by name, if any single test
+      # hangs, rather than silently consuming the whole job's time budget
+      # with no indication of which test caused it.
       - name: Test (bytecode VM on, the default)
-        run: ctest --test-dir build --output-on-failure -C Release
+        run: ctest --test-dir build --output-on-failure --timeout 60 -C Release
 
       - name: Test (bytecode VM off)
-        run: ctest --test-dir build --output-on-failure -C Release
+        run: ctest --test-dir build --output-on-failure --timeout 60 -C Release
         env:
           OSCAD_BYTECODE_VM: "0"
