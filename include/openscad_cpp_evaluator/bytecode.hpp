@@ -276,24 +276,24 @@ struct CompiledChunk {
     // literal's own ClosureSite still needed from beyond `node`'s own scope
     // (i.e. any capture whose resolution target isn't `node` itself). This
     // "bubbling" is what makes a closure nested inside another compiled-
-    // creating closure resolve correctly even though the inner one's body
-    // is never itself compiled (see this struct's own body-compilation
-    // note below): by the time a real, running CompiledChunk executes
-    // Op::MakeClosure for `node`, every one of `captures`'s entries is
-    // guaranteed to resolve against THAT SAME running chunk's own `slots`
-    // array, regardless of how many literal-within-literal levels `node`
-    // was originally nested through in the source.
+    // creating closure resolve correctly: at the OUTERMOST level a given
+    // capture is actually snapshotted (see Op::MakeClosure's own runtime
+    // doc comment, bytecode_vm.cpp), `captures`'s entries resolve against
+    // that running chunk's own `slots` array whenever `targetDecl` matches
+    // its own declaration -- and, when it doesn't (a capture bubbled up
+    // from an even-more-deeply-nested literal), against the enclosing
+    // frame via Evaluator::findUpvalue or, failing that, `ctx.let_`
+    // (rooted at that OUTER closure's own capturedLet whenever it's itself
+    // an escaped invocation) -- regardless of how many literal-within-
+    // literal levels `node` was originally nested through in the source.
     //
-    // `node`'s own BODY is deliberately never itself compiled/registered
-    // once it has any capture need (even an empty one bubbled up from
-    // something it contains) -- it always runs via the ordinary AST
-    // interpreter when invoked (Evaluator::lookupCompiledLiteralChunk finds
-    // no cache entry for it), using Closure::capturedLet exactly like any
-    // other escaping closure the interpreter creates directly. This keeps
-    // the whole feature to "make closure CREATION safe to compile"; a
-    // closure's own body additionally getting compiled too (its captures
-    // would need to read from this snapshot instead of a live-stack walk)
-    // is a natural follow-on, not attempted here.
+    // `node`'s own body IS also registered (Evaluator::
+    // lookupCompiledLiteralChunk finds a real cache entry for it, same as
+    // a zero-capture literal), so a closure invocation can run compiled
+    // too, not just its creation: Op::LoadUpvalue/Op::MakeClosure inside
+    // that body fall back to `ctx.let_` exactly as described above
+    // whenever the live-call-stack walk misses, which is precisely what
+    // happens once this closure has actually escaped its creator.
     struct ClosureSite {
         const oscad::FunctionLiteral* node = nullptr;
         std::vector<UpvalueRef> captures;
@@ -306,6 +306,15 @@ struct CompiledChunk {
     struct EchoSite {
         std::vector<std::optional<std::string>> argNames;
     };
+
+    // The FunctionDeclaration/FunctionLiteral this chunk's own body was
+    // compiled from (bytecode_compiler.cpp's compileFunctionLike sets this
+    // to its own `selfDecl` parameter) -- Op::MakeClosure's runtime handler
+    // (bytecode_vm.cpp) compares a ClosureSite capture's own `targetDecl`
+    // against this to tell "genuinely local to the running chunk" (read
+    // `slots` directly) from "bubbled up from a nested literal" (needs the
+    // enclosing-frame/capturedLet fallback) apart.
+    const oscad::ASTNode* selfDecl = nullptr;
 
     std::vector<Param> params;
     std::vector<std::vector<Instruction>> defaultCode;

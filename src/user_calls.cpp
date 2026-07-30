@@ -152,8 +152,21 @@ EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, 
 
 std::optional<EvalContext> Evaluator::isolatedCallCtxFor(const oscad::ASTNode& declNode, EvalContext& ctx,
                                                           const std::shared_ptr<TrailView<Value>>& capturedLet) {
+    // `declNode.scope()`, not `ctx.scope` -- matches every other call-
+    // resolution function's own `fnScope = decl.scope() ? decl.scope() :
+    // ctx.scope` pattern (evalUserFunction/evalUserFunctionFromBound/
+    // evalFunctionLiteral/evalFunctionLiteralFromBound). Mismatching here
+    // was invisible until a captures-having FunctionLiteral's own body
+    // could ever actually be trampolined into (Op::MakeClosure's own
+    // registration -- bytecode_compiler.cpp's FunctionLiteral case): a
+    // self-referential closure's free-variable resolution can fall through
+    // to evalIdentifier's ctx.scope->lookupVariable() fallback (see its own
+    // doc comment, expr_eval.cpp), which needs the CALLEE's own lexical
+    // scope to walk outward from -- the caller's scope at the call site
+    // has no relation to it at all.
     bool usedChildCtx = false;
-    EvalContext result = callCtxFor(declNode, ctx, ctx.scope, nullptr, nullptr, &usedChildCtx, capturedLet);
+    const oscad::Scope* declScope = declNode.scope() ? declNode.scope() : ctx.scope;
+    EvalContext result = callCtxFor(declNode, ctx, declScope, nullptr, nullptr, &usedChildCtx, capturedLet);
     if (usedChildCtx) return std::nullopt;
     return result;
 }

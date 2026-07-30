@@ -511,10 +511,18 @@ TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteNonEscapingClosure)
     // above), so fast-continue must be enabled (an empty breakpoint map --
     // fast-continue "on", nothing set) to actually observe whether `make`
     // runs compiled here.
+    //
+    // 3 stops, not 4: `make`'s own body-entry (1), `g`'s own body-entry
+    // (1) -- `g` itself now also runs compiled (its captures-having chunk
+    // is registered too, not discarded -- see the FunctionLiteral case's
+    // own doc comment, bytecode_compiler.cpp), so it costs exactly one
+    // stop instead of the extra sub-expression checkpoint an interpreted
+    // call used to add on top -- plus the top-level echo() statement's own
+    // stop (module-level code is never compiled).
     const int stops = countDebugHookStops("function make(x) = let(g = function(y) y + x) g(5);\n"
                                            "echo(make(10));",
                                            std::unordered_map<std::string, std::set<int>>{});
-    EXPECT_EQ(stops, 4);
+    EXPECT_EQ(stops, 3);
 }
 
 TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteEscapingClosure) {
@@ -571,6 +579,60 @@ TEST(BytecodeCompiler, MakeClosureBubblesCaptureThroughAnIntermediateClosureLeve
                                 "stored = outer(100);\n"
                                 "echo(stored(10));";
     EXPECT_EQ(runCapturingEcho(script), "ECHO: 111");
+}
+
+TEST(BytecodeCompiler, MultiLevelCurriedClosureInvocationRunsCompiled) {
+    ScopedVm vm(true);
+    // fnliterals.scad's f_1arg()-style curry adapter: a closure that
+    // returns ANOTHER closure nested inside it, both with real captures.
+    // This is exactly the two-level-nesting case Op::MakeClosure's own
+    // runtime handler (bytecode_vm.cpp) has to get right when a captures-
+    // having chunk's OWN body is registered too -- the inner literal's own
+    // MakeClosure instruction runs as part of the OUTER closure's later,
+    // separate invocation (not inline within f_1arg's own call, the way a
+    // single-level closure's capture always does), so its own captures
+    // (bubbled up from `f_1arg` at compile time) are no longer local to
+    // whatever frame happens to be running -- they resolve via
+    // Evaluator::findUpvalue/`ctx.let_`, not `slots` directly. Correctness
+    // (not a stop count -- several calls chain here, and not every shape
+    // adds its own extra interpreted-only checkpoint, so the total isn't a
+    // reliable compiled-vs-interpreted signal for this particular script)
+    // is what actually matters: a wrong result here is exactly what a
+    // missed/misdirected capture read would produce.
+    EXPECT_EQ(runCapturingEcho("function f_1arg(target_func) = function(a) a==undef? function(x) target_func(x) : "
+                                "function() target_func(a);\n"
+                                "function double(x) = x * 2;\n"
+                                "adder = f_1arg(function(x) double(x));\n"
+                                "echo(adder(21)());\n"
+                                "echo(adder(undef)(10));"),
+              "ECHO: 42\nECHO: 20");
+}
+
+TEST(BytecodeCompiler, SelfReferentialRecursiveClosureStillRunsInterpretedAndCorrectly) {
+    ScopedVm vm(true);
+    // reduce()'s own idiom: `a` calls itself by name, which LetOp's own
+    // declareLocal-after-compiling-the-RHS ordering means never resolves as
+    // a genuine upvalue at compile time (falls through to Op::LoadFree
+    // instead -- see containsLoadFree's own doc comment, bytecode_compiler.cpp).
+    // Registering such a chunk for compiled invocation is what previously
+    // (empirically, against a real list) turned an O(n) reduce() into
+    // O(n^2): every recursive call re-derives a fresh closure via
+    // Evaluator::evalIdentifier's ctx.scope->lookupVariable() fallback,
+    // nesting its own capturedLet one level deeper than the last every
+    // time. `containsLoadFree` excludes exactly this case from
+    // registration, so `a` keeps running interpreted -- more than 1 stop
+    // for its own call proves that, and the actual sum must still come out
+    // right either way.
+    const int stops = countDebugHookStops(
+        "function reduce(func, list, init=0) = let(l = len(list), a = function (x,i) i<l? "
+        "a(func(x,list[i]), i+1) : x) a(init,0);\n"
+        "echo(reduce(function(p,q) p+q, [1,2,3,4], 0));",
+        std::unordered_map<std::string, std::set<int>>{});
+    EXPECT_GT(stops, 2);
+    EXPECT_EQ(runCapturingEcho("function reduce(func, list, init=0) = let(l = len(list), a = function (x,i) "
+                                "i<l? a(func(x,list[i]), i+1) : x) a(init,0);\n"
+                                "echo(reduce(function(p,q) p+q, [1,2,3,4], 0));"),
+              "ECHO: 10");
 }
 
 TEST(BytecodeCompiler, ClosureWithDollarParameterStillBailsContainer) {

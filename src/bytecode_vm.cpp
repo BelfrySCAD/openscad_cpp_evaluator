@@ -127,8 +127,22 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 ++pc;
                 break;
             case Op::LoadUpvalue: {
+                // findUpvalue walks the LIVE call stack -- correct as long
+                // as the declaring call is still active, however many
+                // upvalue levels out `uv.targetDecl` sits (an ordinary,
+                // not-yet-escaped nested closure, e.g. reduce()'s own
+                // self-recursive accumulator). If that frame is gone
+                // (this chunk is running as an ESCAPED closure's own body
+                // -- see the FunctionLiteral case's own doc comment,
+                // bytecode_compiler.cpp), fall back to `ctx.let_`: for any
+                // closure invocation with a non-null capturedLet,
+                // callCtxFor roots `ctx.let_` at that exact snapshot, which
+                // is guaranteed (by construction -- effectiveCaptures is a
+                // superset of this chunk's own upvalues) to contain this
+                // name.
                 const CompiledChunk::UpvalueRef& uv = chunk.upvalues[static_cast<size_t>(ins.a)];
                 const Value* v = ev.findUpvalue(uv.targetDecl, uv.slot);
+                if (!v) v = ctx.let_->find(uv.name);
                 stack.push_back(v ? *v : Value{});
                 ++pc;
                 break;
@@ -137,24 +151,36 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 // Builds a FRESH captured environment every time this
                 // instruction actually runs (never a compile-time constant
                 // -- a loop creating one closure per iteration must capture
-                // THAT iteration's own values, not share one snapshot) by
-                // reading each of the site's own captures straight out of
-                // THIS frame's own `slots` -- see ClosureSite's own doc
-                // comment (bytecode.hpp) for why every capture, however
-                // deeply the literal was originally nested, is guaranteed
-                // to resolve against this SAME currently-running chunk.
-                // The resulting Closure::capturedLet is a real, standalone
-                // TrailView (isolated root -- nothing else shares it, and
-                // it owes nothing to `ctx.let_`, which a compiled call
-                // never populates -- see bindCompiledArgs' own doc
-                // comment), so invoking this closure later works through
-                // the EXACT same callCtxFor/capturedLetTrail machinery
-                // every interpreter-created escaping closure already uses,
-                // unchanged.
+                // THAT iteration's own values, not share one snapshot).
+                // Each capture is genuinely local to the CURRENTLY-RUNNING
+                // chunk only when its own `targetDecl` matches this chunk's
+                // `selfDecl` (this literal's direct free-variable
+                // references) -- read straight out of `slots` in that case.
+                // Anything else is a capture bubbled up from a literal
+                // nested even deeper (see ClosureSite's own doc comment,
+                // bytecode.hpp): resolved the same way Op::LoadUpvalue
+                // resolves any upvalue reference, above -- the live call
+                // stack first (still live if THIS closure hasn't itself
+                // escaped yet), `ctx.let_` otherwise (this chunk's own
+                // capturedLet, when it's running as an escaped closure's
+                // body). The resulting Closure::capturedLet is a real,
+                // standalone TrailView (isolated root -- nothing else
+                // shares it, and it owes nothing to `ctx.let_` itself,
+                // which a compiled call never writes to directly -- see
+                // bindCompiledArgs' own doc comment), so invoking this
+                // closure later works through the EXACT same
+                // callCtxFor/capturedLetTrail machinery every interpreter-
+                // created escaping closure already uses, unchanged.
                 const CompiledChunk::ClosureSite& site = chunk.closureSites[static_cast<size_t>(ins.a)];
                 auto capturedTrail = TrailView<Value>::makeRoot();
                 for (const auto& cap : site.captures) {
-                    capturedTrail->set(cap.name, slots[static_cast<size_t>(cap.slot)]);
+                    if (cap.targetDecl == chunk.selfDecl) {
+                        capturedTrail->set(cap.name, slots[static_cast<size_t>(cap.slot)]);
+                        continue;
+                    }
+                    const Value* v = ev.findUpvalue(cap.targetDecl, cap.slot);
+                    if (!v) v = ctx.let_->find(cap.name);
+                    capturedTrail->set(cap.name, v ? *v : Value{});
                 }
                 stack.push_back(Value{std::make_shared<const Closure>(Closure{site.node, std::move(capturedTrail)})});
                 ++pc;
