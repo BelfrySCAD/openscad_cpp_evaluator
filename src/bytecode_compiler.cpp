@@ -44,11 +44,9 @@ bool isListCompClauseKind(oscad::NodeKind kind) {
 // `owner` itself (targetDecl != owner) -- see ClosureSite's own doc comment
 // (bytecode.hpp) for why this "bubbling" is necessary: a literal nested
 // inside `owner` may need something from further out than `owner`'s own
-// scope, and since that inner literal's body is never itself compiled
-// (only ever invoked via the interpreter once it has any capture need),
-// `owner`'s OWN Op::MakeClosure must snapshot that name too -- otherwise
-// the inner literal's interpreter-resolved capturedLet ancestry, rooted at
-// whatever `owner` itself captured, would simply never contain it.
+// scope, so `owner`'s OWN Op::MakeClosure must snapshot that name too --
+// otherwise the inner literal's own capturedLet, rooted at whatever `owner`
+// itself captured, would simply never contain it.
 // Dedupes by (targetDecl, slot): the same enclosing binding reached through
 // two different nested literals (or the same literal referencing it twice)
 // is still one capture to make.
@@ -65,6 +63,43 @@ void bubbleEscapingCaptures(const CompiledChunk::ClosureSite& site, const oscad:
         }
         if (!already) out.push_back(cap);
     }
+}
+
+// True if any instruction in `chunk`'s own body/defaults is Op::LoadFree --
+// i.e. an identifier that resolved to neither a local, a statically-known
+// enclosing upvalue, nor a dyn ($-prefixed) name at compile time (see
+// compileExpr's own Identifier case). A self-referential recursive closure
+// (`let(a = function(x,i) ... a(...) ...)`, the reduce()/accumulate()/
+// while() idiom) hits exactly this: LetOp's own declareLocal for `a` runs
+// only AFTER compiling `a`'s RHS, so `a`'s reference to itself can't
+// resolve as an upvalue at compile time and falls through to LoadFree --
+// Evaluator::evalIdentifier's own ctx.scope->lookupVariable() fallback,
+// which re-evaluates the let-binding's RHS FRESH on every single call,
+// producing a new Closure whose capturedLet is THIS invocation's own
+// ctx.let_ (see expr_eval.cpp's FunctionLiteral case) rather than a stable
+// snapshot. Registering such a chunk for compiled invocation (see the
+// FunctionLiteral case below) would still be functionally correct -- but
+// each recursive call's own capturedLet->openChild() then nests ONE level
+// deeper than the last (confirmed empirically: an O(n) list reduce()
+// degrading to O(n^2) once compiled), since nothing about that repeated
+// fresh-derivation ever re-roots the trail. Excluding a LoadFree-containing
+// chunk from registration leaves it running interpreted exactly as before
+// (this compile-time gap itself isn't fixed here) -- a real, if imperfect,
+// scope for now; closing it -- letting `a` resolve as a genuine upvalue of
+// its own declaring LetOp -- is future work, not bundled into this change.
+bool containsLoadFree(const std::vector<Instruction>& code) {
+    for (const Instruction& ins : code) {
+        if (ins.op == Op::LoadFree) return true;
+    }
+    return false;
+}
+
+bool containsLoadFree(const CompiledChunk& chunk) {
+    if (containsLoadFree(chunk.bodyCode)) return true;
+    for (const auto& defaultCode : chunk.defaultCode) {
+        if (containsLoadFree(defaultCode)) return true;
+    }
+    return false;
 }
 
 // Compile-time name -> slot resolution, mirroring the LetOp/nested-scope
@@ -306,32 +341,41 @@ public:
                 for (const auto& nestedSite : literalChunk.closureSites) {
                     bubbleEscapingCaptures(nestedSite, &n, effectiveCaptures);
                 }
-                if (effectiveCaptures.empty()) {
-                    // Closes over nothing at all, even transitively -- the
-                    // existing fast path: a single frozen constant works
-                    // for every invocation, and this literal's own compiled
-                    // chunk (possibly containing its OWN MakeClosure sites
-                    // for anything nested inside IT that closes only over
-                    // ITS OWN scope) is genuinely usable, registered as
-                    // before.
+                // Registered (Evaluator::lookupCompiledLiteralChunk finds
+                // this by node pointer whenever the closure is later
+                // invoked, whether that's a plain PushConst-created value
+                // below or a MakeClosure-snapshotted one) whenever it's
+                // actually safe to run compiled: always for a zero-capture
+                // literal (a single frozen constant, unaffected by anything
+                // below), and for a captures-having one only when its own
+                // body contains no Op::LoadFree -- see containsLoadFree's
+                // own doc comment, above, for why a LoadFree-containing
+                // captures-having closure (the reduce()/accumulate()/
+                // while() self-referential-recursion idiom) must still be
+                // left interpreted: its own capturedLet-chaining, once
+                // registered, degrades an O(n) reduction into O(n^2).
+                // Everything else (Op::LoadUpvalue/Op::MakeClosure inside a
+                // REGISTERED captures-having chunk) is no longer assumed to
+                // resolve only against a still-live creator frame (see
+                // those opcodes' own runtime fallback, bytecode_vm.cpp):
+                // when the live-call-stack walk misses (the creator's frame
+                // is gone -- a genuinely escaped closure), they fall back to
+                // `ctx.let_`, which callCtxFor roots at this exact closure's
+                // own capturedLet snapshot whenever it's invoked -- the same
+                // snapshot `effectiveCaptures` describes below.
+                if (effectiveCaptures.empty() || !containsLoadFree(literalChunk)) {
                     chunk_.nestedLiterals.emplace_back(&n, std::move(literalChunk));
+                }
+                if (effectiveCaptures.empty()) {
+                    // Closes over nothing at all, even transitively -- a
+                    // single frozen constant works for every invocation, no
+                    // per-call snapshot needed.
                     out.push_back(
                         {Op::PushConst, internConst(Value{std::make_shared<const Closure>(Closure{&n, nullptr})}), 0,
                          nullptr});
                     return;
                 }
                 // Escaping-closure support (Op::MakeClosure, bytecode.hpp).
-                // `literalChunk`'s own bytecode is discarded here -- its own
-                // upvalue reads would resolve via the live-call-stack walk
-                // (Op::LoadUpvalue), which is wrong for a closure that
-                // outlives its creator -- so this literal always runs
-                // interpreted when invoked instead (Evaluator::
-                // lookupCompiledLiteralChunk finds no cache entry for it),
-                // using the exact same Closure::capturedLet machinery every
-                // other escaping closure the interpreter creates directly
-                // already relies on. Only `effectiveCaptures` (the names/
-                // slots to snapshot right now) survives from the discarded
-                // compile attempt.
                 int siteIdx = static_cast<int>(chunk_.closureSites.size());
                 chunk_.closureSites.push_back(CompiledChunk::ClosureSite{&n, std::move(effectiveCaptures)});
                 out.push_back({Op::MakeClosure, siteIdx, 0, nullptr});
@@ -896,6 +940,7 @@ bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, 
         if (!p->name->name.empty() && p->name->name[0] == '$') return false;
     }
 
+    chunk.selfDecl = selfDecl;
     Compiler compiler(chunk, staticScope, selfDecl, std::move(enclosing));
     CompileScope bodyScope;
     bodyScope.push();
