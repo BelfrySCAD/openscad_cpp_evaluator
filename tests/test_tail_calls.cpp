@@ -126,6 +126,17 @@ TEST(TailCalls, NonTailRecursionIsUnaffectedByTheTrampoline) {
 }
 
 TEST(TailCalls, InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging) {
+#ifndef __APPLE__
+    // Skipped on non-Apple platforms: this drives the interpreter trampoline
+    // to the full 1,000,000-iteration recursion-guard cap, which is O(N)
+    // under Clang/libc++ (~1s) but a confirmed O(N^2) under GCC/libstdc++
+    // (and, empirically, MSVC's STL too) -- 25-50+ minutes instead of
+    // seconds. See https://github.com/BelfrySCAD/openscad_cpp_evaluator/issues/50
+    // for the full investigation (peak RSS/CPU/instruction-count evidence
+    // and an N-scaling experiment proving the asymptotic-complexity gap).
+    // Re-enable once that's root-caused and fixed.
+    GTEST_SKIP() << "O(N^2) under this toolchain -- see issue #50";
+#endif
     ScopedVm vm(false);
     Evaluator ev;
     auto ast = parseSrc("function loop(n) = loop(n + 1);\nresult = loop(0);");
@@ -139,6 +150,11 @@ TEST(TailCalls, InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging) {
 }
 
 TEST(TailCalls, InfiniteTailRecursionErrorMentionsTheFunctionName) {
+#ifndef __APPLE__
+    // See InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging's own
+    // comment just above -- same O(N^2)-under-this-toolchain issue (#50).
+    GTEST_SKIP() << "O(N^2) under this toolchain -- see issue #50";
+#endif
     ScopedVm vm(false);
     Evaluator ev;
     auto ast = parseSrc("function loop(n) = loop(n + 1);\nresult = loop(0);");

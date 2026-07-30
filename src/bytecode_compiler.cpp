@@ -40,6 +40,33 @@ bool isListCompClauseKind(oscad::NodeKind kind) {
     }
 }
 
+// Merges `site`'s own captures into `out` for every entry that escapes
+// `owner` itself (targetDecl != owner) -- see ClosureSite's own doc comment
+// (bytecode.hpp) for why this "bubbling" is necessary: a literal nested
+// inside `owner` may need something from further out than `owner`'s own
+// scope, and since that inner literal's body is never itself compiled
+// (only ever invoked via the interpreter once it has any capture need),
+// `owner`'s OWN Op::MakeClosure must snapshot that name too -- otherwise
+// the inner literal's interpreter-resolved capturedLet ancestry, rooted at
+// whatever `owner` itself captured, would simply never contain it.
+// Dedupes by (targetDecl, slot): the same enclosing binding reached through
+// two different nested literals (or the same literal referencing it twice)
+// is still one capture to make.
+void bubbleEscapingCaptures(const CompiledChunk::ClosureSite& site, const oscad::ASTNode* owner,
+                             std::vector<CompiledChunk::UpvalueRef>& out) {
+    for (const auto& cap : site.captures) {
+        if (cap.targetDecl == owner) continue;
+        bool already = false;
+        for (const auto& existing : out) {
+            if (existing.targetDecl == cap.targetDecl && existing.slot == cap.slot) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) out.push_back(cap);
+    }
+}
+
 // Compile-time name -> slot resolution, mirroring the LetOp/nested-scope
 // shadowing rules callCtx()/letChildCtx() apply at runtime: one frame per
 // LetOp (pushed/popped around its own assignments+body), innermost frame
@@ -149,7 +176,7 @@ public:
     // naturally resolve to the innermost active binding too.
     std::optional<CompiledChunk::UpvalueRef> resolveEnclosing(const std::string& name) const {
         for (auto it = enclosing_.rbegin(); it != enclosing_.rend(); ++it) {
-            if (auto slot = it->scope->resolve(name)) return CompiledChunk::UpvalueRef{it->decl, *slot};
+            if (auto slot = it->scope->resolve(name)) return CompiledChunk::UpvalueRef{it->decl, *slot, name};
         }
         return std::nullopt;
     }
@@ -253,20 +280,14 @@ public:
             // other point where its own free-variable references could be
             // resolved against this enclosing chain (AST nodes have no
             // parent pointers to discover it from later, see this file's
-            // own module notes). If the literal itself fails to compile
-            // (contains a call/echo/assert/unsupported construct, or its
-            // own free-variable resolution needs an upvalue chain going
-            // even deeper than what's captured here), the WHOLE containing
-            // declaration must also bail -- propagated by simply
-            // rethrowing, since an interpreter-executed literal nested
-            // inside a compiled container would silently read stale/undef
-            // values for the container's own (slot-only, never written to
-            // ctx.let_) locals otherwise. On success, the literal's own
-            // chunk is stashed in chunk_.nestedLiterals for
-            // Evaluator::lookupOrCompileChunk to flatten into
-            // literalChunkCache_; the emitted instruction just pushes the
-            // AST pointer as a Value, exactly like the interpreter's own
-            // `Value{&node}` (evalExpr's own FunctionLiteral case).
+            // own module notes). If the literal itself fails to compile as
+            // bytecode at all (contains an echo/assert/unsupported
+            // construct), the WHOLE containing declaration must also bail
+            // -- propagated by simply rethrowing -- since there's no lighter
+            // way left to find out what it captures (see
+            // bubbleEscapingCaptures' own doc comment for why a literal
+            // that DOES compile as bytecode no longer needs this bail just
+            // for referencing enclosing state).
             case NodeKind::FunctionLiteral: {
                 auto& n = static_cast<const oscad::FunctionLiteral&>(node);
                 std::vector<EnclosingLevel> childEnclosing = enclosing_;
@@ -276,33 +297,44 @@ public:
                                           *n.body)) {
                     throw NotCompilable{};
                 }
-                // A nested literal that reads ANY enclosing variable
-                // (literalChunk.upvalues non-empty) is compiled via
-                // Op::LoadUpvalue -- a live-call-stack walk (findUpvalue)
-                // that only ever resolves a still-active enclosing call,
-                // never a captured environment (see LoadUpvalue/
-                // findUpvalue's own doc comments: "this codebase has no
-                // escaping closures"). A closure that escapes its creating
-                // call (returned, stored, passed on -- see Closure's own
-                // doc comment, value.hpp, for the motivating BOSL2
-                // example) would silently read undef for every captured
-                // variable through this path. Bailing the WHOLE containing
-                // compilation here forces such a function to run through
-                // the interpreter instead, which DOES support escaping
-                // closures correctly (evalExpr's FunctionLiteral case
-                // captures ctx.let_ itself). A literal with no upvalues at
-                // all (doesn't reference anything from an enclosing scope)
-                // has nothing that needs escaping-capture support, so it's
-                // unaffected and keeps compiling normally.
-                if (!literalChunk.upvalues.empty()) throw NotCompilable{};
-                chunk_.nestedLiterals.emplace_back(&n, std::move(literalChunk));
-                // No captured `let_` trail here (nullptr) -- a compile-time
-                // constant can't carry per-invocation runtime state, but
-                // (per the upvalues check just above) this literal doesn't
-                // reference anything outside itself, so there is nothing
-                // capture. Not a regression; just not (yet) extended here.
-                out.push_back({Op::PushConst, internConst(Value{std::make_shared<const Closure>(Closure{&n, nullptr})}),
-                               0, nullptr});
+                // Effective capture set: `n`'s own direct free-variable
+                // references, plus -- transitively -- whatever any literal
+                // nested inside `n` still needs from beyond `n`'s own scope
+                // (see bubbleEscapingCaptures' own doc comment, above, and
+                // ClosureSite's, bytecode.hpp).
+                std::vector<CompiledChunk::UpvalueRef> effectiveCaptures = literalChunk.upvalues;
+                for (const auto& nestedSite : literalChunk.closureSites) {
+                    bubbleEscapingCaptures(nestedSite, &n, effectiveCaptures);
+                }
+                if (effectiveCaptures.empty()) {
+                    // Closes over nothing at all, even transitively -- the
+                    // existing fast path: a single frozen constant works
+                    // for every invocation, and this literal's own compiled
+                    // chunk (possibly containing its OWN MakeClosure sites
+                    // for anything nested inside IT that closes only over
+                    // ITS OWN scope) is genuinely usable, registered as
+                    // before.
+                    chunk_.nestedLiterals.emplace_back(&n, std::move(literalChunk));
+                    out.push_back(
+                        {Op::PushConst, internConst(Value{std::make_shared<const Closure>(Closure{&n, nullptr})}), 0,
+                         nullptr});
+                    return;
+                }
+                // Escaping-closure support (Op::MakeClosure, bytecode.hpp).
+                // `literalChunk`'s own bytecode is discarded here -- its own
+                // upvalue reads would resolve via the live-call-stack walk
+                // (Op::LoadUpvalue), which is wrong for a closure that
+                // outlives its creator -- so this literal always runs
+                // interpreted when invoked instead (Evaluator::
+                // lookupCompiledLiteralChunk finds no cache entry for it),
+                // using the exact same Closure::capturedLet machinery every
+                // other escaping closure the interpreter creates directly
+                // already relies on. Only `effectiveCaptures` (the names/
+                // slots to snapshot right now) survives from the discarded
+                // compile attempt.
+                int siteIdx = static_cast<int>(chunk_.closureSites.size());
+                chunk_.closureSites.push_back(CompiledChunk::ClosureSite{&n, std::move(effectiveCaptures)});
+                out.push_back({Op::MakeClosure, siteIdx, 0, nullptr});
                 return;
             }
             case NodeKind::RangeLiteral: {

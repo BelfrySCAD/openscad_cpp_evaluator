@@ -4,6 +4,7 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 #include "openscad_cpp_evaluator/import_builtin.hpp"
+#include "openscad_cpp_evaluator/scope_trail.hpp"
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
 
@@ -129,6 +130,33 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 const CompiledChunk::UpvalueRef& uv = chunk.upvalues[static_cast<size_t>(ins.a)];
                 const Value* v = ev.findUpvalue(uv.targetDecl, uv.slot);
                 stack.push_back(v ? *v : Value{});
+                ++pc;
+                break;
+            }
+            case Op::MakeClosure: {
+                // Builds a FRESH captured environment every time this
+                // instruction actually runs (never a compile-time constant
+                // -- a loop creating one closure per iteration must capture
+                // THAT iteration's own values, not share one snapshot) by
+                // reading each of the site's own captures straight out of
+                // THIS frame's own `slots` -- see ClosureSite's own doc
+                // comment (bytecode.hpp) for why every capture, however
+                // deeply the literal was originally nested, is guaranteed
+                // to resolve against this SAME currently-running chunk.
+                // The resulting Closure::capturedLet is a real, standalone
+                // TrailView (isolated root -- nothing else shares it, and
+                // it owes nothing to `ctx.let_`, which a compiled call
+                // never populates -- see bindCompiledArgs' own doc
+                // comment), so invoking this closure later works through
+                // the EXACT same callCtxFor/capturedLetTrail machinery
+                // every interpreter-created escaping closure already uses,
+                // unchanged.
+                const CompiledChunk::ClosureSite& site = chunk.closureSites[static_cast<size_t>(ins.a)];
+                auto capturedTrail = TrailView<Value>::makeRoot();
+                for (const auto& cap : site.captures) {
+                    capturedTrail->set(cap.name, slots[static_cast<size_t>(cap.slot)]);
+                }
+                stack.push_back(Value{std::make_shared<const Closure>(Closure{site.node, std::move(capturedTrail)})});
                 ++pc;
                 break;
             }
