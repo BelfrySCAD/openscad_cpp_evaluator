@@ -659,6 +659,49 @@ TEST(BytecodeCompiler, PlainLetSelfReferenceStillSeesTheOuterBindingNotItself) {
     EXPECT_EQ(runCapturingEcho("x = 100;\nfunction f() = let(x = x + 1) x;\necho(f());"), "ECHO: 101");
 }
 
+TEST(BytecodeCompiler, MutualRecursionBetweenSiblingLetBoundClosuresResolvesCorrectly) {
+    ScopedVm vm(true);
+    // fnliterals.scad-style isEven()/isOdd(): TWO sibling closures in the
+    // SAME let(), each calling the OTHER by name. `isEven` (compiled
+    // FIRST) references `isOdd`, which doesn't exist at all yet at that
+    // point -- unlike a self-reference, there's nothing to read OR self-
+    // patch into (see Op::PatchClosureCapture's own doc comment,
+    // bytecode.hpp): resolved instead by a real patch instruction emitted
+    // right after `isOdd`'s own StoreLocal, once it actually exists.
+    // 3 stops, not one per logical call (isEvenTest's own entry, plus one
+    // per level of isEven(6)->isOdd(5)->isEven(4)->...->isEven(0)):
+    // isEven<->isOdd calling each other in tail position is exactly what
+    // the tail-call trampoline collapses into ONE evalUserFunctionCore
+    // invocation for the WHOLE chain (see runCompiledFunctionTrampoline,
+    // bytecode_vm.cpp) -- its own unconditional body-entry checkDebug()
+    // fires once for that entire loop, not once per hop. isEvenTest's own
+    // entry (1) + that one trampoline loop (1) + the top-level echo()
+    // statement's own stop (module code is never compiled) = 3.
+    const int stops = countDebugHookStops(
+        "function isEvenTest(n) = let(isEven = function(k) k==0 ? true : isOdd(k-1), isOdd = function(k) "
+        "k==0 ? false : isEven(k-1)) isEven(n);\n"
+        "echo(isEvenTest(6));",
+        std::unordered_map<std::string, std::set<int>>{});
+    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(runCapturingEcho("function isEvenTest(n) = let(isEven = function(k) k==0 ? true : isOdd(k-1), "
+                                "isOdd = function(k) k==0 ? false : isEven(k-1)) isEven(n);\n"
+                                "echo(isEvenTest(6));\necho(isEvenTest(7));"),
+              "ECHO: true\nECHO: false");
+}
+
+TEST(BytecodeCompiler, ThreeWaySiblingMutualRecursionResolvesCorrectly) {
+    ScopedVm vm(true);
+    // The patch mechanism isn't hardcoded to pairs -- a THIRD sibling
+    // (f3, itself forward-referencing f1, the FIRST one compiled) proves
+    // pendingWaiters/Op::PatchClosureCapture generalizes to an arbitrary
+    // cycle length, not just mutual (2-closure) recursion specifically.
+    EXPECT_EQ(runCapturingEcho("function test(n) = let(f1 = function(k) k==0 ? \"f1\" : f2(k-1), f2 = "
+                                "function(k) k==0 ? \"f2\" : f3(k-1), f3 = function(k) k==0 ? \"f3\" : "
+                                "f1(k-1)) f1(n);\n"
+                                "echo(test(9));\necho(test(10));\necho(test(11));"),
+              "ECHO: \"f1\"\nECHO: \"f2\"\nECHO: \"f3\"");
+}
+
 TEST(BytecodeCompiler, ClosureWithDollarParameterStillBailsContainer) {
     ScopedVm vm(true);
     // Residual, deliberate limitation: a FunctionLiteral with its OWN

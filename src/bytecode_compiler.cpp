@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace oscadeval {
 
@@ -68,26 +69,26 @@ void bubbleEscapingCaptures(const CompiledChunk::ClosureSite& site, const oscad:
 // True if any instruction in `chunk`'s own body/defaults is Op::LoadFree --
 // i.e. an identifier that resolved to neither a local, a statically-known
 // enclosing upvalue, nor a dyn ($-prefixed) name at compile time (see
-// compileExpr's own Identifier case). The direct `let(a = function(...)
+// compileExpr's own Identifier case). A DIRECT `let(a = function(...)
 // ... a(...) ...)` self-reference (reduce()/accumulate()/while()'s own
-// idiom) no longer hits this -- see the LetOp case's own letrec pre-declare,
-// below -- but anything the pre-declare doesn't cover still does: `a`
-// wrapped in a ternary/let/anything other than a bare FunctionLiteral RHS
-// (`let(a = cond ? function(...) ...a(...)... : function(...) ...)`),
-// mutual recursion between two sibling let-bound closures (each references
-// the OTHER, which isn't declared yet when compiling the first), or any
-// other free variable this phase simply can't resolve statically. For any
-// of those, Evaluator::evalIdentifier's own ctx.scope->lookupVariable()
-// fallback re-evaluates the let-binding's RHS FRESH on every single call,
-// producing a new Closure whose capturedLet is THIS invocation's own
-// ctx.let_ (see expr_eval.cpp's FunctionLiteral case) rather than a stable
-// snapshot -- registering such a chunk for compiled invocation would still
-// be functionally correct, but each recursive call's own
-// capturedLet->openChild() then nests ONE level deeper than the last
-// (confirmed empirically: an O(n) list reduce() degrading to O(n^2) once
-// compiled, before the letrec pre-declare existed), since nothing about
-// that repeated fresh-derivation ever re-roots the trail. Excluding a
-// LoadFree-containing chunk from registration leaves it running
+// idiom) and mutual recursion between two-or-more sibling DIRECT
+// `let`-bound closures (fnliterals.scad-style isEven/isOdd, each calling
+// the other) no longer hit this -- see the LetOp case's own letrec
+// pre-declare, below -- but anything the pre-declare doesn't cover still
+// does: `a` wrapped in a ternary/let/anything other than a bare
+// FunctionLiteral RHS (`let(a = cond ? function(...) ...a(...)... :
+// function(...) ...)`), or any other free variable this phase simply can't
+// resolve statically. For any of those, Evaluator::evalIdentifier's own
+// ctx.scope->lookupVariable() fallback re-evaluates the let-binding's RHS
+// FRESH on every single call, producing a new Closure whose capturedLet is
+// THIS invocation's own ctx.let_ (see expr_eval.cpp's FunctionLiteral case)
+// rather than a stable snapshot -- registering such a chunk for compiled
+// invocation would still be functionally correct, but each recursive
+// call's own capturedLet->openChild() then nests ONE level deeper than the
+// last (confirmed empirically: an O(n) list reduce() degrading to O(n^2)
+// once compiled, before the letrec pre-declare existed), since nothing
+// about that repeated fresh-derivation ever re-roots the trail. Excluding
+// a LoadFree-containing chunk from registration leaves it running
 // interpreted exactly as before -- correct, if not optimized.
 bool containsLoadFree(const std::vector<Instruction>& code) {
     for (const Instruction& ins : code) {
@@ -566,35 +567,71 @@ public:
                 size_t placeholderIdx = out.size();
                 out.push_back({Op::OpenLocalScope, 0, 0, nullptr});
                 int slotStart = nextSlot_;
-                for (const auto& assign : n.assignments) {
+                // Letrec pre-pass: every DIRECT `name = function(...) ...`
+                // assignment in this LetOp gets its own slot declared up
+                // front, before ANY of them are compiled -- not just so a
+                // closure can reference itself (see the self-reference
+                // handling below), but so an EARLIER one can also reference
+                // a LATER sibling (mutual recursion, e.g. fnliterals.scad-
+                // style isEven/isOdd calling each other). `letrecSlot[i]`
+                // stays -1 for anything else, which keeps the existing
+                // after-the-fact declareLocal path below completely
+                // unchanged (`let(x = x + 1)` must still see the OUTER x,
+                // not a fresh, not-yet-assigned local shadowing it -- only
+                // a function-literal RHS has "see myself/a sibling" as a
+                // sensible reading at all).
+                std::vector<int> letrecSlot(n.assignments.size(), -1);
+                std::unordered_set<int> pendingLetrecSlots;
+                for (size_t i = 0; i < n.assignments.size(); ++i) {
+                    const auto& assign = n.assignments[i];
                     const std::string& name = assign->name->name;
-                    // A DIRECT `name = function(...) ...` RHS -- the
-                    // reduce()/accumulate()/while() idiom, and count_to()-
-                    // style helpers generally -- gets its own slot declared
-                    // BEFORE compiling that RHS (letrec-style), so a
-                    // self-reference inside the closure's own body resolves
-                    // as a genuine upvalue (Op::LoadUpvalue) instead of
-                    // falling through to Op::LoadFree. Every other RHS shape
-                    // keeps the existing after-the-fact declareLocal below
-                    // unchanged (`let(x = x + 1)` must still see the OUTER
-                    // x, not a fresh, not-yet-assigned local shadowing it --
-                    // only a function-literal RHS has "see myself" as a
-                    // sensible reading at all). See Op::MakeClosure's own
-                    // runtime handler (bytecode_vm.cpp) for how the
-                    // resulting self-capture is actually resolved -- the
-                    // closure being created doesn't exist yet at the moment
-                    // its own captures are normally snapshotted, so this
-                    // one is deferred and patched in after construction
-                    // instead of read eagerly like every other capture.
-                    const bool selfBinding = !name.empty() && name[0] != '$' &&
-                                              assign->expr->kind() == oscad::NodeKind::FunctionLiteral;
-                    int preDeclaredSlot = -1;
-                    if (selfBinding) preDeclaredSlot = declareLocal(scope, name);
+                    if (!name.empty() && name[0] != '$' && assign->expr->kind() == oscad::NodeKind::FunctionLiteral) {
+                        letrecSlot[i] = declareLocal(scope, name);
+                        pendingLetrecSlots.insert(letrecSlot[i]);
+                    }
+                }
+                // consumerSlot/name pairs an EARLIER closure's own
+                // Op::MakeClosure left unresolved because they targeted a
+                // sibling that didn't exist yet at that point -- resolved
+                // (an Op::PatchClosureCapture emitted) the moment that
+                // sibling's own StoreLocal runs, below.
+                std::unordered_map<int, std::vector<std::pair<int, std::string>>> pendingWaiters;
+                for (size_t i = 0; i < n.assignments.size(); ++i) {
+                    const auto& assign = n.assignments[i];
+                    const std::string& name = assign->name->name;
+                    const int preDeclaredSlot = letrecSlot[i];
+                    const bool selfBinding = preDeclaredSlot >= 0;
                     compileExpr(*assign->expr, out, scope); // RHS is never tail
                     if (selfBinding && out.back().op == Op::MakeClosure) {
                         CompiledChunk::ClosureSite& site = chunk_.closureSites[static_cast<size_t>(out.back().a)];
-                        for (auto& cap : site.captures) {
-                            if (cap.targetDecl == selfDecl_ && cap.slot == preDeclaredSlot) cap.isSelfReference = true;
+                        auto& captures = site.captures;
+                        for (auto it = captures.begin(); it != captures.end();) {
+                            if (it->targetDecl != selfDecl_ || !pendingLetrecSlots.count(it->slot)) {
+                                ++it;
+                                continue;
+                            }
+                            if (it->slot == preDeclaredSlot) {
+                                // See Op::MakeClosure's own runtime handler
+                                // (bytecode_vm.cpp): the closure being
+                                // created doesn't exist yet at the moment
+                                // its own captures are normally snapshotted,
+                                // so this one is deferred and patched in
+                                // right after construction instead of read
+                                // eagerly like every other capture.
+                                it->isSelfReference = true;
+                                ++it;
+                            } else {
+                                // Forward reference to a sibling that hasn't
+                                // been constructed AT ALL yet -- unlike the
+                                // self-reference case above, there's nothing
+                                // to read OR self-patch into here. Left out
+                                // of `captures` entirely (nothing for
+                                // Op::MakeClosure to even attempt) and
+                                // deferred to a real Op::PatchClosureCapture
+                                // once that sibling's own StoreLocal runs.
+                                pendingWaiters[it->slot].emplace_back(preDeclaredSlot, it->name);
+                                it = captures.erase(it);
+                            }
                         }
                     }
                     if (!name.empty() && name[0] == '$') {
@@ -602,6 +639,17 @@ public:
                     } else {
                         int slot = selfBinding ? preDeclaredSlot : declareLocal(scope, name);
                         out.push_back({Op::StoreLocal, slot, 0, &assign->position()});
+                        if (selfBinding) {
+                            pendingLetrecSlots.erase(slot);
+                            auto waitersIt = pendingWaiters.find(slot);
+                            if (waitersIt != pendingWaiters.end()) {
+                                for (const auto& [consumerSlot, capName] : waitersIt->second) {
+                                    out.push_back({Op::PatchClosureCapture, consumerSlot, internName(capName),
+                                                    &assign->position(), nullptr, slot});
+                                }
+                                pendingWaiters.erase(waitersIt);
+                            }
+                        }
                     }
                 }
                 out[placeholderIdx].a = slotStart;

@@ -203,6 +203,29 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
                 ++pc;
                 break;
             }
+            case Op::PatchClosureCapture: {
+                // Mutual-recursion support (see the LetOp compile case's
+                // own doc comment, bytecode_compiler.cpp): `slots[ins.a]`
+                // (the consumer, e.g. isEven) already holds a real
+                // MakeClosure-created closure whose own capturedTrail is
+                // missing this ONE entry -- it was left out entirely at
+                // compile time because the sibling it names (e.g. isOdd)
+                // hadn't been constructed yet. `slots[ins.c]` (that
+                // sibling's own slot) does now, since this instruction only
+                // ever runs immediately after that sibling's own
+                // Op::StoreLocal. Mutates the SAME shared TrailView the
+                // consumer's own capturedLet already points at -- visible
+                // to it exactly like every other capture, no different
+                // from Op::MakeClosure's own self-reference patch, above.
+                const Value& consumerVal = slots[static_cast<size_t>(ins.a)];
+                if (const auto* closurePtr = std::get_if<ClosurePtr>(&consumerVal); closurePtr && *closurePtr) {
+                    if (auto trail = capturedLetTrail(**closurePtr)) {
+                        trail->set(chunk.names[static_cast<size_t>(ins.b)], slots[static_cast<size_t>(ins.c)]);
+                    }
+                }
+                ++pc;
+                break;
+            }
             case Op::Range: {
                 Value step = std::move(stack.back());
                 stack.pop_back();
