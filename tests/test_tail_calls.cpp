@@ -19,6 +19,7 @@
 
 #include "test_helpers.hpp"
 
+#include <chrono>
 #include <gtest/gtest.h>
 
 using namespace oscadeval;
@@ -126,17 +127,6 @@ TEST(TailCalls, NonTailRecursionIsUnaffectedByTheTrampoline) {
 }
 
 TEST(TailCalls, InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging) {
-#ifndef __APPLE__
-    // Skipped on non-Apple platforms: this drives the interpreter trampoline
-    // to the full 1,000,000-iteration recursion-guard cap, which is O(N)
-    // under Clang/libc++ (~1s) but a confirmed O(N^2) under GCC/libstdc++
-    // (and, empirically, MSVC's STL too) -- 25-50+ minutes instead of
-    // seconds. See https://github.com/BelfrySCAD/openscad_cpp_evaluator/issues/50
-    // for the full investigation (peak RSS/CPU/instruction-count evidence
-    // and an N-scaling experiment proving the asymptotic-complexity gap).
-    // Re-enable once that's root-caused and fixed.
-    GTEST_SKIP() << "O(N^2) under this toolchain -- see issue #50";
-#endif
     ScopedVm vm(false);
     Evaluator ev;
     auto ast = parseSrc("function loop(n) = loop(n + 1);\nresult = loop(0);");
@@ -150,11 +140,6 @@ TEST(TailCalls, InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging) {
 }
 
 TEST(TailCalls, InfiniteTailRecursionErrorMentionsTheFunctionName) {
-#ifndef __APPLE__
-    // See InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging's own
-    // comment just above -- same O(N^2)-under-this-toolchain issue (#50).
-    GTEST_SKIP() << "O(N^2) under this toolchain -- see issue #50";
-#endif
     ScopedVm vm(false);
     Evaluator ev;
     auto ast = parseSrc("function loop(n) = loop(n + 1);\nresult = loop(0);");
@@ -167,6 +152,34 @@ TEST(TailCalls, InfiniteTailRecursionErrorMentionsTheFunctionName) {
         EXPECT_NE(std::string(e.what()).find("loop"), std::string::npos);
         EXPECT_NE(std::string(e.what()).find("Recursion detected"), std::string::npos);
     }
+}
+
+TEST(TailCalls, InfiniteTailRecursionHitsTheCapInBoundedWallTime) {
+    // Regression tripwire for issue #50: evalFunctionBodyTrampoline's own
+    // `chain` (every hop's EvalContext, kept alive for $-var ancestry --
+    // see its own doc comment) used to rely on std::vector<EvalContext>'s
+    // OWN destructor to tear itself down, whose element-destruction order
+    // is unspecified by the standard. libstdc++ (GCC) and, per CI evidence,
+    // MSVC destroy front-to-back -- the adversarial order for
+    // ScopeTrailStorage::popLevel's "scan from the back" optimization
+    // (its own doc comment), turning an intended O(N) teardown into a
+    // real, measured O(N^2): the exact same 1,000,000-iteration script
+    // below took 25-50+ minutes on GCC/MSVC CI runners before the fix
+    // (an explicit back-to-front teardown, immune to the underlying
+    // vector's own unspecified order), vs ~1s on Clang/libc++ throughout.
+    // ponytail: generous fixed ceiling, not a strict perf target -- trips
+    // only on a real regression (this exact O(N^2) reintroduced), not
+    // machine noise; raise if a slower CI runner ever needs it.
+    ScopedVm vm(false);
+    Evaluator ev;
+    auto ast = parseSrc("function loop(n) = loop(n + 1);\nresult = loop(0);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    constexpr double kCeilingMs = 30000.0;
+    EXPECT_LT(ms, kCeilingMs) << "took " << ms << "ms -- possible O(N^2) regression, see issue #50";
 }
 
 TEST(TailCalls, ErrorThrownDeepInATailChainProducesABoundedTrace) {
