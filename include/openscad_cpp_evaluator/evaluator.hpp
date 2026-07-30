@@ -15,6 +15,7 @@
 
 #include "openscad_cpp_parser/ast.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -329,12 +330,61 @@ public:
     // exception at all" (today's original, always-safe behavior) --
     // e.g. the instant a step command starts or a pause is requested.
     // Cheap to call as often as the debugger's own state changes: this
-    // just updates one member, no cache invalidation needed (chunkEligibleNow
-    // is re-checked on every lookupOrCompileChunk/lookupCompiledLiteralChunk
-    // call, not cached itself -- only the compiled bytecode ITSELF, which
-    // never depends on debugger state, is cached forever).
-    void setFastContinueBreakpoints(std::optional<std::unordered_map<std::string, std::set<int>>> breakpoints) {
+    // just updates two members, no cache invalidation needed (chunkEligibleNow/
+    // checkDebug are re-checked on every call, not cached themselves -- only
+    // the compiled bytecode ITSELF, which never depends on debugger state,
+    // is cached forever).
+    //
+    // `hookSkippable`: a STRICTLY narrower claim than "breakpoints is
+    // accurate" above -- true only when NOTHING needs to inspect a
+    // statement-level checkpoint's own line/depth at all, not just "nothing
+    // needs to inspect it unless it's a compiled function's entry." This is
+    // false for step_over/step_out even though THEY also pass a real
+    // breakpoints set (chunkEligibleNow/useBytecodeVm still apply for them):
+    // both need checkDebug() to keep calling into the debug hook on every
+    // statement so the caller's own step_hit logic (line/depth comparison
+    // against the step's own starting point) can run -- there is no way to
+    // decide that in advance the way a breakpoint LOCATION can be. Only a
+    // plain "Continue" with no step pending can safely skip the call
+    // entirely for a line with no breakpoint -- see checkDebug's own doc
+    // comment (debug_profile.cpp) for where this is actually consulted.
+    void setFastContinueBreakpoints(std::optional<std::unordered_map<std::string, std::set<int>>> breakpoints,
+                                     bool hookSkippable = false) {
         fastContinueBreakpoints_ = std::move(breakpoints);
+        fastContinueHookSkippable_ = hookSkippable;
+    }
+
+    // The other half of hook-skippable mode's safety net. checkDebug()'s
+    // whole premise (see its own doc comment, debug_profile.cpp) is that it
+    // can skip calling into Python for a line with no breakpoint -- but the
+    // caller that decided that (DebugSession, on the MAIN/GUI thread) needs
+    // a way to say "actually, don't skip the very next one" from OUTSIDE any
+    // hook call, since debug_evaluate() runs as one single blocking call
+    // with the GIL released for its whole duration: there is no live,
+    // Python-callable Evaluator handle to invoke setFastContinueBreakpoints
+    // on directly the way a synchronous API would allow. A user clicking
+    // Pause, or toggling a breakpoint in an editor tab, while a hook-
+    // skippable render is mid-flight needs to take effect on the very next
+    // checkpoint, not "whenever a breakpoint happens to be hit next" (which,
+    // in hook-skippable mode, could be never, for a script with none set).
+    //
+    // `flag` is a plain shared_ptr<atomic<bool>> -- lock-free and GIL-free
+    // by construction, so the caller (bindings/module.cpp wraps it in a
+    // small Python-visible class) can set it from the main thread at any
+    // moment with no synchronization needed beyond the atomic itself.
+    // checkDebug() atomically test-and-clears it (exchange) on every call
+    // that would otherwise skip: if it was set, this call falls through and
+    // actually invokes the Python hook instead, which re-derives and pushes
+    // fresh breakpoints/hookSkippable state via its own existing logic --
+    // clearing it here (not from Python) means there's no separate
+    // "acknowledge" round-trip needed. Never itself compared against
+    // anything else; nullptr (the default, and what a plain debugger
+    // attach that never wires this up leaves it at) simply means hook-
+    // skippable mode -- if ever engaged at all -- can't be interrupted this
+    // way, which is only actually reachable if a caller opts into
+    // hookSkippable=true above without also providing this.
+    void setFastContinueInterruptFlag(std::shared_ptr<std::atomic<bool>> flag) {
+        fastContinueInterrupt_ = std::move(flag);
     }
 
     // Checks whether a debug pause should happen at `node` (via the
@@ -952,6 +1002,16 @@ private:
     // setter leaves it at) means "no fast-continue exception" -- exactly
     // today's original, always-safe behavior.
     std::optional<std::unordered_map<std::string, std::set<int>>> fastContinueBreakpoints_;
+    // See setFastContinueBreakpoints's own doc comment for why this is a
+    // separate, narrower flag from fastContinueBreakpoints_ itself -- false
+    // (the default) whenever a debugger is attached without explicitly
+    // opting in, matching today's always-safe "checkDebug always calls the
+    // hook" behavior.
+    bool fastContinueHookSkippable_ = false;
+    // See setFastContinueInterruptFlag's own doc comment. nullptr (the
+    // default) means hook-skippable mode, if ever engaged, can't be
+    // interrupted from outside a hook call.
+    std::shared_ptr<std::atomic<bool>> fastContinueInterrupt_;
     // The root EvalContext resolveTree() was called with -- lets
     // checkDebug()'s locals snapshot fall back to top-level script
     // variables when paused inside a nested user call, the same way the

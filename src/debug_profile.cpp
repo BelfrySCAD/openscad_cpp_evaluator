@@ -77,6 +77,36 @@ std::vector<DebugFrame> Evaluator::buildDebugFrames(const EvalContext* ctx) cons
 void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced, bool exprLevel) {
     if (!debugHooks_.debugHook) return;
     const oscad::Position& pos = node.position();
+    // Fast-continue's hook-skippable mode (setFastContinueBreakpoints' own
+    // doc comment): a plain "Continue" with no step pending needs the debug
+    // hook called ONLY for a line that actually has a breakpoint -- every
+    // other checkpoint is guaranteed to do nothing (no forced/breakpoint/
+    // step_hit condition on the Python side can possibly fire), so skip the
+    // call (and the childStatementPositions/getFrame setup below, all
+    // wasted work otherwise) entirely rather than crossing into Python just
+    // to be told "continue". `forced` (the explicit breakpoint() builtin)
+    // always bypasses this, matching its own "bypasses nothing" contract.
+    // Never applies to step_over/step_out (hookSkippable is false for those
+    // even though they also set a real breakpoints set, see the setter's
+    // own doc comment) or step_into/step_to_child (fastContinueBreakpoints_
+    // itself is nullopt then) -- both need every statement inspected.
+    if (!forced && fastContinueHookSkippable_ && fastContinueBreakpoints_) {
+        // Test-and-clear: if the main thread requested an interrupt (Pause,
+        // or a breakpoint edit -- see setFastContinueInterruptFlag's own doc
+        // comment) since the last checkDebug() call, this call falls
+        // through and actually invokes the hook below instead of skipping,
+        // regardless of whether THIS specific line has a breakpoint --
+        // that's what lets the hook's own logic (pause_now, or a freshly
+        // updated breakpoints dict) run at all in hook-skippable mode.
+        const bool interrupted =
+            fastContinueInterrupt_ && fastContinueInterrupt_->exchange(false, std::memory_order_acq_rel);
+        if (!interrupted) {
+            auto originIt = fastContinueBreakpoints_->find(pos.origin);
+            if (originIt == fastContinueBreakpoints_->end() || !originIt->second.count(pos.line)) {
+                return;
+            }
+        }
+    }
     const int depth = static_cast<int>(callStack_.size());
     const DebugFramesFn getFrame = [this, &ctx]() { return buildDebugFrames(&ctx); };
     lastChildrenPositions_ = childStatementPositions(node);

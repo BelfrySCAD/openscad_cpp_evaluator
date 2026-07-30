@@ -27,6 +27,7 @@
 
 #include "openscad_cpp_parser/api.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -362,17 +363,20 @@ using GetChildrenPositionsFn = std::function<const std::optional<std::vector<std
 // exactly where it already computes should_pause, without needing to
 // widen hook()'s existing (cmd, mods) return-tuple contract -- mirrors
 // generate_partial/get_children_positions's own "extra kwarg the Python
-// side may or may not call" shape.
-using SetFastContinueFn = std::function<void(std::optional<std::unordered_map<std::string, std::set<int>>>)>;
+// side may or may not call" shape. `hookSkippable` mirrors
+// setFastContinueBreakpoints's own second parameter exactly -- see its
+// doc comment for why this is narrower than "breakpoints is accurate."
+using SetFastContinueFn = std::function<void(std::optional<std::unordered_map<std::string, std::set<int>>>, bool)>;
 
 // Wraps a SetFastContinueFn as a Python callable taking either a
 // dict[str, set[int]]/dict[str, list[int]] (origin -> breakpoint lines) or
-// None. Mirrors generatePartialTrampoline's own shape.
+// None, plus a hook_skippable bool (default False). Mirrors
+// generatePartialTrampoline's own shape.
 nb::object setFastContinueTrampoline(const SetFastContinueFn& setFastContinue) {
     return nb::cpp_function(
-        [&setFastContinue](nb::object breakpoints) {
+        [&setFastContinue](nb::object breakpoints, bool hookSkippable) {
             if (breakpoints.is_none()) {
-                setFastContinue(std::nullopt);
+                setFastContinue(std::nullopt, hookSkippable);
                 return;
             }
             std::unordered_map<std::string, std::set<int>> bp;
@@ -381,7 +385,7 @@ nb::object setFastContinueTrampoline(const SetFastContinueFn& setFastContinue) {
                 for (nb::handle line : v) lines.insert(nb::cast<int>(line));
                 bp.emplace(nb::cast<std::string>(k), std::move(lines));
             }
-            setFastContinue(std::move(bp));
+            setFastContinue(std::move(bp), hookSkippable);
         },
         // Without .none(), nanobind rejects a Python `None` argument for an
         // `nb::object`-typed parameter registered this ad-hoc way (unlike a
@@ -391,8 +395,32 @@ nb::object setFastContinueTrampoline(const SetFastContinueFn& setFastContinue) {
         // was called with breakpoints=None (DebugSession's own
         // _apply_fast_continue calls it with None whenever fast-continue
         // mode isn't safe right now -- see debugger.py).
-        nb::arg("breakpoints").none());
+        nb::arg("breakpoints").none(), nb::arg("hook_skippable") = false);
 }
+
+// Python-visible handle onto a lock-free, GIL-free interrupt flag -- see
+// Evaluator::setFastContinueInterruptFlag's own doc comment (evaluator.hpp)
+// for why this exists at all: debug_evaluate() runs as one single blocking
+// call with the GIL released for its whole duration, so there is no live,
+// Python-callable Evaluator handle DebugSession.pause()/set_breakpoints()
+// (running on the MAIN/GUI thread) could otherwise invoke directly to
+// interrupt hook-skippable mode. A caller creates ONE of these before
+// calling debug_evaluate() (passing it as fast_continue_signal), keeps it
+// around for the whole debug session, and calls .request() from the main
+// thread any time a hook-skippable checkDebug() call needs to stop
+// skipping and actually consult Python again -- Pause, or a breakpoint
+// being toggled in an editor tab while a render is mid-flight. Nothing
+// else needs to read it back on the Python side; C++ test-and-clears it
+// (see checkDebug's own doc comment, debug_profile.cpp) the moment it acts
+// on it, so there's no separate "acknowledge" step.
+class FastContinueSignal {
+public:
+    void request() { flag_->store(true, std::memory_order_release); }
+    const std::shared_ptr<std::atomic<bool>>& flag() const { return flag_; }
+
+private:
+    std::shared_ptr<std::atomic<bool>> flag_ = std::make_shared<std::atomic<bool>>(false);
+};
 
 // GIL held (reacquired by the caller). `getFrame`/`callStack`/`generatePartial`/
 // `getChildrenPositions` are valid only for this synchronous call, so their
@@ -470,7 +498,8 @@ void callPyReturnHook(nb::handle returnHook, const std::string& name, const osca
 // blocks on the Python side (threading.Event) so the GUI thread keeps running.
 nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::callable debugHook,
                           nb::callable errorBreak, nb::callable echoFn,
-                          std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, nb::object returnHook) {
+                          std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, nb::object returnHook,
+                          FastContinueSignal* fastContinueSignal) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
@@ -501,8 +530,8 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             return evPtr->lastChildrenPositions();
         };
         SetFastContinueFn setFastContinue =
-            [&evPtr](std::optional<std::unordered_map<std::string, std::set<int>>> breakpoints) {
-            evPtr->setFastContinueBreakpoints(std::move(breakpoints));
+            [&evPtr](std::optional<std::unordered_map<std::string, std::set<int>>> breakpoints, bool hookSkippable) {
+            evPtr->setFastContinueBreakpoints(std::move(breakpoints), hookSkippable);
         };
         oscadeval::DebugHooks hooks;
         hooks.debugHook = [&](int line, int depth, bool forced, bool exprLevel, const std::string& origin,
@@ -528,6 +557,7 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, echoCpp);
             oscadeval::Evaluator ev(echoCpp, nullptr, manifoldCache, hooks, false);
             evPtr = &ev;
+            if (fastContinueSignal) ev.setFastContinueInterruptFlag(fastContinueSignal->flag());
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
             collectIdSpans(ev, idSpans);
@@ -602,6 +632,12 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
         .def(nb::init<>())
         .def("clear", &oscadeval::ManifoldCache::clear);
 
+    // See FastContinueSignal's own doc comment, above -- only a
+    // constructor and request() are ever called from Python.
+    nb::class_<FastContinueSignal>(m, "FastContinueSignal")
+        .def(nb::init<>())
+        .def("request", &FastContinueSignal::request);
+
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
           nb::arg("profile") = false,
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).");
@@ -609,6 +645,6 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "Parse a .scad file; return top-level declaration (namespace, name, start, end, line, column, origin) tuples.");
     m.def("debug_evaluate", &debugEvaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("debug_hook"),
           nb::arg("error_break"), nb::arg("echo_fn"), nb::arg("manifold_cache") = nullptr,
-          nb::arg("return_hook") = nb::none(),
+          nb::arg("return_hook") = nb::none(), nb::arg("fast_continue_signal") = nullptr,
           "Evaluate with the debugger wired in; returns (bodies, [], id_to_node, dyn, dyn_explicit). Callbacks fire under the GIL.");
 }
