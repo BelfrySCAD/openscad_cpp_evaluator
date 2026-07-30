@@ -608,31 +608,55 @@ TEST(BytecodeCompiler, MultiLevelCurriedClosureInvocationRunsCompiled) {
               "ECHO: 42\nECHO: 20");
 }
 
-TEST(BytecodeCompiler, SelfReferentialRecursiveClosureStillRunsInterpretedAndCorrectly) {
+TEST(BytecodeCompiler, SelfReferentialRecursiveClosureNowResolvesAsUpvalueAndRunsCompiled) {
     ScopedVm vm(true);
-    // reduce()'s own idiom: `a` calls itself by name, which LetOp's own
-    // declareLocal-after-compiling-the-RHS ordering means never resolves as
-    // a genuine upvalue at compile time (falls through to Op::LoadFree
-    // instead -- see containsLoadFree's own doc comment, bytecode_compiler.cpp).
-    // Registering such a chunk for compiled invocation is what previously
-    // (empirically, against a real list) turned an O(n) reduce() into
-    // O(n^2): every recursive call re-derives a fresh closure via
-    // Evaluator::evalIdentifier's ctx.scope->lookupVariable() fallback,
-    // nesting its own capturedLet one level deeper than the last every
-    // time. `containsLoadFree` excludes exactly this case from
-    // registration, so `a` keeps running interpreted -- more than 1 stop
-    // for its own call proves that, and the actual sum must still come out
-    // right either way.
+    // reduce()'s own idiom: `a` calls itself by name. A direct
+    // `let(a = function(...) ... a(...) ...)` RHS gets `a`'s own slot
+    // pre-declared BEFORE compiling that RHS (bytecode_compiler.cpp's
+    // LetOp case), letrec-style -- so this self-reference now resolves as
+    // a genuine upvalue (Op::LoadUpvalue) instead of falling through to
+    // Op::LoadFree, and `a`'s own body is eligible for registration
+    // (containsLoadFree no longer sees any unresolved reference in it).
+    // Op::MakeClosure's own runtime handler defers this ONE capture
+    // (the closure being built doesn't exist yet when its own captures
+    // are normally snapshotted) and patches it in immediately after
+    // constructing the real closure -- see its own doc comment,
+    // bytecode_vm.cpp. This is also what fixed a real O(n) -> O(n^2)
+    // regression found while building this feature: every recursive call
+    // used to re-derive a FRESH closure via Evaluator::evalIdentifier's
+    // ctx.scope->lookupVariable() fallback, nesting its own capturedLet
+    // one level deeper than the last -- confirmed via the CLI against a
+    // 32,000-element list (7+ seconds -> 0.05s once `a` genuinely
+    // resolves itself as an upvalue instead).
+    //
+    // 11 stops, not 30 (confirmed by diffing against the previous,
+    // containsLoadFree-excluded behavior with the same script): `reduce`'s
+    // own body-entry (1) + `a`'s own 5 recursive calls (1 each, compiled)
+    // + `func`'s own 4 calls (1 each, already compiled even before this --
+    // zero captures) + the top-level echo() statement's own stop (module
+    // code is never compiled).
     const int stops = countDebugHookStops(
         "function reduce(func, list, init=0) = let(l = len(list), a = function (x,i) i<l? "
         "a(func(x,list[i]), i+1) : x) a(init,0);\n"
         "echo(reduce(function(p,q) p+q, [1,2,3,4], 0));",
         std::unordered_map<std::string, std::set<int>>{});
-    EXPECT_GT(stops, 2);
+    EXPECT_EQ(stops, 11);
     EXPECT_EQ(runCapturingEcho("function reduce(func, list, init=0) = let(l = len(list), a = function (x,i) "
                                 "i<l? a(func(x,list[i]), i+1) : x) a(init,0);\n"
                                 "echo(reduce(function(p,q) p+q, [1,2,3,4], 0));"),
               "ECHO: 10");
+}
+
+TEST(BytecodeCompiler, PlainLetSelfReferenceStillSeesTheOuterBindingNotItself) {
+    ScopedVm vm(true);
+    // The letrec pre-declare above is gated on the RHS being a DIRECT
+    // FunctionLiteral specifically because a non-function `let(x = x + 1)`
+    // must keep seeing the OUTER x (real OpenSCAD/letOp shadowing
+    // semantics -- each assignment's RHS sees only what preceded it in the
+    // same let, never itself), not a fresh, not-yet-assigned local
+    // shadowing it. Confirms that ordinary case is untouched by the
+    // FunctionLiteral-only pre-declare.
+    EXPECT_EQ(runCapturingEcho("x = 100;\nfunction f() = let(x = x + 1) x;\necho(f());"), "ECHO: 101");
 }
 
 TEST(BytecodeCompiler, ClosureWithDollarParameterStillBailsContainer) {
