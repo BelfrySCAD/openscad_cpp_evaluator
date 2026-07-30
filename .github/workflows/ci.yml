@@ -58,6 +58,58 @@ jobs:
       # (OSCAD_BYTECODE_VM=0), so a regression in either the compiled or
       # the interpreted path fails CI, not just whichever happens to be
       # default at the time.
+
+      # TEMPORARY DIAGNOSTIC (to be reverted): ubuntu-latest/windows-latest
+      # both stall for 30+ min on TailCalls.InfiniteTailRecursion* (a
+      # 1,000,000-iteration interpreter tail call whose trampoline
+      # deliberately keeps one EvalContext alive per hop -- see
+      # evalFunctionBodyTrampoline's own doc comment, user_calls.cpp -- so
+      # this holds ~1M EvalContext objects simultaneously) while macOS
+      # passes in seconds. Measuring peak RSS + wall time for just these
+      # two tests, isolated, to confirm/refute memory pressure as the cause
+      # before deciding on a real fix.
+      - name: Report runner memory (Linux)
+        if: runner.os == 'Linux'
+        run: free -h
+
+      - name: Report runner memory (Windows)
+        if: runner.os == 'Windows'
+        run: systeminfo | Select-String "Total Physical Memory","Available Physical Memory"
+
+      - name: Report runner memory (macOS)
+        if: runner.os == 'macOS'
+        run: sysctl hw.memsize && vm_stat
+
+      - name: Diagnose slow test memory (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          /usr/bin/time -v ./build/tests/oscad_eval_tests \
+            --gtest_filter="TailCalls.InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging:TailCalls.InfiniteTailRecursionErrorMentionsTheFunctionName"
+
+      - name: Diagnose slow test memory (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $exe = ".\build\tests\Release\oscad_eval_tests.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList '--gtest_filter=TailCalls.InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging:TailCalls.InfiniteTailRecursionErrorMentionsTheFunctionName' -PassThru -NoNewWindow
+          $peak = 0
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          while (-not $p.HasExited) {
+            $p.Refresh()
+            if ($p.PeakWorkingSet64 -gt $peak) { $peak = $p.PeakWorkingSet64 }
+            Start-Sleep -Milliseconds 500
+          }
+          $sw.Stop()
+          Write-Host "Peak working set: $([math]::Round($peak / 1MB, 1)) MB"
+          Write-Host "Wall time: $($sw.Elapsed)"
+          Write-Host "Exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Diagnose slow test memory (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          /usr/bin/time -l ./build/tests/oscad_eval_tests \
+            --gtest_filter="TailCalls.InfiniteTailRecursionHitsTheIterationCapInsteadOfHanging:TailCalls.InfiniteTailRecursionErrorMentionsTheFunctionName"
+
       - name: Test (bytecode VM on, the default)
         run: ctest --test-dir build --output-on-failure -C Release
 
