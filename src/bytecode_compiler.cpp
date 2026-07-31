@@ -5,6 +5,7 @@
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
 #include "openscad_cpp_parser/ast/expression.hpp"
+#include "openscad_cpp_parser/ast/module_instantiation.hpp"
 #include "openscad_cpp_parser/ast/vector_element.hpp"
 #include "openscad_cpp_parser/scope.hpp"
 
@@ -229,6 +230,30 @@ public:
         return slot;
     }
 
+    // Shared by the Identifier case (below) and PrimaryCall's own callee
+    // probe (a bare-identifier callee that didn't resolve to a builtin/user
+    // function statically -- "maybe it's a closure value") -- same name
+    // resolution either way, only the terminal free-variable fallback
+    // differs: an ordinary read always warns on a genuinely unknown name
+    // (LoadFree), but the callee probe must not (LoadFreeNoWarn) --
+    // mirrors evalFunctionCall's own `evalIdentifier(..., warnIfUndef)`
+    // split exactly (user_calls.cpp). See LoadFreeNoWarn's own doc comment,
+    // bytecode.hpp, for the double-warning bug this fixes.
+    void compileIdentifierLoad(const std::string& name, const oscad::Position& pos, std::vector<Instruction>& out,
+                                CompileScope& scope, bool warnIfUndef) {
+        if (!name.empty() && name[0] == '$') {
+            out.push_back({Op::LoadDyn, internName(name), 0, &pos});
+        } else if (auto slot = scope.resolve(name)) {
+            out.push_back({Op::LoadLocal, *slot, 0, &pos});
+        } else if (auto upvalSlot = resolveEnclosing(name)) {
+            int idx = static_cast<int>(chunk_.upvalues.size());
+            chunk_.upvalues.push_back(*upvalSlot);
+            out.push_back({Op::LoadUpvalue, idx, 0, &pos});
+        } else {
+            out.push_back({warnIfUndef ? Op::LoadFree : Op::LoadFreeNoWarn, internName(name), 0, &pos});
+        }
+    }
+
     // Widens chunk_'s own [minLine, maxLine] span to include `node` --
     // called at the top of every AST-node-visiting entry point
     // (compileExpr/compileListElement/compileListCompBody) so the chunk's
@@ -308,17 +333,7 @@ public:
                 return;
             case NodeKind::Identifier: {
                 auto& n = static_cast<const oscad::Identifier&>(node);
-                if (!n.name.empty() && n.name[0] == '$') {
-                    out.push_back({Op::LoadDyn, internName(n.name), 0, &n.position()});
-                } else if (auto slot = scope.resolve(n.name)) {
-                    out.push_back({Op::LoadLocal, *slot, 0, &n.position()});
-                } else if (auto upvalSlot = resolveEnclosing(n.name)) {
-                    int idx = static_cast<int>(chunk_.upvalues.size());
-                    chunk_.upvalues.push_back(*upvalSlot);
-                    out.push_back({Op::LoadUpvalue, idx, 0, &n.position()});
-                } else {
-                    out.push_back({Op::LoadFree, internName(n.name), 0, &n.position()});
-                }
+                compileIdentifierLoad(n.name, n.position(), out, scope, /*warnIfUndef=*/true);
                 return;
             }
             case NodeKind::ListComprehension: {
@@ -560,7 +575,26 @@ public:
                     // otherwise) -- see Op::CallDynamic's own runtime
                     // handler. Never itself in tail position (it's the
                     // CALLEE being resolved, not this call's own result).
-                    compileExpr(*n.left, out, scope);
+                    //
+                    // A bare-identifier callee (leftId) goes through
+                    // compileIdentifierLoad directly with warnIfUndef=false
+                    // (LoadFreeNoWarn for the free-variable fallback,
+                    // matching evalFunctionCall's own
+                    // evalIdentifier(..., /*warnIfUndef=*/false) probe) --
+                    // NOT the generic compileExpr(*n.left, ...), which
+                    // would use plain Identifier compilation (LoadFree,
+                    // warnIfUndef=true) and double up "unknown variable"
+                    // on top of CallDynamic's own "unknown function"
+                    // warning for a genuinely unresolvable name. Anything
+                    // else (index/member access, another call's result)
+                    // has no such special-cased probe in the interpreter
+                    // either -- ordinary compileExpr, whatever warnings
+                    // THAT naturally produces.
+                    if (leftId) {
+                        compileIdentifierLoad(leftId->name, leftId->position(), out, scope, /*warnIfUndef=*/false);
+                    } else {
+                        compileExpr(*n.left, out, scope);
+                    }
                 }
 
                 for (const auto& argPtr : n.arguments) {
@@ -1062,6 +1096,156 @@ public:
         compileListElement(body, out, scope);
     }
 
+    // -- Module-body statement-list compilation (Stage 2) -----------------
+    // See tryCompileModuleBody's own doc comment (bytecode_compiler.hpp)
+    // for the overall shape: assignment/if/for get real bytecode (Jump-
+    // based control flow, so a recursive module call nested inside one
+    // doesn't hide behind a native call boundary); a resolved user-module
+    // call gets Op::CallModule; everything else -- echo/assert/let-blocks/
+    // modifiers/intersection_for, a builtin or unresolved module call, a
+    // plain assignment's own STORE (its RHS value, unlike a function's,
+    // is never slot-addressed here -- see this file's own module-chunk
+    // doc comment, bytecode.hpp, for why module bodies never allocate
+    // slots at all) -- is a native passthrough (Op::NativeStatement),
+    // exactly the same dispatch evalChildren's own per-statement loop
+    // already does for that one node.
+
+    int internNativeExpr(const oscad::Expression* expr) {
+        chunk_.nativeExprs.push_back(expr);
+        return static_cast<int>(chunk_.nativeExprs.size()) - 1;
+    }
+    int internNativeStatement(const oscad::ASTNode* node) {
+        chunk_.nativeStatements.push_back(node);
+        return static_cast<int>(chunk_.nativeStatements.size()) - 1;
+    }
+
+    // Mirrors evalChildren's own assignments-then-others partition
+    // (stmt_eval.cpp) exactly -- OpenSCAD runs every assignment in a scope
+    // before anything else, each group preserving its own source order.
+    // Reordering at COMPILE time (rather than delegating each statement
+    // in SOURCE order and relying on some runtime reordering) is what lets
+    // every statement -- assignment or not -- collapse to the same simple
+    // "compile once, in the right position" treatment.
+    void compileStatementList(const std::vector<std::unique_ptr<oscad::ASTNode>>& children, std::vector<Instruction>& out) {
+        std::vector<const oscad::ASTNode*> assignments;
+        std::vector<const oscad::ASTNode*> others;
+        for (const auto& c : children) {
+            (c->kind() == oscad::NodeKind::Assignment ? assignments : others).push_back(c.get());
+        }
+        for (const oscad::ASTNode* stmt : assignments) compileOneStatement(*stmt, out);
+        for (const oscad::ASTNode* stmt : others) compileOneStatement(*stmt, out);
+    }
+
+    void compileOneStatement(const oscad::ASTNode& stmt, std::vector<Instruction>& out) {
+        using oscad::NodeKind;
+        trackSpan(stmt);
+        switch (stmt.kind()) {
+            // Pure declarations, no-ops at statement-eval time (already
+            // hoisted into scope by buildScopes()) -- matches evalStatement's
+            // own default case; not even worth a NativeStatement entry.
+            case NodeKind::ModuleDeclaration:
+            case NodeKind::FunctionDeclaration:
+                return;
+            case NodeKind::ModularCall: {
+                auto& call = static_cast<const oscad::ModularCall&>(stmt);
+                const oscad::Scope* lookupScope = stmt.scope() ? stmt.scope() : scope_;
+                const oscad::ASTNode* resolved = lookupScope ? lookupScope->lookupModule(call.name->name) : nullptr;
+                if (resolved && resolved->kind() == NodeKind::ModuleDeclaration) {
+                    CompiledChunk::ModuleCallSite site;
+                    site.decl = static_cast<const oscad::ModuleDeclaration*>(resolved);
+                    site.callNode = &call;
+                    site.calleeName = call.name->name;
+                    chunk_.moduleCallSites.push_back(std::move(site));
+                    out.push_back(
+                        {Op::CallModule, static_cast<int>(chunk_.moduleCallSites.size()) - 1, 0, &call.position()});
+                    return;
+                }
+                // Builtin, children(), or a name that didn't resolve to a
+                // user module statically -- native passthrough, exactly
+                // like echo/assert/etc. below. Never the recursion-depth
+                // risk this compiler targets (see NativeStatement's own
+                // doc comment, bytecode.hpp).
+                out.push_back({Op::NativeStatement, internNativeStatement(&stmt), 0, &stmt.position()});
+                return;
+            }
+            case NodeKind::ModularIf: {
+                auto& n = static_cast<const oscad::ModularIf&>(stmt);
+                const int jumpFalseIdx = static_cast<int>(out.size());
+                out.push_back({Op::NativeCondJumpIfFalse, internNativeExpr(n.condition.get()), 0, &n.condition->position()});
+                const oscad::ASTNode* marker = n.trueBranch.empty() ? &stmt : n.trueBranch.front().get();
+                out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(marker), 0, nullptr});
+                compileStatementList(n.trueBranch, out);
+                out[static_cast<size_t>(jumpFalseIdx)].b = static_cast<int>(out.size());
+                return;
+            }
+            case NodeKind::ModularIfElse: {
+                auto& n = static_cast<const oscad::ModularIfElse&>(stmt);
+                const int jumpFalseIdx = static_cast<int>(out.size());
+                out.push_back({Op::NativeCondJumpIfFalse, internNativeExpr(n.condition.get()), 0, &n.condition->position()});
+                const oscad::ASTNode* trueMarker = n.trueBranch.empty() ? &stmt : n.trueBranch.front().get();
+                out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(trueMarker), 0, nullptr});
+                compileStatementList(n.trueBranch, out);
+                const int jumpEndIdx = static_cast<int>(out.size());
+                out.push_back({Op::Jump, 0, 0, nullptr});
+                out[static_cast<size_t>(jumpFalseIdx)].b = static_cast<int>(out.size());
+                const oscad::ASTNode* falseMarker = n.falseBranch.empty() ? &stmt : n.falseBranch.front().get();
+                out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(falseMarker), 0, nullptr});
+                compileStatementList(n.falseBranch, out);
+                out[static_cast<size_t>(jumpEndIdx)].a = static_cast<int>(out.size());
+                return;
+            }
+            case NodeKind::ModularFor: {
+                compileForLoop(static_cast<const oscad::ModularFor&>(stmt), out);
+                return;
+            }
+            default:
+                // echo/assert/let-block/modifiers/intersection_for --
+                // deliberately native, see this section's own header
+                // comment above.
+                out.push_back({Op::NativeStatement, internNativeStatement(&stmt), 0, &stmt.position()});
+                return;
+        }
+    }
+
+    // Cartesian nested loop over N assignments, unrolled into flat Jump-
+    // based code at COMPILE time (bounded by the source's own for-clause
+    // count, always small -- never runtime-driven) rather than the
+    // interpreter's own runtime recursion (evalFor's `recurse(depth+1,
+    // ...)`, stmt_eval.cpp). Each dimension: materialize once (native RHS
+    // eval + expandIterable), then a ForIterNext/ForIterEnd pair wrapping
+    // everything inner -- see Op::ForIterNext/ForIterEnd's own doc
+    // comments (bytecode.hpp) for exactly why a fresh per-iteration ctx
+    // (not an in-place mutation) is required for correctness, not just
+    // parity.
+    void compileForLoop(const oscad::ModularFor& n, std::vector<Instruction>& out) {
+        const size_t numDims = n.assignments.size();
+        std::vector<int> iterListIds(numDims);
+        for (size_t d = 0; d < numDims; ++d) {
+            iterListIds[d] = nextIterList_++;
+            out.push_back({Op::NativeIterMaterialize, internNativeExpr(n.assignments[d]->expr.get()),
+                            iterListIds[d], &n.assignments[d]->position()});
+        }
+        std::vector<size_t> topIdx(numDims);
+        std::vector<size_t> forIterNextIdx(numDims);
+        for (size_t d = 0; d < numDims; ++d) {
+            topIdx[d] = out.size();
+            forIterNextIdx[d] = out.size();
+            Instruction ins;
+            ins.op = Op::ForIterNext;
+            ins.a = internName(n.assignments[d]->name->name);
+            ins.b = iterListIds[d];
+            ins.node = n.assignments[d].get();
+            out.push_back(ins); // ins.c (exhaustion target) patched below
+        }
+        const oscad::ASTNode* marker = n.body.empty() ? static_cast<const oscad::ASTNode*>(&n) : n.body.front().get();
+        out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(marker), 0, nullptr});
+        compileStatementList(n.body, out);
+        for (size_t i = numDims; i-- > 0;) {
+            out.push_back({Op::ForIterEnd, static_cast<int>(topIdx[i]), 0, nullptr});
+            out[forIterNextIdx[i]].c = static_cast<int>(out.size());
+        }
+    }
+
 private:
     CompiledChunk& chunk_;
     const oscad::Scope* scope_;
@@ -1115,6 +1299,95 @@ bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, 
 std::optional<CompiledChunk> tryCompileFunction(const oscad::FunctionDeclaration& decl) {
     CompiledChunk chunk;
     if (!compileFunctionLike(chunk, decl.scope(), &decl, {}, decl.parameters, *decl.expr)) return std::nullopt;
+    return chunk;
+}
+
+std::optional<CompiledChunk> tryCompileStatementExpr(const oscad::Expression& expr, const oscad::Scope* scope) {
+    static const std::vector<std::unique_ptr<oscad::ParameterDeclaration>> kNoParams;
+    CompiledChunk chunk;
+    if (!compileFunctionLike(chunk, scope, nullptr, {}, kNoParams, expr)) return std::nullopt;
+    // See this function's own doc comment (bytecode_compiler.hpp) for why a
+    // captures-having nested closure can't be supported by this bare
+    // wrapper -- selfDecl is nullptr and enclosing is empty above, so its
+    // own upvalue(s) would target a CallStackFrame this path never pushes.
+    // A zero-capture closure never reaches closureSites at all (see the
+    // FunctionLiteral case's own PushConst early-return, above) so it's
+    // unaffected by this check.
+    if (!chunk.closureSites.empty()) return std::nullopt;
+    return chunk;
+}
+
+std::optional<CompiledChunk> tryCompileAssignmentBlock(const std::vector<const oscad::Assignment*>& assigns,
+                                                         const oscad::Scope* scope) {
+    // Reassignment-warning fidelity (see this function's own doc comment,
+    // bytecode_compiler.hpp) -- cheap, one-time scan before touching the
+    // compiler at all.
+    std::unordered_set<std::string> seenNames;
+    int topLevelDollarAssignments = 0;
+    for (const oscad::Assignment* a : assigns) {
+        const std::string& name = a->name->name;
+        if (!name.empty() && name[0] == '$') {
+            ++topLevelDollarAssignments; // evalAssignment never warns for a $-name either -- not tracked in seenNames
+        } else if (!seenNames.insert(name).second) {
+            return std::nullopt;
+        }
+    }
+
+    CompiledChunk chunk;
+    Compiler compiler(chunk, scope, nullptr, {});
+    CompileScope compileScope;
+    compileScope.push();
+    try {
+        for (const oscad::Assignment* a : assigns) {
+            compiler.compileExpr(*a->expr, chunk.bodyCode, compileScope); // RHS is never tail
+            const std::string& name = a->name->name;
+            if (!name.empty() && name[0] == '$') {
+                chunk.bodyCode.push_back({Op::StoreDyn, compiler.internName(name), 0, &a->position()});
+            } else {
+                int slot = compiler.declareLocal(compileScope, name);
+                chunk.bodyCode.push_back({Op::StoreLocalAndLet, slot, compiler.internName(name), &a->position()});
+            }
+        }
+    } catch (const NotCompilable&) {
+        return std::nullopt;
+    }
+    chunk.numSlots = compiler.nextSlot();
+    chunk.numIterLists = compiler.nextIterList();
+
+    // See this function's own doc comment for why: runCompiledAssignmentBlock
+    // (bytecode_vm.cpp) runs directly against the caller's own ctx, with no
+    // scope of its own for a nested let()'s dyn write to be contained by.
+    if (!chunk.closureSites.empty()) return std::nullopt;
+    // Every StoreDyn this loop itself emitted above is accounted for by
+    // topLevelDollarAssignments; any MORE than that in the compiled body
+    // can only have come from a nested let()/list-comprehension-let clause
+    // (StoreDyn's only other two emission sites) inside one of these
+    // assignments' own RHS -- refuse the whole block rather than risk that
+    // write leaking into the caller's ctx.dyn permanently.
+    int storeDynCount = 0;
+    for (const Instruction& ins : chunk.bodyCode) {
+        if (ins.op == Op::StoreDyn) ++storeDynCount;
+    }
+    if (storeDynCount != topLevelDollarAssignments) return std::nullopt;
+    return chunk;
+}
+
+std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration& decl) {
+    CompiledChunk chunk;
+    chunk.isModule = true;
+    chunk.selfDecl = &decl;
+    // No params/defaultCode/numSlots here -- a module's own parameters are
+    // bound natively (Evaluator::buildModuleChildCtx, called by the
+    // CALLER before this chunk's own body ever runs), never slot-
+    // addressed the way a function's are. See this file's own module-
+    // chunk doc comment (bytecode.hpp) for the full reasoning.
+    Compiler compiler(chunk, decl.scope(), nullptr, {});
+    try {
+        compiler.compileStatementList(decl.children, chunk.bodyCode);
+    } catch (const NotCompilable&) {
+        return std::nullopt;
+    }
+    chunk.numIterLists = compiler.nextIterList();
     return chunk;
 }
 

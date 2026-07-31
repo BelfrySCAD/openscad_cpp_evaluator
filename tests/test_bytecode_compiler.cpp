@@ -4,6 +4,7 @@
 
 #include "test_helpers.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -536,17 +537,24 @@ TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteNonEscapingClosure)
     // fast-continue "on", nothing set) to actually observe whether `make`
     // runs compiled here.
     //
-    // 3 stops, not 4: `make`'s own body-entry (1), `g`'s own body-entry
-    // (1) -- `g` itself now also runs compiled (its captures-having chunk
-    // is registered too, not discarded -- see the FunctionLiteral case's
-    // own doc comment, bytecode_compiler.cpp), so it costs exactly one
-    // stop instead of the extra sub-expression checkpoint an interpreted
-    // call used to add on top -- plus the top-level echo() statement's own
-    // stop (module-level code is never compiled).
+    // 2 stops: `make`'s own body-entry (1), `g`'s own body-entry (1) --
+    // `g` itself now also runs compiled (its captures-having chunk is
+    // registered too, not discarded -- see the FunctionLiteral case's own
+    // doc comment, bytecode_compiler.cpp), so it costs exactly one stop
+    // instead of the extra sub-expression checkpoint an interpreted call
+    // used to add on top. NOT a 3rd stop for the top-level echo()
+    // statement's own call-site anymore either (Phase 1, module/top-level
+    // compilation): `echo(make(10))`'s own argument now compiles too (see
+    // evalExprMaybeCompiled, evaluator.hpp), so make(10)'s call-site
+    // checkpoint (previously fired by evalFunctionCall's own checkDebug,
+    // evaluated as a plain interpreted expression) no longer fires --
+    // exactly the same "compiled code has no sub-expression checkpoints"
+    // trade-off a compiled FUNCTION body's own internal calls already had,
+    // now also applying to a statement's own top-level expression.
     const int stops = countDebugHookStops("function make(x) = let(g = function(y) y + x) g(5);\n"
                                            "echo(make(10));",
                                            std::unordered_map<std::string, std::set<int>>{});
-    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(stops, 2);
 }
 
 TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteEscapingClosure) {
@@ -563,12 +571,24 @@ TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteEscapingClosure) {
     // a checkpoint), so it produces the SAME stop count whether `outer`
     // compiled or not -- confirmed empirically, not assumed, by diffing
     // this test's own result against the pre-Op::MakeClosure compiler.
+    //
+    // 3, not 6: BOTH top-level statements' own expressions now compile too
+    // (Phase 1, module/top-level compilation). `stored = outer(5);` is
+    // ALSO its own compiled assignment BLOCK now (evalChildren's own
+    // leading assignment-run, a single-assignment block here -- see
+    // tryRunCompiledAssignmentBlock, evaluator.hpp), which bypasses
+    // evalChildren's own per-STATEMENT checkDebug entirely on top of
+    // `outer(5)`'s own call-site checkpoint already being lost (same
+    // reasoning as evalExprMaybeCompiled's doc comment) -- 2 stops lost
+    // there, not 1. `echo(stored(3));` (doEcho, not a batched assignment)
+    // still only loses its own call-site checkpoint the ordinary way -- 1
+    // stop. 6 - 2 - 1 = 3.
     const int stops = countDebugHookStops(
         "function outer(n) = n > 0 ? function(y) y + n : function(y) y - n;\n"
         "stored = outer(5);\n"
         "echo(stored(3));",
         std::unordered_map<std::string, std::set<int>>{});
-    EXPECT_EQ(stops, 6);
+    EXPECT_EQ(stops, 3);
 }
 
 TEST(BytecodeCompiler, MakeClosureCapturesFreshValuePerInvocation) {
@@ -653,18 +673,30 @@ TEST(BytecodeCompiler, SelfReferentialRecursiveClosureNowResolvesAsUpvalueAndRun
     // 32,000-element list (7+ seconds -> 0.05s once `a` genuinely
     // resolves itself as an upvalue instead).
     //
-    // 11 stops, not 30 (confirmed by diffing against the previous,
-    // containsLoadFree-excluded behavior with the same script): `reduce`'s
-    // own body-entry (1) + `a`'s own 5 recursive calls (1 each, compiled)
-    // + `func`'s own 4 calls (1 each, already compiled even before this --
-    // zero captures) + the top-level echo() statement's own stop (module
-    // code is never compiled).
+    // 6 stops (was 11 before Phase 1 module/top-level compilation --
+    // confirmed via a line/depth debug-hook dump, not re-derived by hand):
+    // the top-level echo() statement's own stop (1, line 2, depth 0) +
+    // `reduce`'s own body-entry (1, line 1, depth 1) + `func`'s own body-
+    // entry, once per call from within `a`'s 5-iteration chain (4, line 2,
+    // depth 2 -- `function(p,q) p+q` is textually written on line 2, as
+    // part of echo's own argument expression). `a`'s own 5 self-recursive
+    // hops contribute NOTHING of their own: reduce's own tail-position call
+    // INTO `a` (`a(init, 0)`, reduce's whole body) and every one of `a`'s
+    // own tail-recursive hops are all part of the SAME trampolined chain,
+    // so only the very first evalUserFunctionCore invocation (reduce's own)
+    // ever fires a body-entry checkDebug -- exactly the same collapse
+    // MutualRecursionBetweenSiblingLetBoundClosuresResolvesCorrectly, below,
+    // documents for isEven<->isOdd. What actually changed here: echo's own
+    // argument -- the WHOLE reduce(...) call -- now compiles as a bare
+    // statement-context chunk too (Phase 1, see evalExprMaybeCompiled,
+    // evaluator.hpp), so it no longer gets a separate call-site checkpoint
+    // of its own either, on top of everything already collapsed above.
     const int stops = countDebugHookStops(
         "function reduce(func, list, init=0) = let(l = len(list), a = function (x,i) i<l? "
         "a(func(x,list[i]), i+1) : x) a(init,0);\n"
         "echo(reduce(function(p,q) p+q, [1,2,3,4], 0));",
         std::unordered_map<std::string, std::set<int>>{});
-    EXPECT_EQ(stops, 11);
+    EXPECT_EQ(stops, 6);
     EXPECT_EQ(runCapturingEcho("function reduce(func, list, init=0) = let(l = len(list), a = function (x,i) "
                                 "i<l? a(func(x,list[i]), i+1) : x) a(init,0);\n"
                                 "echo(reduce(function(p,q) p+q, [1,2,3,4], 0));"),
@@ -692,21 +724,25 @@ TEST(BytecodeCompiler, MutualRecursionBetweenSiblingLetBoundClosuresResolvesCorr
     // patch into (see Op::PatchClosureCapture's own doc comment,
     // bytecode.hpp): resolved instead by a real patch instruction emitted
     // right after `isOdd`'s own StoreLocal, once it actually exists.
-    // 3 stops, not one per logical call (isEvenTest's own entry, plus one
+    // 2 stops, not one per logical call (isEvenTest's own entry, plus one
     // per level of isEven(6)->isOdd(5)->isEven(4)->...->isEven(0)):
     // isEven<->isOdd calling each other in tail position is exactly what
     // the tail-call trampoline collapses into ONE evalUserFunctionCore
     // invocation for the WHOLE chain (see runCompiledFunctionTrampoline,
     // bytecode_vm.cpp) -- its own unconditional body-entry checkDebug()
     // fires once for that entire loop, not once per hop. isEvenTest's own
-    // entry (1) + that one trampoline loop (1) + the top-level echo()
-    // statement's own stop (module code is never compiled) = 3.
+    // entry (1) + that one trampoline loop (1) = 2. NOT a 3rd stop for the
+    // top-level echo() statement's own call-site anymore either (Phase 1,
+    // module/top-level compilation): `echo(isEvenTest(6))`'s own argument
+    // now compiles too (see evalExprMaybeCompiled, evaluator.hpp), so
+    // isEvenTest(6)'s call-site checkpoint -- previously fired by plain
+    // interpreted evalFunctionCall -- no longer does.
     const int stops = countDebugHookStops(
         "function isEvenTest(n) = let(isEven = function(k) k==0 ? true : isOdd(k-1), isOdd = function(k) "
         "k==0 ? false : isEven(k-1)) isEven(n);\n"
         "echo(isEvenTest(6));",
         std::unordered_map<std::string, std::set<int>>{});
-    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(stops, 2);
     EXPECT_EQ(runCapturingEcho("function isEvenTest(n) = let(isEven = function(k) k==0 ? true : isOdd(k-1), "
                                 "isOdd = function(k) k==0 ? false : isEven(k-1)) isEven(n);\n"
                                 "echo(isEvenTest(6));\necho(isEvenTest(7));"),
@@ -772,11 +808,17 @@ TEST(BytecodeCompiler, ClosureWithDollarParameterNowCompilesToo) {
     // Proof via the same fast-continue stop-count technique used
     // throughout this file (nullopt is NOT a reliable signal here -- it
     // forces every function to interpret regardless of eligibility, see
-    // DebugAttachedWithoutFastContinueAlwaysInterprets above -- a real
-    // breakpoint map on a non-matching line is what actually distinguishes
-    // compiled from interpreted). 3 stops: outer's own body-entry, g's
-    // call-site, g's own body-entry -- no ternary/sub-expression stops for
-    // either, since both now run compiled.
+    // DebugAttachedWithoutFastContinueAlwaysInterprets above). The
+    // breakpoint sits on line 2 -- echo's own statement line -- so it
+    // deliberately forces THAT one call (echo's `outer(10)` argument) to
+    // interpret, while outer's and g's own bodies (line 1) stay eligible
+    // and run compiled. 3 stops: the echo statement's own per-statement
+    // checkpoint (line 2), the interpreted call-site checkpoint for
+    // calling outer (line 2), and outer's own body-entry (line 1) -- g's
+    // own tail call, reached from INSIDE outer's now-compiled body, hops
+    // in place silently (no separate stop), proving the tail hop stays
+    // silent even for a closure capturing an enclosing binding with its
+    // own $-parameter.
     const int stops = countDebugHookStops(script, std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
     EXPECT_EQ(stops, 3);
 }
@@ -1124,11 +1166,20 @@ TEST(BytecodeCompiler, FastContinueWithBreakpointInsideFunctionStillInterprets) 
     ScopedVm vm(true);
     // Breakpoint on line 1 itself -- inside f's own compiled span -- must
     // still force the interpreter for f specifically, even in fast-continue
-    // mode: something on that exact line could need a real checkpoint.
+    // mode: something on that exact line could need a real checkpoint. 4,
+    // not 5 (Phase 1, module/top-level compilation): the breakpoint is on
+    // line 1 (f's own body), not line 2, so it doesn't affect echo(f(5))'s
+    // OWN argument expression -- a SEPARATE chunk with its own SEPARATE
+    // [minLine,maxLine] span (line 2 only) -- which is still eligible to
+    // compile and so loses its own call-site checkpoint, exactly like
+    // every other statement-context expression now does when eligible.
+    // f's OWN body still correctly interprets either way (the actual
+    // guarantee this test exists to prove), just via one fewer surrounding
+    // stop than before.
     const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
                                            "echo(f(5));",
                                            std::unordered_map<std::string, std::set<int>>{{"<string>", {1}}});
-    EXPECT_EQ(stops, 5);
+    EXPECT_EQ(stops, 4);
 }
 
 TEST(BytecodeCompiler, FastContinueWithBreakpointInDifferentFunctionUsesVmForThisOne) {
@@ -1140,11 +1191,16 @@ TEST(BytecodeCompiler, FastContinueWithBreakpointInDifferentFunctionUsesVmForThi
     // this same file. Confirms the gating is genuinely per-function, not
     // "any breakpoint anywhere disables the whole file." Only f is ever
     // called, so g's own eligibility is never directly observed here.
+    // 2, not 3 (Phase 1, module/top-level compilation): echo(f(5))'s own
+    // argument (line 3, outside the breakpoint's line-2 span) is a
+    // separate chunk from f's own body, independently eligible to compile
+    // -- losing its own call-site checkpoint like every other eligible
+    // statement-context expression now does.
     const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
                                            "function g(x) = x > 0 ? x + 1 : x - 1;\n"
                                            "echo(f(5));",
                                            std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
-    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(stops, 2);
 }
 
 TEST(BytecodeCompiler, CStyleForIncrNameCanReadItsOwnPriorValueInTheSameAssignment) {
@@ -1175,4 +1231,199 @@ TEST(BytecodeCompiler, CStyleForIncrNameCanReadItsOwnPriorValueInTheSameAssignme
                                 "          if (i==n) best_i];\n"
                                 "echo(myloop(5));"),
               "ECHO: [4]");
+}
+
+// -- Module-body compilation (Stage 2) -------------------------------------
+//
+// Mirrors the function-side Phase B section above: module bodies now
+// compile too (Op::CallModule/NativeStatement/NativeCondJumpIfFalse/
+// NativeIterMaterialize/ForIterNext/ForIterEnd -- see bytecode.hpp and
+// tryCompileModuleBody, bytecode_compiler.cpp), specifically so a
+// recursive module call no longer makes an unbounded native C++ recursive
+// call the way evalUserModule always used to (no trampoline exists for
+// modules, unlike functions' own tail-call machinery). assignment/echo/
+// assert/let-blocks/modifiers/intersection_for still delegate to a native
+// evalStatement call for one node at a time -- only if/for/a resolved
+// user-module call get real bytecode, since those are the shapes that can
+// hide a recursive call behind a native call boundary.
+
+TEST(ModuleBodyCompiles, ForLoopProducesCorrectGeometryCompiled) {
+    // Each iteration's translate()/cube() stays its own separate top-level
+    // body (four disjoint cubes, not boolean-unioned into one manifold --
+    // confirmed against the interpreted path directly: byte-identical STL
+    // output either way for this exact script). Asserting bodies.size()
+    // and the outermost bounding box across all of them is what's actually
+    // load-bearing here, not a specific body count guess.
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module row(n) { for (i = [0:n-1]) translate([i * 2, 0, 0]) cube(1); }\nrow(4);");
+    ASSERT_EQ(e.bodies.size(), 4u);
+    double maxX = 0.0;
+    for (const auto& body : e.bodies) maxX = std::max(maxX, body.body->BoundingBox().max.x);
+    EXPECT_NEAR(maxX, 7.0, 1e-9); // last cube at i=3 -> translate([6,0,0]), cube(1) -> max.x = 7
+}
+
+TEST(ModuleBodyCompiles, IfElseInModuleBodyPicksCorrectBranchCompiled) {
+    ScopedVm vm(true);
+    Evaluated eTrue = evalSrc("module pick(n) { if (n > 0) cube(5); else sphere(1); }\npick(1);");
+    ASSERT_EQ(eTrue.bodies.size(), 1u);
+    EXPECT_NEAR(eTrue.bodies[0].body->BoundingBox().max.x, 5.0, 1e-9);
+
+    Evaluated eFalse = evalSrc("module pick(n) { if (n > 0) cube(5); else sphere(1); }\npick(-1);");
+    ASSERT_EQ(eFalse.bodies.size(), 1u);
+    EXPECT_NEAR(eFalse.bodies[0].body->BoundingBox().max.x, 1.0, 1e-9);
+}
+
+TEST(ModuleBodyCompiles, ReassignmentInsideForLoopBodyDoesNotSpuriouslyWarn) {
+    ScopedVm vm(true);
+    // Op::ForIterNext pushes a FRESH child ctx per iteration (see its own
+    // doc comment, bytecode.hpp) specifically so an ordinary local
+    // assignment inside the loop body -- reusing the same NAME every
+    // iteration, a common and unremarkable pattern -- doesn't trip
+    // evalAssignment's own "was assigned on line N but overwritten"
+    // warning from iteration 2 onward. Reusing the SAME ctx across
+    // iterations (the wrong, simpler design) would warn 9 times here.
+    std::vector<std::string> warnings;
+    Evaluator ev([&](const std::string& msg) { warnings.push_back(msg); });
+    auto ast = parseSrc("module row(n) { for (i = [0:n-1]) { r = i * 2; translate([r, 0, 0]) cube(1); } }\nrow(10);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx, {});
+    for (const std::string& w : warnings) EXPECT_EQ(w.find("overwritten"), std::string::npos) << w;
+}
+
+TEST(ModuleBodyCompiles, RecursiveModuleWithIfSucceedsWellPastTheOldNativeLimitCompiled) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(10000);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+TEST(ModuleBodyCompiles, RecursiveModuleThrowingPartwayUnwindsCleanlyAndVmFrameRunsAgain) {
+    ScopedVm vm(true);
+    Evaluator ev;
+    auto ast1 =
+        parseSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { assert(false, \"boom\"); } }\nrecur(5000);");
+    auto scope1 = oscad::buildScopes(ast1);
+    EvalContext ctx1 = EvalContext::makeRoot(scope1.get());
+    EXPECT_THROW(ev.evaluate(ast1, ctx1, {}), EvalError);
+
+    // A second, unrelated script on the SAME Evaluator afterward -- if any
+    // VmFrame/treeStack_ frame/callStack_ entry leaked from the throw
+    // above, this would crash, misbehave, or show a corrupted pool.
+    auto ast2 = parseSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(2000);");
+    auto scope2 = oscad::buildScopes(ast2);
+    EvalContext ctx2 = EvalContext::makeRoot(scope2.get());
+    std::vector<ColoredBody> bodies = ev.evaluate(ast2, ctx2, {});
+    ASSERT_EQ(bodies.size(), 1u);
+}
+
+TEST(ModuleBodyCompiles, DollarVarSetEarlyStaysVisibleDeepInARecursiveModuleChainCompiled) {
+    ScopedVm vm(true);
+    // The module-call analog of TailCalls.DollarVarSetEarlyInANonTailCompiled
+    // ChainStaysVisibleManyLevelsDeep (test_tail_calls.cpp) -- each
+    // recursive level is a genuine Op::CallModule push (its own VmFrame,
+    // its own ctxChain entry via buildModuleChildCtx's callCtxFor), not a
+    // hop -- $probe (dyn, isolate=false) must still resolve 2000 real
+    // pushes deep.
+    EXPECT_EQ(runCapturingEcho("module recur(n) { if (n > 0) { recur(n - 1); } else { echo($probe); } }\n"
+                                "let($probe = 77) recur(2000);"),
+              "ECHO: 77");
+}
+
+TEST(ModuleBodyCompiles, NestedModuleClosureOverReassignedParameterCompiles) {
+    ScopedVm vm(true);
+    // Regression test for a real bug caught while building this feature:
+    // evalUserModule's own compiled branch used to skip the callStack_
+    // bracket entirely (assuming, wrongly, that some OUTER caller already
+    // did it -- true for a NESTED Op::CallModule call, never true for
+    // THIS, the outermost entry point) -- silently breaking callCtxFor's
+    // span-containment closure search for any module declared INSIDE
+    // another module's body, which hung (an infectious infinite loop, not
+    // a clean failure) rather than crashing outright.
+    Evaluated e = evalSrc("module outer(edges) {"
+                          "  edges = edges * 2;"
+                          "  module inner() { cube(edges); }"
+                          "  inner();"
+                          "}"
+                          "outer(3);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->BoundingBox().max.x, 6.0, 1e-9);
+}
+
+TEST(ModuleBodyCompiles, ParentModulesCountIsAccurateAtEachNestingLevelCompiled) {
+    // Evaluator::moduleCallDepth_ replaced a full callStack_ rescan per
+    // module call (buildModuleChildCtx's own $parent_modules) with an
+    // incrementally maintained counter -- found necessary because the
+    // rescan is O(depth), turning a script recursing 64,000 modules deep
+    // (no geometry cost at all, just the recursion itself) from an
+    // expected-linear ~1s into an actual ~5.5s, and 128,000 deep into
+    // ~22s (quadratic, confirmed by doubling depth and watching wall time
+    // roughly quadruple) -- entirely invisible at the small depths any of
+    // this session's OTHER tests exercise. This test is the correctness
+    // half of that fix: increment/decrement must land on exactly the
+    // right call, at every depth, or $parent_modules silently drifts.
+    EXPECT_EQ(runCapturingEcho("module inner() { echo($parent_modules); }\n"
+                                "module mid() { inner(); }\n"
+                                "module outer() { mid(); }\n"
+                                "outer();"),
+              "ECHO: 2");
+}
+
+TEST(ModuleBodyCompiles, ParentModulesCountRecoversCorrectlyAfterACaughtExceptionCompiled) {
+    // The exception-unwind path (Evaluator::exitUserCallException, and
+    // driveVm's own teardownVmCallStackDownTo for a compiled chain) must
+    // decrement moduleCallDepth_ exactly as often as the success path
+    // does -- otherwise a caught error inside a deep module chain would
+    // leave every SUBSEQUENT $parent_modules read permanently wrong (an
+    // off-by-N leak, not a crash, so nothing else would catch it).
+    std::string captured;
+    Evaluator ev([&](const std::string& msg) { captured = msg; });
+    auto ast1 = parseSrc("module inner() { assert(false, \"boom\"); }\n"
+                          "module outer() { inner(); }\n"
+                          "outer();");
+    auto scope1 = oscad::buildScopes(ast1);
+    EvalContext ctx1 = EvalContext::makeRoot(scope1.get());
+    EXPECT_THROW(ev.resolveTree(ast1, ctx1), EvalError);
+
+    // Same Evaluator instance, a second, unrelated script -- if the throw
+    // above leaked moduleCallDepth_ increments, THIS $parent_modules read
+    // would be wrong even though nothing here is nested at all.
+    auto ast2 = parseSrc("module inner() { echo($parent_modules); }\n"
+                          "module outer() { inner(); }\n"
+                          "outer();");
+    auto scope2 = oscad::buildScopes(ast2);
+    EvalContext ctx2 = EvalContext::makeRoot(scope2.get());
+    ev.resolveTree(ast2, ctx2);
+    EXPECT_EQ(captured, "ECHO: 1");
+}
+
+TEST(ModuleBodyCompiles, NestedModuleClosureStillWorksAfterADeepUnrelatedRecursiveDetour) {
+    ScopedVm vm(true); // 5000-deep non-tail recursion needs the compiled path (see test_tail_calls.cpp)
+    // Regression test for Evaluator::activeDeclRefcount_ (callCtxFor's own
+    // O(depth) callStack_ scan replaced with a refcounted set of DISTINCT
+    // active declarations -- see its own doc comment, evaluator.hpp, for
+    // the O(depth^2) perf cliff this fixes). The refcount for `deep`
+    // should go all the way back to exactly 0 once its 5000-deep
+    // recursive detour unwinds -- if the enter/exit accounting were even
+    // slightly off (e.g. missing a decrement somewhere), `deep`'s own
+    // entry would leak into activeDeclRefcount_ forever, which wouldn't
+    // break correctness here (deep's own span can't contain outer/inner's)
+    // but WOULD mean this test is exercising a real leak undetected by
+    // simpler tests. Bounding `deep`'s own recursion at a shallow depth
+    // first (to confirm it terminates cleanly) then going deep is the
+    // point: it must not corrupt the SEPARATE outer/inner closure check
+    // that runs after it, on the same Evaluator.
+    std::string captured;
+    Evaluator ev([&](const std::string& msg) { captured = msg; });
+    auto ast = parseSrc("function deep(n) = n <= 0 ? 0 : 1 + deep(n - 1);\n"
+                        "module outer(edges) {"
+                        "  edges = edges * 2;"
+                        "  module inner() { echo(edges); }"
+                        "  inner();"
+                        "}"
+                        "echo(deep(5000));"
+                        "outer(3);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    EXPECT_EQ(captured, "ECHO: 6"); // 3*2, seen via inner's own closure over outer's reassigned edges
 }

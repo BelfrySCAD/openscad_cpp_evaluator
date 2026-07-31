@@ -100,6 +100,10 @@ public:
     // tagGenerated()/builtinChildren() are: the call site is a free
     // function, not a method.
     void noteRandsCall() { ++randsCallCount_; }
+    // Read-only accessor for the same reason: Op::CallModule's own runtime
+    // handler (bytecode_vm.cpp) needs its own "randsBefore" snapshot,
+    // mirroring evalModularCall's own local of the same name.
+    std::uint64_t randsCallCount() const { return randsCallCount_; }
 
     // Dispatches on node.kind() (switch, not a visitor -- matches
     // openscad_cpp_parser's own dispatch convention). Throws
@@ -109,6 +113,24 @@ public:
     // supported" should fail loudly, not produce a plausible-looking wrong
     // answer.
     Value evalExpr(const oscad::Expression& node, EvalContext& ctx);
+
+    // Statement-context sibling of evalExpr -- same result for every input,
+    // just a possibly-compiled path for a STATEMENT-level expression
+    // (assignment RHS, if/for condition, module-call or echo()/assert()
+    // argument) instead of module/top-level code's ordinary AST walk. Not a
+    // new evaluation semantics: looks up (compiling and caching on first
+    // use, see stmtExprChunkCache_/tryCompileStatementExpr) a bytecode
+    // chunk for `node`, runs it via runCompiledExprChunk when the VM is on,
+    // this specific chunk is debugger-eligible right now (chunkEligibleNow,
+    // the identical per-chunk gate every compiled function call already
+    // goes through), AND a resolveTree()/evaluate() pass is actually
+    // active (inResolvePass_ -- see stmtExprChunkCache_'s own doc comment
+    // for why caching outside one is unsafe) -- falling straight back to
+    // evalExpr(node, ctx) otherwise. Compilation failing, the VM being off,
+    // a debugger needing this exact span, or no active pass are all
+    // silently equivalent to "just interpret it," same as functions' own
+    // fallback.
+    Value evalExprMaybeCompiled(const oscad::Expression& node, EvalContext& ctx);
 
     // Evaluates a block's statements in OpenSCAD's assignment-before-
     // geometry order (all Assignment nodes first, then everything else,
@@ -478,8 +500,26 @@ private:
     Value evalAssertExpr(const oscad::AssertOp& node, EvalContext& ctx);
     void bindLetName(EvalContext& ctx, const std::string& name, const Value& v);
 
+    // Bracketed public in place: Stage 2's Op::NativeStatement
+    // (bytecode_vm.cpp, a separate translation unit) needs it directly to
+    // run one native-passthrough statement from inside an otherwise-
+    // compiled module body -- exactly the same dispatch evalChildren's own
+    // per-statement loop already does.
+public:
     void evalStatement(const oscad::ASTNode& node, EvalContext& ctx);
+private:
     void evalAssignment(const oscad::Assignment& node, EvalContext& ctx);
+    // Tries to compile+run `assignments` (evalChildren's own leading
+    // assignment-run, stmt_eval.cpp) as ONE chunk via
+    // tryCompileAssignmentBlock/runCompiledAssignmentBlock -- see their own
+    // doc comments (bytecode_compiler.hpp/bytecode_vm.hpp) and
+    // assignBlockChunkCache_'s, above. Returns false (nothing run, `ctx`
+    // untouched) whenever compiling/running the WHOLE batch this way isn't
+    // possible or eligible right now, so the caller can fall back to its
+    // existing per-statement loop -- exactly evalExprMaybeCompiled's own
+    // "silently equivalent to interpreting it" contract, just for a whole
+    // block instead of one leaf expression.
+    bool tryRunCompiledAssignmentBlock(const std::vector<const oscad::ASTNode*>& assignments, EvalContext& ctx);
     void evalModularCall(const oscad::ModularCall& node, EvalContext& ctx);
     void evalFor(const oscad::ModularFor& node, EvalContext& ctx);
     void evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx);
@@ -507,8 +547,18 @@ private:
     void buildTreeNode(const std::string& kind, const oscad::ASTNode& node,
                         const std::function<CSGParams()>& resolveBody);
 
+    // Sets node.treeDepth from its own (already-finalized) `children`,
+    // throwing (kMaxCsgTreeDepth's own doc comment, above, for why) if
+    // it's now too deep. Called by every csg_resolve.cpp site that
+    // finalizes a CSGNode's own `children` -- buildTreeNode,
+    // evalModularCall's non-splice tail, spliceModuleChildren's
+    // union-wrap branch -- right after assigning `children`, before the
+    // node is ever linked into anything a caller could see.
+    void setTreeDepthOrThrow(CSGNode& node, const oscad::ASTNode& errNode);
+
     // -- User function/module calls (Phase 4) --------------------------
 
+public:
     // Picks between an isolated call scope (callCtx()) and a closure-
     // capturing one (childCtx()) for entering `decl`'s body: walks the
     // live call stack, and if `decl`'s own declaration span is *strictly*
@@ -551,6 +601,7 @@ private:
                             const EvalContext* childrenCallerCtx = nullptr, bool* usedChildCtx = nullptr,
                             const std::shared_ptr<TrailView<Value>>& capturedLet = nullptr);
 
+private:
     // Fills in any parameter not already present in `bound` (bindArgs'
     // own return value -- the authoritative "did the caller actually
     // supply this name" record) from its own default-value expression,
@@ -629,68 +680,30 @@ private:
     // closure type all the way through, so the compiler can call (and
     // often inline) `computeResult()` directly -- no erasure, no
     // allocation, same one-call-site-per-caller shape as before.
+    // A synchronous call-and-block wrapper around enterUserCall/
+    // exitUserCallSuccess/exitUserCallException (public, below) -- kept as
+    // the ordinary entry point for the tree-walking interpreter's own
+    // recursive call sites (user_calls.cpp), which genuinely do want "call
+    // and block for the result" semantics. The explicit-frame-stack VM
+    // driver (bytecode_vm.cpp) calls the two halves directly instead,
+    // since ITS whole point is a compiled-to-compiled call must NOT block
+    // a native frame waiting for the callee -- see enterUserCall's own doc
+    // comment for the split rationale. This wrapper's own behavior is
+    // byte-for-byte identical to the pre-split version; the split changed
+    // nothing observable here.
     template <typename F>
     Value evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode, const oscad::Expression& bodyExpr,
                                 EvalContext& childCtx, const oscad::Position* callPos, int upvalueParent,
                                 F&& computeResult) {
-        // Guards against a genuinely non-tail-recursive user function --
-        // each logical call HERE is a real, unavoidable C++ recursive call
-        // (a trampolined tail call never re-enters this function at all,
-        // see evalFunctionBodyTrampoline/runCompiledFunctionTrampoline) --
-        // silently overflowing the native stack: a hard, unrecoverable
-        // process crash with no C++ exception to catch. Confirmed present
-        // (before this guard existed) for a plain, closure-free `function
-        // f(n) = n<=0 ? 0 : 1+f(n-1);`, compiled OR interpreted.
-        //
-        // kMaxUserCallDepth is a conservative, heuristic cap, NOT a
-        // precisely-calibrated one -- and specifically calibrated against
-        // the WORST measured platform, not the best. Two rounds of CI
-        // diagnostics (temporary test builds that recursed to increasing
-        // depths, printing success after each one so the CI log itself
-        // would show exactly where a crash happened) found: (1) this
-        // evaluator's own C++ recursion is safe into the THOUSANDS on an
-        // ordinary macOS/Linux desktop main-thread stack, but only into
-        // the low HUNDREDS on CI's windows-latest runner (smaller default
-        // thread stack and/or larger MSVC-compiled call frames than
-        // Clang's); (2) actually THROWING from that depth and unwinding
-        // back out through that many nested try/catch frames (this guard
-        // fires from inside evalUserFunctionCore, which every level of
-        // the recursion has its own try/catch in) costs meaningfully MORE
-        // native stack than simply being that deep without throwing --
-        // 300 survived on Windows without throwing, but throwing+
-        // unwinding through as few as 100 nested frames did not (80 was
-        // the last depth that survived). 50 leaves real margin below that
-        // 80 figure for whatever's already on the stack from this call's
-        // own caller, and for a smaller stack still (e.g. BelfrySCAD's own
-        // debug-session worker thread, plausibly smaller than any CI
-        // runner's main thread) that this evaluator has no way to probe
-        // for directly. A real OpenSCAD/BOSL2 recursive function is
-        // overwhelmingly tail-recursive in practice anyway (exactly why
-        // reduce()/accumulate()/while() and this evaluator's own
-        // trampolines exist) -- genuine non-tail recursion even
-        // approaching this depth is already the rare, likely-runaway case
-        // a controlled error serves far better than a crash.
-        static constexpr size_t kMaxUserCallDepth = 50;
-        if (callStack_.size() >= kMaxUserCallDepth) {
-            error("Recursion too deep while calling function '" + name + "'", declNode);
-        }
-        std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &declNode.position());
-        callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &declNode.position(), &declNode,
-                                             nullptr, upvalueParent});
-        callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
+        UserCallHandle h = enterUserCall(name, declNode, &bodyExpr, childCtx, callPos, upvalueParent);
         Value result;
         try {
-            checkDebug(bodyExpr, childCtx);
-            lastCtx_ = &childCtx;
             result = computeResult();
-            if (debugHooks_.returnHook) debugHooks_.returnHook(name, result, static_cast<int>(callStack_.size()));
         } catch (...) {
-            callStack_.pop_back();
-            if (prof) profileExit(*prof);
+            exitUserCallException(h);
             throw;
         }
-        callStack_.pop_back();
-        if (prof) profileExit(*prof);
+        exitUserCallSuccess(name, h, result);
         return result;
     }
 
@@ -775,6 +788,53 @@ private:
     Value evalFunctionBodyTrampoline(const oscad::Expression& bodyExpr, EvalContext& ctx);
 
     void evalUserModule(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call, EvalContext& ctx);
+    // Bracketed public in place: Op::CallModule's own runtime handler and
+    // driveVm's module-frame completion branch (bytecode_vm.cpp, a
+    // separate translation unit) need buildModuleChildCtx/
+    // runModuleBodyNative/lookupOrCompileModuleChunk/spliceModuleChildren
+    // directly -- the same reason callCtxFor/enterUserCall/useBytecodeVm
+    // were bracketed public for Stage 1's own driver.
+public:
+    // The shared setup evalUserModule's own compiled-or-native dispatch AND
+    // Op::CallModule's runtime handler (bytecode_vm.cpp) both need,
+    // factored out so neither duplicates it: resolves the module's own
+    // child scope, builds childrenNodes, derives childCtx via callCtxFor,
+    // sets $children/$parent_modules, binds `bound`'s entries and applies
+    // defaults. Exactly what evalUserModule used to do inline before Stage
+    // 2 split it out -- see this file's own git history for the pre-split
+    // version if a byte-for-byte diff is ever needed.
+    EvalContext buildModuleChildCtx(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call,
+                                     EvalContext& ctx, BoundArgs bound);
+    // Runs `decl`'s own body natively against the already-prepared
+    // `childCtx` -- depth guard, callStack_/profiling bracket (Kind::
+    // Module), evalChildren, teardown. This is exactly what evalUserModule
+    // used to do unconditionally before Stage 2 taught it to try a
+    // compiled chunk first (see lookupOrCompileModuleChunk) -- still the
+    // fallback whenever `decl` doesn't compile, called both from
+    // evalUserModule itself and from Op::CallModule's own "callee doesn't
+    // compile" branch.
+    void runModuleBodyNative(const oscad::ModuleDeclaration& decl, EvalContext& childCtx, const oscad::Position* callPos);
+    // Compile-attempt cache for module bodies, mirroring chunkCache_
+    // exactly (nullopt = tried, doesn't compile). See tryCompileModuleBody
+    // (bytecode_compiler.hpp).
+    const CompiledChunk* lookupOrCompileModuleChunk(const oscad::ModuleDeclaration& decl);
+    // Taints every one of `children` if `randsBefore` differs from the
+    // current randsCallCount_, then either wraps >1 sibling into a
+    // synthetic "union" CSGNode (stamped with `callNode`) or splices each
+    // child directly into treeStack_.back() -- the CALLER's own frame,
+    // already exposed at the top of treeStack_ by the time this runs
+    // (`children` itself came from popping the CALLEE's own frame, already
+    // done by the caller before this runs -- see each call site). Factored
+    // out of evalModularCall's own post-processing (csg_resolve.cpp) so
+    // Op::CallModule's own frame-completion (bytecode_vm.cpp's driveVm)
+    // can reuse it exactly -- always the splice branch in practice for a
+    // caller that reached here via a resolved user-module call
+    // (evalModularCall's OWN "is this splice or wrap-as-a-tagged-node"
+    // branch already decided `splice` before ever reaching a user module,
+    // so this helper never needs that decision itself).
+    void spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> children, std::uint64_t randsBefore,
+                               const oscad::ASTNode& callNode);
+private:
     Value evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
                             const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                             const oscad::ASTNode* callNode);
@@ -793,6 +853,11 @@ private:
     // uses e.g. echo() isn't re-attempted on every single call.
     std::unordered_map<const oscad::FunctionDeclaration*, std::optional<CompiledChunk>> chunkCache_;
 
+    // Same, for module bodies (Stage 2) -- see tryCompileModuleBody
+    // (bytecode_compiler.hpp) and lookupOrCompileModuleChunk's own doc
+    // comment, above.
+    std::unordered_map<const oscad::ModuleDeclaration*, std::optional<CompiledChunk>> moduleChunkCache_;
+
     // FunctionLiteral chunks (Phase 2/closures): populated only as a side
     // effect of successfully compiling some OTHER declaration that
     // lexically contains the literal (see CompiledChunk::nestedLiterals'
@@ -806,6 +871,63 @@ private:
     // remember "tried once, don't retry").
     std::unordered_map<const oscad::FunctionLiteral*, CompiledChunk> literalChunkCache_;
     void flattenNestedLiterals(CompiledChunk& chunk);
+
+    // Statement-context expression chunks (Phase 1, module/top-level
+    // compilation) -- see tryCompileStatementExpr's own doc comment
+    // (bytecode_compiler.hpp) and evalExprMaybeCompiled's, below. Keyed by
+    // expression node identity, same nullopt-means-tried-and-failed
+    // convention as chunkCache_ above (an expression using a construct this
+    // wrapper doesn't support isn't re-attempted on every statement it's
+    // part of).
+    //
+    // UNLIKE chunkCache_/literalChunkCache_ (keyed by a FunctionDeclaration/
+    // FunctionLiteral -- a NAMED, script-lifetime declaration), a bare
+    // statement-context Expression node has no such guarantee: it's only
+    // alive as long as the AST it's part of. A caller that re-parses and
+    // re-evaluates DIFFERENT, independently-lived expressions against one
+    // reused Evaluator (several existing tests do exactly this, and it's
+    // not implausible for real usage -- e.g. a debugger REPL evaluating an
+    // ad-hoc watch expression) can free one Expression node and have a
+    // LATER parse's allocator hand back the exact same address for an
+    // unrelated node -- stmtExprChunkCache_.find() would then silently
+    // return a chunk compiled for the WRONG expression. Caught for real:
+    // MathBuiltins.AbsSignCeilFloorRound-style tests returning values from
+    // an entirely different, already-freed call's own constant.
+    //
+    // Kept safe by TWO measures, both required: resolveTreeImpl (csg_
+    // resolve.cpp) clears this at the start of every top-level resolveTree()/
+    // evaluate() call (bounds staleness to "within one render pass" even
+    // when a host reuses one Evaluator across separate, re-parsed renders),
+    // and evalExprMaybeCompiled only reads/writes it at all while
+    // inResolvePass_ is true (bounds it away entirely for any direct
+    // evalExpr()-family call made outside a resolveTree()/evaluate() pass --
+    // exactly the ad-hoc/test-helper shape above, which has no pass
+    // boundary to tie cache validity to in the first place).
+    std::unordered_map<const oscad::Expression*, std::optional<CompiledChunk>> stmtExprChunkCache_;
+
+    // Assignment-BLOCK chunks (see tryCompileAssignmentBlock's own doc
+    // comment, bytecode_compiler.hpp, and tryRunCompiledAssignmentBlock's,
+    // below) -- a whole run of sibling assignments compiled as ONE chunk,
+    // not stmtExprChunkCache_'s one-chunk-per-leaf-expression (whose own
+    // per-call overhead turned out to dominate for a typical block of
+    // several small assignments -- see this feature's own commit message
+    // for the measured regression that motivated batching them instead).
+    // Keyed by the run's own FIRST assignment -- stable and unique per
+    // block: evalChildren's own assignments/others split is deterministic
+    // over a fixed AST, so a given block's leading-assignment-run always
+    // has the same first member across repeated evaluations. Same nullopt-
+    // means-tried-and-failed convention, same dangling-pointer hazard and
+    // same two-part fix (cleared alongside stmtExprChunkCache_ at the top
+    // of every resolveTreeImpl call, only read/written while
+    // inResolvePass_) as stmtExprChunkCache_ itself -- see its own doc
+    // comment above for the full reasoning.
+    std::unordered_map<const oscad::Assignment*, std::optional<CompiledChunk>> assignBlockChunkCache_;
+
+    // See stmtExprChunkCache_'s own doc comment, immediately above, for why
+    // this exists. Not a reentrancy guard (resolveTreeImpl is never called
+    // while another one is already active), just an on/off switch for
+    // whether evalExprMaybeCompiled's cache is safe to touch right now.
+    bool inResolvePass_ = false;
 
 public:
     // lookupOrCompileChunk/lookupCompiledLiteralChunk: public (not just
@@ -943,10 +1065,19 @@ private:
     // debugger happens to be attached somewhere" wastes the most time
     // (see docs/debugger.md and this method's own callers for the full
     // story).
+public:
+    // Public (not just a private helper of evalUserFunction*/
+    // evalFunctionLiteral* anymore): the explicit-frame-stack driver
+    // (bytecode_vm.cpp, a separate translation unit) needs this same gate
+    // for a NESTED call made from within already-compiled code, exactly
+    // the same decision evalUserFunction*/evalFunctionLiteral* already
+    // make before calling lookupOrCompileChunk/lookupCompiledLiteralChunk
+    // themselves.
     bool useBytecodeVm() const {
         return bytecodeVmEnabled() && (!debugHooks_.debugHook || fastContinueBreakpoints_.has_value());
     }
 
+private:
     // The fine-grained half of the check above: even when useBytecodeVm()
     // says compiling/using bytecode is on the table at all, a SPECIFIC
     // chunk is only actually safe to run compiled if nothing about it
@@ -1009,6 +1140,141 @@ private:
     void profileRecordTailHop(const std::string& kind, const std::string& name, const oscad::Position* callPos,
                                const oscad::Position* declPos);
 
+public:
+    // -- User-call bracket, split into enter/exit halves ------------------
+    // (explicit-frame-stack VM groundwork)
+    //
+    // evalUserFunctionCore (above) used to inline this whole bracket
+    // (depth-guard check, profileEnter, callStack_ push, checkDebug,
+    // computeResult() called SYNCHRONOUSLY in the same native frame,
+    // returnHook, callStack_ pop, profileExit) as one block wrapping a
+    // caller-supplied lambda. That shape is fine for the tree-walking
+    // interpreter, which always wants genuine call-and-block semantics --
+    // but it can't be reused by an explicit-frame-stack bytecode VM driver
+    // (bytecode_vm.cpp), whose entire point is that a compiled-to-compiled
+    // call must NOT block a native C++ frame waiting for the callee's
+    // result; the driver instead needs to PUSH a new frame and return
+    // control to its own outer loop, applying "what happens on return"
+    // later, when that pushed frame's own execution reaches its end.
+    //
+    // Split into two explicit halves so both callers -- evalUserFunctionCore
+    // itself (a thin synchronous wrapper around them, see above, kept for
+    // the interpreter's own recursive call sites) and the VM driver's own
+    // push/pop points -- can each drive the SAME bracket logic without
+    // duplicating it. `enterUserCall` does everything up to and including
+    // the body-entry checkDebug() stop; `exitUserCallSuccess`/
+    // `exitUserCallException` do the matching teardown, mirroring
+    // evalUserFunctionCore's own try/catch split exactly (returnHook fires
+    // ONLY on the success path, matching today's behavior precisely).
+    struct UserCallHandle {
+        std::optional<ProfileHandle> prof;
+        // Mirrors the pushed CallStackFrame's own kind -- exitUserCall*
+        // needs it to decrement moduleCallDepth_ correctly without
+        // re-reading callStack_ (already popped by the time exitUserCall*
+        // runs). See moduleCallDepth_'s own doc comment for why this
+        // exists at all.
+        CallStackFrame::Kind kind = CallStackFrame::Kind::Function;
+        // The declaration this call pushed, for the SAME reason as
+        // `kind` above: exitUserCall* needs it to decrement
+        // activeDeclRefcount_'s own count for exactly this declaration,
+        // and callStack_.back() is already gone by the time it runs. See
+        // activeDeclRefcount_'s own doc comment.
+        const oscad::ASTNode* declNode = nullptr;
+    };
+    // `skipDepthGuard`: kMaxUserCallDepth=50 exists purely to keep the
+    // NATIVE C++ stack from overflowing (see its own doc comment) -- true
+    // only for pushBracketedCallFrame's/pushBracketedModuleFrame's own
+    // calls (bytecode_vm.cpp), a compiled-to-compiled push that never
+    // grows the native stack at all (it's serviced by driveVm's own loop,
+    // bounded instead by kMaxVmCallStackDepth, checked separately by the
+    // caller before this runs). evalUserFunctionCore's own call (the
+    // interpreter-fallback boundary, still a genuine native recursive
+    // call either way) always passes false, unchanged. `kind`: Function
+    // for every existing call site; Module for pushBracketedModuleFrame's
+    // own (Stage 2) -- selects both the CallStackFrame::Kind pushed (so
+    // $parent_modules/backtraces count a compiled module call exactly
+    // like a native evalUserModule one) and the profiling site's own
+    // "function"/"module" label. `bodyExpr`: nullptr for a module call --
+    // unlike a function, the native evalUserModule path fires no
+    // "body entry" checkDebug of its own at all (each of the module's own
+    // STATEMENT children gets one instead, via Op::NativeStatement's own
+    // runtime handler / evalChildren's per-statement loop) -- passing a
+    // real bodyExpr here for a module call would add a stop that never
+    // existed before.
+    UserCallHandle enterUserCall(const std::string& name, const oscad::ASTNode& declNode,
+                                  const oscad::Expression* bodyExpr, EvalContext& childCtx,
+                                  const oscad::Position* callPos, int upvalueParent, bool skipDepthGuard = false,
+                                  CallStackFrame::Kind kind = CallStackFrame::Kind::Function);
+    // `fireReturnHook`: false only for a module frame's own completion --
+    // the native evalUserModule path never calls debugHooks_.returnHook
+    // either (a module call has no "return value" concept the debugger
+    // reports), so a compiled module call must not start doing so just
+    // because it happens to reuse this same exit path.
+    void exitUserCallSuccess(const std::string& name, const UserCallHandle& handle, const Value& result,
+                              bool fireReturnHook = true);
+    void exitUserCallException(const UserCallHandle& handle);
+
+    // Decrements activeDeclRefcount_[declNode], erasing the entry once it
+    // reaches 0 (keeps the map's own size bounded by the number of
+    // CURRENTLY active distinct declarations, not the number ever seen) --
+    // shared by exitUserCallSuccess/exitUserCallException/
+    // recordTailCallHop's own "retire the old declaration" half.
+    void noteActiveDeclExit(const oscad::ASTNode* declNode);
+
+    // The CALLER's own callStack_ index right before a new frame is pushed
+    // for it -- exactly the `callerFrameIdx` every evalUserFunction*
+    // variant already computes inline (user_calls.cpp) before deciding
+    // upvalueParent, needed here too by the explicit-frame-stack driver's
+    // own push helper (a free function in a separate translation unit,
+    // bytecode_vm.cpp, so it can't read callStack_ directly). Must be
+    // read BEFORE enterUserCall's own callStack_.push_back(), same
+    // ordering constraint the inline computation already has.
+    int callStackTopIndex() const { return callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1; }
+
+    // The explicit, heap-allocated VM call stack that replaced native C++
+    // recursion for a call between two compiled chunks -- see this
+    // project's own session notes ("iterate over the code, don't use the
+    // C++ call stack for recursion") and VmFrame's own doc comment
+    // (bytecode_vm.hpp) for the full rationale. Public, and manipulated
+    // directly (push_back/pop_back/back()) by bytecode_vm.cpp's driver
+    // loop rather than through narrow wrapper methods -- that driver IS
+    // this stack's only real owner/user, in a hot loop, the same pragmatic
+    // choice already made for treeStack_ (csg_resolve.cpp). A
+    // unique_ptr<VmFrame> has an address independent of the surrounding
+    // vector -- reallocating `vmCallStack_` itself never moves a VmFrame
+    // in memory, so CallStackFrame::vmFrame (a raw pointer into whichever
+    // element is current) stays valid exactly as it always has.
+    std::vector<std::unique_ptr<VmFrame>> vmCallStack_;
+
+    // Parallel to vmCallStack_ (same size, same push/pop points, always) --
+    // holds this frame's own callStack_/profiling bracket handle when it
+    // has one (nullopt for a "bare" frame: a top-level compiled-call entry
+    // point's own first frame, a bare statement expression, an assignment
+    // block, a parameter default) -- see VmFrame's own doc comment for why
+    // this can't just be a VmFrame member (evaluator.hpp can't be
+    // forward-referenced from bytecode_vm.hpp, which evaluator.hpp itself
+    // includes).
+    std::vector<std::optional<UserCallHandle>> vmCallBrackets_;
+
+    // Separate from kMaxUserCallDepth (which stays exactly as-is, still
+    // guarding the interpreter-fallback/native-recursion boundary -- native
+    // stack margin is still the real concern there). This one gates a
+    // PUSH onto vmCallStack_ itself: unbounded growth from a genuinely
+    // runaway non-tail-recursive compiled function is now a heap/memory
+    // concern, not a native-stack-overflow one, so it needs a much higher
+    // ceiling -- reusing kTcoIterationCap's own figure (the tail-loop
+    // runaway guard, user_calls.cpp) for consistency rather than inventing
+    // an unrelated third number. Revisit with the same CI-diagnostic-loop
+    // method already used for kMaxUserCallDepth if this ever needs
+    // recalibrating for real.
+    static constexpr size_t kMaxVmCallStackDepth = 1'000'000;
+
+    // Bracketed public in place: Op::CallModule's own runtime handler and
+    // driveVm's module-frame completion branch (bytecode_vm.cpp, a
+    // separate translation unit) push/pop this directly -- exactly the
+    // same "that driver IS this stack's own only other real owner/user"
+    // reasoning vmCallStack_ was already made public for (Stage 1).
+public:
     // The tree-build stack (mirrors the reference's self._tree_stack): each
     // frame is the children accumulator for whichever CSGNode is currently
     // being resolved (or, at the bottom, the top-level tree itself). A
@@ -1020,12 +1286,118 @@ private:
     // push/call/pop sequence.
     std::vector<std::vector<std::unique_ptr<CSGNode>>> treeStack_;
 
+private:
+
     // User function/module call stack: (kind, name, call position, decl
     // position) per active call, innermost last. Drives callCtxFor's
     // closure detection and error()'s TRACE lines. Mirrors the reference's
     // self._call_stack (there, 4-tuples; here, CallStackFrame -- see
     // eval_error.hpp).
     std::vector<CallStackFrame> callStack_;
+
+    // Running count of Module-kind frames currently on callStack_ --
+    // maintained incrementally by enterUserCall/exitUserCall* rather than
+    // rescanned from callStack_ on every module call (buildModuleChildCtx's
+    // own $parent_modules) the way it used to be. That rescan is O(depth)
+    // per call, so a script recursing deep enough to actually need Stage
+    // 2's own new depth ceiling turned it into real O(depth^2) wall time --
+    // measured directly: a script recursing through recur() alone (no
+    // geometry cost at all) went from 0.49s at depth 16,000 to 7.19s at
+    // depth 64,000 (quadratic, not the expected ~4x-for-4x-the-work
+    // linear scaling) before this fix. Harmless at the OLD native-
+    // recursion depths (capped at kMaxUserCallDepth=50, this scan was
+    // never more than 50 entries) -- only became a real problem once
+    // Stage 2 made much deeper module recursion possible at all.
+    int moduleCallDepth_ = 0;
+
+    // Refcounted set of DISTINCT declarations currently active anywhere on
+    // callStack_ -- keyed by declaration ASTNode identity (the same
+    // pointer CallStackFrame::declNode/enterUserCall's own `declNode` use
+    // throughout), maintained incrementally by enterUserCall/
+    // exitUserCall*/recordTailCallHop (a tail hop swaps the ACTIVE
+    // declaration for the SAME stack slot without a matching enter/exit
+    // pair of its own, so it has to update this too, symmetrically:
+    // decrement the frame's old declNode, increment the new one).
+    //
+    // callCtxFor's own closure/lexical-nesting detection used to walk the
+    // FULL callStack_ testing every single frame's declPosition for span
+    // containment -- O(depth) per call, invisible at the old native-
+    // recursion-bound depths (~50) but genuinely quadratic once compiled
+    // calls (Stage 1/2, see this project's own session notes) made much
+    // deeper recursion possible: a plain non-tail-recursive `f(n) = n<=0
+    // ? 0 : 1+f(n-1)` went 10k->0.15s, 20k->0.54s, 40k->2.1s (measured --
+    // textbook quadratic, not the expected ~2x-per-2x-depth linear
+    // scaling). The fix exploits a structural fact about REAL recursion:
+    // a deep call chain is overwhelmingly the SAME declaration repeated
+    // many times, not many DISTINCT declarations -- so the number of
+    // DISTINCT active declarations stays small and roughly constant
+    // regardless of recursion depth, even though callStack_ itself grows
+    // unboundedly. Since containment for a given declaration X depends
+    // only on X's own (compile-time-fixed) position, never on WHICH of
+    // its (possibly many) active occurrences is checked, checking each
+    // DISTINCT X once is exactly equivalent to checking every occurrence
+    // -- not an approximation.
+    std::unordered_map<const oscad::ASTNode*, int> activeDeclRefcount_;
+
+    // Shared cap on callStack_'s own size, checked by both
+    // evalUserFunctionCore (below) and evalUserModule (user_calls.cpp) --
+    // see evalUserFunctionCore's own doc comment for the full calibration
+    // story (two rounds of CI stack-depth diagnostics on the worst-case
+    // platform -- Windows, whose default thread stack is much smaller than
+    // macOS/Linux's). One constant because both push onto the SAME
+    // callStack_ -- a function recursing into a module recursing into a
+    // function is the same native-stack-growth hazard regardless of which
+    // kind of frame is on top at any given depth.
+    //
+    // Re-lowered from 50 (Stage 2, module-body compilation): factoring
+    // evalUserModule's own native-fallback body into a separate
+    // runModuleBodyNative function (shared with Op::CallModule's own
+    // native-fallback branch, bytecode_vm.cpp -- needed so neither
+    // duplicates the enterUserCall/evalChildren/exitUserCall bracket)
+    // added ONE sustained extra native stack frame to every level of
+    // INTERPRETED module recursion (the one recursive shape this cap still
+    // protects -- compiled module recursion runs through the explicit
+    // vmCallStack_ instead, see kMaxVmCallStackDepth, and never touches
+    // this at all). 50 was tight enough on Windows CI that this alone
+    // segfaulted UserModule.DeepNonTailRecursionHitsAControlledError
+    // Interpreted (PR #59) instead of throwing cleanly at the guard.
+    static constexpr size_t kMaxUserCallDepth = 30;
+
+    // Cap on CSGNode::treeDepth (csg_node.hpp), checked wherever a CSGNode
+    // is finalized with its own `children` already known (buildTreeNode,
+    // evalModularCall's own non-splice tail, spliceModuleChildren's
+    // union-wrap branch -- csg_resolve.cpp) -- i.e. enforced DURING
+    // resolve, at tree-CONSTRUCTION time, not by walking the tree
+    // afterward. This is deliberately NOT a generateTreeImpl-side guard
+    // (an earlier version of this fix was exactly that, and it didn't
+    // work): the RESOLVE pass's own depth guards (kMaxUserCallDepth,
+    // kMaxVmCallStackDepth for compiled module recursion) only bound how
+    // many CALLS happen, not how deep the CSGNode TREE those calls build
+    // ends up being -- confirmed directly that resolveTree() itself
+    // returns successfully for a 100,000-deep incrementally-nested tree
+    // (`module recur(n) { if (n>0) { cube(0.1); recur(n-1); } else {
+    // cube(1); } }` -- an ordinary "spiral/chain of shapes" pattern, not
+    // exotic: each level's own module-call splice sees >1 child, so
+    // evalModularCall wraps them in a synthetic "union" CSGNode instead of
+    // collapsing away, and the tree genuinely grows one level per call).
+    // The crash isn't even IN generateTreeImpl's own walk -- it's in
+    // std::unique_ptr<CSGNode>'s default RECURSIVE destructor, freeing
+    // that same 100,000-deep tree the moment it goes out of scope (a
+    // standalone repro confirmed this directly: resolveTree() returns
+    // fine and prints its own result; the crash happens purely from
+    // letting that return value be destroyed, generateTree() never even
+    // called). A destructor can't throw a catchable error and a real
+    // stack overflow isn't a C++ exception at all -- there is no way to
+    // "guard" the walk or the destructor after the fact, only to stop the
+    // tree from ever getting that deep in the first place. Picked
+    // conservatively (not from a precise Windows measurement, no access
+    // to one locally) -- a chain 10x this depth already showed a real
+    // performance cliff in Manifold's own deeply-nested boolean unions
+    // (unrelated to this guard, but confirms nothing legitimate needs to
+    // go anywhere near this many levels); revisit with the same
+    // CI-diagnostic-loop method kMaxUserCallDepth's own history used if
+    // it ever needs recalibrating.
+    static constexpr int kMaxCsgTreeDepth = 2000;
 
     // See lastChildrenPositions()'s own doc comment.
     std::optional<std::vector<std::pair<std::string, int>>> lastChildrenPositions_;

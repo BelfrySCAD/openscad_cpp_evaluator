@@ -34,6 +34,19 @@ struct CSGNode {
     CSGParams params;                      // resolve step's plain-data output
     bool uncacheable = false;              // set by a later phase (ManifoldCache, Phase 8)
 
+    // 1 + the deepest child's own treeDepth (1 for a leaf) -- set once,
+    // at construction, by whichever csg_resolve.cpp site finalizes this
+    // node's own `children` (buildTreeNode, evalModularCall's non-splice
+    // tail, spliceModuleChildren's union-wrap branch), which also checks
+    // it against Evaluator::kMaxCsgTreeDepth right there and throws
+    // before an unsafely deep tree can ever exist. See that constant's
+    // own doc comment (evaluator.hpp) for why this has to be enforced at
+    // construction time, not by a later walk over the finished tree --
+    // by the time such a tree exists, std::unique_ptr<CSGNode>'s own
+    // default (recursive) destructor is itself an un-guardable native-
+    // stack risk the moment this node is ever destroyed.
+    int treeDepth = 1;
+
     // Memoizes manifold_cache.cpp's cacheKey(*this) -- that function
     // recurses into every descendant to build its own key, so without this
     // memo a generate-time walk that calls cacheKey() at every node (not

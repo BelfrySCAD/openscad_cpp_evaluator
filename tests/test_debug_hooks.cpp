@@ -17,6 +17,20 @@
 using namespace oscadeval;
 using namespace oscadeval::test;
 
+namespace {
+// Mirrors test_bytecode_compiler.cpp's/test_tail_calls.cpp's own ScopedVm --
+// the plain OSCAD_BYTECODE_VM env var is cached forever after its first
+// read, so a test whose own expected stop-count depends on the compiled
+// path actually running (see FastContinueNotHookSkippableStillFiresEvery
+// Checkpoint, below) must force it explicitly rather than relying on
+// whatever the process default happens to be.
+class ScopedVm {
+public:
+    explicit ScopedVm(bool enabled) { Evaluator::setBytecodeVmEnabledForTesting(enabled); }
+    ~ScopedVm() { Evaluator::setBytecodeVmEnabledForTesting(std::nullopt); }
+};
+} // namespace
+
 // Records (line, exprLevel, forced) for every debug-hook call, in order --
 // the shape every parity test below asserts on. Sequences here were taken
 // from the Python reference (openscad_evaluator) run over the same source
@@ -284,6 +298,14 @@ TEST(DebugHooks, FastContinueHookSkippableStillFiresAtMatchingBreakpointLine) {
 }
 
 TEST(DebugHooks, FastContinueNotHookSkippableStillFiresEveryCheckpoint) {
+    // This test's own expected count (4, not 7) depends on the compiled
+    // path actually running (translate()'s own [1,0,0] argument becomes
+    // compile-eligible, collapsing 3 sub-expression stops -- see below) --
+    // force it rather than relying on the process-default OSCAD_BYTECODE_VM,
+    // or this test is silently wrong half the time CI runs the suite with
+    // it forced off (caught for real: both macOS/Ubuntu CI legs failed on
+    // exactly this, PR #59).
+    ScopedVm vm(true);
     int calls = 0;
     DebugHooks hooks;
     hooks.debugHook = [&](int, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&, const DebugFramesFn&) {
@@ -302,7 +324,19 @@ TEST(DebugHooks, FastContinueNotHookSkippableStillFiresEveryCheckpoint) {
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     ev.evaluate(ast, ctx);
-    EXPECT_EQ(calls, 7); // unaffected -- same total as HookFiresOnceForEachStatementAtEveryNestingLevel
+    // 4, not 7 (Phase 1, module/top-level compilation): hookSkippable is a
+    // narrower claim than "breakpoints is accurate" (see
+    // setFastContinueBreakpoints' own doc comment, evaluator.hpp) -- it
+    // does NOT disable useBytecodeVm()/chunkEligibleNow, only whether
+    // checkDebug() can skip calling the hook at all for an eligible line.
+    // With an empty (but real) breakpoint set, translate()'s own argument
+    // `[1,0,0]` is now eligible to compile too (evalExprMaybeCompiled,
+    // called from resolveArgs) -- as a single Op::BuildList instead of
+    // three separate _eval_list_comp element evaluations, its own 3
+    // expr-level element checkpoints (see
+    // HookFiresOnceForEachStatementAtEveryNestingLevel's own doc comment,
+    // above, for where those 3 came from) no longer fire: 7 - 3 = 4.
+    EXPECT_EQ(calls, 4);
 }
 
 TEST(DebugHooks, FastContinueInterruptFlagForcesTheNextCheckpointThrough) {

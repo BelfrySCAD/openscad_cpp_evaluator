@@ -10,6 +10,16 @@ using namespace oscadeval::test;
 
 namespace {
 
+// Mirrors test_bytecode_compiler.cpp's/test_tail_calls.cpp's own ScopedVm --
+// the plain OSCAD_BYTECODE_VM env var is cached forever after its first
+// read, so forcing it per-test needs this override instead (see
+// Evaluator::setBytecodeVmEnabledForTesting's own doc comment).
+class ScopedVm {
+public:
+    explicit ScopedVm(bool enabled) { Evaluator::setBytecodeVmEnabledForTesting(enabled); }
+    ~ScopedVm() { Evaluator::setBytecodeVmEnabledForTesting(std::nullopt); }
+};
+
 double asNum(const Value& v) { return std::get<double>(v); }
 
 // Runs `code` as a full top-level script (all statements, not just a bare
@@ -668,6 +678,28 @@ TEST(UserModule, RecursiveModuleCall) {
                           "}"
                           "stack(3);");
     EXPECT_EQ(e.bodies.size(), 3u);
+}
+
+TEST(UserModule, DeepNonTailRecursionHitsAControlledErrorInterpreted) {
+    // Interpreted modules still have no trampoline and no compiled path
+    // (see Op::CallModule/tryCompileModuleBody, Stage 2) -- every logical
+    // recursive call here is still a real, unavoidable C++ recursive call,
+    // so this guard still matters for this path specifically. The
+    // COMPILED path's own version of this exact script now SUCCEEDS
+    // instead -- see BytecodeCompiler.
+    // RecursiveModuleWithIfSucceedsWellPastTheOldNativeLimitCompiled
+    // (test_bytecode_compiler.cpp) -- these two together are the
+    // differential proof Stage 2 actually changed something, not a
+    // reversion.
+    ScopedVm vm(false);
+    try {
+        evalSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(500);");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("Recursion too deep"), std::string::npos);
+        EXPECT_NE(what.find("'recur'"), std::string::npos);
+    }
 }
 
 TEST(UserModule, DefaultParameterApplied) {
