@@ -332,35 +332,38 @@ TEST(TailCalls, ShallowNonTailRecursionStillWorksUnderTheDepthGuard) {
     EXPECT_EQ(runCapturingEcho(script), "ECHO: 3.6288e+6");
 }
 
-// TEMPORARY diagnostic: kMaxUserCallDepth=200 (evaluator.hpp) still
-// segfaulted on CI's windows-latest runner with no way to reproduce or
-// bisect locally (no Windows access) -- this test's own log output (each
-// depth prints only once it has actually SUCCEEDED, flushed immediately)
-// pinpoints the real safe boundary on that specific runner directly from
-// the CI log, wherever this run happens to crash. Deleted once
-// kMaxUserCallDepth is set to a real, evidence-based value.
-TEST(TailCalls, DiagnosticFindWindowsSafeNonTailRecursionDepth) {
+// TEMPORARY diagnostic, round 2: round 1 (plain recursion, no throw) found
+// depth 300 safe, depth 500 unreached on windows-latest CI -- but
+// kMaxUserCallDepth=200 (a THROW from depth 200, unwinding back out
+// through 200 nested evalUserFunctionCore try/catch frames) ALSO
+// segfaulted there. Together this means throwing+unwinding through N
+// nested frames costs meaningfully more native stack than simply BEING N
+// frames deep without throwing -- this loop measures THAT specific cost
+// directly (assert(false) at depth N throws/unwinds through the exact
+// same nested-try/catch shape Evaluator::error() does), at a finer
+// granularity around the last-known-safe-without-throwing point (300).
+TEST(TailCalls, DiagnosticFindWindowsSafeThrowUnwindDepth) {
     ScopedVm vm(false);
-    for (int depth : {10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 4900}) {
-        std::string script =
-            "function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(" + std::to_string(depth) + ");";
+    for (int depth : {20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 250, 300}) {
+        std::string script = "function f(n) = n <= 0 ? assert(false, \"boom\") 0 : 1 + f(n - 1);\nresult = f(" +
+                              std::to_string(depth) + ");";
         Evaluator ev;
         auto ast = parseSrc(script);
         auto scope = oscad::buildScopes(ast);
         EvalContext ctx = EvalContext::makeRoot(scope.get());
-        ev.resolveTree(ast, ctx);
-        std::cerr << "[DIAG] interpreted depth " << depth << " OK" << std::endl;
+        EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+        std::cerr << "[DIAG] interpreted throw-unwind depth " << depth << " OK" << std::endl;
     }
     Evaluator::setBytecodeVmEnabledForTesting(true);
-    for (int depth : {10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 4900}) {
-        std::string script =
-            "function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(" + std::to_string(depth) + ");";
+    for (int depth : {20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 250, 300}) {
+        std::string script = "function f(n) = n <= 0 ? assert(false, \"boom\") 0 : 1 + f(n - 1);\nresult = f(" +
+                              std::to_string(depth) + ");";
         Evaluator ev;
         auto ast = parseSrc(script);
         auto scope = oscad::buildScopes(ast);
         EvalContext ctx = EvalContext::makeRoot(scope.get());
-        ev.resolveTree(ast, ctx);
-        std::cerr << "[DIAG] compiled depth " << depth << " OK" << std::endl;
+        EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+        std::cerr << "[DIAG] compiled throw-unwind depth " << depth << " OK" << std::endl;
     }
     Evaluator::setBytecodeVmEnabledForTesting(std::nullopt);
 }
