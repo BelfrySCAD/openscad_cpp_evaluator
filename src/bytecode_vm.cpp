@@ -284,7 +284,11 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
     frame->chunk = &chunk;
     frame->code = &chunk.bodyCode;
     frame->pc = 0;
-    frame->slots.clear();
+    // See runCompiledModuleBody's own doc comment (below) for why this is
+    // .assign(numSlots) now, not .clear() -- a nested let-expression
+    // inside a compiled echo/assert/assignment argument can need local
+    // slots even though module parameters themselves never do.
+    frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
     frame->bound.clear();
     frame->accumStack.clear();
@@ -878,11 +882,98 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::NativeStatement: {
                     const oscad::ASTNode* stmt = f.chunk->nativeStatements[static_cast<size_t>(ins.a)];
                     EvalContext childCtx = ctx.withScope(stmt->scope() ? stmt->scope() : ctx.scope);
-                    // Mirrors evalChildren's own per-statement loop exactly,
-                    // including its ModularLet exclusion (evalLetBlock fires
-                    // its own per-assignment checkDebug internally).
-                    if (stmt->kind() != oscad::NodeKind::ModularLet) ev.checkDebug(*stmt, childCtx);
+                    // Mirrors evalChildren's own per-statement loop exactly
+                    // -- no ModularLet exclusion needed here (unlike that
+                    // loop's own): ModularLet has its own compiled form now
+                    // (Op::OpenLetScope/StoreLetVar) and never reaches
+                    // Op::NativeStatement at all.
+                    ev.checkDebug(*stmt, childCtx);
                     ev.evalStatement(*stmt, childCtx);
+                    ++f.pc;
+                    break;
+                }
+                case Op::OpenExprScope: {
+                    f.ctxChain.push_back(ctx.letChildCtx());
+                    ++f.pc;
+                    break;
+                }
+                case Op::CloseExprScope: {
+                    f.ctxChain.pop_back();
+                    ++f.pc;
+                    break;
+                }
+                case Op::OpenLetScope: {
+                    f.ctxChain.push_back(ctx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx));
+                    ++f.pc;
+                    break;
+                }
+                case Op::StoreLetVar: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    const std::string& name = f.chunk->names[static_cast<size_t>(ins.a)];
+                    if (!name.empty() && name[0] == '$') {
+                        ctx.dyn->set(name, std::move(v));
+                        ctx.dynExplicit->set(name, true);
+                    } else {
+                        ctx.let_->set(name, std::move(v));
+                    }
+                    ++f.pc;
+                    break;
+                }
+                case Op::CheckDebugStatement: {
+                    const oscad::ASTNode* stmt = f.chunk->nativeStatements[static_cast<size_t>(ins.a)];
+                    ev.checkDebug(*stmt, ctx);
+                    ++f.pc;
+                    break;
+                }
+                case Op::StoreModuleVar: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    const std::string& name = f.chunk->names[static_cast<size_t>(ins.a)];
+                    // Mirrors Evaluator::evalAssignment exactly (stmt_eval.cpp) --
+                    // see StoreModuleVar's own doc comment (bytecode.hpp).
+                    if (!name.empty() && name[0] == '$') {
+                        ctx.dyn->set(name, std::move(v));
+                        ctx.dynExplicit->set(name, true);
+                    } else {
+                        if (const oscad::Position* const* firstPosEntry = ctx.dynPositions->find(name)) {
+                            const oscad::Position* firstPos = *firstPosEntry;
+                            const int firstLine = firstPos ? firstPos->line : 0;
+                            ev.warn(name + " was assigned on line " + std::to_string(firstLine) + " but was overwritten",
+                                    ins.pos);
+                        }
+                        ctx.let_->set(name, std::move(v));
+                        ctx.dynPositions->set(name, ins.pos);
+                    }
+                    ++f.pc;
+                    break;
+                }
+                case Op::AssertStatement: {
+                    const CompiledChunk::AssertSite& site = f.chunk->assertSites[static_cast<size_t>(ins.a)];
+                    std::vector<Value> args(static_cast<size_t>(site.argCount));
+                    for (int i = site.argCount - 1; i >= 0; --i) {
+                        args[static_cast<size_t>(i)] = std::move(f.stack.back());
+                        f.stack.pop_back();
+                    }
+                    const Value condVal = site.conditionArgIndex ? std::move(args[static_cast<size_t>(*site.conditionArgIndex)])
+                                                                   : Value{true};
+                    if (!truthy(condVal)) {
+                        std::string err = "Assertion '" +
+                                           std::get<std::string>(f.chunk->constants[static_cast<size_t>(site.condTextConstIdx)]) +
+                                           "' failed";
+                        if (site.messageArgIndex) {
+                            const Value& msgArg = args[static_cast<size_t>(*site.messageArgIndex)];
+                            if (!std::holds_alternative<std::monostate>(msgArg)) {
+                                const std::string* s = std::get_if<std::string>(&msgArg);
+                                err += ": \"" + (s ? *s : fmtValue(msgArg)) + "\"";
+                            }
+                        }
+                        ev.error(err, *site.node, "assert");
+                    }
+                    // Rare (assert(...) translate(...) children();-shaped) --
+                    // not worth its own compiled path; evalChildren already
+                    // tries ITS OWN compiled fast path internally regardless.
+                    if (!site.node->children.empty()) ev.evalChildren(site.node->children, ctx);
                     ++f.pc;
                     break;
                 }
@@ -1038,7 +1129,15 @@ void runCompiledModuleBody(Evaluator& ev, const CompiledChunk& chunk, EvalContex
     frame->chunk = &chunk;
     frame->code = &chunk.bodyCode;
     frame->pc = 0;
-    frame->slots.clear();
+    // .assign, not .clear() -- a module chunk's own bodyCode has no
+    // PARAMETER slots (module params are always bound natively, see this
+    // function's own doc comment above), but CAN still declare LOCAL slots
+    // via a nested let-EXPRESSION inside a compiled echo/assert/assignment
+    // argument (Op::LetOp's own compile case, reused as-is for these --
+    // see compileOneStatement's Assignment/ModularEcho/ModularAssert/
+    // ModularLet cases). chunk.numSlots is 0 for the (still-common) case
+    // where nothing inside this body ever does that.
+    frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
     frame->bound.clear();
     frame->accumStack.clear();

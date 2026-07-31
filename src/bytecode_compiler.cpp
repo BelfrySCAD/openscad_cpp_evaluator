@@ -1150,9 +1150,46 @@ public:
         for (const oscad::ASTNode* stmt : others) compileOneStatement(*stmt, out);
     }
 
+    // Compiles one inline sub-expression wrapped in Op::OpenExprScope/
+    // CloseExprScope -- see those ops' own doc comment (bytecode.hpp) for
+    // why every module-body statement's own inline-compiled RHS/argument
+    // needs this (a `$`-write leak this session's own regression test,
+    // UserFunction.DollarVarLetAsAssignmentRhsDoesNotLeak, caught for
+    // real). Shared by Assignment/ModularEcho/ModularAssert's own
+    // compileOneStatement cases, below.
+    void compileIsolatedExpr(const oscad::Expression& expr, std::vector<Instruction>& out, CompileScope& scope) {
+        out.push_back({Op::OpenExprScope, 0, 0, nullptr});
+        compileExpr(expr, out, scope);
+        out.push_back({Op::CloseExprScope, 0, 0, nullptr});
+    }
+
     void compileOneStatement(const oscad::ASTNode& stmt, std::vector<Instruction>& out) {
         using oscad::NodeKind;
         trackSpan(stmt);
+        // A statement's own .scope() can differ from this whole chunk's
+        // fixed scope_ member (e.g. a `use` statement earlier in the SAME
+        // script/module body changes what later statements can see) --
+        // compileExpr's own PrimaryCall case resolves a callee via scope_
+        // DIRECTLY, not per-node, unlike the ModularCall case just below
+        // (which already does its own stmt.scope()-first lookup). Any
+        // inline sub-expression compiled from Assignment/ModularEcho/
+        // ModularAssert, below, needs scope_ swapped to match THIS
+        // statement for its own duration, or a nested function call inside
+        // it resolves against the wrong (chunk-wide) scope instead of its
+        // own. Caught for real: UseStatement.NestedUseNotReExported
+        // started spuriously resolving a NOT-re-exported nested `use`'s
+        // function once echo() got its own inline-compiled argument.
+        // RAII (not "restore before every return") since NotCompilable can
+        // unwind through here -- harmless either way (the whole Compiler
+        // is discarded on that path), but cheap to get right regardless.
+        struct ScopeGuard {
+            const oscad::Scope*& scope;
+            const oscad::Scope* saved;
+            ScopeGuard(const oscad::Scope*& s, const oscad::ASTNode& node) : scope(s), saved(s) {
+                if (const oscad::Scope* stmtScope = node.scope()) scope = stmtScope;
+            }
+            ~ScopeGuard() { scope = saved; }
+        } scopeGuard(scope_, stmt);
         switch (stmt.kind()) {
             // Pure declarations, no-ops at statement-eval time (already
             // hoisted into scope by buildScopes()) -- matches evalStatement's
@@ -1160,6 +1197,145 @@ public:
             case NodeKind::ModuleDeclaration:
             case NodeKind::FunctionDeclaration:
                 return;
+            // Assignment/ModularEcho/ModularAssert: real bytecode instead
+            // of Op::NativeStatement -- a throughput improvement (see
+            // CheckDebugStatement/StoreModuleVar/AssertStatement's own doc
+            // comments, bytecode.hpp), NOT a recursion-safety one (these
+            // were never the risk Stage 2 targeted -- see NativeStatement's
+            // own doc comment). Assignment specifically closes a real
+            // regression: it used to get a genuinely optimized path
+            // (Evaluator::tryRunCompiledAssignmentBlock) via evalChildren's
+            // own native fallback loop, but tryRunCompiledChildren's
+            // broader whole-list compile (the NativeStatement-gap fix)
+            // ALWAYS succeeds first now, silently shadowing it -- every
+            // assignment fell back to generic Op::NativeStatement, one
+            // nested driveVm call per sub-expression via
+            // evalExprMaybeCompiled, instead of this inline form.
+            case NodeKind::Assignment: {
+                auto& n = static_cast<const oscad::Assignment&>(stmt);
+                out.push_back({Op::CheckDebugStatement, internNativeStatement(&stmt), 0, nullptr});
+                CompileScope exprScope; // module-level vars are never slot-addressed --
+                                         // see StoreModuleVar's own doc comment.
+                compileIsolatedExpr(*n.expr, out, exprScope);
+                out.push_back({Op::StoreModuleVar, internName(n.name->name), 0, &n.position()});
+                return;
+            }
+            case NodeKind::ModularEcho: {
+                // Op::Echo itself is reused verbatim from the EXPRESSION
+                // form's own compile case (AssertOp's sibling, above in
+                // compileExpr) -- already statement-shaped (no value
+                // pushed, straight fall-through), so nothing new is needed
+                // there. `.children` is deliberately never read here,
+                // matching evalStatement's own ModularEcho case (doEcho
+                // only ever takes `.arguments` -- an echo statement's
+                // trailing children, if the grammar even produces any, are
+                // not evaluated today; this mirrors that exactly rather
+                // than silently changing behavior).
+                auto& n = static_cast<const oscad::ModularEcho&>(stmt);
+                out.push_back({Op::CheckDebugStatement, internNativeStatement(&stmt), 0, nullptr});
+                CompiledChunk::EchoSite site;
+                CompileScope exprScope;
+                for (const auto& argPtr : n.arguments) {
+                    if (argPtr->kind() == NodeKind::NamedArgument) {
+                        auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
+                        compileIsolatedExpr(*a.expr, out, exprScope);
+                        site.argNames.push_back(a.name->name);
+                    } else {
+                        auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
+                        compileIsolatedExpr(*a.expr, out, exprScope);
+                        site.argNames.push_back(std::nullopt);
+                    }
+                }
+                int siteIdx = static_cast<int>(chunk_.echoSites.size());
+                chunk_.echoSites.push_back(std::move(site));
+                out.push_back({Op::Echo, siteIdx, static_cast<int>(n.arguments.size()), &n.position()});
+                return;
+            }
+            case NodeKind::ModularAssert: {
+                // Genuinely different contract from AssertOp's own compiled
+                // form (Op::AssertFail): the statement form supports named
+                // arguments AND evaluates every argument EAGERLY (mirrors
+                // Evaluator::evalAssertStatement's own resolveArgs() call
+                // exactly -- unlike AssertOp's lazily-compiled message,
+                // guarded by a runtime JumpIfTrue), so every argument is
+                // compiled+pushed here unconditionally, in source order.
+                auto& n = static_cast<const oscad::ModularAssert&>(stmt);
+                out.push_back({Op::CheckDebugStatement, internNativeStatement(&stmt), 0, nullptr});
+                CompiledChunk::AssertSite site;
+                site.node = &n;
+                site.argCount = static_cast<int>(n.arguments.size());
+                CompileScope exprScope;
+                for (size_t i = 0; i < n.arguments.size(); ++i) {
+                    compileIsolatedExpr(*argExpr(*n.arguments[i]), out, exprScope);
+                    if (n.arguments[i]->kind() == NodeKind::NamedArgument) {
+                        auto& na = static_cast<const oscad::NamedArgument&>(*n.arguments[i]);
+                        if (na.name->name == "condition") site.conditionArgIndex = static_cast<int>(i);
+                        else if (na.name->name == "message") site.messageArgIndex = static_cast<int>(i);
+                    }
+                }
+                // Second pass: positional 0/1 fill whichever logical
+                // parameter a named arg didn't already claim -- run AFTER
+                // the named pass above (not interleaved) so a named arg
+                // wins regardless of its position relative to its
+                // positional counterpart in source, matching
+                // Evaluator::getArg's own "named first" priority exactly.
+                int posCounter = 0;
+                for (size_t i = 0; i < n.arguments.size(); ++i) {
+                    if (n.arguments[i]->kind() == NodeKind::NamedArgument) continue;
+                    if (posCounter == 0 && !site.conditionArgIndex) site.conditionArgIndex = static_cast<int>(i);
+                    else if (posCounter == 1 && !site.messageArgIndex) site.messageArgIndex = static_cast<int>(i);
+                    ++posCounter;
+                }
+                // Precomputed once, like AssertFail's own condText --
+                // mirrors evalAssertStatement's `node.arguments.empty() ?
+                // "false" : argExpr(*node.arguments[0])->toString()`
+                // exactly (a MISSING condition arg -- e.g. a bare
+                // `assert(message="x");` -- reads the same as an EMPTY
+                // arg list here: no arg supplies "condition" either way).
+                site.condTextConstIdx = internConst(Value{
+                    site.conditionArgIndex
+                        ? argExpr(*n.arguments[static_cast<size_t>(*site.conditionArgIndex)])->toString()
+                        : std::string("false")});
+                int siteIdx = static_cast<int>(chunk_.assertSites.size());
+                chunk_.assertSites.push_back(std::move(site));
+                out.push_back({Op::AssertStatement, siteIdx, 0, &n.position()});
+                return;
+            }
+            case NodeKind::ModularLet: {
+                // Mirrors Evaluator::evalLetBlock exactly (stmt_eval.cpp):
+                // every assignment's RHS is evaluated against the
+                // ORIGINAL (parent) ctx, never an earlier sibling's own
+                // write in THIS SAME let-block (a documented, deliberate
+                // divergence from the let-EXPRESSION form's sequential
+                // visibility) -- so every RHS is compiled+evaluated FIRST,
+                // all left on f.stack, and only written into the freshly-
+                // opened child scope (Op::OpenLetScope) AFTER every one of
+                // them has already run against the still-current PARENT
+                // ctx. No outer statement-level check for the let-block
+                // node itself (matches evalChildren's own ModularLet
+                // exclusion) -- each assignment gets its own instead,
+                // exactly like evalLetBlock's own per-assignment
+                // checkDebug. The body (n.children) compiles inline,
+                // recursively, against the now-current child ctx -- same
+                // Compiler instance, so nested statements get every bit of
+                // this same real-bytecode treatment too.
+                auto& n = static_cast<const oscad::ModularLet&>(stmt);
+                CompileScope exprScope;
+                for (const auto& assign : n.assignments) {
+                    out.push_back({Op::CheckDebugStatement, internNativeStatement(assign.get()), 0, nullptr});
+                    compileIsolatedExpr(*assign->expr, out, exprScope);
+                }
+                out.push_back({Op::OpenLetScope, 0, 0, nullptr});
+                // Values pop in REVERSE push order (LIFO) -- iterate the
+                // assignment list backwards so each Op::StoreLetVar is
+                // paired with the value that was actually pushed for IT.
+                for (auto it = n.assignments.rbegin(); it != n.assignments.rend(); ++it) {
+                    out.push_back({Op::StoreLetVar, internName((*it)->name->name), 0, &(*it)->position()});
+                }
+                compileStatementList(n.children, out);
+                out.push_back({Op::CloseExprScope, 0, 0, nullptr});
+                return;
+            }
             case NodeKind::ModularCall: {
                 auto& call = static_cast<const oscad::ModularCall&>(stmt);
                 const oscad::Scope* lookupScope = stmt.scope() ? stmt.scope() : scope_;
@@ -1213,9 +1389,10 @@ public:
                 return;
             }
             default:
-                // echo/assert/let-block/modifiers/intersection_for --
-                // deliberately native, see this section's own header
-                // comment above.
+                // modifiers/intersection_for -- deliberately native (see
+                // this section's own header comment above); echo/assert/
+                // assignment/let-block now have their own real bytecode
+                // cases, above.
                 out.push_back({Op::NativeStatement, internNativeStatement(&stmt), 0, &stmt.position()});
                 return;
         }
@@ -1405,11 +1582,16 @@ std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration
     CompiledChunk chunk;
     chunk.isModule = true;
     chunk.selfDecl = &decl;
-    // No params/defaultCode/numSlots here -- a module's own parameters are
-    // bound natively (Evaluator::buildModuleChildCtx, called by the
-    // CALLER before this chunk's own body ever runs), never slot-
-    // addressed the way a function's are. See this file's own module-
-    // chunk doc comment (bytecode.hpp) for the full reasoning.
+    // No params/defaultCode here -- a module's own parameters are bound
+    // natively (Evaluator::buildModuleChildCtx, called by the CALLER
+    // before this chunk's own body ever runs), never slot-addressed the
+    // way a function's are. numSlots CAN still be nonzero though: a
+    // nested let-EXPRESSION inside a compiled echo/assert/assignment
+    // argument (Assignment/ModularEcho/ModularAssert/ModularLet's own
+    // compileOneStatement cases) reuses LetOp's existing slot-allocating
+    // compile path, just scoped to that one statement's own sub-
+    // expression -- see this file's own module-chunk doc comment
+    // (bytecode.hpp) for the full reasoning.
     Compiler compiler(chunk, decl.scope(), nullptr, {});
     try {
         compiler.compileStatementList(decl.children, chunk.bodyCode);
@@ -1417,6 +1599,7 @@ std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration
         return std::nullopt;
     }
     chunk.numIterLists = compiler.nextIterList();
+    chunk.numSlots = compiler.nextSlot();
     return chunk;
 }
 
@@ -1439,6 +1622,7 @@ std::optional<CompiledChunk> tryCompileChildrenList(const std::vector<const osca
         return std::nullopt;
     }
     chunk.numIterLists = compiler.nextIterList();
+    chunk.numSlots = compiler.nextSlot();
     return chunk;
 }
 

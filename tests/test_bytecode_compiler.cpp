@@ -1351,6 +1351,109 @@ TEST(ModuleBodyCompiles, DeepPureVmRecursionWithNonRecursingBuiltinWrappedLeafSu
     ASSERT_EQ(e.bodies.size(), 101u);
 }
 
+// evalModifier used to dispatch its single wrapped child via a hand-rolled
+// checkDebug()+evalStatement() pair, bypassing evalChildren entirely -- so
+// a `#`/`!`-wrapped recursive module call never got the NativeStatement-gap
+// fix's Op::CallModule treatment, unlike an otherwise-identical `translate`-
+// wrapped call. Same shape as
+// DeepPureVmRecursionWithNonRecursingBuiltinWrappedLeafSucceeds, just with
+// `#` instead of `translate` wrapping the non-recursing leaf, proving the
+// fix now applies here too.
+TEST(ModuleBodyCompiles, DeepPureVmRecursionWithNonRecursingModifierWrappedLeafSucceeds) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) {"
+                          "  if (n > 0) {"
+                          "    #translate([0,0,n]) cube(1);"
+                          "    recur(n - 1);"
+                          "  } else {"
+                          "    cube(1);"
+                          "  }"
+                          "}"
+                          "recur(100);");
+    ASSERT_EQ(e.bodies.size(), 101u);
+}
+
+// -- Leaf-statement compilation (Assignment/ModularEcho/ModularAssert/ -----
+// -- ModularLet get real bytecode instead of Op::NativeStatement) ---------
+
+TEST(ModuleBodyCompiles, AssignmentStatementCompilesWithDollarVarAndOverwrittenWarning) {
+    ScopedVm vm(true);
+    std::string captured = runCapturingEcho("$fn = 6;\n"
+                                             "function f() = $fn;\n"
+                                             "echo(f());\n"
+                                             "x = 1;\n"
+                                             "x = 2;\n" // overwritten warning
+                                             "echo(x);\n");
+    EXPECT_NE(captured.find("ECHO: 6"), std::string::npos);
+    EXPECT_NE(captured.find("was assigned on line"), std::string::npos);
+    EXPECT_NE(captured.find("but was overwritten"), std::string::npos);
+    EXPECT_NE(captured.find("ECHO: 2"), std::string::npos);
+}
+
+TEST(ModuleBodyCompiles, EchoStatementCompilesWithNamedAndPositionalArgs) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("echo(1, b=2, 3);"), "ECHO: 1, b = 2, 3");
+}
+
+TEST(ModuleBodyCompiles, AssertStatementCompilesWithNamedArgsMessageAndEagerSideEffects) {
+    ScopedVm vm(true);
+    // Named args in reverse order (message before condition), PLUS a 3rd,
+    // logically-unused positional argument -- must still be evaluated
+    // eagerly for its own side effect (mirrors evalAssertStatement's own
+    // resolveArgs() call, unlike AssertOp's lazy message).
+    std::string captured =
+        runCapturingEcho("assert(message=\"unused, condition true\", condition=true, echo(\"side effect\"));\n"
+                          "echo(\"reached\");\n");
+    EXPECT_NE(captured.find("ECHO: \"side effect\""), std::string::npos);
+    EXPECT_NE(captured.find("ECHO: \"reached\""), std::string::npos);
+}
+
+TEST(ModuleBodyCompiles, AssertStatementCompiledFormFailsWithNamedMessage) {
+    ScopedVm vm(true);
+    try {
+        evalSrc("assert(condition=false, message=\"custom\");");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("Assertion 'false' failed"), std::string::npos) << what;
+        EXPECT_NE(what.find("\"custom\""), std::string::npos) << what;
+    }
+}
+
+TEST(ModuleBodyCompiles, LetBlockStatementDoesNotSeeItsOwnEarlierSiblingAssignment) {
+    ScopedVm vm(true);
+    // The statement form's own documented divergence from let-EXPRESSION
+    // sequential visibility: b's RHS must see the OUTER a (1), not this
+    // same let-block's own a=2 -- b should be 2, not 3.
+    EXPECT_EQ(runCapturingEcho("a = 1;\n"
+                               "let (a = 2, b = a + 1) { echo(a, b); }\n"
+                               "echo(a);\n"),
+              "ECHO: 2, 2\nECHO: 1");
+}
+
+TEST(ModuleBodyCompiles, LetBlockStatementIsolatesDollarVarOverrideFromLaterStatements) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("function f() = $fn;\n"
+                               "$fn = 10;\n"
+                               "let ($fn = 99) { echo(f()); }\n"
+                               "echo(f());\n"),
+              "ECHO: 99\nECHO: 10");
+}
+
+TEST(ModuleBodyCompiles, NestedLetExpressionInsideCompiledStatementArgumentAllocatesSlotsCorrectly) {
+    // Exercises the numSlots/frame->slots fix -- a compiled module-body
+    // statement's own inline argument can itself contain a LetOp
+    // EXPRESSION (as opposed to the ModularLet STATEMENT form, above),
+    // which DOES use real local slots (unlike anything else in a module
+    // chunk) -- without frame->slots sized to chunk.numSlots, this
+    // indexes out of bounds.
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("echo(let(x = 5, y = x + 1) x + y);\n"
+                               "v = let(q = 3) q * q;\n"
+                               "echo(v);\n"),
+              "ECHO: 11\nECHO: 9");
+}
+
 TEST(ModuleBodyCompiles, RecursiveModuleThrowingPartwayUnwindsCleanlyAndVmFrameRunsAgain) {
     ScopedVm vm(true);
     Evaluator ev;

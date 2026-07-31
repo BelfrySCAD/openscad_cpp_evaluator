@@ -143,6 +143,28 @@ void Evaluator::releaseVmFrame(std::unique_ptr<VmFrame> frame) {
     frame->stack.clear();
     frame->slots.clear();
     frame->bound.clear();
+    // A REUSED (pooled) frame does NOT get VmFrame's own default member
+    // initializers re-applied -- those only fire for a genuinely fresh
+    // std::make_unique<VmFrame>() (acquireVmFrame's own empty-pool
+    // fallback). Only pushBracketedModuleFrame ever sets ownsModuleSplice
+    // true (and moduleRandsBefore/moduleSpliceCallNode alongside it); no
+    // OTHER push site (pushBareFrame, pushBracketedCallFrame,
+    // runCompiledFunction(FromBound), a parameter default's own frame)
+    // ever resets it back to false. Without this, a frame released here
+    // after owning a module's own splice, then reacquired later for an
+    // ordinary FUNCTION call, keeps ownsModuleSplice=true -- if THAT
+    // function call is later torn down by an exception (teardownVmCall
+    // StackDownTo), its own `if (frame->ownsModuleSplice) treeStack_.
+    // pop_back();` fires for a frame that never pushed a treeStack_ entry
+    // of its own, silently popping one too many and corrupting treeStack_
+    // for everything after. Caught for real via a heap-buffer-overflow
+    // (ASan) inside teardownVmCallStackDownTo's own treeStack_.pop_back(),
+    // triggered by BOSL2's poly_roots() -- a non-tail self-recursive
+    // function, reusing a frame previously released by an earlier,
+    // unrelated MODULE call -- throwing partway through.
+    frame->ownsModuleSplice = false;
+    frame->moduleRandsBefore = 0;
+    frame->moduleSpliceCallNode = nullptr;
     vmFramePool_.push_back(std::move(frame));
 }
 

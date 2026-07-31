@@ -1336,14 +1336,25 @@ public:
     // free function, not a member, so it needs direct access with no
     // friend declaration in play.
     size_t driveVmNativeDepth_ = 0;
-    // Same figure as kMaxUserCallDepth -- each native re-entry above costs
-    // a comparable handful of native frames (evalStatement, evalModularCall,
-    // a builtin resolve function, evalChildren, tryRunCompiledChildren,
-    // runCompiledModuleBody, driveVm), so the same Windows-CI-calibrated
-    // ceiling applies. Deliberately its own named constant (not a reuse of
-    // kMaxUserCallDepth in place) so the two can be recalibrated
-    // independently if profiling ever shows they should diverge.
-    static constexpr size_t kMaxDriveVmNativeDepth = 30;
+    // Originally set to kMaxUserCallDepth's own figure (30) on the
+    // assumption the two native-reentry chains cost a comparable handful
+    // of frames each -- WRONG in practice: a real differential sweep
+    // against BOSL2's own test corpus found 3 genuine scripts
+    // (test_ball_bearing, test_teardrop_corner_mask, test_rounding_hole_
+    // mask -- all built on deeply layered _translate()/_show_highlight()/
+    // attachment-wrapper composition, not runaway recursion) that used to
+    // render successfully but started failing with "Recursion too deep
+    // (native call stack)" once this guard shipped at 30. Empirically
+    // raised to the smallest value (binary search, local rebuild+retest)
+    // that lets all 3 succeed again (50), then doubled for headroom
+    // against future library growth -- NOT independently re-verified
+    // against Windows CI's own tighter stack margin the way
+    // kMaxUserCallDepth's own 30 was (that number came DOWN from an
+    // initial 50 specifically because 50 segfaulted there) -- if CI ever
+    // flags this as unsafe on a real run, come back down, don't guess
+    // again locally. Deliberately its own named constant (not a reuse of
+    // kMaxUserCallDepth) so the two can be recalibrated independently.
+    static constexpr size_t kMaxDriveVmNativeDepth = 100;
 
     // Bracketed public in place: Op::CallModule's own runtime handler and
     // driveVm's module-frame completion branch (bytecode_vm.cpp, a

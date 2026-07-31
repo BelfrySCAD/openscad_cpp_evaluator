@@ -14,6 +14,7 @@ class FunctionDeclaration;
 class FunctionLiteral;
 class ModuleDeclaration;
 class ModularCall;
+class ModularAssert;
 class Expression;
 } // namespace oscad
 
@@ -259,23 +260,26 @@ enum class Op {
     // which splice is unconditional).
     CallModule,
 
-    // A single "native passthrough" statement -- assignment, echo, assert,
-    // let-block, modifier wrapper, intersection_for, children(), a builtin
-    // module call, or a user-module call that didn't resolve at compile
-    // time (shadowed, forward-declared, or otherwise not staticaly known)
-    // -- anything compileStatementList doesn't give its own real bytecode.
+    // A single "native passthrough" statement -- a modifier wrapper,
+    // intersection_for, children(), a builtin module call, or a user-
+    // module call that didn't resolve at compile time (shadowed, forward-
+    // declared, or otherwise not statically known) -- anything
+    // compileStatementList doesn't give its own real bytecode. (Assignment/
+    // ModularEcho/ModularAssert/ModularLet used to fall here too; they now
+    // have their own real bytecode -- Op::StoreModuleVar/Op::Echo/
+    // Op::AssertStatement/Op::OpenLetScope+StoreLetVar -- purely a
+    // throughput change, since none of these were ever the recursion-depth
+    // risk this compiler targets.)
     // a = index into CompiledChunk::nativeStatements. Runtime just does
     // what Evaluator::evalChildren's own per-statement loop already does
-    // for one node: derive childCtx via ctx.withScope(...), checkDebug
-    // (skipped for ModularLet, exactly like evalChildren's own condition
-    // -- ModularLet fires its own per-assignment checkDebug internally),
+    // for one node: derive childCtx via ctx.withScope(...), checkDebug,
     // evalStatement. These are "leaf-shaped" in the sense the Stage 2 plan
     // means it: whatever native recursion they make (a builtin's own
-    // resolve function walking ITS children, evalLetBlock, etc.) is
-    // bounded by ordinary script structure, not by how deep a recursive
-    // module chain goes -- that risk is fully covered by CallModule/
-    // ForIterNext/the Jump-based if/for control flow instead, regardless
-    // of how many of THESE sit alongside them in the same body.
+    // resolve function walking ITS children, etc.) is bounded by ordinary
+    // script structure, not by how deep a recursive module chain goes --
+    // that risk is fully covered by CallModule/ForIterNext/the Jump-based
+    // if/for control flow instead, regardless of how many of THESE sit
+    // alongside them in the same body.
     NativeStatement,
 
     // If/if-else's own condition, evaluated NATIVELY (Evaluator::
@@ -334,6 +338,108 @@ enum class Op {
     // ForIterNext instruction to attempt the next one. a = jump target
     // (the matching ForIterNext's own pc).
     ForIterEnd,
+
+    // -- Module-body leaf-statement compilation (throughput, not a --------
+    // -- recursion-safety concern -- see NativeStatement's own doc comment
+    // for why THAT stayed native for these same node kinds in Stage 2;
+    // this closes the "every sub-expression is a separate nested driveVm
+    // call via evalExprMaybeCompiled" gap instead by inlining them into
+    // the enclosing chunk's own instruction stream) --------------------
+    //
+    // A module-body statement's own top-level checkDebug -- the compiled
+    // analog of what evalChildren's native per-statement loop / Op::
+    // NativeStatement's own handler already does for the SAME node
+    // (`ev.checkDebug(*stmt, ctx)`, exprLevel=false, forced=false) -- kept
+    // as a real op (not simply omitted) so a compiled statement's debug
+    // behavior is identical to its native form, not just "usually doesn't
+    // matter because fast-continue only compiles breakpoint-free chunks."
+    // a = index into CompiledChunk::nativeStatements (reusing that table).
+    CheckDebugStatement,
+
+    // Assignment's own compiled form -- pops one Value (already evaluated
+    // via an ordinary inline compileExpr, NOT native evalExprMaybeCompiled)
+    // and replicates Evaluator::evalAssignment exactly: a `$`-prefixed name
+    // goes to ctx.dyn (+ dynExplicit), everything else checks
+    // ctx.dynPositions for the "assigned but overwritten" warning, then
+    // writes ctx.let_ and records this position. Never slot-addressed --
+    // module-level/top-level assignments are always ctx-visible, dynamic-
+    // scope writes, exactly like today. a = name pool index, pos = the
+    // Assignment node's own position (for both the overwritten warning and
+    // the position recorded into dynPositions).
+    StoreModuleVar,
+
+    // ModularEcho/ModularAssert's own statement form share Op::Echo/a
+    // dedicated AssertStatement op (below) for the "pop N already-compiled
+    // argument values" mechanics -- see those ops' own doc comments
+    // (Op::Echo, above; Op::AssertStatement, below) for why the
+    // EXPRESSION-form opcodes are directly reusable (statement-shaped
+    // already: no value pushed, straight fall-through) while assert's
+    // needs its own op (named-argument support + eager-not-lazy message
+    // evaluation, both genuinely different from AssertOp's own contract).
+
+    // Isolates ONE inline-compiled sub-expression's own `$`-writes from the
+    // rest of this chunk's shared, long-lived ctx -- pushes ctx.
+    // letChildCtx() (reads still see through to the parent level; only
+    // WRITES are isolated) onto f.ctxChain, mirroring exactly what
+    // runCompiledExprChunk's own wrapper already does for a native call
+    // into a compiled EXPRESSION chunk (evalExprMaybeCompiled). Needed
+    // because a module-body statement's own inline-compiled sub-
+    // expression (Assignment's RHS, one echo()/assert() argument) has NO
+    // such wrapper of its own the way a genuinely separate chunk call
+    // does -- without this, `v1 = let($fn=55) f(); v2 = f();` leaks $fn=55
+    // into v2 too (caught for real by UserFunction.
+    // DollarVarLetAsAssignmentRhsDoesNotLeak once Assignment got its own
+    // inline compiled form). Always emitted, unconditionally, around
+    // EVERY such sub-expression -- not just ones statically known to
+    // contain a `let($...)` -- for the same reason runCompiledExprChunk's
+    // own wrapper is unconditional: a nested call/closure could still
+    // reach one indirectly, and the cost when nothing $-scoped is present
+    // is just one cheap trail-level open, not a real expression re-walk.
+    OpenExprScope,
+    // Pops the ctx OpenExprScope just pushed (f.ctxChain.pop_back()) --
+    // always paired, immediately after the sub-expression's own compiled
+    // code finishes (its RESULT, if any, is already on f.stack by then;
+    // this only tears down the ctx, never touches the value stack). Also
+    // reused to close Op::OpenLetScope's own child ctx (below) -- both are
+    // just "pop the current ctx level", identical either way.
+    CloseExprScope,
+
+    // ModularLet's own (statement-form) child scope -- mirrors
+    // Evaluator::evalLetBlock's own `ctx.childCtx(nullptr, std::nullopt,
+    // ctx.childrenNodes, ctx.childrenCallerCtx)` call exactly, pushed onto
+    // f.ctxChain (Op::CloseExprScope, above, pops it back off once the
+    // let-block's own body finishes compiling/running). Every assignment's
+    // own RHS is compiled+evaluated BEFORE this runs (while the PARENT ctx
+    // is still current -- see ModularLet's own compileOneStatement case,
+    // bytecode_compiler.cpp, for why: the statement form's RHS must never
+    // see an EARLIER sibling's own write in the SAME let-block, unlike the
+    // let-EXPRESSION form's sequential visibility), each left on f.stack;
+    // only the WRITES (Op::StoreLetVar, below) happen after this runs.
+    OpenLetScope,
+
+    // Op::StoreLetVar -- pops one value and writes it into the CURRENT ctx
+    // (by then, the child Op::OpenLetScope just pushed) via the same
+    // `$`-prefix branch Op::StoreModuleVar uses, but WITHOUT its
+    // dynPositions "assigned but overwritten" bookkeeping -- evalLetBlock's
+    // own writes never do that check either (a let-block's own child scope
+    // is always fresh, so "reassigning the same name in the same scope"
+    // can never happen the way a module-body Assignment's own can). a =
+    // name pool index, pos = the Assignment node's own position (unused by
+    // the handler itself, kept for consistency/future debugging only).
+    StoreLetVar,
+
+    // a = index into CompiledChunk::assertSites. Pops site.argCount values
+    // (all of this statement's own arguments, already compiled+pushed in
+    // source order via compileExpr -- EVERY one, not just condition/
+    // message, mirrors evalAssertStatement's own eager resolveArgs() over
+    // AssertOp's lazy-message contract) and replicates
+    // Evaluator::evalAssertStatement exactly: named "condition"/"message"
+    // win over positional 0/1 (resolved at COMPILE time into
+    // AssertSite::conditionArgIndex/messageArgIndex -- the argument SHAPE
+    // is static, only values vary per call), throws via Evaluator::error()
+    // on failure, otherwise runs any chained node.children natively (rare;
+    // not worth its own compiled path -- see AssertSite's own doc comment).
+    AssertStatement,
 };
 
 struct Instruction {
@@ -477,6 +583,32 @@ struct CompiledChunk {
         std::string calleeName;
     };
 
+    // One Op::AssertStatement site -- see that op's own doc comment for
+    // the full contract. `conditionArgIndex`/`messageArgIndex` are indices
+    // into the site's own argCount-sized popped-argument array (source
+    // order), resolved at COMPILE time via the same "named wins over
+    // positional 0/1" priority Evaluator::getArg applies at runtime --
+    // nullopt means "no argument supplies this logical parameter" (mirrors
+    // getArg's own defaultValue fallback: absent condition reads as
+    // `Value{true}`, absent message means no ": ..." suffix).
+    // `condTextConstIdx`: constants[] index of the condition argument's own
+    // source text (or "false" when no condition argument exists, matching
+    // evalAssertStatement's `node.arguments.empty() ? "false" : ...`),
+    // interned once at compile time. `node`: for both Evaluator::error()'s
+    // TRACE walk and the (rare) chained-children fallback below.
+    //
+    // ponytail: a script with TWO named args of the SAME name (e.g.
+    // `assert(condition=true, condition=false)`) would resolve to the
+    // LAST one here, not getArg's own first-match; not worth the extra
+    // bookkeeping to fix for input that's already nonsensical.
+    struct AssertSite {
+        int argCount = 0;
+        std::optional<int> conditionArgIndex;
+        std::optional<int> messageArgIndex;
+        int condTextConstIdx = -1;
+        const oscad::ModularAssert* node = nullptr;
+    };
+
     // Every distinct chunk this SPECIFIC CompiledChunk owns is either a
     // function body (bodyCode is one expression's own instruction stream)
     // or a module body (bodyCode is a compiled STATEMENT list -- see
@@ -512,6 +644,7 @@ struct CompiledChunk {
     // NativeCondJumpIfFalse/NativeCheckDebugExprLevel/NativeIterMaterialize's
     // own doc comments, above) -- always empty for a function chunk.
     std::vector<ModuleCallSite> moduleCallSites;
+    std::vector<AssertSite> assertSites;
     std::vector<const oscad::Expression*> nativeExprs;
     std::vector<const oscad::ASTNode*> nativeStatements;
     int numSlots = 0;
