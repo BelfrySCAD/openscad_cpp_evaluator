@@ -572,23 +572,31 @@ TEST(BytecodeCompiler, MakeClosureLetsContainerCompileDespiteEscapingClosure) {
     // compiled or not -- confirmed empirically, not assumed, by diffing
     // this test's own result against the pre-Op::MakeClosure compiler.
     //
-    // 3, not 6: BOTH top-level statements' own expressions now compile too
-    // (Phase 1, module/top-level compilation). `stored = outer(5);` is
-    // ALSO its own compiled assignment BLOCK now (evalChildren's own
-    // leading assignment-run, a single-assignment block here -- see
-    // tryRunCompiledAssignmentBlock, evaluator.hpp), which bypasses
-    // evalChildren's own per-STATEMENT checkDebug entirely on top of
-    // `outer(5)`'s own call-site checkpoint already being lost (same
-    // reasoning as evalExprMaybeCompiled's doc comment) -- 2 stops lost
-    // there, not 1. `echo(stored(3));` (doEcho, not a batched assignment)
-    // still only loses its own call-site checkpoint the ordinary way -- 1
-    // stop. 6 - 2 - 1 = 3.
+    // 4, not 6: BOTH top-level statements' own expressions now compile too
+    // (Phase 1, module/top-level compilation). Confirmed directly via a
+    // standalone debug-hook trace, not derived by hand: (1) `stored =
+    // outer(5);`'s own STATEMENT-level checkpoint (line 2, depth 0) --
+    // now the evalChildren top-level list compiles as ONE chunk
+    // (Evaluator::tryRunCompiledChildren, the "NativeStatement gap" fix),
+    // this assignment runs as an ordinary Op::NativeStatement entry,
+    // which DOES fire its own statement-level checkDebug -- unlike the
+    // narrower, single-purpose tryRunCompiledAssignmentBlock path this
+    // used to take instead (a real, single-assignment "block"), which
+    // skips that checkpoint entirely. `outer(5)`'s own call-site
+    // checkpoint is still lost either way (compiled either path). (2)
+    // `outer`'s own body-entry (line 1, depth 1). (3) `echo(stored(3));`'s
+    // own statement-level checkpoint (line 3, depth 0) -- unchanged from
+    // before, echo was never part of the assignment-block compile. (4)
+    // `stored(3)`'s own body-entry (line 1, depth 1) -- `stored` is an
+    // ESCAPING closure (captures `n`), never compiles regardless (see
+    // this test's own title), so this is the interpreter's usual
+    // body-entry stop for a genuine call.
     const int stops = countDebugHookStops(
         "function outer(n) = n > 0 ? function(y) y + n : function(y) y - n;\n"
         "stored = outer(5);\n"
         "echo(stored(3));",
         std::unordered_map<std::string, std::set<int>>{});
-    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(stops, 4);
 }
 
 TEST(BytecodeCompiler, MakeClosureCapturesFreshValuePerInvocation) {
@@ -1295,6 +1303,52 @@ TEST(ModuleBodyCompiles, RecursiveModuleWithIfSucceedsWellPastTheOldNativeLimitC
     ScopedVm vm(true);
     Evaluated e = evalSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(10000);");
     ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// The "NativeStatement gap" pattern (Evaluator::tryRunCompiledChildren): a
+// builtin-with-children statement (translate here) always falls to
+// Op::NativeStatement, so a recursive call made ONLY from inside one is a
+// genuine, repeated native C++ re-entry into the VM (evalChildren ->
+// tryRunCompiledChildren -> runCompiledModuleBody -> driveVm) every single
+// level -- unlike a bare `recur(n-1);` statement, which compiles straight
+// to Op::CallModule and costs zero native stack. Before
+// driveVmNativeDepth_/kMaxDriveVmNativeDepth existed, this pattern
+// segfaulted (exit 139) around n=3000 instead of throwing; this proves it
+// now fails the same controlled way kMaxUserCallDepth already does for the
+// interpreted case.
+TEST(ModuleBodyCompiles, NativeReentrantRecursionHitsAControlledErrorInsteadOfCrashing) {
+    ScopedVm vm(true);
+    try {
+        evalSrc("module recur(n) { translate([0,0,n]) recur2(n); }\n"
+                "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                "recur(3000);");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("Recursion too deep"), std::string::npos) << what;
+    }
+}
+
+// The realistic case the NativeStatement-gap fix actually targets: the
+// RECURSIVE call itself is a bare statement (pure Op::CallModule, zero
+// native stack, bounded only by the heap-sized kMaxVmCallStackDepth), and
+// only a non-recursive LEAF statement per level is builtin-wrapped. Each
+// such native re-entry completes immediately (no further recursion inside
+// it), so driveVmNativeDepth_ never nests past 1-2 regardless of how deep
+// `n` goes -- proving driveVmNativeDepth_'s new guard doesn't wrongly cap
+// this well past kMaxUserCallDepth=30/kMaxDriveVmNativeDepth=30.
+TEST(ModuleBodyCompiles, DeepPureVmRecursionWithNonRecursingBuiltinWrappedLeafSucceeds) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) {"
+                          "  if (n > 0) {"
+                          "    translate([0,0,n]) cube(1);"
+                          "    recur(n - 1);"
+                          "  } else {"
+                          "    cube(1);"
+                          "  }"
+                          "}"
+                          "recur(100);");
+    ASSERT_EQ(e.bodies.size(), 101u);
 }
 
 TEST(ModuleBodyCompiles, RecursiveModuleThrowingPartwayUnwindsCleanlyAndVmFrameRunsAgain) {
