@@ -1336,14 +1336,37 @@ public:
     // free function, not a member, so it needs direct access with no
     // friend declaration in play.
     size_t driveVmNativeDepth_ = 0;
-    // Same figure as kMaxUserCallDepth -- each native re-entry above costs
-    // a comparable handful of native frames (evalStatement, evalModularCall,
-    // a builtin resolve function, evalChildren, tryRunCompiledChildren,
-    // runCompiledModuleBody, driveVm), so the same Windows-CI-calibrated
-    // ceiling applies. Deliberately its own named constant (not a reuse of
-    // kMaxUserCallDepth in place) so the two can be recalibrated
-    // independently if profiling ever shows they should diverge.
-    static constexpr size_t kMaxDriveVmNativeDepth = 30;
+    // Originally set to kMaxUserCallDepth's own figure (30) on the
+    // assumption the two native-reentry chains cost a comparable handful
+    // of frames each -- WRONG in practice: a real differential sweep
+    // against BOSL2's own test corpus found 3 genuine scripts
+    // (test_ball_bearing, test_teardrop_corner_mask, test_rounding_hole_
+    // mask -- all built on deeply layered _translate()/_show_highlight()/
+    // attachment-wrapper composition, not runaway recursion) that used to
+    // render successfully but started failing with "Recursion too deep
+    // (native call stack)" once this guard shipped at 30.
+    //
+    // Locally binary-searched (macOS) to a first candidate of 50, the
+    // smallest value tried that let all 3 succeed again, then FIRST tried
+    // doubled to 100 for headroom -- that immediately segfaulted on
+    // Windows CI (ModuleBodyCompiles.
+    // NativeReentrantRecursionHitsAControlledErrorInsteadOfCrashing, its
+    // own guard-safety regression test). Backed off to 50 -- STILL
+    // segfaulted there. Confirms this chain's real per-level native-frame
+    // cost is heavier than kMaxUserCallDepth's own (which needed the SAME
+    // kind of comedown, an initial 50 down to 30, for a shallower chain),
+    // and that Windows' real safe ceiling for THIS chain sits somewhere
+    // below 50, above the already-Windows-verified-safe 30 (confirmed
+    // safe by PR #60's own successful merge, before this value ever
+    // changed). Currently at 40 -- ALSO still functionally sufficient
+    // (all 3 real scripts still render locally at this value) -- bisecting
+    // downward toward Windows' actual ceiling via successive CI runs, one
+    // step at a time; if 40 itself is still unsafe there, keep coming
+    // down. Do not raise this value again based on local (macOS/Linux)
+    // testing alone -- only a real Windows CI pass is evidence of safety
+    // here. Deliberately its own named constant (not a reuse of
+    // kMaxUserCallDepth) so the two can be recalibrated independently.
+    static constexpr size_t kMaxDriveVmNativeDepth = 40;
 
     // Bracketed public in place: Op::CallModule's own runtime handler and
     // driveVm's module-frame completion branch (bytecode_vm.cpp, a

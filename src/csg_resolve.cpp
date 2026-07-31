@@ -175,17 +175,21 @@ void Evaluator::evalModifier(const oscad::ModuleInstantiation& child, const osca
     // always empty (role tagging happens entirely in the matching
     // generate function -- generateHighlight/Background/ShowOnly).
     buildTreeNode(kind, wrapperNode, [&]() {
-        // The wrapped child gets its own statement-level stop, in addition
-        // to the modifier node's (which evalChildren already fired before
-        // dispatching here) -- so `#cube(1);` pauses twice, like the
-        // reference. There, _resolve_modifier_child has no _check_debug of
-        // its own: it calls _eval_statement(node.child, ctx), and _that_
-        // dispatcher independently checks every _TREE_NODE_TYPES node it
-        // is handed. This port's evalStatement has no such blanket check
-        // (evalChildren owns it), so the equivalent stop is made explicit
-        // here.
-        checkDebug(child, ctx);
-        evalStatement(child, ctx);
+        // A single-element evalChildren() call, not a hand-rolled
+        // checkDebug+evalStatement pair -- gives the wrapped child its own
+        // statement-level stop exactly like the old explicit checkDebug()
+        // did (evalChildren's own per-statement loop fires the identical
+        // check, at the identical point, for a lone non-declaration
+        // non-ModularLet node), while ALSO trying the compiled
+        // Op::CallModule path first (tryRunCompiledChildren, the
+        // NativeStatement-gap fix) -- so `#recur(n-1);` gets the same
+        // depth-safe treatment translate()/union()/let()/intersection_for
+        // already do, instead of always falling through evalStatement ->
+        // evalModularCall -> evalUserModule capped at kMaxUserCallDepth=30.
+        // No double stop: whichever path runs (compiled Op::CallModule,
+        // compiled Op::NativeStatement, or the native loop) fires the
+        // check exactly once, same as evalChildren's own existing callers.
+        evalChildren(std::vector<const oscad::ASTNode*>{&child}, ctx);
         return CSGParams{};
     });
 }
