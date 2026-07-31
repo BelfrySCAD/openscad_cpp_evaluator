@@ -1344,17 +1344,23 @@ public:
     // mask -- all built on deeply layered _translate()/_show_highlight()/
     // attachment-wrapper composition, not runaway recursion) that used to
     // render successfully but started failing with "Recursion too deep
-    // (native call stack)" once this guard shipped at 30. Empirically
-    // raised to the smallest value (binary search, local rebuild+retest)
-    // that lets all 3 succeed again (50), then doubled for headroom
-    // against future library growth -- NOT independently re-verified
-    // against Windows CI's own tighter stack margin the way
-    // kMaxUserCallDepth's own 30 was (that number came DOWN from an
-    // initial 50 specifically because 50 segfaulted there) -- if CI ever
-    // flags this as unsafe on a real run, come back down, don't guess
-    // again locally. Deliberately its own named constant (not a reuse of
+    // (native call stack)" once this guard shipped at 30.
+    //
+    // Locally binary-searched (macOS) to 50, the smallest value that lets
+    // all 3 succeed again, then FIRST tried doubled to 100 for headroom --
+    // that immediately segfaulted on Windows CI
+    // (ModuleBodyCompiles.NativeReentrantRecursionHitsAControlledError
+    // InsteadOfCrashing, its own guard-safety regression test), confirming
+    // this chain's real per-level native-frame cost is heavier than
+    // kMaxUserCallDepth's own (which needed the SAME kind of comedown, an
+    // initial 50 to 30, for a shallower chain). Set to exactly the
+    // locally-determined functional minimum (50), no headroom this time --
+    // headroom is what crashed. If a future CI run ever segfaults here
+    // again, come back down further via that same signal; don't rely on
+    // local (macOS/Linux) testing alone to judge Windows stack margin.
+    // Deliberately its own named constant (not a reuse of
     // kMaxUserCallDepth) so the two can be recalibrated independently.
-    static constexpr size_t kMaxDriveVmNativeDepth = 100;
+    static constexpr size_t kMaxDriveVmNativeDepth = 50;
 
     // Bracketed public in place: Op::CallModule's own runtime handler and
     // driveVm's module-frame completion branch (bytecode_vm.cpp, a
