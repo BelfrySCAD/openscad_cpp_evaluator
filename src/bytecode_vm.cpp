@@ -604,17 +604,18 @@ Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Inst
 // Mirrors Evaluator::bindArgs' own positional/named matching exactly (same
 // "later write for a repeated name wins," same "evaluate every argument
 // expression even if its name doesn't match a declared parameter" side-
-// effect rule), but writes matched-plain-parameter values directly into
-// `slots` instead of a fresh unordered_map, and routes a matched-$-name
-// straight to `childCtx.dyn` (childCtx.dyn->set) since $-parameters never
-// reach compilation (see tryCompileFunction) -- so ANY $-named argument here
-// is necessarily an undeclared override, exactly like today's interpreter
-// path. An undeclared plain (non-$) name has no slot and nothing in this
-// chunk can ever reference it by name, so its already-evaluated value is
-// simply discarded -- ponytail: ctx.let_ isn't written for it either
-// (unlike the interpreter path), which changes nothing observable, since
-// nothing downstream of a compiled call ever reads ctx.let_ for a name a
-// compiled body didn't itself resolve to a slot.
+// effect rule), but writes a matched plain-parameter value directly into
+// `slots` instead of a fresh unordered_map, and routes a matched DECLARED
+// $-parameter (chunk.params[i].isDyn) straight to `childCtx.dyn` instead of
+// a slot -- see compileFunctionLike's own doc comment, bytecode_compiler.cpp.
+// A $-named argument that doesn't match any declared parameter is still an
+// undeclared override, exactly like today's interpreter path -- routed to
+// `childCtx.dyn` too. An undeclared plain (non-$) name has no slot and
+// nothing in this chunk can ever reference it by name, so its already-
+// evaluated value is simply discarded -- ponytail: ctx.let_ isn't written
+// for it either (unlike the interpreter path), which changes nothing
+// observable, since nothing downstream of a compiled call ever reads
+// ctx.let_ for a name a compiled body didn't itself resolve to a slot.
 void bindCompiledArgs(Evaluator& ev, const CompiledChunk& chunk,
                        const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& callerCtx,
                        EvalContext& childCtx, std::vector<Value>& slots, std::vector<bool>& bound) {
@@ -628,7 +629,11 @@ void bindCompiledArgs(Evaluator& ev, const CompiledChunk& chunk,
             bool matched = false;
             for (size_t i = 0; i < nparams; ++i) {
                 if (chunk.params[i].name == name) {
-                    slots[static_cast<size_t>(chunk.params[i].slot)] = std::move(v);
+                    if (chunk.params[i].isDyn) {
+                        childCtx.dyn->set(name, std::move(v));
+                    } else {
+                        slots[static_cast<size_t>(chunk.params[i].slot)] = std::move(v);
+                    }
                     bound[i] = true;
                     matched = true;
                     break;
@@ -641,10 +646,37 @@ void bindCompiledArgs(Evaluator& ev, const CompiledChunk& chunk,
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
             Value v = ev.evalExpr(*a.expr, callerCtx);
             if (positionalIdx < nparams) {
-                slots[static_cast<size_t>(chunk.params[positionalIdx].slot)] = std::move(v);
+                const CompiledChunk::Param& p = chunk.params[positionalIdx];
+                if (p.isDyn) {
+                    childCtx.dyn->set(p.name, std::move(v));
+                } else {
+                    slots[static_cast<size_t>(p.slot)] = std::move(v);
+                }
                 bound[positionalIdx] = true;
             }
             ++positionalIdx;
+        }
+    }
+}
+
+// Shared by runCompiledFunction/runCompiledFunctionFromBound: applies each
+// unbound parameter's default (or, for a $-parameter with none, an explicit
+// undef -- mirrors Evaluator::applyDefaults' own "declaring a parameter
+// always creates a fresh binding" rule, which for a slot-addressed plain
+// parameter is already true for free via frame.slots' own zero-initialized
+// Value{} fill, but for ctx.dyn needs the same explicit write applyDefaults
+// makes, or a stale ancestor-level $-var would incorrectly show through).
+void applyCompiledDefaults(Evaluator& ev, const CompiledChunk& chunk, VmFrame& frame, EvalContext& childCtx) {
+    for (size_t i = 0; i < chunk.params.size(); ++i) {
+        if (frame.bound[i]) continue;
+        const CompiledChunk::Param& p = chunk.params[i];
+        if (p.isDyn) {
+            childCtx.dyn->set(p.name, chunk.defaultCode[i].empty()
+                                           ? Value{}
+                                           : runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack));
+        } else if (!chunk.defaultCode[i].empty()) {
+            frame.slots[static_cast<size_t>(p.slot)] =
+                runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack);
         }
     }
 }
@@ -667,12 +699,7 @@ Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
     // started running, never during argument binding itself.
     ev.setCurrentCallVmFrame(&frame);
     bindCompiledArgs(ev, chunk, arguments, callerCtx, childCtx, frame.slots, frame.bound);
-    for (size_t i = 0; i < chunk.params.size(); ++i) {
-        if (!frame.bound[i] && !chunk.defaultCode[i].empty()) {
-            frame.slots[static_cast<size_t>(chunk.params[i].slot)] =
-                runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack);
-        }
-    }
+    applyCompiledDefaults(ev, chunk, frame, childCtx);
     return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack, tailOut);
 }
 
@@ -684,8 +711,13 @@ Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, co
     frame.bound.assign(chunk.params.size(), false);
     ev.setCurrentCallVmFrame(&frame);
     for (size_t i = 0; i < chunk.params.size(); ++i) {
-        if (const Value* v = bound.find(chunk.params[i].name)) {
-            frame.slots[static_cast<size_t>(chunk.params[i].slot)] = *v;
+        const CompiledChunk::Param& p = chunk.params[i];
+        if (const Value* v = bound.find(p.name)) {
+            if (p.isDyn) {
+                childCtx.dyn->set(p.name, *v);
+            } else {
+                frame.slots[static_cast<size_t>(p.slot)] = *v;
+            }
             frame.bound[i] = true;
         }
     }
@@ -699,12 +731,7 @@ Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, co
         }
         if (!matched && !k.empty() && k[0] == '$') childCtx.dyn->set(k, v);
     }
-    for (size_t i = 0; i < chunk.params.size(); ++i) {
-        if (!frame.bound[i] && !chunk.defaultCode[i].empty()) {
-            frame.slots[static_cast<size_t>(chunk.params[i].slot)] =
-                runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack);
-        }
-    }
+    applyCompiledDefaults(ev, chunk, frame, childCtx);
     return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack, tailOut);
 }
 

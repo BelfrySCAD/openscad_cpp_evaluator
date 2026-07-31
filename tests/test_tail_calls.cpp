@@ -119,6 +119,21 @@ TEST(TailCalls, DollarVarSetEarlyInATailChainStaysVisibleManyHopsLater) {
     EXPECT_EQ(runCapturingEcho(script), "ECHO: 77");
 }
 
+TEST(TailCalls, DollarParameterThreadsThroughCompiledTailRecursion) {
+    ScopedVm vm(true);
+    // $fn declared as its own PARAMETER (not just read as an ambient dyn
+    // var, unlike the test above) rebinds via childCtx.dyn at every tail
+    // hop -- compileFunctionLike no longer bails on a $-prefixed parameter
+    // (see its own doc comment, bytecode_compiler.cpp). No tail-call-
+    // specific hazard: every hop's bindCompiledArgs call is identical to
+    // what a genuine non-tail call already does, and dyn already threads
+    // correctly across hops (proved by the test above).
+    const std::string script =
+        "function sum_with_fn($fn, n, acc=0) = n == 0 ? $fn + acc : sum_with_fn($fn, n - 1, acc + n);\n"
+        "echo(sum_with_fn(1000, 50000));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 1.25003e+9");
+}
+
 TEST(TailCalls, NonTailRecursionIsUnaffectedByTheTrampoline) {
     ScopedVm vm(false);
     // `n * fact(n-1)` is NOT a tail position -- the multiply happens after
@@ -314,6 +329,32 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompile
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+}
+
+TEST(TailCalls, CollatzStepsRecursesFromBothTernaryBranchesInterpreted) {
+    ScopedVm vm(false);
+    // Real-world example exercising tail calls from BOTH ternary branches at
+    // once (the even and odd cases each recurse) -- came up when auditing
+    // for un-trampolined tail positions (see this file's header). Scans
+    // every n < 10000 and takes the longest chain; the known record holder
+    // in that range is n=6171 at 261 steps, calling collatz_steps 10000
+    // times over.
+    const std::string script =
+        "function collatz_steps(n, steps=0) = n == 1 ? steps : "
+        "(n % 2 == 0 ? collatz_steps(n / 2, steps + 1) : collatz_steps(3 * n + 1, steps + 1));\n"
+        "lengths = [for (i = [1:10000]) collatz_steps(i)];\n"
+        "echo(max(lengths));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 261");
+}
+
+TEST(TailCalls, CollatzStepsRecursesFromBothTernaryBranchesCompiled) {
+    ScopedVm vm(true);
+    const std::string script =
+        "function collatz_steps(n, steps=0) = n == 1 ? steps : "
+        "(n % 2 == 0 ? collatz_steps(n / 2, steps + 1) : collatz_steps(3 * n + 1, steps + 1));\n"
+        "lengths = [for (i = [1:10000]) collatz_steps(i)];\n"
+        "echo(max(lengths));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 261");
 }
 
 TEST(TailCalls, ShallowNonTailRecursionStillWorksUnderTheDepthGuard) {
