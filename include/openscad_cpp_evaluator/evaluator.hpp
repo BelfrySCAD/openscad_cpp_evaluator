@@ -633,6 +633,47 @@ private:
     Value evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode, const oscad::Expression& bodyExpr,
                                 EvalContext& childCtx, const oscad::Position* callPos, int upvalueParent,
                                 F&& computeResult) {
+        // Guards against a genuinely non-tail-recursive user function --
+        // each logical call HERE is a real, unavoidable C++ recursive call
+        // (a trampolined tail call never re-enters this function at all,
+        // see evalFunctionBodyTrampoline/runCompiledFunctionTrampoline) --
+        // silently overflowing the native stack: a hard, unrecoverable
+        // process crash with no C++ exception to catch. Confirmed present
+        // (before this guard existed) for a plain, closure-free `function
+        // f(n) = n<=0 ? 0 : 1+f(n-1);`, compiled OR interpreted.
+        //
+        // kMaxUserCallDepth is a conservative, heuristic cap, NOT a
+        // precisely-calibrated one -- and specifically calibrated against
+        // the WORST measured platform, not the best. Two rounds of CI
+        // diagnostics (temporary test builds that recursed to increasing
+        // depths, printing success after each one so the CI log itself
+        // would show exactly where a crash happened) found: (1) this
+        // evaluator's own C++ recursion is safe into the THOUSANDS on an
+        // ordinary macOS/Linux desktop main-thread stack, but only into
+        // the low HUNDREDS on CI's windows-latest runner (smaller default
+        // thread stack and/or larger MSVC-compiled call frames than
+        // Clang's); (2) actually THROWING from that depth and unwinding
+        // back out through that many nested try/catch frames (this guard
+        // fires from inside evalUserFunctionCore, which every level of
+        // the recursion has its own try/catch in) costs meaningfully MORE
+        // native stack than simply being that deep without throwing --
+        // 300 survived on Windows without throwing, but throwing+
+        // unwinding through as few as 100 nested frames did not (80 was
+        // the last depth that survived). 50 leaves real margin below that
+        // 80 figure for whatever's already on the stack from this call's
+        // own caller, and for a smaller stack still (e.g. BelfrySCAD's own
+        // debug-session worker thread, plausibly smaller than any CI
+        // runner's main thread) that this evaluator has no way to probe
+        // for directly. A real OpenSCAD/BOSL2 recursive function is
+        // overwhelmingly tail-recursive in practice anyway (exactly why
+        // reduce()/accumulate()/while() and this evaluator's own
+        // trampolines exist) -- genuine non-tail recursion even
+        // approaching this depth is already the rare, likely-runaway case
+        // a controlled error serves far better than a crash.
+        static constexpr size_t kMaxUserCallDepth = 50;
+        if (callStack_.size() >= kMaxUserCallDepth) {
+            error("Recursion too deep while calling function '" + name + "'", declNode);
+        }
         std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &declNode.position());
         callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &declNode.position(), &declNode,
                                              nullptr, upvalueParent});
