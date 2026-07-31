@@ -1346,21 +1346,27 @@ public:
     // render successfully but started failing with "Recursion too deep
     // (native call stack)" once this guard shipped at 30.
     //
-    // Locally binary-searched (macOS) to 50, the smallest value that lets
-    // all 3 succeed again, then FIRST tried doubled to 100 for headroom --
-    // that immediately segfaulted on Windows CI
-    // (ModuleBodyCompiles.NativeReentrantRecursionHitsAControlledError
-    // InsteadOfCrashing, its own guard-safety regression test), confirming
-    // this chain's real per-level native-frame cost is heavier than
-    // kMaxUserCallDepth's own (which needed the SAME kind of comedown, an
-    // initial 50 to 30, for a shallower chain). Set to exactly the
-    // locally-determined functional minimum (50), no headroom this time --
-    // headroom is what crashed. If a future CI run ever segfaults here
-    // again, come back down further via that same signal; don't rely on
-    // local (macOS/Linux) testing alone to judge Windows stack margin.
-    // Deliberately its own named constant (not a reuse of
+    // Locally binary-searched (macOS) to a first candidate of 50, the
+    // smallest value tried that let all 3 succeed again, then FIRST tried
+    // doubled to 100 for headroom -- that immediately segfaulted on
+    // Windows CI (ModuleBodyCompiles.
+    // NativeReentrantRecursionHitsAControlledErrorInsteadOfCrashing, its
+    // own guard-safety regression test). Backed off to 50 -- STILL
+    // segfaulted there. Confirms this chain's real per-level native-frame
+    // cost is heavier than kMaxUserCallDepth's own (which needed the SAME
+    // kind of comedown, an initial 50 down to 30, for a shallower chain),
+    // and that Windows' real safe ceiling for THIS chain sits somewhere
+    // below 50, above the already-Windows-verified-safe 30 (confirmed
+    // safe by PR #60's own successful merge, before this value ever
+    // changed). Currently at 40 -- ALSO still functionally sufficient
+    // (all 3 real scripts still render locally at this value) -- bisecting
+    // downward toward Windows' actual ceiling via successive CI runs, one
+    // step at a time; if 40 itself is still unsafe there, keep coming
+    // down. Do not raise this value again based on local (macOS/Linux)
+    // testing alone -- only a real Windows CI pass is evidence of safety
+    // here. Deliberately its own named constant (not a reuse of
     // kMaxUserCallDepth) so the two can be recalibrated independently.
-    static constexpr size_t kMaxDriveVmNativeDepth = 50;
+    static constexpr size_t kMaxDriveVmNativeDepth = 40;
 
     // Bracketed public in place: Op::CallModule's own runtime handler and
     // driveVm's module-frame completion branch (bytecode_vm.cpp, a
