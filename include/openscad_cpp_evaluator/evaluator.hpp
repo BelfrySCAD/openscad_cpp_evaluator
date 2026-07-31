@@ -547,6 +547,15 @@ private:
     void buildTreeNode(const std::string& kind, const oscad::ASTNode& node,
                         const std::function<CSGParams()>& resolveBody);
 
+    // Sets node.treeDepth from its own (already-finalized) `children`,
+    // throwing (kMaxCsgTreeDepth's own doc comment, above, for why) if
+    // it's now too deep. Called by every csg_resolve.cpp site that
+    // finalizes a CSGNode's own `children` -- buildTreeNode,
+    // evalModularCall's non-splice tail, spliceModuleChildren's
+    // union-wrap branch -- right after assigning `children`, before the
+    // node is ever linked into anything a caller could see.
+    void setTreeDepthOrThrow(CSGNode& node, const oscad::ASTNode& errNode);
+
     // -- User function/module calls (Phase 4) --------------------------
 
 public:
@@ -1353,6 +1362,42 @@ private:
     // segfaulted UserModule.DeepNonTailRecursionHitsAControlledError
     // Interpreted (PR #59) instead of throwing cleanly at the guard.
     static constexpr size_t kMaxUserCallDepth = 30;
+
+    // Cap on CSGNode::treeDepth (csg_node.hpp), checked wherever a CSGNode
+    // is finalized with its own `children` already known (buildTreeNode,
+    // evalModularCall's own non-splice tail, spliceModuleChildren's
+    // union-wrap branch -- csg_resolve.cpp) -- i.e. enforced DURING
+    // resolve, at tree-CONSTRUCTION time, not by walking the tree
+    // afterward. This is deliberately NOT a generateTreeImpl-side guard
+    // (an earlier version of this fix was exactly that, and it didn't
+    // work): the RESOLVE pass's own depth guards (kMaxUserCallDepth,
+    // kMaxVmCallStackDepth for compiled module recursion) only bound how
+    // many CALLS happen, not how deep the CSGNode TREE those calls build
+    // ends up being -- confirmed directly that resolveTree() itself
+    // returns successfully for a 100,000-deep incrementally-nested tree
+    // (`module recur(n) { if (n>0) { cube(0.1); recur(n-1); } else {
+    // cube(1); } }` -- an ordinary "spiral/chain of shapes" pattern, not
+    // exotic: each level's own module-call splice sees >1 child, so
+    // evalModularCall wraps them in a synthetic "union" CSGNode instead of
+    // collapsing away, and the tree genuinely grows one level per call).
+    // The crash isn't even IN generateTreeImpl's own walk -- it's in
+    // std::unique_ptr<CSGNode>'s default RECURSIVE destructor, freeing
+    // that same 100,000-deep tree the moment it goes out of scope (a
+    // standalone repro confirmed this directly: resolveTree() returns
+    // fine and prints its own result; the crash happens purely from
+    // letting that return value be destroyed, generateTree() never even
+    // called). A destructor can't throw a catchable error and a real
+    // stack overflow isn't a C++ exception at all -- there is no way to
+    // "guard" the walk or the destructor after the fact, only to stop the
+    // tree from ever getting that deep in the first place. Picked
+    // conservatively (not from a precise Windows measurement, no access
+    // to one locally) -- a chain 10x this depth already showed a real
+    // performance cliff in Manifold's own deeply-nested boolean unions
+    // (unrelated to this guard, but confirms nothing legitimate needs to
+    // go anywhere near this many levels); revisit with the same
+    // CI-diagnostic-loop method kMaxUserCallDepth's own history used if
+    // it ever needs recalibrating.
+    static constexpr int kMaxCsgTreeDepth = 2000;
 
     // See lastChildrenPositions()'s own doc comment.
     std::optional<std::vector<std::pair<std::string, int>>> lastChildrenPositions_;

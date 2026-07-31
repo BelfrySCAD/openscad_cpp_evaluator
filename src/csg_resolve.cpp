@@ -28,6 +28,15 @@ private:
 };
 } // namespace
 
+void Evaluator::setTreeDepthOrThrow(CSGNode& node, const oscad::ASTNode& errNode) {
+    int maxChildDepth = 0;
+    for (const auto& c : node.children) maxChildDepth = std::max(maxChildDepth, c->treeDepth);
+    node.treeDepth = maxChildDepth + 1;
+    if (node.treeDepth > kMaxCsgTreeDepth) {
+        error("Recursion too deep while building geometry", errNode);
+    }
+}
+
 void Evaluator::buildTreeNode(const std::string& kind, const oscad::ASTNode& node,
                                const std::function<CSGParams()>& resolveBody) {
     // Push a fresh accumulator for whatever CSGNodes get created while
@@ -60,6 +69,7 @@ void Evaluator::buildTreeNode(const std::string& kind, const oscad::ASTNode& nod
     treeNode->children = std::move(children);
     treeNode->params = std::move(params);
     treeNode->uncacheable = uncacheable;
+    setTreeDepthOrThrow(*treeNode, node);
     treeStack_.back().push_back(std::move(treeNode));
 }
 
@@ -128,6 +138,7 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     treeNode->uncacheable = uncacheable;
     treeNode->children = std::move(children);
     treeNode->params = std::move(params);
+    setTreeDepthOrThrow(*treeNode, node);
     treeStack_.back().push_back(std::move(treeNode));
 }
 
@@ -150,6 +161,7 @@ void Evaluator::spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> child
         unionNode->isBuiltin = false;
         unionNode->uncacheable = std::any_of(children.begin(), children.end(), [](const auto& c) { return c->uncacheable; });
         unionNode->children = std::move(children);
+        setTreeDepthOrThrow(*unionNode, callNode);
         treeStack_.back().push_back(std::move(unionNode));
     } else {
         for (auto& c : children) treeStack_.back().push_back(std::move(c));

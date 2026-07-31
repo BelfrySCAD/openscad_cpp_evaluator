@@ -7,6 +7,20 @@
 using namespace oscadeval;
 using namespace oscadeval::test;
 
+namespace {
+// Mirrors test_bytecode_compiler.cpp's/test_tail_calls.cpp's own ScopedVm --
+// the plain OSCAD_BYTECODE_VM env var is cached forever after its first
+// read, so a test whose own correctness depends on the compiled path
+// actually running (see BareModuleRecursionStaysTreeDepthOneRegardlessOf
+// CallDepth, below -- 20,000-deep recursion needs Op::CallModule, not
+// kMaxUserCallDepth=30's native recursion) must force it explicitly.
+class ScopedVm {
+public:
+    explicit ScopedVm(bool enabled) { Evaluator::setBytecodeVmEnabledForTesting(enabled); }
+    ~ScopedVm() { Evaluator::setBytecodeVmEnabledForTesting(std::nullopt); }
+};
+} // namespace
+
 // -- Tree shape -----------------------------------------------------------
 
 TEST(CsgTree, OneModularCallProducesOneTreeNode) {
@@ -154,4 +168,55 @@ TEST(CsgTree, LinearExtrudeNestsItsChildUnderneath) {
     EXPECT_EQ(e.tree[0]->kind, "linear_extrude");
     ASSERT_EQ(e.tree[0]->children.size(), 1u);
     EXPECT_EQ(e.tree[0]->children[0]->kind, "circle");
+}
+
+// -- CSGNode::treeDepth / Evaluator::kMaxCsgTreeDepth ----------------------
+//
+// A recursive user-module call that wraps only a SINGLE spliced child
+// (evalModularCall's own splice branch collapses it away, no extra
+// CSGNode) can recurse arbitrarily deep (bounded only by kMaxUserCallDepth/
+// kMaxVmCallStackDepth, the CALL-depth guards) without the resulting TREE
+// ever getting any deeper. A recursive module that instead adds its OWN
+// incremental geometry each level -- an ordinary "chain/spiral of shapes"
+// pattern, not exotic -- makes each level's own splice see >1 child, so it
+// gets wrapped in a synthetic "union" CSGNode instead of collapsing away,
+// and the TREE genuinely grows one level per call. Before this guard, a
+// long enough chain resolved fine (the call-depth guards don't bound tree
+// depth at all) and then segfaulted the instant the resulting CSGNode
+// tree -- built, never walked -- went out of scope: std::unique_ptr<
+// CSGNode>'s own default recursive destructor is itself an un-guardable
+// native-stack risk once such a tree exists at all, so this has to be
+// caught DURING resolve, at tree-construction time, not by a later walk.
+
+TEST(CsgTree, BareModuleRecursionStaysTreeDepthOneRegardlessOfCallDepth) {
+    ScopedVm vm(true); // 20,000-deep recursion needs the compiled path
+    // Splicing collapses every level away -- 20,000 calls deep, but the
+    // FINAL tree is still just the one leaf cube. Proves the new guard
+    // (kMaxCsgTreeDepth = 2000) doesn't false-positive on the shape Stage
+    // 2's own deep-recursion tests already rely on.
+    Evaluated e = evalSrc("module recur(n) { if (n>0) recur(n-1); else cube(1); }\nrecur(20000);");
+    ASSERT_EQ(e.tree.size(), 1u);
+    EXPECT_EQ(e.tree[0]->kind, "cube");
+    EXPECT_EQ(e.tree[0]->treeDepth, 1);
+}
+
+TEST(CsgTree, IncrementalGeometryChainHitsTheDepthGuardCleanlyInsteadOfCrashing) {
+    // Forced compiled specifically so this is unambiguously testing THIS
+    // guard (kMaxCsgTreeDepth=2000) and not incidentally passing because
+    // interpreted recursion would ALSO throw first, at kMaxUserCallDepth
+    // (30) -- a much shallower, unrelated guard.
+    ScopedVm vm(true);
+    // Each level adds its own cube(0.1) alongside the recursive call, so
+    // the tree grows one level per call -- 5000 is comfortably past
+    // kMaxCsgTreeDepth (2000). Before this guard, a script shaped exactly
+    // like this segfaulted (confirmed directly: resolveTree() itself
+    // returned successfully and printed its own result; the crash was
+    // purely from destroying the resulting tree afterward, generateTree()
+    // never even reached).
+    try {
+        evalSrc("module recur(n) { if (n>0) { cube(0.1); recur(n-1); } else { cube(1); } }\nrecur(5000);");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("Recursion too deep"), std::string::npos);
+    }
 }
