@@ -69,27 +69,31 @@ void bubbleEscapingCaptures(const CompiledChunk::ClosureSite& site, const oscad:
 // True if any instruction in `chunk`'s own body/defaults is Op::LoadFree --
 // i.e. an identifier that resolved to neither a local, a statically-known
 // enclosing upvalue, nor a dyn ($-prefixed) name at compile time (see
-// compileExpr's own Identifier case). A DIRECT `let(a = function(...)
-// ... a(...) ...)` self-reference (reduce()/accumulate()/while()'s own
-// idiom) and mutual recursion between two-or-more sibling DIRECT
-// `let`-bound closures (fnliterals.scad-style isEven/isOdd, each calling
-// the other) no longer hit this -- see the LetOp case's own letrec
-// pre-declare, below -- but anything the pre-declare doesn't cover still
-// does: `a` wrapped in a ternary/let/anything other than a bare
-// FunctionLiteral RHS (`let(a = cond ? function(...) ...a(...)... :
-// function(...) ...)`), or any other free variable this phase simply can't
-// resolve statically. For any of those, Evaluator::evalIdentifier's own
-// ctx.scope->lookupVariable() fallback re-evaluates the let-binding's RHS
-// FRESH on every single call, producing a new Closure whose capturedLet is
-// THIS invocation's own ctx.let_ (see expr_eval.cpp's FunctionLiteral case)
-// rather than a stable snapshot -- registering such a chunk for compiled
-// invocation would still be functionally correct, but each recursive
-// call's own capturedLet->openChild() then nests ONE level deeper than the
-// last (confirmed empirically: an O(n) list reduce() degrading to O(n^2)
-// once compiled, before the letrec pre-declare existed), since nothing
-// about that repeated fresh-derivation ever re-roots the trail. Excluding
-// a LoadFree-containing chunk from registration leaves it running
-// interpreted exactly as before -- correct, if not optimized.
+// compileExpr's own Identifier case). A `let(a = function(...) ...
+// a(...) ...)` self-reference, mutual recursion between two-or-more
+// sibling `let`-bound closures (fnliterals.scad-style isEven/isOdd, each
+// calling the other), and either of those wrapped in a ternary (`let(a =
+// cond ? function(...) ...a(...)... : function(...) ...)`, every reachable
+// branch unambiguously a closure) no longer hit this -- see the LetOp
+// case's own letrec pre-declare, below, and collectLetrecCandidateLiterals'
+// own doc comment for exactly which RHS shapes qualify. Anything the
+// pre-declare doesn't cover still does: a reference buried in something
+// other than a direct-or-ternary closure RHS (`let(a = some_call() ?
+// function(...) ...a(...)... : function(...) ...)`, a non-ternary
+// conditional shape, etc.), or any other free variable this phase simply
+// can't resolve statically. For any of those, Evaluator::evalIdentifier's
+// own ctx.scope->lookupVariable() fallback re-evaluates the let-binding's
+// RHS FRESH on every single call, producing a new Closure whose
+// capturedLet is THIS invocation's own ctx.let_ (see expr_eval.cpp's
+// FunctionLiteral case) rather than a stable snapshot -- registering such
+// a chunk for compiled invocation would still be functionally correct,
+// but each recursive call's own capturedLet->openChild() then nests ONE
+// level deeper than the last (confirmed empirically: an O(n) list
+// reduce() degrading to O(n^2) once compiled, before the letrec pre-
+// declare existed), since nothing about that repeated fresh-derivation
+// ever re-roots the trail. Excluding a LoadFree-containing chunk from
+// registration leaves it running interpreted exactly as before --
+// correct, if not optimized.
 bool containsLoadFree(const std::vector<Instruction>& code) {
     for (const Instruction& ins : code) {
         if (ins.op == Op::LoadFree) return true;
@@ -103,6 +107,38 @@ bool containsLoadFree(const CompiledChunk& chunk) {
         if (containsLoadFree(defaultCode)) return true;
     }
     return false;
+}
+
+// Recursively collects every FunctionLiteral `expr` could actually
+// evaluate to at runtime -- a bare literal, or a ternary (or nested
+// ternaries) whose branches ALL recursively qualify, e.g. `cond ?
+// function(...) ...a(...)... : function(...) ...` (the ternary-wrapped
+// self/mutual-reference case the direct-RHS-only letrec pre-declare,
+// below, doesn't reach on its own). Returns std::nullopt -- not just an
+// empty vector -- the moment ANY reachable branch ISN'T reliably a
+// closure (a plain value, a call, anything else): letrec pre-declaration
+// only makes sense when EVERY runtime path through `expr` really does
+// produce a fresh closure that might reference the let-binding's own
+// name, never a mix. A CommentedExpr wrapper is transparent, matching
+// compileExpr's own handling of it everywhere else.
+std::optional<std::vector<const oscad::FunctionLiteral*>> collectLetrecCandidateLiterals(const oscad::ASTNode& expr) {
+    using oscad::NodeKind;
+    if (expr.kind() == NodeKind::CommentedExpr) {
+        return collectLetrecCandidateLiterals(*static_cast<const oscad::CommentedExpr&>(expr).expr);
+    }
+    if (expr.kind() == NodeKind::FunctionLiteral) {
+        return std::vector<const oscad::FunctionLiteral*>{static_cast<const oscad::FunctionLiteral*>(&expr)};
+    }
+    if (expr.kind() == NodeKind::TernaryOp) {
+        auto& t = static_cast<const oscad::TernaryOp&>(expr);
+        auto trueLits = collectLetrecCandidateLiterals(*t.trueExpr);
+        if (!trueLits) return std::nullopt;
+        auto falseLits = collectLetrecCandidateLiterals(*t.falseExpr);
+        if (!falseLits) return std::nullopt;
+        trueLits->insert(trueLits->end(), falseLits->begin(), falseLits->end());
+        return trueLits;
+    }
+    return std::nullopt;
 }
 
 // Compile-time name -> slot resolution, mirroring the LetOp/nested-scope
@@ -567,26 +603,39 @@ public:
                 size_t placeholderIdx = out.size();
                 out.push_back({Op::OpenLocalScope, 0, 0, nullptr});
                 int slotStart = nextSlot_;
-                // Letrec pre-pass: every DIRECT `name = function(...) ...`
-                // assignment in this LetOp gets its own slot declared up
-                // front, before ANY of them are compiled -- not just so a
-                // closure can reference itself (see the self-reference
-                // handling below), but so an EARLIER one can also reference
-                // a LATER sibling (mutual recursion, e.g. fnliterals.scad-
-                // style isEven/isOdd calling each other). `letrecSlot[i]`
-                // stays -1 for anything else, which keeps the existing
-                // after-the-fact declareLocal path below completely
-                // unchanged (`let(x = x + 1)` must still see the OUTER x,
-                // not a fresh, not-yet-assigned local shadowing it -- only
-                // a function-literal RHS has "see myself/a sibling" as a
-                // sensible reading at all).
+                // Letrec pre-pass: every assignment whose RHS is GUARANTEED
+                // to evaluate to a closure -- a direct `name =
+                // function(...) ...`, or `name = cond ? function(...) ... :
+                // function(...) ...` (or nested ternaries of the same
+                // shape) -- gets its own slot declared up front, before ANY
+                // of them are compiled -- not just so a closure can
+                // reference itself (see the self-reference handling
+                // below), but so an EARLIER one can also reference a LATER
+                // sibling (mutual recursion, e.g. fnliterals.scad-style
+                // isEven/isOdd calling each other). `letrecSlot[i]` stays
+                // -1 for anything else, which keeps the existing after-the-
+                // fact declareLocal path below completely unchanged
+                // (`let(x = x + 1)` must still see the OUTER x, not a
+                // fresh, not-yet-assigned local shadowing it -- only an
+                // RHS that's UNAMBIGUOUSLY always a closure has "see
+                // myself/a sibling" as a sensible reading at all; see
+                // collectLetrecCandidateLiterals' own doc comment, above,
+                // for why a mixed/uncertain RHS shape doesn't qualify).
+                // `letrecCandidates[i]` is every FunctionLiteral node `i`'s
+                // own RHS could actually construct at runtime -- more than
+                // one for a ternary -- each independently checked for a
+                // self/sibling reference below, since either one might be
+                // the value `name` ends up holding.
                 std::vector<int> letrecSlot(n.assignments.size(), -1);
+                std::vector<std::vector<const oscad::FunctionLiteral*>> letrecCandidates(n.assignments.size());
                 std::unordered_set<int> pendingLetrecSlots;
                 for (size_t i = 0; i < n.assignments.size(); ++i) {
                     const auto& assign = n.assignments[i];
                     const std::string& name = assign->name->name;
-                    if (!name.empty() && name[0] != '$' && assign->expr->kind() == oscad::NodeKind::FunctionLiteral) {
+                    if (name.empty() || name[0] == '$') continue;
+                    if (auto candidates = collectLetrecCandidateLiterals(*assign->expr)) {
                         letrecSlot[i] = declareLocal(scope, name);
+                        letrecCandidates[i] = std::move(*candidates);
                         pendingLetrecSlots.insert(letrecSlot[i]);
                     }
                 }
@@ -602,9 +651,21 @@ public:
                     const int preDeclaredSlot = letrecSlot[i];
                     const bool selfBinding = preDeclaredSlot >= 0;
                     compileExpr(*assign->expr, out, scope); // RHS is never tail
-                    if (selfBinding && out.back().op == Op::MakeClosure) {
-                        CompiledChunk::ClosureSite& site = chunk_.closureSites[static_cast<size_t>(out.back().a)];
-                        auto& captures = site.captures;
+                    for (const oscad::FunctionLiteral* candidate : letrecCandidates[i]) {
+                        CompiledChunk::ClosureSite* site = nullptr;
+                        for (auto& s : chunk_.closureSites) {
+                            if (s.node == candidate) {
+                                site = &s;
+                                break;
+                            }
+                        }
+                        // No entry at all means this particular candidate
+                        // (e.g. one branch of a ternary) never referenced
+                        // itself/a sibling/anything else -- zero captures,
+                        // still the cheaper Op::PushConst path, nothing
+                        // here to patch.
+                        if (!site) continue;
+                        auto& captures = site->captures;
                         for (auto it = captures.begin(); it != captures.end();) {
                             if (it->targetDecl != selfDecl_ || !pendingLetrecSlots.count(it->slot)) {
                                 ++it;

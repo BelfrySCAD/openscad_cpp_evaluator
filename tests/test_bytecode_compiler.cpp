@@ -702,6 +702,39 @@ TEST(BytecodeCompiler, ThreeWaySiblingMutualRecursionResolvesCorrectly) {
               "ECHO: \"f1\"\nECHO: \"f2\"\nECHO: \"f3\"");
 }
 
+TEST(BytecodeCompiler, TernaryWrappedSelfReferenceResolvesAsUpvalue) {
+    ScopedVm vm(true);
+    // The letrec pre-declare's own eligibility check isn't limited to a
+    // bare `name = function(...) ...` RHS -- `cond ? function(...) ... :
+    // function(...) ...` (EVERY reachable branch is unambiguously a
+    // closure, see collectLetrecCandidateLiterals' own doc comment,
+    // bytecode_compiler.cpp) also pre-declares, and BOTH branches'
+    // FunctionLiteral nodes are independently found and marked afterward
+    // (a ternary can produce two structurally distinct closures, not just
+    // one). Deep, genuinely TAIL-recursive (`acc` accumulates on the way
+    // down, not after the recursive call returns -- see this file's own
+    // DeepSelfTailRecursionUnderVmDoesNotOverflowTheNativeStack, above, for
+    // why that distinction matters at this depth) to prove it actually
+    // runs compiled, not just correctly-but-slowly interpreted.
+    const std::string script =
+        "function make(n) = let(a = n > 0 ? function(k, acc) k<=0 ? acc : a(k-1, acc+n) : function(k, acc) acc) "
+        "a(200000, 0);\necho(make(1));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 200000");
+}
+
+TEST(BytecodeCompiler, TernaryWrappedMutualRecursionResolvesCorrectly) {
+    ScopedVm vm(true);
+    // Same ternary-wrapped-RHS eligibility as the self-reference case
+    // above, but for TWO siblings that reference each other -- both
+    // Op::PatchClosureCapture's forward-reference deferral and the
+    // ternary's own multi-candidate handling apply simultaneously.
+    const std::string script =
+        "function test(n) = let(isEven = n >= 0 ? function(k) k==0 ? true : isOdd(k-1) : function(k) undef, "
+        "isOdd = n >= 0 ? function(k) k==0 ? false : isEven(k-1) : function(k) undef) isEven(n);\n"
+        "echo(test(10));\necho(test(7));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: true\nECHO: false");
+}
+
 TEST(BytecodeCompiler, ClosureWithDollarParameterStillBailsContainer) {
     ScopedVm vm(true);
     // Residual, deliberate limitation: a FunctionLiteral with its OWN
