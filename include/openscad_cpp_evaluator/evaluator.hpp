@@ -659,7 +659,14 @@ private:
         // trampolines exist), so genuine non-tail recursion even
         // approaching this depth is already the rare, likely-runaway case
         // a controlled error serves far better than a crash.
-        static constexpr size_t kMaxUserCallDepth = 200;
+        // TEMPORARY: bumped for one diagnostic CI round (see
+        // TailCalls.DiagnosticFindWindowsSafeNonTailRecursionDepth,
+        // test_tail_calls.cpp) to find exactly how deep windows-latest CI
+        // can actually go before crashing -- 200 itself still segfaulted
+        // there, with no way to reproduce or bisect locally (no Windows
+        // access). Will be set to a real, evidence-based value once that
+        // run's log is read.
+        static constexpr size_t kMaxUserCallDepth = 5000;
         if (callStack_.size() >= kMaxUserCallDepth) {
             error("Recursion too deep while calling function '" + name + "'", declNode);
         }

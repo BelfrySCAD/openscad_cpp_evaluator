@@ -25,6 +25,7 @@
 #include "test_helpers.hpp"
 
 #include <chrono>
+#include <iostream>
 #include <gtest/gtest.h>
 
 using namespace oscadeval;
@@ -273,7 +274,16 @@ TEST(TailCalls, DebugHookFiresPerHopInsideATailChain) {
     EXPECT_EQ(bodyEntry, 501 + 500 + 1);
 }
 
-TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpreted) {
+TEST(TailCalls, DISABLED_DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpreted) {
+    // TEMPORARILY DISABLED for this one diagnostic CI round: kMaxUserCallDepth
+    // is temporarily 5000 (see its own comment, evaluator.hpp) specifically
+    // so DiagnosticFindWindowsSafeNonTailRecursionDepth (below) can probe
+    // past every depth measured safe so far -- which means this script's
+    // own f(6000) now exceeds even this evaluator's OWN measured-safe
+    // native depth on ordinary desktop hardware, crashing for real before
+    // the guard ever gets a chance to fire. Re-enable (and fix the depth
+    // back down) once kMaxUserCallDepth is set to a real, evidence-based
+    // value.
     ScopedVm vm(false);
     // `1 + f(n-1)` is NOT a tail position (the addition happens after the
     // recursive call returns) -- there is no trampoline for this, ever
@@ -286,7 +296,7 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpr
     // closures/letrec/tail-call machinery at all). Interpreted-path
     // variant; see the compiled-path one below.
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(2000);");
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(6000);"); // TEMPORARY: see kMaxUserCallDepth's own comment, evaluator.hpp
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     try {
@@ -298,7 +308,7 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpr
     }
 }
 
-TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompiled) {
+TEST(TailCalls, DISABLED_DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompiled) {
     ScopedVm vm(true);
     // Same script, same guard (evalUserFunctionCore is shared by both the
     // interpreter and the bytecode VM's own compiled call path) -- the
@@ -307,7 +317,7 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompile
     // runChunk/runCompiledFunctionFromBound/runCompiledFunctionFromBoundTrampoline),
     // so this is the MORE exposed of the two paths, not a lesser check.
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(2000);");
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(6000);"); // TEMPORARY: see kMaxUserCallDepth's own comment, evaluator.hpp
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -320,4 +330,37 @@ TEST(TailCalls, ShallowNonTailRecursionStillWorksUnderTheDepthGuard) {
     // to a few dozen levels, e.g. walking a small nested data structure).
     const std::string script = "function fact(n) = n <= 1 ? 1 : n * fact(n - 1);\necho(fact(10));";
     EXPECT_EQ(runCapturingEcho(script), "ECHO: 3.6288e+6");
+}
+
+// TEMPORARY diagnostic: kMaxUserCallDepth=200 (evaluator.hpp) still
+// segfaulted on CI's windows-latest runner with no way to reproduce or
+// bisect locally (no Windows access) -- this test's own log output (each
+// depth prints only once it has actually SUCCEEDED, flushed immediately)
+// pinpoints the real safe boundary on that specific runner directly from
+// the CI log, wherever this run happens to crash. Deleted once
+// kMaxUserCallDepth is set to a real, evidence-based value.
+TEST(TailCalls, DiagnosticFindWindowsSafeNonTailRecursionDepth) {
+    ScopedVm vm(false);
+    for (int depth : {10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 4900}) {
+        std::string script =
+            "function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(" + std::to_string(depth) + ");";
+        Evaluator ev;
+        auto ast = parseSrc(script);
+        auto scope = oscad::buildScopes(ast);
+        EvalContext ctx = EvalContext::makeRoot(scope.get());
+        ev.resolveTree(ast, ctx);
+        std::cerr << "[DIAG] interpreted depth " << depth << " OK" << std::endl;
+    }
+    Evaluator::setBytecodeVmEnabledForTesting(true);
+    for (int depth : {10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 4900}) {
+        std::string script =
+            "function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(" + std::to_string(depth) + ");";
+        Evaluator ev;
+        auto ast = parseSrc(script);
+        auto scope = oscad::buildScopes(ast);
+        EvalContext ctx = EvalContext::makeRoot(scope.get());
+        ev.resolveTree(ast, ctx);
+        std::cerr << "[DIAG] compiled depth " << depth << " OK" << std::endl;
+    }
+    Evaluator::setBytecodeVmEnabledForTesting(std::nullopt);
 }
