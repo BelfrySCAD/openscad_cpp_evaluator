@@ -640,20 +640,26 @@ private:
         // silently overflowing the native stack: a hard, unrecoverable
         // process crash with no C++ exception to catch. Confirmed present
         // (before this guard existed) for a plain, closure-free `function
-        // f(n) = n<=0 ? 0 : 1+f(n-1);`, compiled OR interpreted, a few
-        // thousand levels deep on an 8MB desktop main-thread stack.
-        // kMaxUserCallDepth is a conservative, heuristic cap, not a
-        // precisely-calibrated one -- deliberately well under that
-        // measured threshold to leave real margin for a smaller worker-
-        // thread stack (e.g. BelfrySCAD's own debug-session thread) and
-        // for whatever native stack this call's own caller has already
-        // consumed before reaching here. A real OpenSCAD/BOSL2 recursive
-        // function is overwhelmingly tail-recursive in practice (exactly
-        // why reduce()/accumulate()/while() and this evaluator's own
-        // trampolines exist) -- genuine non-tail recursion this deep is
-        // the rare, likely-runaway case a controlled error serves far
-        // better than a crash.
-        static constexpr size_t kMaxUserCallDepth = 1000;
+        // f(n) = n<=0 ? 0 : 1+f(n-1);`, compiled OR interpreted.
+        // kMaxUserCallDepth is a conservative, heuristic cap, NOT a
+        // precisely-calibrated one, and deliberately erred low: an initial
+        // value of 1000 -- comfortably under the several-thousand-level
+        // threshold this evaluator's own C++ recursion measured safe at on
+        // an 8MB desktop macOS/Linux main-thread stack -- still crashed on
+        // CI's windows-latest runner, whose default thread stack is
+        // apparently far smaller and/or whose MSVC-compiled call frames
+        // are larger than Clang's. Without a reliable way to measure the
+        // real figure on every platform/thread this evaluator might run
+        // on (e.g. BelfrySCAD's own debug-session worker thread, likely
+        // smaller still than any CI runner's main thread), this cap trades
+        // away some legitimate deep-non-tail-recursion headroom for actual
+        // safety -- a real OpenSCAD/BOSL2 recursive function is
+        // overwhelmingly tail-recursive in practice anyway (exactly why
+        // reduce()/accumulate()/while() and this evaluator's own
+        // trampolines exist), so genuine non-tail recursion even
+        // approaching this depth is already the rare, likely-runaway case
+        // a controlled error serves far better than a crash.
+        static constexpr size_t kMaxUserCallDepth = 200;
         if (callStack_.size() >= kMaxUserCallDepth) {
             error("Recursion too deep while calling function '" + name + "'", declNode);
         }

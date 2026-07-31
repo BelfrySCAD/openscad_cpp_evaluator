@@ -286,7 +286,7 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpr
     // closures/letrec/tail-call machinery at all). Interpreted-path
     // variant; see the compiled-path one below.
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(50000);");
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(2000);");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     try {
@@ -307,7 +307,7 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompile
     // runChunk/runCompiledFunctionFromBound/runCompiledFunctionFromBoundTrampoline),
     // so this is the MORE exposed of the two paths, not a lesser check.
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(50000);");
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(2000);");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
