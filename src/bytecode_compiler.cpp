@@ -193,7 +193,7 @@ class Compiler;
 // (a non-empty `enclosing` chain, letting the literal's own free-variable
 // references resolve as upvalues into whatever lexically contains it).
 // Returns false (chunk left partially populated, discarded by the caller)
-// for a $-prefixed parameter or any NotCompilable thrown while compiling.
+// for any NotCompilable thrown while compiling.
 bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, const oscad::ASTNode* selfDecl,
                           std::vector<EnclosingLevel> enclosing,
                           const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
@@ -1075,21 +1075,21 @@ bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, 
                           std::vector<EnclosingLevel> enclosing,
                           const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
                           const oscad::Expression& bodyExpr) {
-    for (const auto& p : params) {
-        // $-prefixed parameters bind through ctx.dyn (dynamically scoped,
-        // never slot-addressed) via the existing applyDefaults/bindArgs
-        // machinery -- out of scope for this design, see this file's
-        // header comment.
-        if (!p->name->name.empty() && p->name->name[0] == '$') return false;
-    }
-
     chunk.selfDecl = selfDecl;
     Compiler compiler(chunk, staticScope, selfDecl, std::move(enclosing));
     CompileScope bodyScope;
     bodyScope.push();
     for (const auto& p : params) {
-        int slot = compiler.declareLocal(bodyScope, p->name->name);
-        chunk.params.push_back(CompiledChunk::Param{p->name->name, slot});
+        // $-prefixed parameters bind through ctx.dyn (dynamically scoped)
+        // rather than a slot -- never declared as a local, so a reference
+        // to one inside the body already compiles to Op::LoadDyn via the
+        // Identifier case's own $-check regardless of scope visibility.
+        // Still occupies its declared POSITION among all parameters (see
+        // bindCompiledArgs, bytecode_vm.cpp) for positional-argument
+        // matching, exactly like the interpreter's own bindArgs.
+        const bool isDyn = !p->name->name.empty() && p->name->name[0] == '$';
+        const int slot = isDyn ? 0 : compiler.declareLocal(bodyScope, p->name->name);
+        chunk.params.push_back(CompiledChunk::Param{p->name->name, slot, isDyn});
     }
     chunk.defaultCode.resize(params.size());
 

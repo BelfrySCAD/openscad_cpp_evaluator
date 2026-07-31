@@ -241,7 +241,11 @@ struct Instruction {
 struct CompiledChunk {
     struct Param {
         std::string name;
-        int slot = 0;
+        int slot = 0; // unused when isDyn is true -- $-params are never slot-addressed
+        // $-prefixed parameter: binds through ctx.dyn (dynamically scoped)
+        // instead of a slot -- see compileFunctionLike's own doc comment,
+        // bytecode_compiler.cpp, and bindCompiledArgs', bytecode_vm.cpp.
+        bool isDyn = false;
     };
 
     // A call site statically resolved at compile time (see

@@ -175,10 +175,34 @@ TEST(BytecodeCompiler, NonCompilableFunctionContainingACallStillFallsBackCorrect
               "ECHO: 8");
 }
 
-TEST(BytecodeCompiler, DollarPrefixedParameterBailsCompilationAndStillWorks) {
+TEST(BytecodeCompiler, DollarPrefixedParameterCompiles) {
     ScopedVm vm(true);
+    // $-prefixed parameters used to bail compileFunctionLike outright
+    // (bound through ctx.dyn, never slot-addressed) -- now they compile:
+    // never declared as a local (skipped in the params/declareLocal loop),
+    // so every reference inside the body still reaches Op::LoadDyn via the
+    // Identifier case's own $-check, exactly as an undeclared override
+    // already did.
     EXPECT_EQ(runCapturingEcho("function withFn($fn = 8) = $fn;\necho(withFn());"), "ECHO: 8");
     EXPECT_EQ(runCapturingEcho("function withFn($fn = 8) = $fn;\necho(withFn($fn = 20));"), "ECHO: 20");
+    // Positional binding: a $-param still occupies its declared POSITION
+    // among all parameters for a caller's positional arguments, exactly
+    // like the interpreter's own bindArgs.
+    EXPECT_EQ(runCapturingEcho("function withFn($fn, x) = $fn + x;\necho(withFn(10, 1));"), "ECHO: 11");
+    // Declared without a default and not passed: shadows to undef locally
+    // rather than inheriting an ancestor's dyn binding -- mirrors
+    // Evaluator::applyDefaults' explicit "declaring a parameter always
+    // creates a fresh binding" write.
+    EXPECT_EQ(runCapturingEcho("function withFn($fn) = $fn;\necho(let($fn = 99) withFn());"), "ECHO: undef");
+    // The proof this is actually running compiled, not silently falling
+    // back: same ternary-bodied shape and technique as
+    // FastContinueWithNoBreakpointInFunctionUsesVm above (3 stops =
+    // compiled, 5 = interpreted), with $fn substituted in for the plain
+    // parameter both as the declared name and every body reference.
+    const int stops = countDebugHookStops("function f($fn) = $fn > 0 ? $fn + 1 : $fn - 1;\n"
+                                           "echo(f(5));",
+                                           std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
+    EXPECT_EQ(stops, 3);
 }
 
 TEST(BytecodeCompiler, UndeclaredDollarNamedArgumentReachesDynInsideCompiledFunction) {
@@ -735,27 +759,26 @@ TEST(BytecodeCompiler, TernaryWrappedMutualRecursionResolvesCorrectly) {
     EXPECT_EQ(runCapturingEcho(script), "ECHO: true\nECHO: false");
 }
 
-TEST(BytecodeCompiler, ClosureWithDollarParameterStillBailsContainer) {
+TEST(BytecodeCompiler, ClosureWithDollarParameterNowCompilesToo) {
     ScopedVm vm(true);
-    // Residual, deliberate limitation: a FunctionLiteral with its OWN
-    // dollar-prefixed parameter still fails compileFunctionLike outright
-    // (same $-prefixed-parameter rule as a plain named function, see
-    // DollarPrefixedParameterBailsCompilationAndStillWorks above) -- there's
-    // no lighter way left to discover what it captures in that case, so the
-    // WHOLE containing declaration still bails (throw NotCompilable), same
-    // as before Op::MakeClosure. Value must still be correct via the
-    // interpreter fallback.
-    const int stops = countDebugHookStops(
-        "function outer(x) = let(g = function(y, $fn) y + x + $fn) g(5, $fn=2);\n"
-        "echo(outer(10));",
-        std::nullopt);
-    // `outer` never compiles at all here (more than 1 stop for its own
-    // call), unlike MakeClosureLetsContainerCompileDespiteNonEscapingClosure
-    // above where the analogous ($-free) container compiles to 1.
-    EXPECT_GT(stops, 2);
-    EXPECT_EQ(runCapturingEcho("function outer(x) = let(g = function(y, $fn) y + x + $fn) g(5, $fn=2);\n"
-                                "echo(outer(10));"),
-              "ECHO: 17");
+    // A FunctionLiteral with its OWN dollar-prefixed parameter used to fail
+    // compileFunctionLike outright, bailing the WHOLE containing
+    // declaration (see DollarPrefixedParameterCompiles above for the plain-
+    // function case) -- now compileFunctionLike has no $-specific bail left
+    // at all, so this compiles too, container and closure both.
+    const std::string script = "function outer(x) = let(g = function(y, $fn) y + x + $fn) g(5, $fn=2);\n"
+                                "echo(outer(10));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 17");
+    // Proof via the same fast-continue stop-count technique used
+    // throughout this file (nullopt is NOT a reliable signal here -- it
+    // forces every function to interpret regardless of eligibility, see
+    // DebugAttachedWithoutFastContinueAlwaysInterprets above -- a real
+    // breakpoint map on a non-matching line is what actually distinguishes
+    // compiled from interpreted). 3 stops: outer's own body-entry, g's
+    // call-site, g's own body-entry -- no ternary/sub-expression stops for
+    // either, since both now run compiled.
+    const int stops = countDebugHookStops(script, std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
+    EXPECT_EQ(stops, 3);
 }
 
 // -- Tail-call optimization, VM path (Phase B) -----------------------------
