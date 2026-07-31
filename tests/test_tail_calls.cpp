@@ -25,7 +25,6 @@
 #include "test_helpers.hpp"
 
 #include <chrono>
-#include <iostream>
 #include <gtest/gtest.h>
 
 using namespace oscadeval;
@@ -274,16 +273,7 @@ TEST(TailCalls, DebugHookFiresPerHopInsideATailChain) {
     EXPECT_EQ(bodyEntry, 501 + 500 + 1);
 }
 
-TEST(TailCalls, DISABLED_DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpreted) {
-    // TEMPORARILY DISABLED for this one diagnostic CI round: kMaxUserCallDepth
-    // is temporarily 5000 (see its own comment, evaluator.hpp) specifically
-    // so DiagnosticFindWindowsSafeNonTailRecursionDepth (below) can probe
-    // past every depth measured safe so far -- which means this script's
-    // own f(6000) now exceeds even this evaluator's OWN measured-safe
-    // native depth on ordinary desktop hardware, crashing for real before
-    // the guard ever gets a chance to fire. Re-enable (and fix the depth
-    // back down) once kMaxUserCallDepth is set to a real, evidence-based
-    // value.
+TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpreted) {
     ScopedVm vm(false);
     // `1 + f(n-1)` is NOT a tail position (the addition happens after the
     // recursive call returns) -- there is no trampoline for this, ever
@@ -291,12 +281,15 @@ TEST(TailCalls, DISABLED_DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashi
     // logical call is a real, unavoidable C++ recursive call through
     // evalUserFunctionCore. Before its own depth guard existed, a script
     // shaped exactly like this one reliably segfaulted the whole process
-    // a few thousand levels deep -- confirmed present in the wild (a
-    // plain, closure-free FunctionDeclaration, nothing specific to
-    // closures/letrec/tail-call machinery at all). Interpreted-path
-    // variant; see the compiled-path one below.
+    // (confirmed present in the wild -- a plain, closure-free
+    // FunctionDeclaration, nothing specific to closures/letrec/tail-call
+    // machinery at all). Interpreted-path variant; see the compiled-path
+    // one below. f(500) is comfortably past kMaxUserCallDepth (50, see its
+    // own doc comment, evaluator.hpp) -- the actual native recursion never
+    // gets anywhere near 500, since the guard fires at 50 regardless of
+    // what depth the script asks for.
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(6000);"); // TEMPORARY: see kMaxUserCallDepth's own comment, evaluator.hpp
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(500);");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     try {
@@ -308,7 +301,7 @@ TEST(TailCalls, DISABLED_DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashi
     }
 }
 
-TEST(TailCalls, DISABLED_DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompiled) {
+TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompiled) {
     ScopedVm vm(true);
     // Same script, same guard (evalUserFunctionCore is shared by both the
     // interpreter and the bytecode VM's own compiled call path) -- the
@@ -317,7 +310,7 @@ TEST(TailCalls, DISABLED_DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashi
     // runChunk/runCompiledFunctionFromBound/runCompiledFunctionFromBoundTrampoline),
     // so this is the MORE exposed of the two paths, not a lesser check.
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(6000);"); // TEMPORARY: see kMaxUserCallDepth's own comment, evaluator.hpp
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(500);");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -330,40 +323,4 @@ TEST(TailCalls, ShallowNonTailRecursionStillWorksUnderTheDepthGuard) {
     // to a few dozen levels, e.g. walking a small nested data structure).
     const std::string script = "function fact(n) = n <= 1 ? 1 : n * fact(n - 1);\necho(fact(10));";
     EXPECT_EQ(runCapturingEcho(script), "ECHO: 3.6288e+6");
-}
-
-// TEMPORARY diagnostic, round 2: round 1 (plain recursion, no throw) found
-// depth 300 safe, depth 500 unreached on windows-latest CI -- but
-// kMaxUserCallDepth=200 (a THROW from depth 200, unwinding back out
-// through 200 nested evalUserFunctionCore try/catch frames) ALSO
-// segfaulted there. Together this means throwing+unwinding through N
-// nested frames costs meaningfully more native stack than simply BEING N
-// frames deep without throwing -- this loop measures THAT specific cost
-// directly (assert(false) at depth N throws/unwinds through the exact
-// same nested-try/catch shape Evaluator::error() does), at a finer
-// granularity around the last-known-safe-without-throwing point (300).
-TEST(TailCalls, DiagnosticFindWindowsSafeThrowUnwindDepth) {
-    ScopedVm vm(false);
-    for (int depth : {20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 250, 300}) {
-        std::string script = "function f(n) = n <= 0 ? assert(false, \"boom\") 0 : 1 + f(n - 1);\nresult = f(" +
-                              std::to_string(depth) + ");";
-        Evaluator ev;
-        auto ast = parseSrc(script);
-        auto scope = oscad::buildScopes(ast);
-        EvalContext ctx = EvalContext::makeRoot(scope.get());
-        EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
-        std::cerr << "[DIAG] interpreted throw-unwind depth " << depth << " OK" << std::endl;
-    }
-    Evaluator::setBytecodeVmEnabledForTesting(true);
-    for (int depth : {20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 250, 300}) {
-        std::string script = "function f(n) = n <= 0 ? assert(false, \"boom\") 0 : 1 + f(n - 1);\nresult = f(" +
-                              std::to_string(depth) + ");";
-        Evaluator ev;
-        auto ast = parseSrc(script);
-        auto scope = oscad::buildScopes(ast);
-        EvalContext ctx = EvalContext::makeRoot(scope.get());
-        EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
-        std::cerr << "[DIAG] compiled throw-unwind depth " << depth << " OK" << std::endl;
-    }
-    Evaluator::setBytecodeVmEnabledForTesting(std::nullopt);
 }

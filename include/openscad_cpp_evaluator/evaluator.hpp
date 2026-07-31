@@ -641,32 +641,36 @@ private:
         // process crash with no C++ exception to catch. Confirmed present
         // (before this guard existed) for a plain, closure-free `function
         // f(n) = n<=0 ? 0 : 1+f(n-1);`, compiled OR interpreted.
+        //
         // kMaxUserCallDepth is a conservative, heuristic cap, NOT a
-        // precisely-calibrated one, and deliberately erred low: an initial
-        // value of 1000 -- comfortably under the several-thousand-level
-        // threshold this evaluator's own C++ recursion measured safe at on
-        // an 8MB desktop macOS/Linux main-thread stack -- still crashed on
-        // CI's windows-latest runner, whose default thread stack is
-        // apparently far smaller and/or whose MSVC-compiled call frames
-        // are larger than Clang's. Without a reliable way to measure the
-        // real figure on every platform/thread this evaluator might run
-        // on (e.g. BelfrySCAD's own debug-session worker thread, likely
-        // smaller still than any CI runner's main thread), this cap trades
-        // away some legitimate deep-non-tail-recursion headroom for actual
-        // safety -- a real OpenSCAD/BOSL2 recursive function is
+        // precisely-calibrated one -- and specifically calibrated against
+        // the WORST measured platform, not the best. Two rounds of CI
+        // diagnostics (temporary test builds that recursed to increasing
+        // depths, printing success after each one so the CI log itself
+        // would show exactly where a crash happened) found: (1) this
+        // evaluator's own C++ recursion is safe into the THOUSANDS on an
+        // ordinary macOS/Linux desktop main-thread stack, but only into
+        // the low HUNDREDS on CI's windows-latest runner (smaller default
+        // thread stack and/or larger MSVC-compiled call frames than
+        // Clang's); (2) actually THROWING from that depth and unwinding
+        // back out through that many nested try/catch frames (this guard
+        // fires from inside evalUserFunctionCore, which every level of
+        // the recursion has its own try/catch in) costs meaningfully MORE
+        // native stack than simply being that deep without throwing --
+        // 300 survived on Windows without throwing, but throwing+
+        // unwinding through as few as 100 nested frames did not (80 was
+        // the last depth that survived). 50 leaves real margin below that
+        // 80 figure for whatever's already on the stack from this call's
+        // own caller, and for a smaller stack still (e.g. BelfrySCAD's own
+        // debug-session worker thread, plausibly smaller than any CI
+        // runner's main thread) that this evaluator has no way to probe
+        // for directly. A real OpenSCAD/BOSL2 recursive function is
         // overwhelmingly tail-recursive in practice anyway (exactly why
         // reduce()/accumulate()/while() and this evaluator's own
-        // trampolines exist), so genuine non-tail recursion even
+        // trampolines exist) -- genuine non-tail recursion even
         // approaching this depth is already the rare, likely-runaway case
         // a controlled error serves far better than a crash.
-        // TEMPORARY: bumped for one diagnostic CI round (see
-        // TailCalls.DiagnosticFindWindowsSafeNonTailRecursionDepth,
-        // test_tail_calls.cpp) to find exactly how deep windows-latest CI
-        // can actually go before crashing -- 200 itself still segfaulted
-        // there, with no way to reproduce or bisect locally (no Windows
-        // access). Will be set to a real, evidence-based value once that
-        // run's log is read.
-        static constexpr size_t kMaxUserCallDepth = 5000;
+        static constexpr size_t kMaxUserCallDepth = 50;
         if (callStack_.size() >= kMaxUserCallDepth) {
             error("Recursion too deep while calling function '" + name + "'", declNode);
         }
