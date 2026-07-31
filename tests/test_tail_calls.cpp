@@ -9,10 +9,15 @@
 // Every test here explicitly forces the interpreter path via ScopedVm(false)
 // (not the OSCAD_BYTECODE_VM env var, which is cached forever after its
 // first read within a test binary -- see Evaluator::
-// setBytecodeVmEnabledForTesting's own doc comment): the bytecode VM's own
-// call machinery (Phase B, not yet implemented as of this file) still does
-// genuine C++ recursion for every call, so a deep-recursion test run under
-// the default VM-on path would crash for the wrong reason.
+// setBytecodeVmEnabledForTesting's own doc comment). Both the interpreter
+// AND the bytecode VM's own call machinery (Phase B) do genuine C++
+// recursion for a NON-tail call (there is no other way to implement one --
+// see NonTailRecursionIsUnaffectedByTheTrampoline, below) -- a sufficiently
+// deep one used to silently overflow the native stack and crash the whole
+// process; evalUserFunctionCore's own depth guard (evaluator.hpp) now turns
+// that into a controlled EvalError well before that point, shared by both
+// paths, exercised by both compiled- and interpreted-path variants of the
+// same test at the bottom of this file.
 
 #include "openscad_cpp_evaluator/eval_error.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
@@ -266,4 +271,53 @@ TEST(TailCalls, DebugHookFiresPerHopInsideATailChain) {
     // 501 ternary stops (n = 500..0), 500 recursive call-site stops, and the
     // single body-entry stop.
     EXPECT_EQ(bodyEntry, 501 + 500 + 1);
+}
+
+TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpreted) {
+    ScopedVm vm(false);
+    // `1 + f(n-1)` is NOT a tail position (the addition happens after the
+    // recursive call returns) -- there is no trampoline for this, ever
+    // (see NonTailRecursionIsUnaffectedByTheTrampoline, above): every
+    // logical call is a real, unavoidable C++ recursive call through
+    // evalUserFunctionCore. Before its own depth guard existed, a script
+    // shaped exactly like this one reliably segfaulted the whole process
+    // a few thousand levels deep -- confirmed present in the wild (a
+    // plain, closure-free FunctionDeclaration, nothing specific to
+    // closures/letrec/tail-call machinery at all). Interpreted-path
+    // variant; see the compiled-path one below.
+    Evaluator ev;
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(50000);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.resolveTree(ast, ctx);
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("Recursion too deep"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("'f'"), std::string::npos);
+    }
+}
+
+TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompiled) {
+    ScopedVm vm(true);
+    // Same script, same guard (evalUserFunctionCore is shared by both the
+    // interpreter and the bytecode VM's own compiled call path) -- the
+    // compiled path's own real per-call native stack usage is actually
+    // larger (more C++ frames between one logical call and the next, see
+    // runChunk/runCompiledFunctionFromBound/runCompiledFunctionFromBoundTrampoline),
+    // so this is the MORE exposed of the two paths, not a lesser check.
+    Evaluator ev;
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(50000);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+}
+
+TEST(TailCalls, ShallowNonTailRecursionStillWorksUnderTheDepthGuard) {
+    ScopedVm vm(true);
+    // The guard must not fire for perfectly ordinary, shallow non-tail
+    // recursion -- the overwhelmingly common real-world shape (a handful
+    // to a few dozen levels, e.g. walking a small nested data structure).
+    const std::string script = "function fact(n) = n <= 1 ? 1 : n * fact(n - 1);\necho(fact(10));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 3.6288e+6");
 }

@@ -633,6 +633,30 @@ private:
     Value evalUserFunctionCore(const std::string& name, const oscad::ASTNode& declNode, const oscad::Expression& bodyExpr,
                                 EvalContext& childCtx, const oscad::Position* callPos, int upvalueParent,
                                 F&& computeResult) {
+        // Guards against a genuinely non-tail-recursive user function --
+        // each logical call HERE is a real, unavoidable C++ recursive call
+        // (a trampolined tail call never re-enters this function at all,
+        // see evalFunctionBodyTrampoline/runCompiledFunctionTrampoline) --
+        // silently overflowing the native stack: a hard, unrecoverable
+        // process crash with no C++ exception to catch. Confirmed present
+        // (before this guard existed) for a plain, closure-free `function
+        // f(n) = n<=0 ? 0 : 1+f(n-1);`, compiled OR interpreted, a few
+        // thousand levels deep on an 8MB desktop main-thread stack.
+        // kMaxUserCallDepth is a conservative, heuristic cap, not a
+        // precisely-calibrated one -- deliberately well under that
+        // measured threshold to leave real margin for a smaller worker-
+        // thread stack (e.g. BelfrySCAD's own debug-session thread) and
+        // for whatever native stack this call's own caller has already
+        // consumed before reaching here. A real OpenSCAD/BOSL2 recursive
+        // function is overwhelmingly tail-recursive in practice (exactly
+        // why reduce()/accumulate()/while() and this evaluator's own
+        // trampolines exist) -- genuine non-tail recursion this deep is
+        // the rare, likely-runaway case a controlled error serves far
+        // better than a crash.
+        static constexpr size_t kMaxUserCallDepth = 1000;
+        if (callStack_.size() >= kMaxUserCallDepth) {
+            error("Recursion too deep while calling function '" + name + "'", declNode);
+        }
         std::optional<ProfileHandle> prof = profileEnter("function", name, callPos, &declNode.position());
         callStack_.push_back(CallStackFrame{CallStackFrame::Kind::Function, name, callPos, &declNode.position(), &declNode,
                                              nullptr, upvalueParent});
