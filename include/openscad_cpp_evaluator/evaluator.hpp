@@ -1334,11 +1334,25 @@ private:
     // evalUserFunctionCore (below) and evalUserModule (user_calls.cpp) --
     // see evalUserFunctionCore's own doc comment for the full calibration
     // story (two rounds of CI stack-depth diagnostics on the worst-case
-    // platform). One constant because both push onto the SAME callStack_ --
-    // a function recursing into a module recursing into a function is the
-    // same native-stack-growth hazard regardless of which kind of frame is
-    // on top at any given depth.
-    static constexpr size_t kMaxUserCallDepth = 50;
+    // platform -- Windows, whose default thread stack is much smaller than
+    // macOS/Linux's). One constant because both push onto the SAME
+    // callStack_ -- a function recursing into a module recursing into a
+    // function is the same native-stack-growth hazard regardless of which
+    // kind of frame is on top at any given depth.
+    //
+    // Re-lowered from 50 (Stage 2, module-body compilation): factoring
+    // evalUserModule's own native-fallback body into a separate
+    // runModuleBodyNative function (shared with Op::CallModule's own
+    // native-fallback branch, bytecode_vm.cpp -- needed so neither
+    // duplicates the enterUserCall/evalChildren/exitUserCall bracket)
+    // added ONE sustained extra native stack frame to every level of
+    // INTERPRETED module recursion (the one recursive shape this cap still
+    // protects -- compiled module recursion runs through the explicit
+    // vmCallStack_ instead, see kMaxVmCallStackDepth, and never touches
+    // this at all). 50 was tight enough on Windows CI that this alone
+    // segfaulted UserModule.DeepNonTailRecursionHitsAControlledError
+    // Interpreted (PR #59) instead of throwing cleanly at the guard.
+    static constexpr size_t kMaxUserCallDepth = 30;
 
     // See lastChildrenPositions()'s own doc comment.
     std::optional<std::vector<std::pair<std::string, int>>> lastChildrenPositions_;
