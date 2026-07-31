@@ -30,12 +30,56 @@ const CompiledChunk* Evaluator::lookupCompiledLiteralChunk(const oscad::Function
     return chunkEligibleNow(it->second) ? &it->second : nullptr;
 }
 
+const CompiledChunk* Evaluator::lookupOrCompileModuleChunk(const oscad::ModuleDeclaration& decl) {
+    auto it = moduleChunkCache_.find(&decl);
+    if (it == moduleChunkCache_.end()) {
+        it = moduleChunkCache_.emplace(&decl, tryCompileModuleBody(decl)).first;
+        if (it->second) flattenNestedLiterals(*it->second);
+    }
+    if (!it->second) return nullptr;
+    return chunkEligibleNow(*it->second) ? &*it->second : nullptr;
+}
+
 void Evaluator::flattenNestedLiterals(CompiledChunk& chunk) {
     for (auto& [litNode, litChunk] : chunk.nestedLiterals) {
         flattenNestedLiterals(litChunk);
         literalChunkCache_.emplace(litNode, std::move(litChunk));
     }
     chunk.nestedLiterals.clear();
+}
+
+Value Evaluator::evalExprMaybeCompiled(const oscad::Expression& node, EvalContext& ctx) {
+    if (!useBytecodeVm() || !inResolvePass_) return evalExpr(node, ctx);
+    auto it = stmtExprChunkCache_.find(&node);
+    if (it == stmtExprChunkCache_.end()) {
+        it = stmtExprChunkCache_.emplace(&node, tryCompileStatementExpr(node, node.scope())).first;
+        // A zero-capture closure literal (e.g. `x = function(y) y + 1;`)
+        // still reaches chunk.nestedLiterals even though it never touches
+        // closureSites (see tryCompileStatementExpr's own doc comment: only
+        // a CAPTURES-HAVING closure is refused) -- flatten it into
+        // literalChunkCache_ exactly like lookupOrCompileChunk does, so a
+        // later call to that closure value can run compiled too.
+        if (it->second) flattenNestedLiterals(*it->second);
+    }
+    if (!it->second || !chunkEligibleNow(*it->second)) return evalExpr(node, ctx);
+    return runCompiledExprChunk(*this, *it->second, ctx);
+}
+
+bool Evaluator::tryRunCompiledAssignmentBlock(const std::vector<const oscad::ASTNode*>& assignments,
+                                               EvalContext& ctx) {
+    if (assignments.empty() || !useBytecodeVm() || !inResolvePass_) return false;
+    auto* first = static_cast<const oscad::Assignment*>(assignments.front());
+    auto it = assignBlockChunkCache_.find(first);
+    if (it == assignBlockChunkCache_.end()) {
+        std::vector<const oscad::Assignment*> assigns;
+        assigns.reserve(assignments.size());
+        for (const oscad::ASTNode* n : assignments) assigns.push_back(static_cast<const oscad::Assignment*>(n));
+        it = assignBlockChunkCache_.emplace(first, tryCompileAssignmentBlock(assigns, first->scope())).first;
+        if (it->second) flattenNestedLiterals(*it->second);
+    }
+    if (!it->second || !chunkEligibleNow(*it->second)) return false;
+    runCompiledAssignmentBlock(*this, *it->second, ctx);
+    return true;
 }
 
 const Value* Evaluator::findUpvalue(const oscad::ASTNode* targetDecl, int slot) const {
@@ -98,11 +142,11 @@ BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::Parameter
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-            result.set(a.name->name, evalExpr(*a.expr, ctx));
+            result.set(a.name->name, evalExprMaybeCompiled(*a.expr, ctx));
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
             if (positionalIdx < nparams) {
-                result.set(params[positionalIdx]->name->name, evalExpr(*a.expr, ctx));
+                result.set(params[positionalIdx]->name->name, evalExprMaybeCompiled(*a.expr, ctx));
             }
             ++positionalIdx;
         }
@@ -136,10 +180,22 @@ EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, 
         if (usedChildCtx) *usedChildCtx = false;
         return ctx.callCtxFromCapturedLet(capturedLet, scope, std::nullopt, std::move(childrenNodes), childrenCallerCtx);
     }
+    // Was a full callStack_ scan (every frame, checking THAT frame's own
+    // declPosition for span containment) -- see activeDeclRefcount_'s own
+    // doc comment (evaluator.hpp) for why iterating its DISTINCT keys
+    // instead is exactly equivalent, not an approximation: containment for
+    // a given declaration depends only on that declaration's own
+    // (compile-time-fixed) position, never on which of its possibly-many
+    // active occurrences on callStack_ is checked, so deduplicating by
+    // declaration identity changes nothing observable -- only how many
+    // checks a deeply/self-recursive call chain (the overwhelmingly common
+    // shape once Stage 1/2 made deep recursion possible at all) needs to
+    // do: a small, roughly-constant number of DISTINCT active
+    // declarations, not one check per active call.
     const oscad::Position& declPos = decl.position();
-    for (const CallStackFrame& frame : callStack_) {
-        const oscad::Position* outer = frame.declPosition;
-        if (outer == nullptr || outer->origin != declPos.origin) continue;
+    for (const auto& [activeDecl, count] : activeDeclRefcount_) {
+        const oscad::Position* outer = &activeDecl->position();
+        if (outer->origin != declPos.origin) continue;
         const bool sameSpan = (outer->start_offset == declPos.start_offset && outer->end_offset == declPos.end_offset);
         if (!sameSpan && outer->start_offset <= declPos.start_offset && declPos.end_offset <= outer->end_offset) {
             if (usedChildCtx) *usedChildCtx = true;
@@ -223,9 +279,9 @@ void Evaluator::bindCallArgsInto(const std::vector<std::unique_ptr<oscad::Parame
     applyDefaults(params, bound, childCtx);
 }
 
-void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call, EvalContext& ctx) {
+EvalContext Evaluator::buildModuleChildCtx(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call,
+                                            EvalContext& ctx, BoundArgs bound) {
     const oscad::Scope* childScope = decl.scope() ? decl.scope() : ctx.scope;
-    auto bound = bindArgs(decl.parameters, call.arguments, ctx);
 
     auto childrenNodes = std::make_shared<ChildrenNodeList>();
     childrenNodes->reserve(call.children.size());
@@ -254,25 +310,79 @@ void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad
     }
     applyDefaults(decl.parameters, bound, childCtx);
 
-    int parentModules = 0;
-    for (const CallStackFrame& f : callStack_) {
-        if (f.kind == CallStackFrame::Kind::Module) ++parentModules;
-    }
-    childCtx.dyn->set("$parent_modules", Value{static_cast<double>(parentModules)});
+    // moduleCallDepth_ (maintained incrementally by enterUserCall/
+    // exitUserCall*) is already exactly "how many Module frames are on
+    // callStack_ right now" -- this call's OWN frame isn't pushed yet, so
+    // it correctly counts only ancestors, matching what a callStack_ scan
+    // would have found. See moduleCallDepth_'s own doc comment for why a
+    // scan here specifically used to be an O(depth) hazard.
+    childCtx.dyn->set("$parent_modules", Value{static_cast<double>(moduleCallDepth_)});
+    return childCtx;
+}
 
-    std::optional<ProfileHandle> prof = profileEnter("module", call.name->name, &call.position(), &decl.position());
-    callStack_.push_back(
-        CallStackFrame{CallStackFrame::Kind::Module, call.name->name, &call.position(), &decl.position()});
-    callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
+void Evaluator::runModuleBodyNative(const oscad::ModuleDeclaration& decl, EvalContext& childCtx,
+                                     const oscad::Position* callPos) {
+    // Guards against a genuinely (non-tail) recursive user module the same
+    // way evalUserFunctionCore's own guard does for functions (evaluator.hpp)
+    // -- each logical module call HERE is a real, unavoidable C++ recursive
+    // call (evalModularCall -> evalUserModule -> evalChildren ->
+    // evalStatement -> evalModularCall -> ...), so a deep enough one
+    // silently overflows the native stack with no exception to catch.
+    // Confirmed present for a plain, closure-free `module recur(n) { if
+    // (n>0) recur(n-1); else cube(1); }` -- segfaults around depth 5000 on
+    // an ordinary desktop build. Recursive tree/pattern-generator modules
+    // are a real, common pattern (not just an adversarial script), so this
+    // is reachable in practice. Shares kMaxUserCallDepth AND callStack_
+    // itself with the function-side guard: a function recursing into a
+    // module recursing into a function is the same hazard regardless of
+    // which kind of frame is on top. This guard -- unlike the compiled
+    // path's own (see pushBracketedModuleFrame, bytecode_vm.cpp,
+    // skipDepthGuard) -- stays exactly as-is: this IS still a genuine
+    // native recursive call, so native stack margin still matters here.
+    // Uses enterUserCall/exitUserCall* (not a hand-rolled profileEnter/
+    // callStack_.push_back) so this bracket is identical in shape to the
+    // compiled path's own (evalUserModule, below) -- one shared mechanism,
+    // not two that could drift.
+    UserCallHandle h = enterUserCall(decl.name->name, decl, /*bodyExpr=*/nullptr, childCtx, callPos,
+                                       /*upvalueParent=*/-1, /*skipDepthGuard=*/false, CallStackFrame::Kind::Module);
     try {
         evalChildren(decl.children, childCtx);
     } catch (...) {
-        callStack_.pop_back();
-        if (prof) profileExit(*prof);
+        exitUserCallException(h);
         throw;
     }
-    callStack_.pop_back();
-    if (prof) profileExit(*prof);
+    exitUserCallSuccess(decl.name->name, h, Value{}, /*fireReturnHook=*/false);
+}
+
+void Evaluator::evalUserModule(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call, EvalContext& ctx) {
+    auto bound = bindArgs(decl.parameters, call.arguments, ctx);
+    EvalContext childCtx = buildModuleChildCtx(decl, call, ctx, std::move(bound));
+    const CompiledChunk* chunk = useBytecodeVm() ? lookupOrCompileModuleChunk(decl) : nullptr;
+    if (!chunk) {
+        runModuleBodyNative(decl, childCtx, &call.position());
+        return;
+    }
+    // Unlike runModuleBodyNative, this bracket wraps runCompiledModuleBody
+    // instead of evalChildren -- but it's still REQUIRED here, even though
+    // runCompiledModuleBody's own frame is bare (see its own doc comment):
+    // this call site IS the "outer caller" that bare frame assumes already
+    // did the bracketing (mirrors evalUserFunctionCore's own unconditional
+    // enterUserCall wrapping BOTH its compiled and native branches
+    // uniformly). Skipping it here was a real bug caught by
+    // UserModule.NestedModuleSeesReassignedParameterViaClosure hanging --
+    // without `decl`'s own CallStackFrame on callStack_, callCtxFor's own
+    // span-containment closure search (used by a module declared INSIDE
+    // this one's body) can never find it, silently misclassifying every
+    // such lookup.
+    UserCallHandle h = enterUserCall(decl.name->name, decl, /*bodyExpr=*/nullptr, childCtx, &call.position(),
+                                       /*upvalueParent=*/-1, /*skipDepthGuard=*/false, CallStackFrame::Kind::Module);
+    try {
+        runCompiledModuleBody(*this, *chunk, childCtx);
+    } catch (...) {
+        exitUserCallException(h);
+        throw;
+    }
+    exitUserCallSuccess(decl.name->name, h, Value{}, /*fireReturnHook=*/false);
 }
 
 // -- Tail-call optimization (interpreter path) -----------------------------
@@ -505,12 +615,67 @@ void Evaluator::recordTailCallHop(const std::string& calleeName, const oscad::AS
         error("Recursion detected calling function '" + calleeName + "'", calleeDecl);
     }
     CallStackFrame& frame = callStack_.back();
+    // A tail hop swaps which declaration occupies THIS stack slot without
+    // a matching enter/exit pair of its own -- activeDeclRefcount_ (see
+    // its own doc comment, evaluator.hpp) has to be updated symmetrically
+    // here too, or it would count the OLD declaration as active forever
+    // and never see the NEW one at all.
+    noteActiveDeclExit(frame.declNode);
+    ++activeDeclRefcount_[&calleeDecl];
     frame.name = calleeName;
     frame.declNode = &calleeDecl;
     frame.declPosition = &calleeDecl.position();
     frame.callPosition = callPos;
     frame.upvalueParent = -1;
     profileRecordTailHop("function", calleeName, callPos, &calleeDecl.position());
+}
+
+// See these three methods' own doc comment (evaluator.hpp) for the split
+// rationale. Body is a direct, behavior-preserving lift of what
+// evalUserFunctionCore used to inline -- see this file's own git history
+// for the pre-split version if a byte-for-byte diff is ever needed.
+Evaluator::UserCallHandle Evaluator::enterUserCall(const std::string& name, const oscad::ASTNode& declNode,
+                                                    const oscad::Expression* bodyExpr, EvalContext& childCtx,
+                                                    const oscad::Position* callPos, int upvalueParent,
+                                                    bool skipDepthGuard, CallStackFrame::Kind kind) {
+    const bool isModule = kind == CallStackFrame::Kind::Module;
+    if (!skipDepthGuard && callStack_.size() >= kMaxUserCallDepth) {
+        error("Recursion too deep while calling " + std::string(isModule ? "module" : "function") + " '" + name + "'",
+              declNode);
+    }
+    UserCallHandle h;
+    h.kind = kind;
+    h.declNode = &declNode;
+    h.prof = profileEnter(isModule ? "module" : "function", name, callPos, &declNode.position());
+    callStack_.push_back(CallStackFrame{kind, name, callPos, &declNode.position(), &declNode, nullptr, upvalueParent});
+    callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
+    if (isModule) ++moduleCallDepth_;
+    ++activeDeclRefcount_[&declNode];
+    if (bodyExpr) checkDebug(*bodyExpr, childCtx);
+    lastCtx_ = &childCtx;
+    return h;
+}
+
+void Evaluator::noteActiveDeclExit(const oscad::ASTNode* declNode) {
+    auto it = activeDeclRefcount_.find(declNode);
+    if (it == activeDeclRefcount_.end()) return; // defensive; should always be found
+    if (--it->second <= 0) activeDeclRefcount_.erase(it);
+}
+
+void Evaluator::exitUserCallSuccess(const std::string& name, const UserCallHandle& handle, const Value& result,
+                                     bool fireReturnHook) {
+    if (fireReturnHook && debugHooks_.returnHook) debugHooks_.returnHook(name, result, static_cast<int>(callStack_.size()));
+    callStack_.pop_back();
+    if (handle.kind == CallStackFrame::Kind::Module) --moduleCallDepth_;
+    noteActiveDeclExit(handle.declNode);
+    if (handle.prof) profileExit(*handle.prof);
+}
+
+void Evaluator::exitUserCallException(const UserCallHandle& handle) {
+    callStack_.pop_back();
+    if (handle.kind == CallStackFrame::Kind::Module) --moduleCallDepth_;
+    noteActiveDeclExit(handle.declNode);
+    if (handle.prof) profileExit(*handle.prof);
 }
 
 Value Evaluator::evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
@@ -534,7 +699,7 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
 
     const oscad::Position* callPos = callNode ? &callNode->position() : nullptr;
     return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
-        return chunk ? runCompiledFunctionTrampoline(*this, *chunk, arguments, ctx, childCtx)
+        return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx)
                       : evalFunctionBodyTrampoline(*decl.expr, childCtx);
     });
 }
@@ -553,7 +718,7 @@ Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad:
                                      [&]() -> Value { return evalFunctionBodyTrampoline(*decl.expr, childCtx); });
     }
     return evalUserFunctionCore(name, decl, *decl.expr, childCtx, callPos, upvalueParent, [&]() -> Value {
-        return runCompiledFunctionFromBoundTrampoline(*this, *chunk, bound, childCtx);
+        return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx);
     });
 }
 
@@ -589,7 +754,7 @@ Value Evaluator::evalFunctionLiteral(const Closure& closure,
     // further given no test depends on it.
     return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
                                  [&]() -> Value {
-                                     return chunk ? runCompiledFunctionTrampoline(*this, *chunk, arguments, ctx, childCtx)
+                                     return chunk ? runCompiledFunction(*this, *chunk, arguments, ctx, childCtx)
                                                   : evalFunctionBodyTrampoline(*funcNode.body, childCtx);
                                  });
 }
@@ -611,7 +776,7 @@ Value Evaluator::evalFunctionLiteralFromBound(const Closure& closure, BoundArgs 
             [&]() -> Value { return evalFunctionBodyTrampoline(*funcNode.body, childCtx); });
     }
     return evalUserFunctionCore("<function literal>", funcNode, *funcNode.body, childCtx, callPos, upvalueParent,
-                                 [&]() -> Value { return runCompiledFunctionFromBoundTrampoline(*this, *chunk, bound, childCtx); });
+                                 [&]() -> Value { return runCompiledFunctionFromBound(*this, *chunk, bound, childCtx); });
 }
 
 Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& ctx) {

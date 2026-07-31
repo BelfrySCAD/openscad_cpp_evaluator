@@ -302,7 +302,19 @@ TEST(DebugHooks, FastContinueNotHookSkippableStillFiresEveryCheckpoint) {
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     ev.evaluate(ast, ctx);
-    EXPECT_EQ(calls, 7); // unaffected -- same total as HookFiresOnceForEachStatementAtEveryNestingLevel
+    // 4, not 7 (Phase 1, module/top-level compilation): hookSkippable is a
+    // narrower claim than "breakpoints is accurate" (see
+    // setFastContinueBreakpoints' own doc comment, evaluator.hpp) -- it
+    // does NOT disable useBytecodeVm()/chunkEligibleNow, only whether
+    // checkDebug() can skip calling the hook at all for an eligible line.
+    // With an empty (but real) breakpoint set, translate()'s own argument
+    // `[1,0,0]` is now eligible to compile too (evalExprMaybeCompiled,
+    // called from resolveArgs) -- as a single Op::BuildList instead of
+    // three separate _eval_list_comp element evaluations, its own 3
+    // expr-level element checkpoints (see
+    // HookFiresOnceForEachStatementAtEveryNestingLevel's own doc comment,
+    // above, for where those 3 came from) no longer fire: 7 - 3 = 4.
+    EXPECT_EQ(calls, 4);
 }
 
 TEST(DebugHooks, FastContinueInterruptFlagForcesTheNextCheckpointThrough) {

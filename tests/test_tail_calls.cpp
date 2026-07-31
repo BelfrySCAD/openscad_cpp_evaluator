@@ -316,19 +316,72 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpr
     }
 }
 
-TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingCompiled) {
+TEST(TailCalls, DeepNonTailRecursionUnderVmDoesNotHitTheNativeDepthGuard) {
     ScopedVm vm(true);
-    // Same script, same guard (evalUserFunctionCore is shared by both the
-    // interpreter and the bytecode VM's own compiled call path) -- the
-    // compiled path's own real per-call native stack usage is actually
-    // larger (more C++ frames between one logical call and the next, see
-    // runChunk/runCompiledFunctionFromBound/runCompiledFunctionFromBoundTrampoline),
-    // so this is the MORE exposed of the two paths, not a lesser check.
+    // Same script as the interpreted test above, but this is exactly the
+    // case the explicit frame-stack VM (see bytecode_vm.cpp's driveVm)
+    // exists to fix: a NON-tail call between two compiled chunks
+    // (Op::CallFn, via pushBracketedCallFrame) no longer makes a genuine
+    // native C++ call -- it's pushed onto vmCallStack_ and serviced by
+    // driveVm's own loop instead, so kMaxUserCallDepth (50, a NATIVE
+    // stack margin -- see its own doc comment) no longer applies here at
+    // all (enterUserCall's skipDepthGuard=true, set only by
+    // pushBracketedCallFrame). f(500) now succeeds where it used to throw
+    // -- the direct, measurable proof the redesign works, not just "no
+    // regression." Bounded only by the new, much larger
+    // kMaxVmCallStackDepth (1,000,000, a memory/runaway guard, not a
+    // stack-safety one).
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(500);");
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\necho(f(500));");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+}
+
+TEST(TailCalls, DeepNonTailRecursionUnderVmSucceedsWellPastTheOldNativeLimit) {
+    ScopedVm vm(true);
+    // 10,000 is two orders of magnitude past the old native-stack-bound
+    // kMaxUserCallDepth=50 -- the explicit-stack VM (vmCallStack_, heap-
+    // allocated) has no trouble with it.
+    const std::string script = "function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\necho(f(10000));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 10000");
+}
+
+TEST(TailCalls, DeepNonTailRecursionThrowingPartwayUnwindsCleanly) {
+    ScopedVm vm(true);
+    // An assert() partway down a long NON-tail compiled call chain throws
+    // through N pushed, bracketed VmFrames -- driveVm's own outer
+    // try/catch (teardownVmCallStackDownTo) must walk vmCallStack_ back
+    // to the floor, releasing every VmFrame to the pool and closing out
+    // every callStack_/profiling bracket WITHOUT firing returnHook,
+    // exactly mirroring the pre-redesign per-frame native unwind. Proven
+    // not by inspecting internals directly but by running a second,
+    // unrelated script on the SAME Evaluator afterward -- if any frame,
+    // pool slot, or callStack_ entry leaked, this second run would either
+    // crash, wrongly inherit stale state, or the pool would be visibly
+    // exhausted/corrupted.
+    Evaluator ev;
+    auto ast = parseSrc("function f(n) = n <= 0 ? assert(false, \"boom\") : 1 + f(n - 1);\necho(f(5000));");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+
+    auto ast2 = parseSrc("function g(n) = n <= 0 ? 0 : 1 + g(n - 1);\necho(g(2000));");
+    auto scope2 = oscad::buildScopes(ast2);
+    EvalContext ctx2 = EvalContext::makeRoot(scope2.get());
+    ev.resolveTree(ast2, ctx2);
+}
+
+TEST(TailCalls, DollarVarSetEarlyInANonTailCompiledChainStaysVisibleManyLevelsDeep) {
+    ScopedVm vm(true);
+    // The ctxChain analog of DollarVarSetEarlyInATailChainStaysVisible
+    // ManyHopsLater above, but for a NON-tail chain -- each level is a
+    // genuine pushBracketedCallFrame push (its own VmFrame, its own
+    // ctxChain entry), not a tail hop mutating one frame in place. $probe
+    // (dyn, isolate=false) must still resolve 2000 real pushes deep.
+    const std::string script = "function depth(n) = n <= 0 ? $probe : 1 + depth(n - 1);\n"
+                                "echo(let($probe = 77) depth(2000));";
+    EXPECT_EQ(runCapturingEcho(script), "ECHO: 2077");
 }
 
 TEST(TailCalls, CollatzStepsRecursesFromBothTernaryBranchesInterpreted) {

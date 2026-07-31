@@ -10,6 +10,24 @@
 
 namespace oscadeval {
 
+namespace {
+// Scopes Evaluator::inResolvePass_ to one resolveTreeImpl call, restored on
+// every exit path including an exception thrown from evalChildren (an
+// assert() failure, mid-tree) -- see stmtExprChunkCache_'s own doc comment
+// (evaluator.hpp) for why evalExprMaybeCompiled must never touch its cache
+// outside an active pass.
+class ResolvePassGuard {
+public:
+    explicit ResolvePassGuard(bool& flag) : flag_(flag) { flag_ = true; }
+    ~ResolvePassGuard() { flag_ = false; }
+    ResolvePassGuard(const ResolvePassGuard&) = delete;
+    ResolvePassGuard& operator=(const ResolvePassGuard&) = delete;
+
+private:
+    bool& flag_;
+};
+} // namespace
+
 void Evaluator::buildTreeNode(const std::string& kind, const oscad::ASTNode& node,
                                const std::function<CSGParams()>& resolveBody) {
     // Push a fresh accumulator for whatever CSGNodes get created while
@@ -97,27 +115,7 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     // _eval_statement's splice branch exactly.
     const bool splice = (name == "children" && isBuiltin) || !isBuiltin;
     if (splice) {
-        if (randsCallCount_ != randsBefore) {
-            // rands() fired directly during *this* call's own resolve
-            // (e.g. an assignment before any geometry statement in a user
-            // module's body) rather than inside one of the spliced
-            // children's own resolve (which already self-taints via the
-            // branch below) -- propagate onto every spliced child so the
-            // taint isn't silently dropped by splicing away the node it
-            // would otherwise have landed on.
-            for (auto& c : children) c->uncacheable = true;
-        }
-        if (children.size() > 1) {
-            auto unionNode = std::make_unique<CSGNode>();
-            unionNode->kind = "union";
-            unionNode->node = &node;
-            unionNode->isBuiltin = false;
-            unionNode->uncacheable = std::any_of(children.begin(), children.end(), [](const auto& c) { return c->uncacheable; });
-            unionNode->children = std::move(children);
-            treeStack_.back().push_back(std::move(unionNode));
-        } else {
-            for (auto& c : children) treeStack_.back().push_back(std::move(c));
-        }
+        spliceModuleChildren(std::move(children), randsBefore, node);
         return;
     }
 
@@ -131,6 +129,31 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     treeNode->children = std::move(children);
     treeNode->params = std::move(params);
     treeStack_.back().push_back(std::move(treeNode));
+}
+
+void Evaluator::spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> children, std::uint64_t randsBefore,
+                                      const oscad::ASTNode& callNode) {
+    if (randsCallCount_ != randsBefore) {
+        // rands() fired directly during *this* call's own resolve (e.g. an
+        // assignment before any geometry statement in a user module's
+        // body) rather than inside one of the spliced children's own
+        // resolve (which already self-taints via the branch below) --
+        // propagate onto every spliced child so the taint isn't silently
+        // dropped by splicing away the node it would otherwise have
+        // landed on.
+        for (auto& c : children) c->uncacheable = true;
+    }
+    if (children.size() > 1) {
+        auto unionNode = std::make_unique<CSGNode>();
+        unionNode->kind = "union";
+        unionNode->node = &callNode;
+        unionNode->isBuiltin = false;
+        unionNode->uncacheable = std::any_of(children.begin(), children.end(), [](const auto& c) { return c->uncacheable; });
+        unionNode->children = std::move(children);
+        treeStack_.back().push_back(std::move(unionNode));
+    } else {
+        for (auto& c : children) treeStack_.back().push_back(std::move(c));
+    }
 }
 
 void Evaluator::evalModifier(const oscad::ModuleInstantiation& child, const oscad::ASTNode& wrapperNode,
@@ -167,6 +190,15 @@ std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTreeImpl(const NodeList&
     treeStack_.emplace_back();
     rootCtx_ = &ctx;
     lastCtx_ = &ctx;
+    // Cleared here, not just guarded by inResolvePass_ below, so a host
+    // that reuses one Evaluator across separate top-level resolveTree()/
+    // evaluate() calls (each against a freshly re-parsed AST -- the normal
+    // "re-render after an edit" pattern) never risks a stale entry from a
+    // PRIOR pass whose own AST nodes may since have been freed. See
+    // stmtExprChunkCache_'s own doc comment (evaluator.hpp) for the full
+    // hazard this guards against.
+    stmtExprChunkCache_.clear();
+    ResolvePassGuard resolvePassGuard(inResolvePass_);
     evalChildren(nodes, ctx);
     std::vector<std::unique_ptr<CSGNode>> tree = std::move(treeStack_.back());
     treeStack_.pop_back();

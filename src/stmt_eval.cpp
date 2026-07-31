@@ -9,7 +9,7 @@ namespace oscadeval {
 void Evaluator::evalAssignment(const oscad::Assignment& node, EvalContext& ctx) {
     const std::string& name = node.name->name;
     if (!name.empty() && name[0] == '$') {
-        ctx.dyn->set(name, evalExpr(*node.expr, ctx));
+        ctx.dyn->set(name, evalExprMaybeCompiled(*node.expr, ctx));
         ctx.dynExplicit->set(name, true);
         return;
     }
@@ -20,7 +20,7 @@ void Evaluator::evalAssignment(const oscad::Assignment& node, EvalContext& ctx) 
         const int firstLine = firstPos ? firstPos->line : 0;
         warn(name + " was assigned on line " + std::to_string(firstLine) + " but was overwritten", pos);
     }
-    ctx.let_->set(name, evalExpr(*node.expr, ctx));
+    ctx.let_->set(name, evalExprMaybeCompiled(*node.expr, ctx));
     ctx.dynPositions->set(name, pos);
 }
 
@@ -39,7 +39,7 @@ void Evaluator::doEcho(const std::vector<std::unique_ptr<oscad::Argument>>& argu
     pairs.reserve(arguments.size());
     for (const auto& argPtr : arguments) {
         const oscad::Argument& arg = *argPtr;
-        Value val = evalExpr(*argExpr(arg), ctx);
+        Value val = evalExprMaybeCompiled(*argExpr(arg), ctx);
         std::optional<std::string> name;
         if (arg.kind() == oscad::NodeKind::NamedArgument) name = static_cast<const oscad::NamedArgument&>(arg).name->name;
         pairs.emplace_back(std::move(name), std::move(val));
@@ -78,7 +78,7 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
     std::vector<AssignPair> pairs;
     pairs.reserve(node.assignments.size());
     for (const auto& assign : node.assignments) {
-        Value values = evalExpr(*assign->expr, ctx);
+        Value values = evalExprMaybeCompiled(*assign->expr, ctx);
         const oscad::Position* pos = &assign->position();
         pairs.push_back(AssignPair{assign->name->name, expandIterable(values, [&](size_t count) {
             warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
@@ -135,7 +135,7 @@ void Evaluator::evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx) {
         // Checked against the ORIGINAL ctx (like the RHS eval below), not
         // childCtx -- mirrors _eval_let_block's `_check_debug(assign, ctx)`.
         checkDebug(*assign, ctx);
-        Value v = evalExpr(*assign->expr, ctx);
+        Value v = evalExprMaybeCompiled(*assign->expr, ctx);
         const std::string& name = assign->name->name;
         if (!name.empty() && name[0] == '$') {
             childCtx.dyn->set(name, v);
@@ -186,7 +186,7 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
         // `_check_debug(branch[0] if branch else node, ctx, expr_level=True)`.
         case oscad::NodeKind::ModularIf: {
             auto& n = static_cast<const oscad::ModularIf&>(node);
-            if (truthy(evalExpr(*n.condition, ctx))) {
+            if (truthy(evalExprMaybeCompiled(*n.condition, ctx))) {
                 checkDebug(n.trueBranch.empty() ? node : *n.trueBranch.front(), ctx, /*forced=*/false,
                             /*exprLevel=*/true);
                 evalChildren(n.trueBranch, ctx);
@@ -195,7 +195,7 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
         }
         case oscad::NodeKind::ModularIfElse: {
             auto& n = static_cast<const oscad::ModularIfElse&>(node);
-            const auto& branch = truthy(evalExpr(*n.condition, ctx)) ? n.trueBranch : n.falseBranch;
+            const auto& branch = truthy(evalExprMaybeCompiled(*n.condition, ctx)) ? n.trueBranch : n.falseBranch;
             checkDebug(branch.empty() ? node : *branch.front(), ctx, /*forced=*/false, /*exprLevel=*/true);
             evalChildren(branch, ctx);
             return;
@@ -262,7 +262,14 @@ void Evaluator::evalChildren(const std::vector<const oscad::ASTNode*>& children,
             evalStatement(*child, childCtx);
         }
     };
-    runAll(assignments);
+    // Whole-batch compile first (see tryRunCompiledAssignmentBlock's own
+    // doc comment, evaluator.hpp) -- falls back to the ordinary per-
+    // statement loop whenever compiling/running the batch that way isn't
+    // possible or eligible, unconditionally correct either way since
+    // nothing about these assignments' observable behavior differs based
+    // on which path ran them.
+    lastCtx_ = &ctx;
+    if (!tryRunCompiledAssignmentBlock(assignments, ctx)) runAll(assignments);
     runAll(others);
 }
 

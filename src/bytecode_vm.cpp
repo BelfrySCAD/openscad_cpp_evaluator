@@ -7,51 +7,11 @@
 #include "openscad_cpp_evaluator/scope_trail.hpp"
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
+#include "openscad_cpp_parser/ast/module_instantiation.hpp"
 
 namespace oscadeval {
 
 namespace {
-
-// RAII pool checkout -- see VmFrame's own doc comment (bytecode_vm.hpp) for
-// why pooling exists. Always returns its frame to the pool on destruction,
-// including via exception unwind (a nested compiled call throwing through
-// CallFn's own evalUserFunctionFromBound/evalBuiltinFunction call).
-class VmFrameGuard {
-public:
-    explicit VmFrameGuard(Evaluator& ev) : ev_(ev), frame_(ev.acquireVmFrame()) {}
-    ~VmFrameGuard() { ev_.releaseVmFrame(std::move(frame_)); }
-    VmFrameGuard(const VmFrameGuard&) = delete;
-    VmFrameGuard& operator=(const VmFrameGuard&) = delete;
-
-    VmFrame& get() { return *frame_; }
-
-private:
-    Evaluator& ev_;
-    std::unique_ptr<VmFrame> frame_;
-};
-
-// `stack` is a caller-owned, pooled scratch buffer (see VmFrameGuard) --
-// cleared here at entry rather than declared fresh, since one compiled
-// call's own VmFrame is reused across each of its unbound-default
-// evaluations AND its body (sequential, never concurrent, so sharing one
-// buffer across those sub-runs is safe and avoids allocating a new stack
-// vector for each).
-// One ListCompFor assignment's own materialized iteration state -- see
-// IterMaterialize/IterReset/IterNext's own doc comments (bytecode.hpp).
-struct IterList {
-    IterableValues values;
-    size_t index = 0;
-    // Cached once at IterMaterialize time -- IterableValues::size() is O(1)
-    // for a list/owned vector, but walks a RANGE's whole sequence from
-    // scratch every call (its own doc comment: "no caller in this codebase
-    // actually calls size() on a range today" -- Op::IterNext, below, used
-    // to be exactly that stale caller). Recomputing it once per IterNext
-    // call turned a single range-based for()/list-comp `for` into an O(n^2)
-    // walk (a 100,000-element range: interpreter ~0.03s, VM ~9.5s) -- caught
-    // via a BOSL2 corpus sweep (test_math.scadtest's own gaussian_rands(),
-    // which builds a 100,000-element list via `count()`).
-    size_t total = 0;
-};
 
 // Shared by Op::CallFn's isBuiltin (evalBuiltinFunction) and isImport
 // (importAsValue) branches -- both take the same pre-resolved CallArgs
@@ -62,9 +22,6 @@ CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& 
     int positionalIdx = 0;
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
-            // Each call site's argNames are distinct source arguments, never
-            // a repeated key, so a direct emplace_back (no overwrite check)
-            // is safe and avoids a pointless linear scan on every insert.
             callArgs.named.emplace_back(*site.argNames[i], std::move(args[i]));
         } else {
             callArgs.positional.emplace_back(positionalIdx++, std::move(args[i]));
@@ -73,648 +30,46 @@ CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& 
     return callArgs;
 }
 
-Value runChunk(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Instruction>& code,
-                std::vector<Value>& slots, EvalContext& ctx, std::vector<Value>& stack,
-                TailCallRequest* tailOut = nullptr) {
-    stack.clear();
-    // Native scratch state for list-comprehension clauses (Phase 3) -- not
-    // pooled (unlike stack/slots/bound): only chunks containing a real
-    // comprehension clause ever touch these, and both start genuinely
-    // empty per runChunk call regardless, so there's no steady-state
-    // capacity to preserve across calls the way stack/slots benefit from.
-    std::vector<std::vector<Value>> accumStack;
-    std::vector<IterList> iterLists(static_cast<size_t>(chunk.numIterLists));
-    size_t pc = 0;
-    while (pc < code.size()) {
-        const Instruction& ins = code[pc];
-        switch (ins.op) {
-            case Op::PushConst:
-                stack.push_back(chunk.constants[static_cast<size_t>(ins.a)]);
-                ++pc;
-                break;
-            case Op::PushBool:
-                stack.push_back(Value{ins.a != 0});
-                ++pc;
-                break;
-            case Op::LoadLocal:
-                stack.push_back(slots[static_cast<size_t>(ins.a)]);
-                ++pc;
-                break;
-            case Op::StoreLocal: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                slots[static_cast<size_t>(ins.a)] = std::move(v);
-                ++pc;
-                break;
-            }
-            case Op::LoadDyn: {
-                const Value* v = ctx.dyn->find(chunk.names[static_cast<size_t>(ins.a)]);
-                stack.push_back(v ? *v : Value{});
-                ++pc;
-                break;
-            }
-            case Op::StoreDyn: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                const std::string& name = chunk.names[static_cast<size_t>(ins.a)];
-                ctx.dyn->set(name, v);
-                ctx.dynExplicit->set(name, true);
-                ++pc;
-                break;
-            }
-            case Op::LoadFree:
-                stack.push_back(ev.evalIdentifier(chunk.names[static_cast<size_t>(ins.a)], ins.pos, ctx, true));
-                ++pc;
-                break;
-            case Op::LoadUpvalue: {
-                // findUpvalue walks the LIVE call stack -- correct as long
-                // as the declaring call is still active, however many
-                // upvalue levels out `uv.targetDecl` sits (an ordinary,
-                // not-yet-escaped nested closure, e.g. reduce()'s own
-                // self-recursive accumulator). If that frame is gone
-                // (this chunk is running as an ESCAPED closure's own body
-                // -- see the FunctionLiteral case's own doc comment,
-                // bytecode_compiler.cpp), fall back to `ctx.let_`: for any
-                // closure invocation with a non-null capturedLet,
-                // callCtxFor roots `ctx.let_` at that exact snapshot, which
-                // is guaranteed (by construction -- effectiveCaptures is a
-                // superset of this chunk's own upvalues) to contain this
-                // name.
-                const CompiledChunk::UpvalueRef& uv = chunk.upvalues[static_cast<size_t>(ins.a)];
-                const Value* v = ev.findUpvalue(uv.targetDecl, uv.slot);
-                if (!v) v = ctx.let_->find(uv.name);
-                stack.push_back(v ? *v : Value{});
-                ++pc;
-                break;
-            }
-            case Op::MakeClosure: {
-                // Builds a FRESH captured environment every time this
-                // instruction actually runs (never a compile-time constant
-                // -- a loop creating one closure per iteration must capture
-                // THAT iteration's own values, not share one snapshot).
-                // Each capture is genuinely local to the CURRENTLY-RUNNING
-                // chunk only when its own `targetDecl` matches this chunk's
-                // `selfDecl` (this literal's direct free-variable
-                // references) -- read straight out of `slots` in that case.
-                // Anything else is a capture bubbled up from a literal
-                // nested even deeper (see ClosureSite's own doc comment,
-                // bytecode.hpp): resolved the same way Op::LoadUpvalue
-                // resolves any upvalue reference, above -- the live call
-                // stack first (still live if THIS closure hasn't itself
-                // escaped yet), `ctx.let_` otherwise (this chunk's own
-                // capturedLet, when it's running as an escaped closure's
-                // body). The resulting Closure::capturedLet is a real,
-                // standalone TrailView (isolated root -- nothing else
-                // shares it, and it owes nothing to `ctx.let_` itself,
-                // which a compiled call never writes to directly -- see
-                // bindCompiledArgs' own doc comment), so invoking this
-                // closure later works through the EXACT same
-                // callCtxFor/capturedLetTrail machinery every interpreter-
-                // created escaping closure already uses, unchanged.
-                const CompiledChunk::ClosureSite& site = chunk.closureSites[static_cast<size_t>(ins.a)];
-                auto capturedTrail = TrailView<Value>::makeRoot();
-                // A letrec-style self-reference (UpvalueRef::isSelfReference,
-                // see its own doc comment) is skipped here, not read -- the
-                // closure it names is THIS instruction's own result, which
-                // doesn't exist until the shared_ptr below is constructed.
-                // Patched in immediately afterward via the exact same
-                // capturedTrail (a live, shared TrailView -- mutating it
-                // after `closure` wraps it is exactly as visible to that
-                // closure's own later invocations as any other entry).
-                std::vector<const std::string*> selfNames;
-                for (const auto& cap : site.captures) {
-                    if (cap.isSelfReference) {
-                        selfNames.push_back(&cap.name);
-                        continue;
-                    }
-                    if (cap.targetDecl == chunk.selfDecl) {
-                        capturedTrail->set(cap.name, slots[static_cast<size_t>(cap.slot)]);
-                        continue;
-                    }
-                    const Value* v = ev.findUpvalue(cap.targetDecl, cap.slot);
-                    if (!v) v = ctx.let_->find(cap.name);
-                    capturedTrail->set(cap.name, v ? *v : Value{});
-                }
-                auto closure = std::make_shared<const Closure>(Closure{site.node, capturedTrail});
-                for (const std::string* selfName : selfNames) {
-                    capturedTrail->set(*selfName, Value{closure});
-                }
-                stack.push_back(Value{std::move(closure)});
-                ++pc;
-                break;
-            }
-            case Op::PatchClosureCapture: {
-                // Mutual-recursion support (see the LetOp compile case's
-                // own doc comment, bytecode_compiler.cpp): `slots[ins.a]`
-                // (the consumer, e.g. isEven) already holds a real
-                // MakeClosure-created closure whose own capturedTrail is
-                // missing this ONE entry -- it was left out entirely at
-                // compile time because the sibling it names (e.g. isOdd)
-                // hadn't been constructed yet. `slots[ins.c]` (that
-                // sibling's own slot) does now, since this instruction only
-                // ever runs immediately after that sibling's own
-                // Op::StoreLocal. Mutates the SAME shared TrailView the
-                // consumer's own capturedLet already points at -- visible
-                // to it exactly like every other capture, no different
-                // from Op::MakeClosure's own self-reference patch, above.
-                const Value& consumerVal = slots[static_cast<size_t>(ins.a)];
-                if (const auto* closurePtr = std::get_if<ClosurePtr>(&consumerVal); closurePtr && *closurePtr) {
-                    if (auto trail = capturedLetTrail(**closurePtr)) {
-                        trail->set(chunk.names[static_cast<size_t>(ins.b)], slots[static_cast<size_t>(ins.c)]);
-                    }
-                }
-                ++pc;
-                break;
-            }
-            case Op::Range: {
-                Value step = std::move(stack.back());
-                stack.pop_back();
-                Value end = std::move(stack.back());
-                stack.pop_back();
-                Value start = std::move(stack.back());
-                stack.pop_back();
-                stack.push_back(ev.applyRange(start, end, step));
-                ++pc;
-                break;
-            }
-            case Op::Index: {
-                Value idx = std::move(stack.back());
-                stack.pop_back();
-                Value obj = std::move(stack.back());
-                stack.pop_back();
-                stack.push_back(ev.applyIndexAccess(obj, idx));
-                ++pc;
-                break;
-            }
-            case Op::Member: {
-                Value obj = std::move(stack.back());
-                stack.pop_back();
-                stack.push_back(ev.applyMemberAccess(obj, chunk.names[static_cast<size_t>(ins.a)]));
-                ++pc;
-                break;
-            }
-            case Op::UnaryOp: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                stack.push_back(ev.applyUnaryOp(static_cast<oscad::NodeKind>(ins.a), v, *ins.pos));
-                ++pc;
-                break;
-            }
-            case Op::BinaryOp: {
-                Value b = std::move(stack.back());
-                stack.pop_back();
-                Value a = std::move(stack.back());
-                stack.pop_back();
-                stack.push_back(ev.applyBinaryOp(static_cast<oscad::NodeKind>(ins.a), a, b, *ins.pos));
-                ++pc;
-                break;
-            }
-            case Op::Jump:
-                pc = static_cast<size_t>(ins.a);
-                break;
-            case Op::JumpIfFalse: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                if (!truthy(v)) {
-                    pc = static_cast<size_t>(ins.a);
-                } else {
-                    ++pc;
-                }
-                break;
-            }
-            case Op::JumpIfTrue: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                if (truthy(v)) {
-                    pc = static_cast<size_t>(ins.a);
-                } else {
-                    ++pc;
-                }
-                break;
-            }
-            case Op::OpenLocalScope: {
-                for (int i = 0; i < ins.b; ++i) slots[static_cast<size_t>(ins.a + i)] = Value{};
-                ++pc;
-                break;
-            }
-            case Op::BuildList: {
-                const size_t count = static_cast<size_t>(ins.a);
-                std::vector<Value> items(count);
-                for (size_t i = 0; i < count; ++i) {
-                    items[count - 1 - i] = std::move(stack.back());
-                    stack.pop_back();
-                }
-                stack.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(items)})});
-                ++pc;
-                break;
-            }
-            case Op::AccumOpen:
-                accumStack.emplace_back();
-                ++pc;
-                break;
-            case Op::AccumAppendOne: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                accumStack.back().push_back(std::move(v));
-                ++pc;
-                break;
-            }
-            case Op::AccumAppendEach: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                appendEachInto(accumStack.back(), v);
-                ++pc;
-                break;
-            }
-            case Op::AccumClose: {
-                std::vector<Value> items = std::move(accumStack.back());
-                accumStack.pop_back();
-                stack.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(items)})});
-                ++pc;
-                break;
-            }
-            case Op::AccumMergeEach: {
-                std::vector<Value> inner = std::move(accumStack.back());
-                accumStack.pop_back();
-                for (const Value& item : inner) appendEachInto(accumStack.back(), item);
-                ++pc;
-                break;
-            }
-            case Op::IterMaterialize: {
-                Value v = std::move(stack.back());
-                stack.pop_back();
-                IterList& il = iterLists[static_cast<size_t>(ins.a)];
-                il.values = expandIterable(v, [&](size_t count) {
-                    ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", ins.pos);
-                });
-                il.index = 0;
-                il.total = il.values.size(); // once here, never per-iteration -- see IterList's own doc comment
-                ++pc;
-                break;
-            }
-            case Op::IterReset: {
-                iterLists[static_cast<size_t>(ins.a)].index = 0;
-                ++pc;
-                break;
-            }
-            case Op::IterNext: {
-                IterList& il = iterLists[static_cast<size_t>(ins.b)];
-                if (il.index < il.total) {
-                    slots[static_cast<size_t>(ins.a)] = il.values[il.index];
-                    ++il.index;
-                    ++pc;
-                } else {
-                    pc = static_cast<size_t>(ins.c);
-                }
-                break;
-            }
-            case Op::CheckIterLimit: {
-                double count = std::get<double>(slots[static_cast<size_t>(ins.a)]) + 1.0;
-                slots[static_cast<size_t>(ins.a)] = Value{count};
-                if (count > static_cast<double>(ins.b)) {
-                    ev.error("C-style for loop exceeded maximum iteration count", *ins.node);
-                }
-                ++pc;
-                break;
-            }
-            case Op::CallFn: {
-                const CompiledChunk::CallSite& site = chunk.callSites[static_cast<size_t>(ins.a)];
-                const size_t argCount = static_cast<size_t>(ins.b);
-                std::vector<Value> args(argCount);
-                for (size_t i = 0; i < argCount; ++i) {
-                    args[argCount - 1 - i] = std::move(stack.back());
-                    stack.pop_back();
-                }
-                Value result;
-                if (site.isImport) {
-                    // import(): not in isBuiltinFunctionName's table (special-
-                    // cased earlier in evalFunctionCall), but importAsValue
-                    // takes the exact same pre-resolved CallArgs shape
-                    // evalBuiltinFunction does.
-                    CallArgs callArgs = buildCallArgs(site, args, argCount);
-                    result = importAsValue(ev, callArgs, *site.callNode);
-                } else if (site.isBuiltin && site.calleeName == "object") {
-                    // object() needs its arguments merged in exact call-site
-                    // interleaved order, which CallArgs' split positional/
-                    // named maps can't represent -- but args/site.argNames
-                    // are already in that exact source order (compiled and
-                    // popped the same way every other call's arguments are),
-                    // so no raw AST access is needed here at all.
-                    std::vector<std::pair<std::optional<std::string>, Value>> pairs;
-                    pairs.reserve(argCount);
-                    for (size_t i = 0; i < argCount; ++i) pairs.emplace_back(site.argNames[i], std::move(args[i]));
-                    result = mergeObjectArgs(pairs);
-                } else if (site.isBuiltin) {
-                    // evalBuiltinFunction takes a pre-resolved CallArgs, no
-                    // live ctx needed at all -- builtin functions are
-                    // already value-based, no interpreter bridge required.
-                    CallArgs callArgs = buildCallArgs(site, args, argCount);
-                    result = evalBuiltinFunction(ev, site.calleeName, callArgs, *site.callNode);
-                } else {
-                    // Replays bindArgs' own positional/named matching rule
-                    // (positional index counted only among positional
-                    // arguments, later write for a repeated name wins)
-                    // against already-evaluated values.
-                    BoundArgs bound;
-                    bound.reserve(argCount);
-                    size_t positionalIdx = 0;
-                    const size_t nparams = site.decl->parameters.size();
-                    for (size_t i = 0; i < argCount; ++i) {
-                        if (site.argNames[i]) {
-                            bound.set(*site.argNames[i], std::move(args[i]));
-                        } else {
-                            if (positionalIdx < nparams) {
-                                bound.set(site.decl->parameters[positionalIdx]->name->name, std::move(args[i]));
-                            }
-                            ++positionalIdx;
-                        }
-                    }
-                    result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound), ctx,
-                                                           &site.callNode->position());
-                }
-                stack.push_back(std::move(result));
-                ++pc;
-                break;
-            }
-            case Op::CallDynamic: {
-                const CompiledChunk::CallSite& site = chunk.callSites[static_cast<size_t>(ins.a)];
-                const size_t argCount = static_cast<size_t>(ins.b);
-                std::vector<Value> args(argCount);
-                for (size_t i = 0; i < argCount; ++i) {
-                    args[argCount - 1 - i] = std::move(stack.back());
-                    stack.pop_back();
-                }
-                Value callee = std::move(stack.back());
-                stack.pop_back();
-                Value result;
-                if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
-                    const Closure& closure = **closurePtr;
-                    BoundArgs bound;
-                    bound.reserve(argCount);
-                    size_t positionalIdx = 0;
-                    const size_t nparams = closure.node->parameters.size();
-                    for (size_t i = 0; i < argCount; ++i) {
-                        if (site.argNames[i]) {
-                            bound.set(*site.argNames[i], std::move(args[i]));
-                        } else {
-                            if (positionalIdx < nparams) {
-                                bound.set(closure.node->parameters[positionalIdx]->name->name, std::move(args[i]));
-                            }
-                            ++positionalIdx;
-                        }
-                    }
-                    result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
-                } else if (!site.calleeName.empty()) {
-                    ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
-                }
-                stack.push_back(std::move(result));
-                ++pc;
-                break;
-            }
-            case Op::CallFnTail: {
-                const CompiledChunk::CallSite& site = chunk.callSites[static_cast<size_t>(ins.a)];
-                const size_t argCount = static_cast<size_t>(ins.b);
-                std::vector<Value> args(argCount);
-                for (size_t i = 0; i < argCount; ++i) {
-                    args[argCount - 1 - i] = std::move(stack.back());
-                    stack.pop_back();
-                }
-                BoundArgs bound;
-                bound.reserve(argCount);
-                size_t positionalIdx = 0;
-                const size_t nparams = site.decl->parameters.size();
-                for (size_t i = 0; i < argCount; ++i) {
-                    if (site.argNames[i]) {
-                        bound.set(*site.argNames[i], std::move(args[i]));
-                    } else {
-                        if (positionalIdx < nparams) {
-                            bound.set(site.decl->parameters[positionalIdx]->name->name, std::move(args[i]));
-                        }
-                        ++positionalIdx;
-                    }
-                }
-                // Eligible for trampolining only when isolated (not
-                // closure-nested -- see Evaluator::isolatedCallCtxFor's own
-                // doc comment) AND the callee itself has a compiled chunk
-                // (a tail hop into a callee that doesn't compile pays one
-                // real C++ frame at that boundary instead, same as today).
-                // Ineligible falls through to exactly what CallFn already
-                // does -- no new behavior for that case.
-                if (tailOut != nullptr) {
-                    if (auto hopCtx = ev.isolatedCallCtxFor(*site.decl, ctx)) {
-                        if (ev.lookupOrCompileChunk(*site.decl) != nullptr) {
-                            tailOut->decl = site.decl;
-                            tailOut->literal = nullptr;
-                            tailOut->bound = std::move(bound);
-                            tailOut->ctx = std::move(*hopCtx);
-                            tailOut->name = site.calleeName;
-                            tailOut->callPos = &site.callNode->position();
-                            return Value{};
-                        }
-                    }
-                }
-                Value result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound), ctx,
-                                                              &site.callNode->position());
-                stack.push_back(std::move(result));
-                ++pc;
-                break;
-            }
-            case Op::CallDynamicTail: {
-                const CompiledChunk::CallSite& site = chunk.callSites[static_cast<size_t>(ins.a)];
-                const size_t argCount = static_cast<size_t>(ins.b);
-                std::vector<Value> args(argCount);
-                for (size_t i = 0; i < argCount; ++i) {
-                    args[argCount - 1 - i] = std::move(stack.back());
-                    stack.pop_back();
-                }
-                Value callee = std::move(stack.back());
-                stack.pop_back();
-                Value result;
-                if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
-                    const Closure& closure = **closurePtr;
-                    const oscad::FunctionLiteral& funcNode = *closure.node;
-                    BoundArgs bound;
-                    bound.reserve(argCount);
-                    size_t positionalIdx = 0;
-                    const size_t nparams = funcNode.parameters.size();
-                    for (size_t i = 0; i < argCount; ++i) {
-                        if (site.argNames[i]) {
-                            bound.set(*site.argNames[i], std::move(args[i]));
-                        } else {
-                            if (positionalIdx < nparams) {
-                                bound.set(funcNode.parameters[positionalIdx]->name->name, std::move(args[i]));
-                            }
-                            ++positionalIdx;
-                        }
-                    }
-                    if (tailOut != nullptr) {
-                        if (auto hopCtx = ev.isolatedCallCtxFor(funcNode, ctx, capturedLetTrail(closure))) {
-                            if (ev.lookupCompiledLiteralChunk(funcNode) != nullptr) {
-                                tailOut->decl = nullptr;
-                                tailOut->literal = &funcNode;
-                                tailOut->bound = std::move(bound);
-                                tailOut->ctx = std::move(*hopCtx);
-                                tailOut->name = "<function literal>";
-                                tailOut->callPos = ins.pos;
-                                return Value{};
-                            }
-                        }
-                    }
-                    result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
-                } else if (!site.calleeName.empty()) {
-                    ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
-                }
-                stack.push_back(std::move(result));
-                ++pc;
-                break;
-            }
-            case Op::Echo: {
-                const CompiledChunk::EchoSite& site = chunk.echoSites[static_cast<size_t>(ins.a)];
-                const size_t argCount = static_cast<size_t>(ins.b);
-                std::vector<std::pair<std::optional<std::string>, Value>> pairs(argCount);
-                for (size_t i = 0; i < argCount; ++i) {
-                    pairs[argCount - 1 - i] = {site.argNames[argCount - 1 - i], std::move(stack.back())};
-                    stack.pop_back();
-                }
-                ev.emitEcho(pairs);
-                ++pc;
-                break;
-            }
-            case Op::AssertFail: {
-                // Only ever reached on the condition-false path (guarded by
-                // a JumpIfTrue the compiler emits around it) -- always
-                // throws, matching evalAssertExpr's own error() call
-                // exactly (same message format, same "assert" innermostFrame).
-                const bool hasMessage = ins.a == 1;
-                std::string err = "Assertion '" + std::get<std::string>(chunk.constants[static_cast<size_t>(ins.b)]) +
-                                   "' failed";
-                if (hasMessage) {
-                    Value msg = std::move(stack.back());
-                    stack.pop_back();
-                    const std::string* s = std::get_if<std::string>(&msg);
-                    err += ": \"" + (s ? *s : fmtValue(msg)) + "\"";
-                }
-                ev.error(err, *ins.node, "assert");
-            }
-        }
-    }
-    return stack.empty() ? Value{} : std::move(stack.back());
-}
-
-// Mirrors Evaluator::bindArgs' own positional/named matching exactly (same
-// "later write for a repeated name wins," same "evaluate every argument
-// expression even if its name doesn't match a declared parameter" side-
-// effect rule), but writes a matched plain-parameter value directly into
-// `slots` instead of a fresh unordered_map, and routes a matched DECLARED
-// $-parameter (chunk.params[i].isDyn) straight to `childCtx.dyn` instead of
-// a slot -- see compileFunctionLike's own doc comment, bytecode_compiler.cpp.
-// A $-named argument that doesn't match any declared parameter is still an
-// undeclared override, exactly like today's interpreter path -- routed to
-// `childCtx.dyn` too. An undeclared plain (non-$) name has no slot and
-// nothing in this chunk can ever reference it by name, so its already-
-// evaluated value is simply discarded -- ponytail: ctx.let_ isn't written
-// for it either (unlike the interpreter path), which changes nothing
-// observable, since nothing downstream of a compiled call ever reads
-// ctx.let_ for a name a compiled body didn't itself resolve to a slot.
-void bindCompiledArgs(Evaluator& ev, const CompiledChunk& chunk,
-                       const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& callerCtx,
-                       EvalContext& childCtx, std::vector<Value>& slots, std::vector<bool>& bound) {
+// Replays bindArgs' own positional/named matching rule (positional index
+// counted only among positional arguments, later write for a repeated name
+// wins) against already-evaluated `args`, for a callee whose own parameter
+// LIST is `paramNames` (in declared order -- a FunctionDeclaration's
+// parameters or a FunctionLiteral's). Shared by CallFn/CallFnTail (a
+// site.decl callee) and CallDynamic/CallDynamicTail (a closure callee).
+BoundArgs buildBoundArgs(const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount,
+                          const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& paramNames) {
+    BoundArgs bound;
+    bound.reserve(argCount);
     size_t positionalIdx = 0;
-    const size_t nparams = chunk.params.size();
-    for (const auto& argPtr : arguments) {
-        if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
-            auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-            Value v = ev.evalExpr(*a.expr, callerCtx);
-            const std::string& name = a.name->name;
-            bool matched = false;
-            for (size_t i = 0; i < nparams; ++i) {
-                if (chunk.params[i].name == name) {
-                    if (chunk.params[i].isDyn) {
-                        childCtx.dyn->set(name, std::move(v));
-                    } else {
-                        slots[static_cast<size_t>(chunk.params[i].slot)] = std::move(v);
-                    }
-                    bound[i] = true;
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched && !name.empty() && name[0] == '$') {
-                childCtx.dyn->set(name, v);
-            }
+    const size_t nparams = paramNames.size();
+    for (size_t i = 0; i < argCount; ++i) {
+        if (site.argNames[i]) {
+            bound.set(*site.argNames[i], std::move(args[i]));
         } else {
-            auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
-            Value v = ev.evalExpr(*a.expr, callerCtx);
             if (positionalIdx < nparams) {
-                const CompiledChunk::Param& p = chunk.params[positionalIdx];
-                if (p.isDyn) {
-                    childCtx.dyn->set(p.name, std::move(v));
-                } else {
-                    slots[static_cast<size_t>(p.slot)] = std::move(v);
-                }
-                bound[positionalIdx] = true;
+                bound.set(paramNames[positionalIdx]->name->name, std::move(args[i]));
             }
             ++positionalIdx;
         }
     }
+    return bound;
 }
 
-// Shared by runCompiledFunction/runCompiledFunctionFromBound: applies each
-// unbound parameter's default (or, for a $-parameter with none, an explicit
-// undef -- mirrors Evaluator::applyDefaults' own "declaring a parameter
-// always creates a fresh binding" rule, which for a slot-addressed plain
-// parameter is already true for free via frame.slots' own zero-initialized
-// Value{} fill, but for ctx.dyn needs the same explicit write applyDefaults
-// makes, or a stale ancestor-level $-var would incorrectly show through).
-void applyCompiledDefaults(Evaluator& ev, const CompiledChunk& chunk, VmFrame& frame, EvalContext& childCtx) {
-    for (size_t i = 0; i < chunk.params.size(); ++i) {
-        if (frame.bound[i]) continue;
-        const CompiledChunk::Param& p = chunk.params[i];
-        if (p.isDyn) {
-            childCtx.dyn->set(p.name, chunk.defaultCode[i].empty()
-                                           ? Value{}
-                                           : runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack));
-        } else if (!chunk.defaultCode[i].empty()) {
-            frame.slots[static_cast<size_t>(p.slot)] =
-                runChunk(ev, chunk, chunk.defaultCode[i], frame.slots, childCtx, frame.stack);
-        }
-    }
-}
-
-} // namespace
-
-Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
-                          const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& callerCtx,
-                          EvalContext& childCtx, TailCallRequest* tailOut) {
-    VmFrameGuard guard(ev);
-    VmFrame& frame = guard.get();
-    frame.slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
-    frame.bound.assign(chunk.params.size(), false);
-    // Stamped onto the current (this call's own) CallStackFrame only once
-    // `frame.slots` is a well-defined (if still all-undef) array -- a
-    // nested compiled closure's own LOAD_UPVALUE could in principle find
-    // this frame from here on; see Evaluator::findUpvalue's own doc
-    // comment for why that's only reachable once this call's own body
-    // (which alone could construct/expose such a closure) has actually
-    // started running, never during argument binding itself.
-    ev.setCurrentCallVmFrame(&frame);
-    bindCompiledArgs(ev, chunk, arguments, callerCtx, childCtx, frame.slots, frame.bound);
-    applyCompiledDefaults(ev, chunk, frame, childCtx);
-    return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack, tailOut);
-}
-
-Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, const BoundArgs& bound,
-                                    EvalContext& childCtx, TailCallRequest* tailOut) {
-    VmFrameGuard guard(ev);
-    VmFrame& frame = guard.get();
-    frame.slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
-    frame.bound.assign(chunk.params.size(), false);
-    ev.setCurrentCallVmFrame(&frame);
+// Binds `bound`'s entries into `frame`'s own slots (matching
+// CompiledChunk::Param::name) or, for a declared $-parameter, straight
+// into `frame.ctxChain.back().dyn` -- see CompiledChunk::Param::isDyn's
+// own doc comment (bytecode.hpp). An undeclared $-named entry is still a
+// dynamic-scope override, routed to dyn too; an undeclared plain name has
+// no slot and is simply unreferenceable (ponytail: nothing downstream of a
+// compiled call ever reads ctx.let_ for a name a compiled body didn't
+// itself resolve to a slot, so there's nothing to write there either).
+void bindBoundArgsIntoFrame(const CompiledChunk& chunk, const BoundArgs& bound, VmFrame& frame) {
+    EvalContext& ctx = frame.ctxChain.back();
     for (size_t i = 0; i < chunk.params.size(); ++i) {
         const CompiledChunk::Param& p = chunk.params[i];
         if (const Value* v = bound.find(p.name)) {
             if (p.isDyn) {
-                childCtx.dyn->set(p.name, *v);
+                ctx.dyn->set(p.name, *v);
             } else {
                 frame.slots[static_cast<size_t>(p.slot)] = *v;
             }
@@ -729,104 +84,961 @@ Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, co
                 break;
             }
         }
-        if (!matched && !k.empty() && k[0] == '$') childCtx.dyn->set(k, v);
+        if (!matched && !k.empty() && k[0] == '$') ctx.dyn->set(k, v);
     }
-    applyCompiledDefaults(ev, chunk, frame, childCtx);
-    return runChunk(ev, chunk, chunk.bodyCode, frame.slots, childCtx, frame.stack, tailOut);
 }
 
-// The trampoline entry points -- see bytecode_vm.hpp's own doc comment for
-// the overview. Both share the identical loop shape: run the first
-// (real) call via the ordinary entry function (with tailOut populated),
-// then keep reusing runCompiledFunctionFromBound directly for every
-// subsequent hop (a TailCallRequest's own bound-args shape already
-// matches that function's own parameter shape exactly -- no new binding
-// logic needed).
-//
-// Every hop's own EvalContext (TailCallRequest::ctx, already derived by
-// isolatedCallCtxFor -- a fresh $-var/dyn trail level) is kept alive for
-// the WHOLE trampoline run via `chain`, mirroring evalFunctionBodyTrampoline's
-// identical fix on the interpreter side (user_calls.cpp) exactly: $-vars
-// stay dynamically scoped THROUGH even an isolated call (callCtx()'s own
-// dyn uses isolate=false), so a later hop may still need to walk back
-// through a much earlier one's dyn level to resolve a name. Reusing a
-// single EvalContext variable via plain assignment would drop an earlier
-// level's shared_ptr refcount to zero and pop it (ScopeTrailStorage::
-// popLevel, scope_trail.hpp's custom-deleter mechanism) -- permanently
-// erasing a parent-chain link a later hop still needs. Trades native C++
-// *stack* growth (what this trampoline exists to eliminate) for heap
-// growth instead -- O(iteration count) EvalContext objects, bounded by
-// available RAM rather than a ~few-MB thread stack.
-namespace {
-// Tears a trampoline's own `chain` down back-to-front on EVERY exit path --
-// normal return OR exception unwind (recordTailCallHop's own recursion-guard
-// error is the exact case that matters: an infinite tail-recursive function
-// with no base case throws out of the loop entirely, bypassing any teardown
-// code placed after it). Relying on `chain` simply falling out of scope
-// instead is NOT equivalent: std::vector<T>'s own element-destruction order
-// is unspecified by the standard -- libc++ destroys back-to-front (matching
-// ScopeTrailStorage::popLevel's own "scan from the back" doc comment, which
-// assumes the level being popped is usually the most recently pushed one --
-// O(1) per pop that way), but libstdc++ destroys front-to-back, the
-// adversarial order for that same scan -- each pop then walks almost the
-// entire remaining vector, turning an intended O(N) teardown into a real,
-// measured O(N^2) (see issue #50: an N-scaling experiment plus a minimal
-// repro proving libc++/libstdc++ disagree on std::vector<T>::clear()'s
-// destruction order for identical source). Popping back-to-front explicitly,
-// via a destructor that always runs before `chain`'s own, is correct AND
-// O(N) on every standard library and every exit path, not just the ones
-// that happen to agree with libc++ and return normally.
-struct ChainTeardown {
-    std::vector<EvalContext>& chain;
-    ~ChainTeardown() {
-        while (!chain.empty()) chain.pop_back();
+// Same, but for a call site whose arguments are still raw AST (evaluated
+// here against `callerCtx`) -- only ever used by runCompiledFunction's own
+// entry point (a top-level call with raw AST arguments, mirroring
+// evalUserFunction's own bindArgs+bound-loop). The Op::CallFn-family
+// opcodes always have already-EVALUATED arguments by the time they resolve
+// a callee (popped off the caller frame's own operand stack), so they go
+// through buildBoundArgs+bindBoundArgsIntoFrame above instead.
+void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
+                          const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& callerCtx,
+                          VmFrame& frame) {
+    EvalContext& ctx = frame.ctxChain.back();
+    size_t positionalIdx = 0;
+    const size_t nparams = chunk.params.size();
+    for (const auto& argPtr : arguments) {
+        if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
+            auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
+            Value v = ev.evalExpr(*a.expr, callerCtx);
+            const std::string& name = a.name->name;
+            bool matched = false;
+            for (size_t i = 0; i < nparams; ++i) {
+                if (chunk.params[i].name == name) {
+                    if (chunk.params[i].isDyn) {
+                        ctx.dyn->set(name, std::move(v));
+                    } else {
+                        frame.slots[static_cast<size_t>(chunk.params[i].slot)] = std::move(v);
+                    }
+                    frame.bound[i] = true;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched && !name.empty() && name[0] == '$') {
+                ctx.dyn->set(name, v);
+            }
+        } else {
+            auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
+            Value v = ev.evalExpr(*a.expr, callerCtx);
+            if (positionalIdx < nparams) {
+                const CompiledChunk::Param& p = chunk.params[positionalIdx];
+                if (p.isDyn) {
+                    ctx.dyn->set(p.name, std::move(v));
+                } else {
+                    frame.slots[static_cast<size_t>(p.slot)] = std::move(v);
+                }
+                frame.bound[positionalIdx] = true;
+            }
+            ++positionalIdx;
+        }
     }
-};
+}
+
+Value driveVm(Evaluator& ev, size_t floor);
+
+// Fills in any parameter left unbound after bindBoundArgsIntoFrame/
+// bindAstArgsIntoFrame from its own default-value expression
+// (chunk.defaultCode[i]) -- mirrors applyDefaults' "declaring a parameter
+// always creates a fresh binding" rule exactly, same as before this
+// redesign. A default's own code is driven through the SAME explicit-
+// frame-stack mechanism as everything else (a bare, unbracketed push+
+// drive down to a local floor) rather than a separate execution path --
+// so a call made FROM a default value (rare, but not disallowed by the
+// grammar) still gets the full no-native-recursion treatment, not just
+// function bodies specifically.
+void applyCompiledDefaultsToFrame(Evaluator& ev, const CompiledChunk& chunk, VmFrame& frame) {
+    for (size_t i = 0; i < chunk.params.size(); ++i) {
+        if (frame.bound[i]) continue;
+        const CompiledChunk::Param& p = chunk.params[i];
+        Value v;
+        if (!chunk.defaultCode[i].empty()) {
+            auto defaultFrame = ev.acquireVmFrame();
+            defaultFrame->chunk = &chunk;
+            defaultFrame->code = &chunk.defaultCode[i];
+            defaultFrame->pc = 0;
+            defaultFrame->slots = frame.slots; // defaults may read earlier SIBLING slots? no -- compiled with an
+                                                 // isolated (zero-frame) scope, see bytecode_compiler.cpp's
+                                                 // compileFunctionLike -- copied anyway since Op::LoadLocal
+                                                 // addresses this SAME chunk's slot numbering and a default's own
+                                                 // compiled body never references one (isolated scope guarantees
+                                                 // no LoadLocal survives compilation for a default), so this is
+                                                 // just "big enough," not "meaningfully shared."
+            defaultFrame->stack.clear();
+            defaultFrame->bound.assign(chunk.params.size(), false);
+            defaultFrame->accumStack.clear();
+            defaultFrame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+            defaultFrame->ctxChain.clear();
+            defaultFrame->ctxChain.push_back(frame.ctxChain.back());
+            defaultFrame->tailHopGuard = 0;
+            defaultFrame->hopEligible = false; // call-boundary-free, see VmFrame::hopEligible
+            const size_t floor = ev.vmCallStack_.size();
+            ev.vmCallStack_.push_back(std::move(defaultFrame));
+            ev.vmCallBrackets_.emplace_back(std::nullopt);
+            v = driveVm(ev, floor);
+        }
+        if (p.isDyn) {
+            frame.ctxChain.back().dyn->set(p.name, std::move(v));
+        } else {
+            frame.slots[static_cast<size_t>(p.slot)] = std::move(v);
+        }
+    }
+}
+
+// Constructs (from the pool) and pushes a BARE frame -- no callStack_/
+// profiling bracket, see VmFrame's own doc comment (bytecode_vm.hpp) for
+// exactly which call shapes this applies to.
+void pushBareFrame(Evaluator& ev, const CompiledChunk& chunk, const std::vector<Instruction>& code,
+                    EvalContext ctx) {
+    auto frame = ev.acquireVmFrame();
+    frame->chunk = &chunk;
+    frame->code = &code;
+    frame->pc = 0;
+    frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
+    frame->stack.clear();
+    frame->bound.assign(chunk.params.size(), false);
+    frame->accumStack.clear();
+    frame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+    frame->ctxChain.clear();
+    frame->ctxChain.push_back(std::move(ctx));
+    frame->tailHopGuard = 0;
+    frame->logicalName.clear();
+    frame->hopEligible = false; // both callers (runCompiledExprChunk/
+                                 // runCompiledAssignmentBlock) are genuinely
+                                 // call-boundary-free -- see VmFrame::hopEligible.
+    ev.vmCallStack_.push_back(std::move(frame));
+    ev.vmCallBrackets_.emplace_back(std::nullopt);
+}
+
+// Constructs and pushes a BRACKETED frame -- a genuine new logical call,
+// exactly mirroring what evalUserFunctionFromBound/
+// evalFunctionLiteralFromBound used to do via a native recursive call
+// (callCtxFor-derived childCtx, upvalueParent computed from
+// usedChildCtx, enterUserCall for the callStack_/profiling/checkDebug
+// bracket) -- just pushed onto the explicit stack instead of blocking a
+// native C++ frame. `declNode`/`bodyExpr` mirror evalUserFunctionCore's
+// own parameters exactly (a FunctionDeclaration's decl/*decl.expr, or a
+// FunctionLiteral's funcNode/*funcNode.body).
+void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const oscad::ASTNode& declNode,
+                             const oscad::Expression& bodyExpr, const std::string& name, BoundArgs bound,
+                             EvalContext& callerCtx, const oscad::Scope* fnScope,
+                             const std::shared_ptr<TrailView<Value>>& capturedLet, const oscad::Position* callPos) {
+    if (ev.vmCallStack_.size() >= Evaluator::kMaxVmCallStackDepth) {
+        ev.error("Recursion too deep while calling function '" + name + "'", declNode);
+    }
+    const int callerFrameIdx = ev.callStackTopIndex();
+    bool usedChildCtx = false;
+    EvalContext childCtx = ev.callCtxFor(declNode, callerCtx, fnScope, nullptr, nullptr, &usedChildCtx, capturedLet);
+    const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
+    Evaluator::UserCallHandle handle =
+        ev.enterUserCall(name, declNode, &bodyExpr, childCtx, callPos, upvalueParent, /*skipDepthGuard=*/true);
+
+    auto frame = ev.acquireVmFrame();
+    frame->chunk = &chunk;
+    frame->code = &chunk.bodyCode;
+    frame->pc = 0;
+    frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
+    frame->stack.clear();
+    frame->bound.assign(chunk.params.size(), false);
+    frame->accumStack.clear();
+    frame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+    frame->ctxChain.clear();
+    frame->ctxChain.push_back(std::move(childCtx));
+    frame->tailHopGuard = 0;
+    frame->logicalName = name;
+    frame->hopEligible = true; // just pushed a fresh, correctly-named callStack_ entry
+    bindBoundArgsIntoFrame(chunk, bound, *frame);
+    applyCompiledDefaultsToFrame(ev, chunk, *frame);
+    ev.vmCallStack_.push_back(std::move(frame));
+    ev.vmCallBrackets_.push_back(std::move(handle));
+}
+
+// Constructs and pushes a BRACKETED MODULE frame -- the module-side analog
+// of pushBracketedCallFrame, used only by Op::CallModule for a NESTED
+// module call made from within an already-compiled module body. Unlike a
+// function call, there's no BoundArgs/defaults to bind into slots here --
+// `childCtx` arrives already fully prepared (see Evaluator::
+// buildModuleChildCtx, called by Op::CallModule before this runs): a
+// module's own parameters were never meant to be slot-addressed in this
+// design, only its OWN local variable/for-loop-variable reads inside the
+// compiled body go through LoadFree/LoadDyn against ctx, exactly like a
+// bare statement-context expression's do. `randsBefore`/`callNode` are
+// stashed on the frame itself (moduleRandsBefore/moduleSpliceCallNode) so
+// driveVm's own completion branch can run Evaluator::spliceModuleChildren
+// once this frame finishes, without needing anywhere else to remember
+// them across the (possibly long) run this frame is about to make.
+void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const oscad::ModuleDeclaration& decl,
+                               EvalContext& childCtx, const oscad::Position* callPos, std::uint64_t randsBefore,
+                               const oscad::ASTNode& callNode) {
+    if (ev.vmCallStack_.size() >= Evaluator::kMaxVmCallStackDepth) {
+        ev.error("Recursion too deep while calling module '" + decl.name->name + "'", decl);
+    }
+    Evaluator::UserCallHandle handle = ev.enterUserCall(decl.name->name, decl, /*bodyExpr=*/nullptr, childCtx, callPos,
+                                                          /*upvalueParent=*/-1, /*skipDepthGuard=*/true,
+                                                          CallStackFrame::Kind::Module);
+    auto frame = ev.acquireVmFrame();
+    frame->chunk = &chunk;
+    frame->code = &chunk.bodyCode;
+    frame->pc = 0;
+    frame->slots.clear();
+    frame->stack.clear();
+    frame->bound.clear();
+    frame->accumStack.clear();
+    frame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+    frame->ctxChain.clear();
+    frame->ctxChain.push_back(std::move(childCtx));
+    frame->tailHopGuard = 0;
+    frame->logicalName = decl.name->name;
+    frame->ownsModuleSplice = true;
+    frame->moduleRandsBefore = randsBefore;
+    frame->moduleSpliceCallNode = &callNode;
+    ev.vmCallStack_.push_back(std::move(frame));
+    ev.vmCallBrackets_.push_back(std::move(handle));
+}
+
+// Tears down every frame from vmCallStack_'s own top down to (but not
+// including) `floor`, on the exception path -- releases each VmFrame to
+// the pool, tears down its ctxChain back-to-front (never relying on
+// std::vector's own unspecified destruction order -- see VmFrame's own
+// doc comment), and closes out its callStack_/profiling bracket if it had
+// one, deliberately WITHOUT firing returnHook (matches
+// Evaluator::exitUserCallException's own "only fires on the success path"
+// contract). Direct generalization of the pre-redesign ChainTeardown, from
+// "one trampoline's own ctx chain" to "the whole explicit call stack."
+void teardownVmCallStackDownTo(Evaluator& ev, size_t floor) {
+    while (ev.vmCallStack_.size() > floor) {
+        std::unique_ptr<VmFrame> frame = std::move(ev.vmCallStack_.back());
+        ev.vmCallStack_.pop_back();
+        std::optional<Evaluator::UserCallHandle> bracket = std::move(ev.vmCallBrackets_.back());
+        ev.vmCallBrackets_.pop_back();
+        while (!frame->ctxChain.empty()) frame->ctxChain.pop_back();
+        // A module frame's own CALLER (Op::CallModule, mirroring
+        // evalModularCall/buildTreeNode) always pushes a treeStack_
+        // accumulator for it before pushing this frame -- normally popped
+        // by this same frame's own completion (driveVm's completion
+        // branch); on the exception path that never runs, so it has to
+        // happen here instead, exactly like buildTreeNode's own
+        // catch(...) { treeStack_.pop_back(); throw; }.
+        if (frame->ownsModuleSplice) ev.treeStack_.pop_back();
+        if (bracket) ev.exitUserCallException(*bracket);
+        ev.releaseVmFrame(std::move(frame));
+    }
+}
+
+// The driver -- see this project's own session notes for the full
+// "explicit frame stack, not the C++ call stack" rationale. Services
+// ev.vmCallStack_ down to (but not including) `floor`, returning the
+// value the frame originally AT `floor + 1` (i.e. whichever frame the
+// caller just pushed before calling this) produced. Every OTHER frame
+// this loop itself pushes (a non-tail Op::CallFn/CallDynamic to another
+// compiled function) is fully serviced -- pushed, run, popped, its value
+// folded into its own parent's operand stack -- before this function
+// returns; only the floor frame's own result escapes to the caller.
+Value driveVm(Evaluator& ev, size_t floor) {
+    Value finalResult;
+    try {
+        while (ev.vmCallStack_.size() > floor) {
+            VmFrame& f = *ev.vmCallStack_.back();
+            if (f.pc >= f.code->size()) {
+                // A module chunk produces nothing on the stack at all --
+                // its whole effect already landed in treeStack_ as a side
+                // effect of running its own body (Op::CallModule/
+                // NativeStatement). `result` stays Value{} for one; a
+                // function chunk's own completion is unchanged.
+                const bool isModule = f.chunk->isModule;
+                Value result = (!isModule && !f.stack.empty()) ? std::move(f.stack.back()) : Value{};
+                const bool isFloorFrame = ev.vmCallStack_.size() == floor + 1;
+                std::unique_ptr<VmFrame> finished = std::move(ev.vmCallStack_.back());
+                ev.vmCallStack_.pop_back();
+                std::optional<Evaluator::UserCallHandle> bracket = std::move(ev.vmCallBrackets_.back());
+                ev.vmCallBrackets_.pop_back();
+                const std::string finishedName = finished->logicalName;
+                const bool ownsModuleSplice = finished->ownsModuleSplice;
+                const std::uint64_t moduleRandsBefore = finished->moduleRandsBefore;
+                const oscad::ASTNode* moduleSpliceCallNode = finished->moduleSpliceCallNode;
+                while (!finished->ctxChain.empty()) finished->ctxChain.pop_back();
+                // Module frames never fire returnHook (native evalUserModule
+                // never did either -- a module call has no "return value"
+                // the debugger reports).
+                if (bracket) ev.exitUserCallSuccess(finishedName, *bracket, result, /*fireReturnHook=*/!isModule);
+                ev.releaseVmFrame(std::move(finished));
+                if (isModule && ownsModuleSplice) {
+                    std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
+                    ev.treeStack_.pop_back();
+                    ev.spliceModuleChildren(std::move(children), moduleRandsBefore, *moduleSpliceCallNode);
+                }
+                if (isFloorFrame) {
+                    finalResult = std::move(result); // unused by a module caller (runCompiledModuleBody ignores it)
+                    break;
+                }
+                if (!isModule) ev.vmCallStack_.back()->stack.push_back(std::move(result));
+                ++ev.vmCallStack_.back()->pc;
+                continue;
+            }
+
+            const Instruction& ins = (*f.code)[f.pc];
+            EvalContext& ctx = f.ctxChain.back();
+            switch (ins.op) {
+                case Op::PushConst:
+                    f.stack.push_back(f.chunk->constants[static_cast<size_t>(ins.a)]);
+                    ++f.pc;
+                    break;
+                case Op::PushBool:
+                    f.stack.push_back(Value{ins.a != 0});
+                    ++f.pc;
+                    break;
+                case Op::LoadLocal:
+                    f.stack.push_back(f.slots[static_cast<size_t>(ins.a)]);
+                    ++f.pc;
+                    break;
+                case Op::StoreLocal: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.slots[static_cast<size_t>(ins.a)] = std::move(v);
+                    ++f.pc;
+                    break;
+                }
+                case Op::StoreLocalAndLet: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.slots[static_cast<size_t>(ins.a)] = v;
+                    ctx.let_->set(f.chunk->names[static_cast<size_t>(ins.b)], std::move(v));
+                    ++f.pc;
+                    break;
+                }
+                case Op::LoadDyn: {
+                    const std::string& name = f.chunk->names[static_cast<size_t>(ins.a)];
+                    if (const Value* v = ctx.let_->find(name)) {
+                        f.stack.push_back(*v);
+                    } else if (const Value* v = ctx.dyn->find(name)) {
+                        f.stack.push_back(*v);
+                    } else {
+                        f.stack.push_back(Value{});
+                    }
+                    ++f.pc;
+                    break;
+                }
+                case Op::StoreDyn: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    const std::string& name = f.chunk->names[static_cast<size_t>(ins.a)];
+                    ctx.dyn->set(name, v);
+                    ctx.dynExplicit->set(name, true);
+                    ++f.pc;
+                    break;
+                }
+                case Op::LoadFree:
+                    f.stack.push_back(ev.evalIdentifier(f.chunk->names[static_cast<size_t>(ins.a)], ins.pos, ctx, true));
+                    ++f.pc;
+                    break;
+                case Op::LoadFreeNoWarn:
+                    f.stack.push_back(ev.evalIdentifier(f.chunk->names[static_cast<size_t>(ins.a)], ins.pos, ctx, false));
+                    ++f.pc;
+                    break;
+                case Op::LoadUpvalue: {
+                    const CompiledChunk::UpvalueRef& uv = f.chunk->upvalues[static_cast<size_t>(ins.a)];
+                    const Value* v = ev.findUpvalue(uv.targetDecl, uv.slot);
+                    if (!v) v = ctx.let_->find(uv.name);
+                    f.stack.push_back(v ? *v : Value{});
+                    ++f.pc;
+                    break;
+                }
+                case Op::MakeClosure: {
+                    const CompiledChunk::ClosureSite& site = f.chunk->closureSites[static_cast<size_t>(ins.a)];
+                    auto capturedTrail = TrailView<Value>::makeRoot();
+                    std::vector<const std::string*> selfNames;
+                    for (const auto& cap : site.captures) {
+                        if (cap.isSelfReference) {
+                            selfNames.push_back(&cap.name);
+                            continue;
+                        }
+                        if (cap.targetDecl == f.chunk->selfDecl) {
+                            capturedTrail->set(cap.name, f.slots[static_cast<size_t>(cap.slot)]);
+                            continue;
+                        }
+                        const Value* v = ev.findUpvalue(cap.targetDecl, cap.slot);
+                        if (!v) v = ctx.let_->find(cap.name);
+                        capturedTrail->set(cap.name, v ? *v : Value{});
+                    }
+                    auto closure = std::make_shared<const Closure>(Closure{site.node, capturedTrail});
+                    for (const std::string* selfName : selfNames) {
+                        capturedTrail->set(*selfName, Value{closure});
+                    }
+                    f.stack.push_back(Value{std::move(closure)});
+                    ++f.pc;
+                    break;
+                }
+                case Op::PatchClosureCapture: {
+                    const Value& consumerVal = f.slots[static_cast<size_t>(ins.a)];
+                    if (const auto* closurePtr = std::get_if<ClosurePtr>(&consumerVal); closurePtr && *closurePtr) {
+                        if (auto trail = capturedLetTrail(**closurePtr)) {
+                            trail->set(f.chunk->names[static_cast<size_t>(ins.b)], f.slots[static_cast<size_t>(ins.c)]);
+                        }
+                    }
+                    ++f.pc;
+                    break;
+                }
+                case Op::Range: {
+                    Value step = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    Value end = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    Value start = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.stack.push_back(ev.applyRange(start, end, step));
+                    ++f.pc;
+                    break;
+                }
+                case Op::Index: {
+                    Value idx = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    Value obj = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.stack.push_back(ev.applyIndexAccess(obj, idx));
+                    ++f.pc;
+                    break;
+                }
+                case Op::Member: {
+                    Value obj = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.stack.push_back(ev.applyMemberAccess(obj, f.chunk->names[static_cast<size_t>(ins.a)]));
+                    ++f.pc;
+                    break;
+                }
+                case Op::UnaryOp: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.stack.push_back(ev.applyUnaryOp(static_cast<oscad::NodeKind>(ins.a), v, *ins.pos));
+                    ++f.pc;
+                    break;
+                }
+                case Op::BinaryOp: {
+                    Value b = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    Value a = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.stack.push_back(ev.applyBinaryOp(static_cast<oscad::NodeKind>(ins.a), a, b, *ins.pos));
+                    ++f.pc;
+                    break;
+                }
+                case Op::Jump:
+                    f.pc = static_cast<size_t>(ins.a);
+                    break;
+                case Op::JumpIfFalse: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.pc = !truthy(v) ? static_cast<size_t>(ins.a) : f.pc + 1;
+                    break;
+                }
+                case Op::JumpIfTrue: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.pc = truthy(v) ? static_cast<size_t>(ins.a) : f.pc + 1;
+                    break;
+                }
+                case Op::OpenLocalScope: {
+                    for (int i = 0; i < ins.b; ++i) f.slots[static_cast<size_t>(ins.a + i)] = Value{};
+                    ++f.pc;
+                    break;
+                }
+                case Op::BuildList: {
+                    const size_t count = static_cast<size_t>(ins.a);
+                    std::vector<Value> items(count);
+                    for (size_t i = 0; i < count; ++i) {
+                        items[count - 1 - i] = std::move(f.stack.back());
+                        f.stack.pop_back();
+                    }
+                    f.stack.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(items)})});
+                    ++f.pc;
+                    break;
+                }
+                case Op::AccumOpen:
+                    f.accumStack.emplace_back();
+                    ++f.pc;
+                    break;
+                case Op::AccumAppendOne: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    f.accumStack.back().push_back(std::move(v));
+                    ++f.pc;
+                    break;
+                }
+                case Op::AccumAppendEach: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    appendEachInto(f.accumStack.back(), v);
+                    ++f.pc;
+                    break;
+                }
+                case Op::AccumClose: {
+                    std::vector<Value> items = std::move(f.accumStack.back());
+                    f.accumStack.pop_back();
+                    f.stack.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(items)})});
+                    ++f.pc;
+                    break;
+                }
+                case Op::AccumMergeEach: {
+                    std::vector<Value> inner = std::move(f.accumStack.back());
+                    f.accumStack.pop_back();
+                    for (const Value& item : inner) appendEachInto(f.accumStack.back(), item);
+                    ++f.pc;
+                    break;
+                }
+                case Op::IterMaterialize: {
+                    Value v = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    IterList& il = f.iterLists[static_cast<size_t>(ins.a)];
+                    il.values = expandIterable(v, [&](size_t count) {
+                        ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")",
+                                ins.pos);
+                    });
+                    il.index = 0;
+                    il.total = il.values.size();
+                    ++f.pc;
+                    break;
+                }
+                case Op::IterReset: {
+                    f.iterLists[static_cast<size_t>(ins.a)].index = 0;
+                    ++f.pc;
+                    break;
+                }
+                case Op::IterNext: {
+                    IterList& il = f.iterLists[static_cast<size_t>(ins.b)];
+                    if (il.index < il.total) {
+                        f.slots[static_cast<size_t>(ins.a)] = il.values[il.index];
+                        ++il.index;
+                        ++f.pc;
+                    } else {
+                        f.pc = static_cast<size_t>(ins.c);
+                    }
+                    break;
+                }
+                case Op::CheckIterLimit: {
+                    double count = std::get<double>(f.slots[static_cast<size_t>(ins.a)]) + 1.0;
+                    f.slots[static_cast<size_t>(ins.a)] = Value{count};
+                    if (count > static_cast<double>(ins.b)) {
+                        ev.error("C-style for loop exceeded maximum iteration count", *ins.node);
+                    }
+                    ++f.pc;
+                    break;
+                }
+                case Op::CallFn: {
+                    const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
+                    const size_t argCount = static_cast<size_t>(ins.b);
+                    std::vector<Value> args(argCount);
+                    for (size_t i = 0; i < argCount; ++i) {
+                        args[argCount - 1 - i] = std::move(f.stack.back());
+                        f.stack.pop_back();
+                    }
+                    if (site.isImport) {
+                        CallArgs callArgs = buildCallArgs(site, args, argCount);
+                        f.stack.push_back(importAsValue(ev, callArgs, *site.callNode));
+                        ++f.pc;
+                    } else if (site.isBuiltin && site.calleeName == "object") {
+                        std::vector<std::pair<std::optional<std::string>, Value>> pairs;
+                        pairs.reserve(argCount);
+                        for (size_t i = 0; i < argCount; ++i) pairs.emplace_back(site.argNames[i], std::move(args[i]));
+                        f.stack.push_back(mergeObjectArgs(pairs));
+                        ++f.pc;
+                    } else if (site.isBuiltin) {
+                        CallArgs callArgs = buildCallArgs(site, args, argCount);
+                        f.stack.push_back(evalBuiltinFunction(ev, site.calleeName, callArgs, *site.callNode));
+                        ++f.pc;
+                    } else {
+                        BoundArgs bound = buildBoundArgs(site, args, argCount, site.decl->parameters);
+                        const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
+                        if (calleeChunk) {
+                            const oscad::Scope* fnScope = site.decl->scope() ? site.decl->scope() : ctx.scope;
+                            pushBracketedCallFrame(ev, *calleeChunk, *site.decl, *site.decl->expr, site.calleeName,
+                                                    std::move(bound), ctx, fnScope, nullptr, &site.callNode->position());
+                            // f.pc deliberately NOT advanced -- resumes when the
+                            // pushed frame completes (see driveVm's own
+                            // completion branch, above).
+                        } else {
+                            Value result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound), ctx,
+                                                                          &site.callNode->position());
+                            f.stack.push_back(std::move(result));
+                            ++f.pc;
+                        }
+                    }
+                    break;
+                }
+                case Op::CallDynamic: {
+                    const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
+                    const size_t argCount = static_cast<size_t>(ins.b);
+                    std::vector<Value> args(argCount);
+                    for (size_t i = 0; i < argCount; ++i) {
+                        args[argCount - 1 - i] = std::move(f.stack.back());
+                        f.stack.pop_back();
+                    }
+                    Value callee = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
+                        const Closure& closure = **closurePtr;
+                        const oscad::FunctionLiteral& funcNode = *closure.node;
+                        BoundArgs bound = buildBoundArgs(site, args, argCount, funcNode.parameters);
+                        const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupCompiledLiteralChunk(funcNode) : nullptr;
+                        if (calleeChunk) {
+                            const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
+                            pushBracketedCallFrame(ev, *calleeChunk, funcNode, *funcNode.body, "<function literal>",
+                                                    std::move(bound), ctx, fnScope, capturedLetTrail(closure), ins.pos);
+                        } else {
+                            Value result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
+                            f.stack.push_back(std::move(result));
+                            ++f.pc;
+                        }
+                    } else {
+                        if (!site.calleeName.empty()) ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
+                        f.stack.push_back(Value{});
+                        ++f.pc;
+                    }
+                    break;
+                }
+                case Op::CallFnTail: {
+                    const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
+                    const size_t argCount = static_cast<size_t>(ins.b);
+                    std::vector<Value> args(argCount);
+                    for (size_t i = 0; i < argCount; ++i) {
+                        args[argCount - 1 - i] = std::move(f.stack.back());
+                        f.stack.pop_back();
+                    }
+                    BoundArgs bound = buildBoundArgs(site, args, argCount, site.decl->parameters);
+                    // Tail-hop-in-place requires f.hopEligible -- a frame
+                    // that's call-boundary-free (statement expression,
+                    // assignment block, parameter default) has no
+                    // callStack_ entry that's genuinely its own, so
+                    // recordTailCallHop below (which mutates
+                    // callStack_.back()) would corrupt whatever UNRELATED
+                    // call happens to be on top of callStack_ instead --
+                    // see VmFrame::hopEligible's own doc comment for why
+                    // this is NOT the same test as "did THIS frame push its
+                    // own vmCallBrackets_ entry" (runCompiledFunction's
+                    // initial frame is bare in that sense but still
+                    // hop-eligible). Falls through to the exact same
+                    // push-or-native-fallback behavior as Op::CallFn in that
+                    // case -- still gets the full explicit-stack treatment if
+                    // the callee compiles, just as a genuine new logical call
+                    // rather than a hop, mirroring today's `tailOut==nullptr`
+                    // behavior for these same bare call shapes exactly.
+                    const bool thisFrameBracketed = f.hopEligible;
+                    std::optional<EvalContext> hopCtx =
+                        thisFrameBracketed ? ev.isolatedCallCtxFor(*site.decl, ctx) : std::nullopt;
+                    const CompiledChunk* calleeChunk =
+                        (thisFrameBracketed && hopCtx && ev.useBytecodeVm()) ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
+                    if (calleeChunk) {
+                        ev.recordTailCallHop(site.calleeName, *site.decl, &site.callNode->position(), f.tailHopGuard);
+                        f.chunk = calleeChunk;
+                        f.code = &calleeChunk->bodyCode;
+                        f.pc = 0;
+                        f.slots.assign(static_cast<size_t>(calleeChunk->numSlots), Value{});
+                        f.stack.clear();
+                        f.bound.assign(calleeChunk->params.size(), false);
+                        f.accumStack.clear();
+                        f.iterLists.assign(static_cast<size_t>(calleeChunk->numIterLists), IterList{});
+                        f.ctxChain.push_back(std::move(*hopCtx));
+                        bindBoundArgsIntoFrame(*calleeChunk, bound, f);
+                        applyCompiledDefaultsToFrame(ev, *calleeChunk, f);
+                        // continue via the outer while -- re-fetches this
+                        // same (now-mutated) frame from its new pc=0.
+                    } else {
+                        const CompiledChunk* fallbackChunk =
+                            ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
+                        if (fallbackChunk) {
+                            const oscad::Scope* fnScope = site.decl->scope() ? site.decl->scope() : ctx.scope;
+                            pushBracketedCallFrame(ev, *fallbackChunk, *site.decl, *site.decl->expr, site.calleeName,
+                                                    std::move(bound), ctx, fnScope, nullptr, &site.callNode->position());
+                        } else {
+                            Value result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound), ctx,
+                                                                          &site.callNode->position());
+                            f.stack.push_back(std::move(result));
+                            ++f.pc;
+                        }
+                    }
+                    break;
+                }
+                case Op::CallDynamicTail: {
+                    const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
+                    const size_t argCount = static_cast<size_t>(ins.b);
+                    std::vector<Value> args(argCount);
+                    for (size_t i = 0; i < argCount; ++i) {
+                        args[argCount - 1 - i] = std::move(f.stack.back());
+                        f.stack.pop_back();
+                    }
+                    Value callee = std::move(f.stack.back());
+                    f.stack.pop_back();
+                    if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
+                        const Closure& closure = **closurePtr;
+                        const oscad::FunctionLiteral& funcNode = *closure.node;
+                        BoundArgs bound = buildBoundArgs(site, args, argCount, funcNode.parameters);
+                        const bool thisFrameBracketed = f.hopEligible;
+                        std::optional<EvalContext> hopCtx = thisFrameBracketed
+                                                                 ? ev.isolatedCallCtxFor(funcNode, ctx, capturedLetTrail(closure))
+                                                                 : std::nullopt;
+                        const CompiledChunk* calleeChunk = (thisFrameBracketed && hopCtx && ev.useBytecodeVm())
+                                                                ? ev.lookupCompiledLiteralChunk(funcNode)
+                                                                : nullptr;
+                        if (calleeChunk) {
+                            ev.recordTailCallHop("<function literal>", funcNode, ins.pos, f.tailHopGuard);
+                            f.chunk = calleeChunk;
+                            f.code = &calleeChunk->bodyCode;
+                            f.pc = 0;
+                            f.slots.assign(static_cast<size_t>(calleeChunk->numSlots), Value{});
+                            f.stack.clear();
+                            f.bound.assign(calleeChunk->params.size(), false);
+                            f.accumStack.clear();
+                            f.iterLists.assign(static_cast<size_t>(calleeChunk->numIterLists), IterList{});
+                            f.ctxChain.push_back(std::move(*hopCtx));
+                            bindBoundArgsIntoFrame(*calleeChunk, bound, f);
+                            applyCompiledDefaultsToFrame(ev, *calleeChunk, f);
+                        } else {
+                            const CompiledChunk* fallbackChunk =
+                                ev.useBytecodeVm() ? ev.lookupCompiledLiteralChunk(funcNode) : nullptr;
+                            if (fallbackChunk) {
+                                const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
+                                pushBracketedCallFrame(ev, *fallbackChunk, funcNode, *funcNode.body, "<function literal>",
+                                                        std::move(bound), ctx, fnScope, capturedLetTrail(closure), ins.pos);
+                            } else {
+                                Value result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
+                                f.stack.push_back(std::move(result));
+                                ++f.pc;
+                            }
+                        }
+                    } else {
+                        if (!site.calleeName.empty()) ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
+                        f.stack.push_back(Value{});
+                        ++f.pc;
+                    }
+                    break;
+                }
+                case Op::Echo: {
+                    const CompiledChunk::EchoSite& site = f.chunk->echoSites[static_cast<size_t>(ins.a)];
+                    const size_t argCount = static_cast<size_t>(ins.b);
+                    std::vector<std::pair<std::optional<std::string>, Value>> pairs(argCount);
+                    for (size_t i = 0; i < argCount; ++i) {
+                        pairs[argCount - 1 - i] = {site.argNames[argCount - 1 - i], std::move(f.stack.back())};
+                        f.stack.pop_back();
+                    }
+                    ev.emitEcho(pairs);
+                    ++f.pc;
+                    break;
+                }
+                case Op::AssertFail: {
+                    const bool hasMessage = ins.a == 1;
+                    std::string err =
+                        "Assertion '" + std::get<std::string>(f.chunk->constants[static_cast<size_t>(ins.b)]) + "' failed";
+                    if (hasMessage) {
+                        Value msg = std::move(f.stack.back());
+                        f.stack.pop_back();
+                        const std::string* s = std::get_if<std::string>(&msg);
+                        err += ": \"" + (s ? *s : fmtValue(msg)) + "\"";
+                    }
+                    ev.error(err, *ins.node, "assert");
+                }
+                case Op::CallModule: {
+                    const CompiledChunk::ModuleCallSite& site = f.chunk->moduleCallSites[static_cast<size_t>(ins.a)];
+                    BoundArgs bound = ev.bindArgs(site.decl->parameters, site.callNode->arguments, ctx);
+                    EvalContext childCtx = ev.buildModuleChildCtx(*site.decl, *site.callNode, ctx, std::move(bound));
+                    ev.treeStack_.emplace_back();
+                    const std::uint64_t randsBefore = ev.randsCallCount();
+                    const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupOrCompileModuleChunk(*site.decl) : nullptr;
+                    if (calleeChunk) {
+                        pushBracketedModuleFrame(ev, *calleeChunk, *site.decl, childCtx, &site.callNode->position(),
+                                                  randsBefore, *site.callNode);
+                        // f.pc deliberately NOT advanced -- resumes when the
+                        // pushed frame completes (see driveVm's own module
+                        // completion branch, above).
+                    } else {
+                        ev.runModuleBodyNative(*site.decl, childCtx, &site.callNode->position());
+                        std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
+                        ev.treeStack_.pop_back();
+                        ev.spliceModuleChildren(std::move(children), randsBefore, *site.callNode);
+                        ++f.pc;
+                    }
+                    break;
+                }
+                case Op::NativeStatement: {
+                    const oscad::ASTNode* stmt = f.chunk->nativeStatements[static_cast<size_t>(ins.a)];
+                    EvalContext childCtx = ctx.withScope(stmt->scope() ? stmt->scope() : ctx.scope);
+                    // Mirrors evalChildren's own per-statement loop exactly,
+                    // including its ModularLet exclusion (evalLetBlock fires
+                    // its own per-assignment checkDebug internally).
+                    if (stmt->kind() != oscad::NodeKind::ModularLet) ev.checkDebug(*stmt, childCtx);
+                    ev.evalStatement(*stmt, childCtx);
+                    ++f.pc;
+                    break;
+                }
+                case Op::NativeCondJumpIfFalse: {
+                    const oscad::Expression* cond = f.chunk->nativeExprs[static_cast<size_t>(ins.a)];
+                    const bool truthyVal = truthy(ev.evalExprMaybeCompiled(*cond, ctx));
+                    f.pc = truthyVal ? f.pc + 1 : static_cast<size_t>(ins.b);
+                    break;
+                }
+                case Op::NativeCheckDebugExprLevel: {
+                    const oscad::ASTNode* marker = f.chunk->nativeStatements[static_cast<size_t>(ins.a)];
+                    ev.checkDebug(*marker, ctx, /*forced=*/false, /*exprLevel=*/true);
+                    ++f.pc;
+                    break;
+                }
+                case Op::NativeIterMaterialize: {
+                    const oscad::Expression* rangeExpr = f.chunk->nativeExprs[static_cast<size_t>(ins.a)];
+                    Value v = ev.evalExprMaybeCompiled(*rangeExpr, ctx);
+                    IterList& il = f.iterLists[static_cast<size_t>(ins.b)];
+                    il.values = expandIterable(v, [&](size_t count) {
+                        ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")",
+                                ins.pos);
+                    });
+                    il.index = 0;
+                    il.total = il.values.size();
+                    ++f.pc;
+                    break;
+                }
+                case Op::ForIterNext: {
+                    IterList& il = f.iterLists[static_cast<size_t>(ins.b)];
+                    if (il.index < il.total) {
+                        // Fresh child ctx per iteration -- mirrors evalFor's
+                        // own parentCtx.childCtx(...) exactly (see
+                        // Op::ForIterNext's own doc comment, bytecode.hpp,
+                        // for why reusing the SAME ctx across iterations
+                        // would be observably wrong, not just slower).
+                        EvalContext iterCtx = ctx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
+                        iterCtx.let_->set(f.chunk->names[static_cast<size_t>(ins.a)], il.values[il.index]);
+                        ++il.index;
+                        f.ctxChain.push_back(std::move(iterCtx));
+                        ev.checkDebug(*ins.node, f.ctxChain.back());
+                        ++f.pc;
+                    } else {
+                        f.pc = static_cast<size_t>(ins.c);
+                    }
+                    break;
+                }
+                case Op::ForIterEnd: {
+                    f.ctxChain.pop_back();
+                    f.pc = static_cast<size_t>(ins.a);
+                    break;
+                }
+            }
+        }
+    } catch (...) {
+        teardownVmCallStackDownTo(ev, floor);
+        throw;
+    }
+    return finalResult;
+}
+
 } // namespace
 
-Value runCompiledFunctionTrampoline(Evaluator& ev, const CompiledChunk& chunk,
-                                     const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
-                                     EvalContext& callerCtx, EvalContext& childCtx) {
-    std::vector<EvalContext> chain{childCtx};
-    ChainTeardown teardown{chain};
-    TailCallRequest req;
-    Value result = runCompiledFunction(ev, chunk, arguments, callerCtx, chain.back(), &req);
-    unsigned recursionGuard = 0;
-    while (req.decl != nullptr || req.literal != nullptr) {
-        const oscad::ASTNode& calleeDecl =
-            req.decl ? static_cast<const oscad::ASTNode&>(*req.decl) : static_cast<const oscad::ASTNode&>(*req.literal);
-        ev.recordTailCallHop(req.name, calleeDecl, req.callPos, recursionGuard);
-        const CompiledChunk* curChunk =
-            req.decl ? ev.lookupOrCompileChunk(*req.decl) : ev.lookupCompiledLiteralChunk(*req.literal);
-        BoundArgs bound = std::move(req.bound);
-        chain.push_back(std::move(req.ctx));
-        TailCallRequest next;
-        result = runCompiledFunctionFromBound(ev, *curChunk, bound, chain.back(), &next);
-        req = std::move(next);
-    }
-    return result;
+Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
+                          const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& callerCtx,
+                          EvalContext& childCtx) {
+    auto frame = ev.acquireVmFrame();
+    frame->chunk = &chunk;
+    frame->code = &chunk.bodyCode;
+    frame->pc = 0;
+    frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
+    frame->stack.clear();
+    frame->bound.assign(chunk.params.size(), false);
+    frame->accumStack.clear();
+    frame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+    frame->ctxChain.clear();
+    frame->ctxChain.push_back(childCtx);
+    frame->tailHopGuard = 0;
+    frame->logicalName.clear();
+    frame->hopEligible = true; // caller's own enterUserCall already made
+                                // callStack_.back() this call -- see
+                                // VmFrame::hopEligible.
+    bindAstArgsIntoFrame(ev, chunk, arguments, callerCtx, *frame);
+    applyCompiledDefaultsToFrame(ev, chunk, *frame);
+    const size_t floor = ev.vmCallStack_.size();
+    ev.vmCallStack_.push_back(std::move(frame));
+    ev.vmCallBrackets_.emplace_back(std::nullopt);
+    return driveVm(ev, floor);
 }
 
-Value runCompiledFunctionFromBoundTrampoline(Evaluator& ev, const CompiledChunk& chunk, const BoundArgs& bound,
-                                              EvalContext& childCtx) {
-    std::vector<EvalContext> chain{childCtx};
-    ChainTeardown teardown{chain};
-    TailCallRequest req;
-    Value result = runCompiledFunctionFromBound(ev, chunk, bound, chain.back(), &req);
-    unsigned recursionGuard = 0;
-    while (req.decl != nullptr || req.literal != nullptr) {
-        const oscad::ASTNode& calleeDecl =
-            req.decl ? static_cast<const oscad::ASTNode&>(*req.decl) : static_cast<const oscad::ASTNode&>(*req.literal);
-        ev.recordTailCallHop(req.name, calleeDecl, req.callPos, recursionGuard);
-        const CompiledChunk* curChunk =
-            req.decl ? ev.lookupOrCompileChunk(*req.decl) : ev.lookupCompiledLiteralChunk(*req.literal);
-        BoundArgs nextBound = std::move(req.bound);
-        chain.push_back(std::move(req.ctx));
-        TailCallRequest next;
-        result = runCompiledFunctionFromBound(ev, *curChunk, nextBound, chain.back(), &next);
-        req = std::move(next);
-    }
-    return result;
+Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, const BoundArgs& bound,
+                                    EvalContext& childCtx) {
+    auto frame = ev.acquireVmFrame();
+    frame->chunk = &chunk;
+    frame->code = &chunk.bodyCode;
+    frame->pc = 0;
+    frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
+    frame->stack.clear();
+    frame->bound.assign(chunk.params.size(), false);
+    frame->accumStack.clear();
+    frame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+    frame->ctxChain.clear();
+    frame->ctxChain.push_back(childCtx);
+    frame->tailHopGuard = 0;
+    frame->logicalName.clear();
+    frame->hopEligible = true; // caller's own enterUserCall already made
+                                // callStack_.back() this call -- see
+                                // VmFrame::hopEligible.
+    bindBoundArgsIntoFrame(chunk, bound, *frame);
+    applyCompiledDefaultsToFrame(ev, chunk, *frame);
+    const size_t floor = ev.vmCallStack_.size();
+    ev.vmCallStack_.push_back(std::move(frame));
+    ev.vmCallBrackets_.emplace_back(std::nullopt);
+    return driveVm(ev, floor);
+}
+
+Value runCompiledExprChunk(Evaluator& ev, const CompiledChunk& chunk, EvalContext& ctx) {
+    // A fresh letChildCtx(), not `ctx` directly -- Op::OpenLocalScope (a
+    // nested let()'s own compiled entry) only resets SLOTS, never opens a
+    // new ctx.dyn trail level: a `let($fn=...)` inside the expression
+    // writes straight into whatever dyn level is current. That's harmless
+    // for a genuine call frame (each of THOSE already derives its own
+    // fresh, call-scoped childCtx via callCtxFor), but this wrapper is
+    // handed the CALLER's own ctx directly (a statement-context expression
+    // runs in the same scope as its statement, not a new call boundary),
+    // so without this, a `$fn` override would leak into every statement
+    // sharing `ctx` AFTER this one. Caught for real this session:
+    // `v1 = let($fn=55) f(); v2 = f();` returned 55 for v2 too.
+    const size_t floor = ev.vmCallStack_.size();
+    pushBareFrame(ev, chunk, chunk.bodyCode, ctx.letChildCtx());
+    return driveVm(ev, floor);
+}
+
+void runCompiledAssignmentBlock(Evaluator& ev, const CompiledChunk& chunk, EvalContext& ctx) {
+    const size_t floor = ev.vmCallStack_.size();
+    // `ctx` directly -- Op::StoreLocalAndLet/Op::StoreDyn's own writes must
+    // persist into the caller's own scope; see tryCompileAssignmentBlock's
+    // own doc comment (bytecode_compiler.hpp) for why a nested let()'s own
+    // dyn-scoping hazard doesn't apply here (refused at compile time
+    // instead of needing runtime containment).
+    pushBareFrame(ev, chunk, chunk.bodyCode, ctx);
+    driveVm(ev, floor);
+}
+
+void runCompiledModuleBody(Evaluator& ev, const CompiledChunk& chunk, EvalContext& childCtx) {
+    // Bare push -- unlike pushBracketedModuleFrame, this frame's own
+    // splice responsibility belongs to whichever NATIVE evalModularCall
+    // called Evaluator::evalUserModule in the first place (it already
+    // pushed treeStack_'s own accumulator before calling in here) --
+    // mirrors runCompiledFunction's own bare/bracket-owned-by-caller split
+    // exactly (VmFrame::ownsModuleSplice's own doc comment, bytecode_vm.hpp).
+    auto frame = ev.acquireVmFrame();
+    frame->chunk = &chunk;
+    frame->code = &chunk.bodyCode;
+    frame->pc = 0;
+    frame->slots.clear();
+    frame->stack.clear();
+    frame->bound.clear();
+    frame->accumStack.clear();
+    frame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+    frame->ctxChain.clear();
+    frame->ctxChain.push_back(childCtx);
+    frame->tailHopGuard = 0;
+    frame->logicalName.clear();
+    frame->ownsModuleSplice = false;
+    frame->moduleRandsBefore = 0;
+    frame->moduleSpliceCallNode = nullptr;
+    const size_t floor = ev.vmCallStack_.size();
+    ev.vmCallStack_.push_back(std::move(frame));
+    ev.vmCallBrackets_.emplace_back(std::nullopt);
+    driveVm(ev, floor);
 }
 
 } // namespace oscadeval

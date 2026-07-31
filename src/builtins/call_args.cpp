@@ -47,10 +47,10 @@ CallArgs resolveArgs(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Arg
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::PositionalArgument) {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
-            result.positional.emplace_back(pos++, ev.evalExpr(*a.expr, ctx));
+            result.positional.emplace_back(pos++, ev.evalExprMaybeCompiled(*a.expr, ctx));
         } else if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-            result.named.emplace_back(a.name->name, ev.evalExpr(*a.expr, ctx));
+            result.named.emplace_back(a.name->name, ev.evalExprMaybeCompiled(*a.expr, ctx));
         }
     }
     return result;

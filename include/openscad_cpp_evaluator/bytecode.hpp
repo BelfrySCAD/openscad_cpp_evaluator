@@ -12,6 +12,9 @@
 namespace oscad {
 class FunctionDeclaration;
 class FunctionLiteral;
+class ModuleDeclaration;
+class ModularCall;
+class Expression;
 } // namespace oscad
 
 namespace oscadeval {
@@ -37,7 +40,33 @@ enum class Op {
     StoreLocal,     // a = slot index (pops)
     LoadDyn,        // a = name pool index ($-prefixed)
     StoreDyn,       // a = name pool index (pops; also marks dynExplicit)
-    LoadFree,       // a = name pool index -- Evaluator::evalIdentifier fallback
+    LoadFree,       // a = name pool index -- Evaluator::evalIdentifier fallback (warnIfUndef=true)
+    // Same as LoadFree, but Evaluator::evalIdentifier's warnIfUndef=false --
+    // only ever emitted for a PrimaryCall's own callee probe (bytecode_
+    // compiler.cpp's PrimaryCall case), mirroring evalFunctionCall's own
+    // `evalIdentifier(leftId->name, ..., /*warnIfUndef=*/false)` fallback
+    // exactly: probing whether a bare identifier resolves to a callable
+    // Closure value shouldn't itself warn "unknown variable" when it
+    // doesn't -- Op::CallDynamic's own runtime handler already warns
+    // "unknown function" once the probe comes back non-Closure, so using
+    // plain LoadFree here doubled that up into two warnings for one
+    // genuinely-unknown callee.
+    LoadFreeNoWarn, // a = name pool index
+    // a = slot index, b = name pool index (pops). Only emitted for a
+    // compiled ASSIGNMENT BLOCK (Evaluator::tryCompileAssignmentBlock,
+    // user_calls.cpp -- a run of sibling `name = expr;` statements sharing
+    // one scope, exactly what Evaluator::evalChildren already isolates as
+    // its own `assignments` sub-list before any non-assignment statement
+    // runs). Stores into BOTH the slot (so a LATER sibling assignment in
+    // the SAME batch can read this one back via a fast LoadLocal, mirroring
+    // how LetOp's own bindings already work) AND ctx.let_ (so code OUTSIDE
+    // this compiled batch -- a later non-assignment statement, a nested
+    // block, a module call -- still sees it the ordinary way, since this
+    // batch's own slots are invisible once it returns). Plain StoreLocal
+    // alone would lose that outer visibility entirely; plain "store to
+    // let_ only" would lose the fast intra-batch slot reads a batch of
+    // assignments exists to buy back in the first place.
+    StoreLocalAndLet,
     Range,          // pops step, pops end, pops start (pushed in that order); pushes applyRange(start, end, step)
     Index,          // pops idx, pops obj, pushes applyIndexAccess(obj, idx)
     Member,         // a = name pool index (member name); pops obj, pushes applyMemberAccess(obj, name)
@@ -210,6 +239,101 @@ enum class Op {
     // which recomputes this on every failing call). pos/node: same
     // Evaluator::error() TRACE-walk need CheckIterLimit already has.
     AssertFail,
+
+    // -- Module-body compilation (Stage 2) --------------------------------
+    // A call to a user module resolved to a specific ModuleDeclaration AT
+    // COMPILE TIME (see CompiledChunk::ModuleCallSite) -- the module-side
+    // analog of Op::CallFn. a = index into CompiledChunk::moduleCallSites.
+    // Arguments are NOT pre-pushed onto the operand stack the way CallFn's
+    // are (bindArgs runs directly against site.callNode->arguments at
+    // runtime instead) -- module-call argument evaluation was never the
+    // recursion-safety target here, so there's no need to teach the
+    // compiler a separate "push each arg" step just for this. Produces no
+    // stack Value at all: its effect is entirely the side effect of
+    // splicing (or wrapping into a synthetic "union") whatever CSGNodes
+    // the callee's body produces into the CURRENT treeStack_ frame -- see
+    // Evaluator::spliceModuleChildren's own doc comment (bytecode_vm.cpp)
+    // for why this is always the splice branch, never the "wrap as a
+    // builtin-tagged CSGNode" one evalModularCall's own general form also
+    // has (Op::CallModule only ever targets a resolved USER module, for
+    // which splice is unconditional).
+    CallModule,
+
+    // A single "native passthrough" statement -- assignment, echo, assert,
+    // let-block, modifier wrapper, intersection_for, children(), a builtin
+    // module call, or a user-module call that didn't resolve at compile
+    // time (shadowed, forward-declared, or otherwise not staticaly known)
+    // -- anything compileStatementList doesn't give its own real bytecode.
+    // a = index into CompiledChunk::nativeStatements. Runtime just does
+    // what Evaluator::evalChildren's own per-statement loop already does
+    // for one node: derive childCtx via ctx.withScope(...), checkDebug
+    // (skipped for ModularLet, exactly like evalChildren's own condition
+    // -- ModularLet fires its own per-assignment checkDebug internally),
+    // evalStatement. These are "leaf-shaped" in the sense the Stage 2 plan
+    // means it: whatever native recursion they make (a builtin's own
+    // resolve function walking ITS children, evalLetBlock, etc.) is
+    // bounded by ordinary script structure, not by how deep a recursive
+    // module chain goes -- that risk is fully covered by CallModule/
+    // ForIterNext/the Jump-based if/for control flow instead, regardless
+    // of how many of THESE sit alongside them in the same body.
+    NativeStatement,
+
+    // If/if-else's own condition, evaluated NATIVELY (Evaluator::
+    // evalExprMaybeCompiled -- gets the SAME expression-level compilation
+    // a bare statement-context expression already would, just not folded
+    // into THIS chunk's own instruction stream) rather than compiled
+    // inline -- module-body compilation's job is the STATEMENT-level
+    // control flow (so a recursive module call nested inside doesn't hide
+    // behind a native evalStatement call), not re-deriving expression
+    // compilation tryCompileStatementExpr already does. a = index into
+    // CompiledChunk::nativeExprs, b = jump target on false (mirrors
+    // JumpIfFalse's own semantics, just with a native condition source
+    // instead of a popped stack Value).
+    NativeCondJumpIfFalse,
+
+    // The "entering this branch/iteration" expr-level checkDebug marker
+    // ModularIf/ModularIfElse/ModularFor's own interpreted forms each fire
+    // once (see evalStatement's ModularIf/ModularIfElse cases and evalFor,
+    // stmt_eval.cpp) -- a = index into CompiledChunk::nativeStatements
+    // (reusing that same table; the entry here is whichever ASTNode the
+    // interpreter would have passed to checkDebug -- the branch/body's
+    // own first statement, or the ModularIf/For node itself when that
+    // branch/body is empty).
+    NativeCheckDebugExprLevel,
+
+    // One ModularFor assignment's own RHS range/list expression, evaluated
+    // NATIVELY (same reasoning as NativeCondJumpIfFalse) and materialized
+    // into an IterList exactly like the existing (list-comprehension)
+    // Op::IterMaterialize -- a = index into CompiledChunk::nativeExprs, b
+    // = iterList id.
+    NativeIterMaterialize,
+
+    // Statement-for's own per-iteration advance -- the module-body analog
+    // of Op::IterNext, but binding into ctx.let_ (a real, dynamically-
+    // discoverable statement-scope variable, exactly like the
+    // interpreter's own per-iteration childCtx.let_->set()) instead of a
+    // slot, and -- critically -- pushing a FRESH child EvalContext onto
+    // f.ctxChain for the upcoming iteration rather than mutating the
+    // current one in place: evalFor derives a brand-new childCtx per
+    // iteration (see stmt_eval.cpp), so an ordinary local assignment made
+    // inside the loop body doesn't trip evalAssignment's own "was
+    // assigned on line N but overwritten" warning on iteration 2 onward,
+    // and so a value bound in one iteration never leaks into the next.
+    // a = name-pool index (the loop variable's own name), b = iterList id,
+    // c = jump target on exhaustion (taken WITHOUT pushing a new ctx --
+    // mirrors the cartesian loop simply not entering the body once that
+    // dimension is exhausted). `node` = the Assignment AST node, for the
+    // matching per-iteration checkDebug call (mirrors evalFor's own
+    // `checkDebug(*node.assignments[depth], childCtx)`). Always paired
+    // with a matching Op::ForIterEnd at the bottom of the SAME dimension's
+    // loop body.
+    ForIterNext,
+
+    // Pops the ctx Op::ForIterNext just pushed for the iteration that's
+    // ending (f.ctxChain.pop_back()) and jumps back to that same
+    // ForIterNext instruction to attempt the next one. a = jump target
+    // (the matching ForIterNext's own pc).
+    ForIterEnd,
 };
 
 struct Instruction {
@@ -339,6 +463,33 @@ struct CompiledChunk {
         std::vector<std::optional<std::string>> argNames;
     };
 
+    // One Op::CallModule site -- a ModularCall statically resolved (at
+    // compile time, via the enclosing ModuleDeclaration's own static
+    // scope) to a specific user ModuleDeclaration. Unlike CallSite,
+    // there's no isBuiltin/isImport branch to represent: a callee that
+    // ISN'T a resolved user ModuleDeclaration (a builtin, children(), an
+    // unresolvable name) never gets one of these -- it's compiled as a
+    // NativeStatement instead (see Op::CallModule's own doc comment for
+    // why that's exactly right, not a missed optimization).
+    struct ModuleCallSite {
+        const oscad::ModuleDeclaration* decl = nullptr;
+        const oscad::ModularCall* callNode = nullptr;
+        std::string calleeName;
+    };
+
+    // Every distinct chunk this SPECIFIC CompiledChunk owns is either a
+    // function body (bodyCode is one expression's own instruction stream)
+    // or a module body (bodyCode is a compiled STATEMENT list -- see
+    // tryCompileModuleBody, bytecode_compiler.cpp) -- never both. `params`/
+    // `defaultCode` mean the same thing either way (a ModuleDeclaration's
+    // parameters are shaped identically to a FunctionDeclaration's).
+    // Gates driveVm's own frame-completion branch (bytecode_vm.cpp):a
+    // function frame's completion produces a Value (popped off f.stack);
+    // a module frame's produces nothing on the stack at all -- its whole
+    // effect already landed in treeStack_ as a side effect of running its
+    // own body.
+    bool isModule = false;
+
     // The FunctionDeclaration/FunctionLiteral this chunk's own body was
     // compiled from (bytecode_compiler.cpp's compileFunctionLike sets this
     // to its own `selfDecl` parameter) -- Op::MakeClosure's runtime handler
@@ -357,6 +508,12 @@ struct CompiledChunk {
     std::vector<UpvalueRef> upvalues;
     std::vector<ClosureSite> closureSites;
     std::vector<EchoSite> echoSites;
+    // Module-body-only tables (see Op::CallModule/NativeStatement/
+    // NativeCondJumpIfFalse/NativeCheckDebugExprLevel/NativeIterMaterialize's
+    // own doc comments, above) -- always empty for a function chunk.
+    std::vector<ModuleCallSite> moduleCallSites;
+    std::vector<const oscad::Expression*> nativeExprs;
+    std::vector<const oscad::ASTNode*> nativeStatements;
     int numSlots = 0;
     // Count of distinct ListCompFor-assignment iterLists allocated across
     // this whole chunk (see IterMaterialize/IterReset/IterNext) -- runChunk
