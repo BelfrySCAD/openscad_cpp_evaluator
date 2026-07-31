@@ -221,6 +221,22 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
 }
 
 void Evaluator::evalChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx) {
+    // Whole-LIST compile first (see tryRunCompiledChildren's own doc
+    // comment, evaluator.hpp) -- tries the FULL `children` as one chunk
+    // before falling back to assignments-then-others below. This is what
+    // lets a resolvable module call anywhere in ANY children list --
+    // not just a module/top-level body, but a for-loop's/let-block's own
+    // body, or a builtin's own children (translate()/union()/etc., whose
+    // own resolve function calls this SAME evalChildren internally) --
+    // get real Op::CallModule bytecode instead of always falling through
+    // to the native per-statement loop below. Unconditionally correct
+    // either way since nothing about these statements' observable
+    // behavior differs based on which path ran them (same reasoning as
+    // tryRunCompiledAssignmentBlock's own doc comment, just for the WHOLE
+    // list instead of its own leading assignment run).
+    lastCtx_ = &ctx;
+    if (tryRunCompiledChildren(children, ctx)) return;
+
     // OpenSCAD executes all assignments in a scope before anything else,
     // each group preserving source order -- mirrors evaluate()/
     // _eval_children's `assignments + others` partition.

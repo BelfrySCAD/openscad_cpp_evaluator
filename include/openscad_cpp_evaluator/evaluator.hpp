@@ -520,6 +520,18 @@ private:
     // "silently equivalent to interpreting it" contract, just for a whole
     // block instead of one leaf expression.
     bool tryRunCompiledAssignmentBlock(const std::vector<const oscad::ASTNode*>& assignments, EvalContext& ctx);
+    // Same contract as tryRunCompiledAssignmentBlock, above, but for
+    // evalChildren's own FULL `children` list (not just its leading
+    // assignment run) -- see tryCompileChildrenList's own doc comment
+    // (bytecode_compiler.hpp) for why every evalChildren() call site
+    // tries this FIRST now, including a builtin module's own children
+    // (translate()/union()/etc.) and a for-loop's/let-block's body, not
+    // just module/top-level bodies. `ctx` is used directly (not a scoped
+    // child), matching runCompiledModuleBody's own contract -- a
+    // children-list chunk's own writes (assignments, $-vars) must persist
+    // into the caller's scope exactly the way the native per-statement
+    // loop's own writes already do.
+    bool tryRunCompiledChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx);
     void evalModularCall(const oscad::ModularCall& node, EvalContext& ctx);
     void evalFor(const oscad::ModularFor& node, EvalContext& ctx);
     void evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx);
@@ -923,6 +935,25 @@ private:
     // comment above for the full reasoning.
     std::unordered_map<const oscad::Assignment*, std::optional<CompiledChunk>> assignBlockChunkCache_;
 
+    // Whole-CHILDREN-LIST chunks (see tryCompileChildrenList's own doc
+    // comment, bytecode_compiler.hpp, and tryRunCompiledChildren's,
+    // below) -- every evalChildren() call now tries the FULL list it was
+    // given as one chunk first (not just its own assignments sub-list),
+    // including a builtin module's own children (translate()/union()/
+    // etc.'s internal evalChildren call) and a for-loop's/let-block's
+    // body -- so a resolvable module call anywhere in that list gets
+    // Op::CallModule bytecode, and any if/for control flow around it gets
+    // real Jump-based bytecode too, instead of falling through to the
+    // native per-statement loop. Keyed by the list's own FIRST element,
+    // same convention as assignBlockChunkCache_ (stable and unique per
+    // list: a given evalChildren() call site is always handed the same
+    // leading element across repeated evaluations). Same nullopt-means-
+    // tried-and-failed convention, same dangling-pointer hazard, same
+    // two-part fix (cleared alongside stmtExprChunkCache_ at the top of
+    // every resolveTreeImpl call, only read/written while inResolvePass_)
+    // as stmtExprChunkCache_ itself.
+    std::unordered_map<const oscad::ASTNode*, std::optional<CompiledChunk>> childrenListChunkCache_;
+
     // See stmtExprChunkCache_'s own doc comment, immediately above, for why
     // this exists. Not a reentrancy guard (resolveTreeImpl is never called
     // while another one is already active), just an on/off switch for
@@ -1231,6 +1262,20 @@ public:
     // ordering constraint the inline computation already has.
     int callStackTopIndex() const { return callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1; }
 
+    // The innermost active call's own declaration node, for error()'s TRACE
+    // walk -- needed by driveVm's own driveVmNativeDepth_ guard (see that
+    // field's doc comment), which has no single reliable ASTNode of its own
+    // to report against (the top VmFrame's chunk may be a children-list
+    // chunk with a null selfDecl -- see tryCompileChildrenList's own doc
+    // comment, bytecode_compiler.cpp). callStack_ is guaranteed non-empty
+    // by the time this guard can fire (it only trips past
+    // kMaxDriveVmNativeDepth levels of nesting, and every level pushes a
+    // CallStackFrame first via enterUserCall). Same "free function, no
+    // friend declaration" reasoning as callStackTopIndex, just above.
+    const oscad::ASTNode* currentCallDeclNode() const {
+        return callStack_.empty() ? nullptr : callStack_.back().declNode;
+    }
+
     // The explicit, heap-allocated VM call stack that replaced native C++
     // recursion for a call between two compiled chunks -- see this
     // project's own session notes ("iterate over the code, don't use the
@@ -1268,6 +1313,37 @@ public:
     // method already used for kMaxUserCallDepth if this ever needs
     // recalibrating for real.
     static constexpr size_t kMaxVmCallStackDepth = 1'000'000;
+
+    // Counts native C++ nesting of driveVm itself -- NOT logical call
+    // depth (that's vmCallStack_.size()/callStack_.size(), both of which
+    // grow just as much for a pure VM-internal Op::CallModule hop, which
+    // costs zero native stack). A hop entirely serviced by driveVm's own
+    // while loop (Op::CallModule/CallFn/CallFnTail/CallDynamic/
+    // CallDynamicTail) never increments this. It DOES increment when a
+    // compiled body statement isn't one of the specially-compiled forms
+    // (e.g. `translate(v) recur(n-1);` -- a builtin-with-children falls to
+    // Op::NativeStatement) and that native evalStatement call itself
+    // re-enters the VM (evalChildren -> tryRunCompiledChildren/
+    // tryRunCompiledAssignmentBlock/evalExprMaybeCompiled -> a fresh
+    // driveVm call, nested on the native stack, unlike Op::CallModule's own
+    // push). This is a REAL native recursive call each time, same hazard
+    // kMaxUserCallDepth guards against -- caught for real: `module
+    // recur(n) { translate([0,0,n]) recur2(n); } module recur2(n) { if
+    // (n>0) recur(n-1); else cube(1); }` segfaulted (exit 139) around
+    // n=3000 with no guard at all, since kMaxCsgTreeDepth only catches this
+    // AFTER the (already-crashed) native descent would have unwound. Public
+    // for the same reason vmCallStack_ is: driveVm (bytecode_vm.cpp) is a
+    // free function, not a member, so it needs direct access with no
+    // friend declaration in play.
+    size_t driveVmNativeDepth_ = 0;
+    // Same figure as kMaxUserCallDepth -- each native re-entry above costs
+    // a comparable handful of native frames (evalStatement, evalModularCall,
+    // a builtin resolve function, evalChildren, tryRunCompiledChildren,
+    // runCompiledModuleBody, driveVm), so the same Windows-CI-calibrated
+    // ceiling applies. Deliberately its own named constant (not a reuse of
+    // kMaxUserCallDepth in place) so the two can be recalibrated
+    // independently if profiling ever shows they should diverge.
+    static constexpr size_t kMaxDriveVmNativeDepth = 30;
 
     // Bracketed public in place: Op::CallModule's own runtime handler and
     // driveVm's module-frame completion branch (bytecode_vm.cpp, a

@@ -340,7 +340,22 @@ void teardownVmCallStackDownTo(Evaluator& ev, size_t floor) {
 // returns; only the floor frame's own result escapes to the caller.
 Value driveVm(Evaluator& ev, size_t floor) {
     Value finalResult;
+    // Native-stack-safety guard, distinct from vmCallStack_'s own
+    // heap-bounded kMaxVmCallStackDepth check -- see driveVmNativeDepth_'s
+    // own doc comment (evaluator.hpp) for exactly what this catches (a
+    // NativeStatement-triggered re-entry into the VM, still a genuine
+    // native C++ call unlike an ordinary Op::CallModule/CallFn hop).
+    struct NativeDepthGuard {
+        Evaluator& ev;
+        explicit NativeDepthGuard(Evaluator& e) : ev(e) { ++ev.driveVmNativeDepth_; }
+        ~NativeDepthGuard() { --ev.driveVmNativeDepth_; }
+    } nativeDepthGuard(ev);
     try {
+        if (ev.driveVmNativeDepth_ > Evaluator::kMaxDriveVmNativeDepth) {
+            const oscad::ASTNode* node = ev.currentCallDeclNode();
+            if (!node) node = ev.vmCallStack_.back()->chunk->selfDecl;
+            ev.error("Recursion too deep (native call stack)", *node);
+        }
         while (ev.vmCallStack_.size() > floor) {
             VmFrame& f = *ev.vmCallStack_.back();
             if (f.pc >= f.code->size()) {

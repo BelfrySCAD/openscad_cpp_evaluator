@@ -1127,10 +1127,24 @@ public:
     // every statement -- assignment or not -- collapse to the same simple
     // "compile once, in the right position" treatment.
     void compileStatementList(const std::vector<std::unique_ptr<oscad::ASTNode>>& children, std::vector<Instruction>& out) {
+        std::vector<const oscad::ASTNode*> raw;
+        raw.reserve(children.size());
+        for (const auto& c : children) raw.push_back(c.get());
+        compileStatementList(raw, out);
+    }
+
+    // Same, for a list of raw (non-owning) pointers -- Evaluator::
+    // evalChildren's own primary overload already receives its `children`
+    // this shape (a caller-owned list, e.g. a builtin module's own
+    // node.children, or a for-loop's freshly-built bodyNodes vector, not
+    // necessarily one this Compiler's own declaration owns) -- see
+    // tryCompileChildrenList's own doc comment, below, for the entry point
+    // that needs this shape directly.
+    void compileStatementList(const std::vector<const oscad::ASTNode*>& children, std::vector<Instruction>& out) {
         std::vector<const oscad::ASTNode*> assignments;
         std::vector<const oscad::ASTNode*> others;
-        for (const auto& c : children) {
-            (c->kind() == oscad::NodeKind::Assignment ? assignments : others).push_back(c.get());
+        for (const oscad::ASTNode* c : children) {
+            (c->kind() == oscad::NodeKind::Assignment ? assignments : others).push_back(c);
         }
         for (const oscad::ASTNode* stmt : assignments) compileOneStatement(*stmt, out);
         for (const oscad::ASTNode* stmt : others) compileOneStatement(*stmt, out);
@@ -1228,6 +1242,21 @@ public:
         std::vector<size_t> topIdx(numDims);
         std::vector<size_t> forIterNextIdx(numDims);
         for (size_t d = 0; d < numDims; ++d) {
+            // Every dimension but the outermost needs its own IterList
+            // index reset to 0 each time it's (re-)entered from the
+            // ENCLOSING dimension's own successful bind -- NativeIterMaterialize
+            // only resets it once, up front, before ANY iteration runs; by
+            // the second (and every later) outer-dimension value, this
+            // dimension's own index is still sitting at "exhausted" from
+            // the PREVIOUS pass, and would immediately look exhausted
+            // again without this. Placed strictly BEFORE this dimension's
+            // own ForIterNext/topIdx (not at it) so this dimension's OWN
+            // "try the next value" jump (its own ForIterEnd, below) lands
+            // AT ForIterNext directly and skips the reset -- only the
+            // fall-through from the enclosing dimension's bind passes
+            // through it. Harmless (a no-op) the very first time, since
+            // the index is already 0 from NativeIterMaterialize then.
+            if (d > 0) out.push_back({Op::IterReset, iterListIds[d], 0, nullptr});
             topIdx[d] = out.size();
             forIterNextIdx[d] = out.size();
             Instruction ins;
@@ -1384,6 +1413,28 @@ std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration
     Compiler compiler(chunk, decl.scope(), nullptr, {});
     try {
         compiler.compileStatementList(decl.children, chunk.bodyCode);
+    } catch (const NotCompilable&) {
+        return std::nullopt;
+    }
+    chunk.numIterLists = compiler.nextIterList();
+    return chunk;
+}
+
+std::optional<CompiledChunk> tryCompileChildrenList(const std::vector<const oscad::ASTNode*>& children,
+                                                     const oscad::Scope* scope) {
+    CompiledChunk chunk;
+    // Same completion semantics as a module chunk (no return value, its
+    // whole effect is the side effect of what lands in treeStack_) --
+    // reuses runCompiledModuleBody's own bare-frame entry point as-is
+    // (bytecode_vm.cpp) to run it, no new runtime machinery needed.
+    // selfDecl stays null -- this list has no single declaration identity
+    // of its own the way a ModuleDeclaration's body does (no upvalues are
+    // ever resolved against it either way; module bodies don't create
+    // escaping closures).
+    chunk.isModule = true;
+    Compiler compiler(chunk, scope, nullptr, {});
+    try {
+        compiler.compileStatementList(children, chunk.bodyCode);
     } catch (const NotCompilable&) {
         return std::nullopt;
     }

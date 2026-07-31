@@ -208,8 +208,13 @@ std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTreeImpl(const NodeList&
     // "re-render after an edit" pattern) never risks a stale entry from a
     // PRIOR pass whose own AST nodes may since have been freed. See
     // stmtExprChunkCache_'s own doc comment (evaluator.hpp) for the full
-    // hazard this guards against.
+    // hazard this guards against. assignBlockChunkCache_'s own doc
+    // comment already claimed this -- it just wasn't actually done; a
+    // real, pre-existing gap, fixed here alongside childrenListChunkCache_
+    // getting the same treatment from day one.
     stmtExprChunkCache_.clear();
+    assignBlockChunkCache_.clear();
+    childrenListChunkCache_.clear();
     ResolvePassGuard resolvePassGuard(inResolvePass_);
     evalChildren(nodes, ctx);
     std::vector<std::unique_ptr<CSGNode>> tree = std::move(treeStack_.back());

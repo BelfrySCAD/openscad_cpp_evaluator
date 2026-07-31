@@ -82,6 +82,19 @@ bool Evaluator::tryRunCompiledAssignmentBlock(const std::vector<const oscad::AST
     return true;
 }
 
+bool Evaluator::tryRunCompiledChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx) {
+    if (children.empty() || !useBytecodeVm() || !inResolvePass_) return false;
+    const oscad::ASTNode* first = children.front();
+    auto it = childrenListChunkCache_.find(first);
+    if (it == childrenListChunkCache_.end()) {
+        it = childrenListChunkCache_.emplace(first, tryCompileChildrenList(children, first->scope())).first;
+        if (it->second) flattenNestedLiterals(*it->second);
+    }
+    if (!it->second || !chunkEligibleNow(*it->second)) return false;
+    runCompiledModuleBody(*this, *it->second, ctx);
+    return true;
+}
+
 const Value* Evaluator::findUpvalue(const oscad::ASTNode* targetDecl, int slot) const {
     // Walks upvalueParent links, NOT a blind scan of callStack_ -- see
     // that field's own doc comment for the real bug this distinction

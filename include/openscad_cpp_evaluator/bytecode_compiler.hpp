@@ -99,4 +99,28 @@ std::optional<CompiledChunk> tryCompileAssignmentBlock(const std::vector<const o
 // (via tryCompileStatementExpr's own NotCompilable, propagated up).
 std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration& decl);
 
+// Same compilation (assignment/if/for/resolved-module-call get real
+// bytecode, everything else a native passthrough), but for an ARBITRARY
+// statement list, not just a ModuleDeclaration's own `children` -- the
+// general form behind Evaluator::tryRunCompiledChildren, which every
+// evalChildren() call now tries first (stmt_eval.cpp), including a
+// builtin module's own children (translate()/union()/etc.'s internal
+// evalChildren call, src/builtins/*.cpp) and a for-loop's/let-block's
+// body. This is what actually reaches the "native passthrough wraps a
+// recursive module call" case Op::NativeStatement alone can't -- see this
+// project's own session notes on the Stage 2 "NativeStatement gap" for
+// why a builtin call itself (translate, not just what's declared inside
+// this project's own module bodies) still can't become a SINGLE flat
+// instruction stream with its caller this way (its own resolve function,
+// e.g. resolveTransform, computes params AND evaluates children as one
+// opaque native call -- decoupling that is a separate, larger project),
+// but this DOES mean the children of any wrapping builtin get their own,
+// independent chance to compile, cutting the number of native stack
+// frames needed per recursive "wrap-then-recurse" level rather than
+// eliminating them entirely. `scope`: the list's own lexical scope for
+// resolving a call site's callee -- callers pass `children.front()->
+// scope()`, mirroring tryRunCompiledAssignmentBlock's own convention.
+std::optional<CompiledChunk> tryCompileChildrenList(const std::vector<const oscad::ASTNode*>& children,
+                                                     const oscad::Scope* scope);
+
 } // namespace oscadeval
