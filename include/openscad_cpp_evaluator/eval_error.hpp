@@ -95,6 +95,15 @@ std::string locSuffix(const oscad::Position* pos);
 //       Module:   "TRACE: call of '<name>()'<locSuffix(declPosition)>"
 //                 "TRACE: called by '<name>'<locSuffix(callPosition)>"
 //       Function: "TRACE: called by '<name>'<locSuffix(callPosition)>"
+// One deliberate departure from the reference: once callStack itself has
+// more than a small number of frames, only the innermost and outermost
+// few are shown, with a single "... N more frames ..." marker in
+// between -- see traceLines()'s own definition (eval_error.cpp) for why.
+// The reference never needed this (Python's own recursion limit makes a
+// callStack this deep unreachable there); this port's explicit-stack VM
+// (Stage 1/2) can legitimately recurse thousands of calls deep, and
+// printing one line per frame turned a single error into a
+// multi-megabyte message.
 std::vector<std::string> traceLines(const oscad::Position* nodePosition,
                                      const std::vector<CallStackFrame>& callStack,
                                      const std::string& innermostFrame = "");

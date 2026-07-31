@@ -220,3 +220,27 @@ TEST(CsgTree, IncrementalGeometryChainHitsTheDepthGuardCleanlyInsteadOfCrashing)
         EXPECT_NE(std::string(e.what()).find("Recursion too deep"), std::string::npos);
     }
 }
+
+TEST(CsgTree, DeepNonTailChainErrorTraceStaysBoundedInsteadOfMegabytes) {
+    // Same shape as IncrementalGeometryChainHitsTheDepthGuardCleanlyInstead
+    // OfCrashing, above, but asserting on the TRACE itself: before
+    // traceLines() (eval_error.cpp) bounded it, this exact error carried
+    // one "TRACE:" pair per real (non-tail) call stack frame -- ~6000
+    // lines, several megabytes, for a script that isn't doing anything
+    // unusual by this session's own new standards (Stage 1/2 make exactly
+    // this depth of real recursion routine). Checks the marker line
+    // appears and the total TRACE-line count stays small regardless of
+    // how deep the actual chain was.
+    ScopedVm vm(true);
+    try {
+        evalSrc("module recur(n) { if (n>0) { cube(0.1); recur(n-1); } else { cube(1); } }\nrecur(5000);");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("TRACE: ... "), std::string::npos);
+        EXPECT_NE(msg.find(" more frames ..."), std::string::npos);
+        size_t count = 0;
+        for (size_t pos = msg.find("TRACE:"); pos != std::string::npos; pos = msg.find("TRACE:", pos + 1)) ++count;
+        EXPECT_LE(count, 41u); // 40 shown (20 each end, 2 lines/Module frame) + 1 marker
+    }
+}
