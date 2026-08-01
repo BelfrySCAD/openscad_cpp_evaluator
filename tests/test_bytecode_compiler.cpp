@@ -1419,6 +1419,59 @@ TEST(ModuleBodyCompiles, UnionWrappedRecursionStillHitsTheNativeReentryGuardCont
     }
 }
 
+// The BOSL2 attachable() shape this whole effort targets: a wrapper module
+// whose body is just `children();`, applied at every level of a recursive
+// chain. children() used to fall to Op::NativeStatement -- one genuine
+// native C++ reentry (evalStatement -> evalModularCall -> builtinChildren
+// -> evalChildren -> runCompiledModuleBody -> a fresh nested driveVm) per
+// level, measured as 85 of 93 native-reentry hits in a real BOSL2 script.
+// Op::CallChildren resolves the forwarded list at runtime and pushes its
+// chunk onto vmCallStack_ directly (zero native frames), so this now
+// SUCCEEDS well past the old ~40-level Windows-safe ceiling. Depth 1500:
+// same figure the PushBuiltinWrap per-construct tests use -- comfortably
+// past the old ceiling, and tree depth stays flat regardless (children()
+// and user-module calls both splice, no kMaxCsgTreeDepth interaction).
+TEST(ModuleBodyCompiles, RecursiveChildrenForwardingChainSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module wrap() { children(); }\n"
+                          "module recur(n) { if (n > 0) { wrap() recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// Same chain through the INDEXED form -- children(0) shares Op::
+// CallChildren with the bare form (the index is resolved at runtime by
+// the same prepareChildrenForward helper the native path uses), so it
+// gets the same zero-native-reentry treatment, not just bare children().
+TEST(ModuleBodyCompiles, RecursiveIndexedChildrenForwardingChainSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module wrap() { children(0); }\n"
+                          "module recur(n) { if (n > 0) { wrap() recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// $-forwarding parity for the compiled children() path: a wrapper module's
+// own $-writes (`$fn = 7; children();`) and a children($fn=9)-style
+// named-$ override must both reach the forwarded child, exactly as the
+// native builtinChildren path forwards them (prepareChildrenForward's own
+// $-loop, shared by both paths precisely so they can't drift -- these
+// tests are the proof it actually holds end-to-end through the compiled
+// opcode, not just by construction).
+TEST(ModuleBodyCompiles, ChildrenForwardingCarriesWrapperDollarWritesCompiled) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("module w() { $fn = 7; children(); }\n"
+                               "w() echo($fn);"),
+              "ECHO: 7");
+}
+
+TEST(ModuleBodyCompiles, ChildrenForwardingCarriesNamedDollarArgCompiled) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("module w() { children($fn = 9); }\n"
+                               "w() echo($fn);"),
+              "ECHO: 9");
+}
+
 // Regression test for a real bug this same investigation caught:
 // enterUserCall's own depth guard used to check callStack_.size()
 // directly -- but callStack_ also grows from cheap, zero-native-cost

@@ -325,8 +325,50 @@ enum class Op {
     // same seam, now a counter).
     PopBuiltinWrap,
 
+    // A `children()` / `children(N)` statement -- the runtime-varying
+    // sibling of Op::CallModule/Op::PushBuiltinWrap, closing the LAST
+    // dominant native-reentry source (BOSL2's attachable() calls
+    // children() at nearly every wrapper level; measured 85 of 93 native
+    // reentries in a real script). Unlike PushBuiltinWrap's constructs,
+    // the forwarded children aren't known at compile time (they're the
+    // CALLER's own call-site statements, carried on ctx.childrenNodes/
+    // childrenCallerCtx -- see Evaluator::buildModuleChildCtx), so they
+    // can't compile inline; instead the handler resolves the list at
+    // RUNTIME, looks up/compiles its chunk (the same
+    // childrenListChunkCache_ tryRunCompiledChildren uses, via
+    // lookupOrCompileChildrenListChunk -- gated on useBytecodeVm() &&
+    // inResolvePass_, the cache is pass-scoped), and pushes it onto
+    // vmCallStack_ directly, mirroring Op::CallModule's own zero-native-
+    // call push -- but with a THIRD frame shape: splice-owning like a
+    // module frame (ownsModuleSplice=true, mirroring evalModularCall's
+    // own unconditional splice branch for "children"), yet bracketless
+    // like a bare frame (children() never gets a callStack_/profiling
+    // entry natively either -- only enterUserCall pushes those, and
+    // resolveChildren/builtinChildren never call it). driveVm's existing
+    // completion branch and teardownVmCallStackDownTo both already
+    // handle that combination (their bracket and splice concerns are
+    // independent).
+    //
+    // Handler ordering is load-bearing: checkDebug fires in-handler
+    // against the scope-wrapped ctx (byte-for-byte what Op::
+    // NativeStatement does -- NOT via an emitted Op::CheckDebugStatement,
+    // whose handler passes the un-wrapped ctx); randsBefore is captured
+    // BEFORE argument resolution (rands-in-args taint, same lesson
+    // PushBuiltinWrap already encodes); and treeStack_ is pushed LAST,
+    // immediately before the frame push / native fallback (an early-out
+    // or a throw during arg resolution then has nothing to clean up --
+    // the native path's own catch{pop;throw} has no equivalent here, so
+    // the reorder IS the exception-safety mechanism). The not-eligible
+    // fallback reuses the ALREADY-resolved args (never evalStatement,
+    // which would re-resolve them: double rands(), double side effects)
+    // by inlining evalModularCall's own children branch around a native
+    // evalChildren call. a = index into CompiledChunk::nativeStatements
+    // (the ModularCall node -- arguments, error position, splice node;
+    // no separate site table needed).
+    CallChildren,
+
     // A single "native passthrough" statement -- intersection_for,
-    // children(), union/difference/intersection and every other builtin
+    // union/difference/intersection and every other builtin
     // module call NOT covered by Op::PushBuiltinWrap (see that op's own
     // doc comment for exactly which builtins ARE covered), the `*`
     // modifier's own no-op case, or a user-module call that didn't
@@ -344,7 +386,9 @@ enum class Op {
     // pattern that made this op's own native reentry a genuine Windows
     // crash risk in practice, not just a missed optimization. See
     // Op::PushBuiltinWrap's own doc comment for the real story and the
-    // fix.)
+    // fix. children() fell here too, and was the LAST and largest such
+    // reentry source once PushBuiltinWrap's own set was covered -- it
+    // now has Op::CallChildren, above.)
     // a = index into CompiledChunk::nativeStatements. Runtime just does
     // what Evaluator::evalChildren's own per-statement loop already does
     // for one node: derive childCtx via ctx.withScope(...), checkDebug,

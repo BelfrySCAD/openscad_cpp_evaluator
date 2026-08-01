@@ -271,6 +271,25 @@ public:
     // _builtin_children/_eval_children_lazy.
     void builtinChildren(const CallArgs& args, EvalContext& ctx);
 
+    // The "which nodes, evaluated against what context" half of
+    // builtinChildren, shared with Op::CallChildren's runtime handler
+    // (bytecode_vm.cpp) so the native and compiled paths cannot drift on
+    // any of the subtle parts: the caller-ctx re-derivation, the
+    // $-forwarding loop (which must read the post-resolveCallArgs effCtx
+    // -- a children($fn=12) named-$ override lives only there), and the
+    // children(N) statement-index filtering/bounds-check. nullopt means
+    // "nothing to evaluate" (no forwarded children in scope, empty list,
+    // or index out of range) -- a silent no-op in every existing caller,
+    // exactly matching builtinChildren's own early returns. `ctx` must be
+    // the effCtx resolveCallArgs returned, same as builtinChildren's own
+    // parameter today. Public for the same free-function reasoning as
+    // builtinChildren itself.
+    struct ChildrenForward {
+        EvalContext evalCtx;
+        std::vector<const oscad::ASTNode*> nodes;
+    };
+    std::optional<ChildrenForward> prepareChildrenForward(const CallArgs& args, EvalContext& ctx);
+
     // "WARNING: {message}{locSuffix(position)}" via echoFn_, no-op if unset.
     // Public: builtins/import.cpp's not-manifold warning is emitted from a
     // free function, same reasoning as tagGenerated()/builtinChildren().
@@ -1148,6 +1167,17 @@ public:
     bool useBytecodeVm() const {
         return bytecodeVmEnabled() && (!debugHooks_.debugHook || fastContinueBreakpoints_.has_value());
     }
+
+    // Read accessor for inResolvePass_ (private, below) -- Op::CallChildren's
+    // runtime handler (bytecode_vm.cpp, a free function) must gate its
+    // childrenListChunkCache_ access on it, exactly like
+    // tryRunCompiledChildren's own self-gate: the cache is pass-scoped
+    // (cleared per resolveTreeImpl, AST-address-reuse hazard -- see
+    // stmtExprChunkCache_'s own doc comment), and driveVm CAN run outside
+    // the resolve pass (a host calling evalChildren directly reaches
+    // module opcodes via lookupOrCompileModuleChunk, which is NOT
+    // pass-scoped).
+    bool inResolvePass() const { return inResolvePass_; }
 
 private:
     // The fine-grained half of the check above: even when useBytecodeVm()

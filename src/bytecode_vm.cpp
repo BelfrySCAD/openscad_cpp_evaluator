@@ -329,6 +329,49 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
     ev.vmCallBrackets_.push_back(std::move(handle));
 }
 
+// Op::CallChildren's own push -- a THIRD frame shape, distinct from both
+// existing helpers: splice-owning like pushBracketedModuleFrame's
+// (ownsModuleSplice=true, mirroring evalModularCall's own unconditional
+// splice branch for "children", csg_resolve.cpp) but BRACKETLESS like
+// pushBareFrame's (nullopt in vmCallBrackets_ -- children() never gets a
+// callStack_/profiling entry natively either: only enterUserCall pushes
+// those, and resolveChildren/builtinChildren never call it, so no TRACE
+// frame, no profile site, no $parent_modules bump, exactly matching the
+// native path). driveVm's completion branch and teardownVmCallStackDownTo
+// both already handle this combination -- their bracket (`if (bracket)`)
+// and splice (`if (ownsModuleSplice)`) concerns are independent at both
+// sites. `evalCtx` is prepareChildrenForward's result (the caller-derived,
+// $-forwarded context the children must run under -- see that helper's
+// own doc comment, evaluator.hpp). hopEligible set explicitly false --
+// pushBracketedModuleFrame itself omits the reset (benign there only
+// because module chunks never contain tail-call opcodes); don't inherit
+// a pooled function frame's stale true here either.
+void pushChildrenForwardFrame(Evaluator& ev, const CompiledChunk& chunk, EvalContext evalCtx,
+                               std::uint64_t randsBefore, const oscad::ASTNode& callNode) {
+    if (ev.vmCallStack_.size() >= Evaluator::kMaxVmCallStackDepth) {
+        ev.error("Recursion too deep while forwarding children()", callNode);
+    }
+    auto frame = ev.acquireVmFrame();
+    frame->chunk = &chunk;
+    frame->code = &chunk.bodyCode;
+    frame->pc = 0;
+    frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
+    frame->stack.clear();
+    frame->bound.clear();
+    frame->accumStack.clear();
+    frame->iterLists.assign(static_cast<size_t>(chunk.numIterLists), IterList{});
+    frame->ctxChain.clear();
+    frame->ctxChain.push_back(std::move(evalCtx));
+    frame->tailHopGuard = 0;
+    frame->logicalName.clear();
+    frame->hopEligible = false;
+    frame->ownsModuleSplice = true;
+    frame->moduleRandsBefore = randsBefore;
+    frame->moduleSpliceCallNode = &callNode;
+    ev.vmCallStack_.push_back(std::move(frame));
+    ev.vmCallBrackets_.emplace_back(std::nullopt);
+}
+
 // Tears down every frame from vmCallStack_'s own top down to (but not
 // including) `floor`, on the exception path -- releases each VmFrame to
 // the pool, tears down its ctxChain back-to-front (never relying on
@@ -929,6 +972,71 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                         ev.treeStack_.pop_back();
                         ev.spliceModuleChildren(std::move(children), randsBefore, *site.callNode);
+                        ++f.pc;
+                    }
+                    break;
+                }
+                case Op::CallChildren: {
+                    // Ordering is load-bearing throughout -- see this op's
+                    // own doc comment (bytecode.hpp): checkDebug against
+                    // the SCOPE-WRAPPED ctx (byte-for-byte what Op::
+                    // NativeStatement does for this same node today);
+                    // randsBefore BEFORE argument resolution (rands-in-args
+                    // taint); treeStack_ pushed LAST, immediately before
+                    // the frame push / native fallback, so an early-out or
+                    // a throw during arg resolution has nothing to clean
+                    // up (the native path's own catch{pop;throw} has no
+                    // equivalent out here -- this reorder IS the
+                    // exception-safety mechanism; arg resolution never
+                    // appends CSG nodes, so pushing after it is
+                    // unobservable).
+                    const auto* callNode =
+                        static_cast<const oscad::ModularCall*>(f.chunk->nativeStatements[static_cast<size_t>(ins.a)]);
+                    EvalContext scopedCtx = ctx.withScope(callNode->scope() ? callNode->scope() : ctx.scope);
+                    ev.checkDebug(*callNode, scopedCtx);
+                    const std::uint64_t randsBefore = ev.randsCallCount();
+                    auto [args, effCtx] = resolveCallArgs(ev, callNode->arguments, scopedCtx);
+                    std::optional<Evaluator::ChildrenForward> fwd = ev.prepareChildrenForward(args, effCtx);
+                    if (!fwd) {
+                        // No forwarded children in scope / empty / index
+                        // out of range -- a silent no-op, exactly matching
+                        // builtinChildren's own early returns.
+                        ++f.pc;
+                        break;
+                    }
+                    // Pass gate is load-bearing, not defensive -- the
+                    // chunk cache is pass-scoped; see inResolvePass()'s
+                    // own doc comment (evaluator.hpp).
+                    const CompiledChunk* chunk = (ev.useBytecodeVm() && ev.inResolvePass())
+                                                     ? ev.lookupOrCompileChildrenListChunk(fwd->nodes)
+                                                     : nullptr;
+                    if (chunk) {
+                        ev.treeStack_.emplace_back();
+                        pushChildrenForwardFrame(ev, *chunk, std::move(fwd->evalCtx), randsBefore, *callNode);
+                        // f.pc deliberately NOT advanced -- resumes when
+                        // the pushed frame completes; driveVm's completion
+                        // branch runs the splice (isModule &&
+                        // ownsModuleSplice), mirroring evalModularCall's
+                        // own "children" splice branch exactly.
+                    } else {
+                        // Fallback reuses the ALREADY-resolved args --
+                        // never evalStatement, which would re-resolve them
+                        // (double rands(), double echo/assert side
+                        // effects, double expr-level debug stops).
+                        // Inlines evalModularCall's own children branch:
+                        // push accumulator, run natively, pop, splice.
+                        // The native evalChildren still self-gates and
+                        // retries tryRunCompiledChildren internally.
+                        ev.treeStack_.emplace_back();
+                        try {
+                            ev.evalChildren(fwd->nodes, fwd->evalCtx);
+                        } catch (...) {
+                            ev.treeStack_.pop_back();
+                            throw;
+                        }
+                        std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
+                        ev.treeStack_.pop_back();
+                        ev.spliceModuleChildren(std::move(children), randsBefore, *callNode);
                         ++f.pc;
                     }
                     break;

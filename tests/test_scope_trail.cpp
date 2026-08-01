@@ -75,6 +75,36 @@ TEST(IndexedScopeTrailStorage, SetAtSameLevelDoesNotAccumulateEntries) {
     EXPECT_EQ(*storage.lookup("$fn", level), 999);
 }
 
+// popLevel must remove the entry belonging to THE LEVEL BEING POPPED, not
+// blindly pop_back() whatever happens to be physically last -- the exact
+// out-of-order-pop bug class ScopeTrailStorage::popLevel's own doc comment
+// already describes (and fixed) for the non-indexed twin; this indexed
+// variant kept the blind pop until Op::CallChildren's forwarding frame
+// (bytecode_vm.cpp) became the first real caller to violate LIFO view
+// destruction on the dyn trail. Level shape mirrors that real scenario
+// exactly: E (a children() call's own effCtx, opened first) and L (the
+// forwarding evalCtx, opened later, moved into a VmFrame) both set the
+// same name; E pops FIRST while L is still live. The blind pop removed
+// L's entry -- the still-live forwarded value -- leaving a lookup from L
+// falling through to the root default (caught for real: children($fn=9)
+// read back as 0 inside the forwarded child).
+TEST(IndexedScopeTrailStorage, PopLevelRemovesItsOwnEntryNotThePhysicallyLastOne) {
+    auto intern = std::make_shared<DynNameIntern>();
+    IndexedScopeTrailStorage<int> storage(intern);
+    const int root = storage.openLevel(0);
+    storage.set("$fn", 0, root);
+    const int e = storage.openLevel(root); // effCtx's own level
+    storage.set("$fn", 9, e);
+    const int l = storage.openLevel(root); // forwarding evalCtx's level, opened AFTER e
+    storage.set("$fn", 9, l);
+    storage.popLevel(e); // e dies while l is still live -- non-LIFO
+    ASSERT_NE(storage.lookup("$fn", l), nullptr);
+    EXPECT_EQ(*storage.lookup("$fn", l), 9);
+    storage.popLevel(l);
+    ASSERT_NE(storage.lookup("$fn", root), nullptr);
+    EXPECT_EQ(*storage.lookup("$fn", root), 0);
+}
+
 // A captured (closure) level's own ancestor must stay alive even after
 // EVERY other TrailView referencing that ancestor has gone out of scope --
 // see TrailView::openChild's own doc comment (parentView_) for why. This
