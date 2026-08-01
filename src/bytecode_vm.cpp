@@ -234,8 +234,6 @@ void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const osc
     bool usedChildCtx = false;
     EvalContext childCtx = ev.callCtxFor(declNode, callerCtx, fnScope, nullptr, nullptr, &usedChildCtx, capturedLet);
     const int upvalueParent = usedChildCtx ? callerFrameIdx : -1;
-    Evaluator::UserCallHandle handle =
-        ev.enterUserCall(name, declNode, &bodyExpr, childCtx, callPos, upvalueParent, /*skipDepthGuard=*/true);
 
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
@@ -253,6 +251,23 @@ void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const osc
     frame->hopEligible = true; // just pushed a fresh, correctly-named callStack_ entry
     bindBoundArgsIntoFrame(chunk, bound, *frame);
     applyCompiledDefaultsToFrame(ev, chunk, *frame);
+
+    // enterUserCall's own bodyCtx must point at frame->ctxChain's OWN
+    // storage (stable: this VmFrame lives behind a unique_ptr, so its
+    // address never moves even if vmCallStack_ itself reallocates), not
+    // a plain local -- a local `childCtx` here would be destroyed the
+    // instant this function returns, but CallStackFrame::bodyCtx is read
+    // LATER, by ANY subsequent checkDebug() call (this call's own nested
+    // calls, or an unrelated sibling's) that walks the WHOLE call stack
+    // to build per-frame debugger locals (Evaluator::buildDebugFrames) --
+    // reading a dangling pointer there segfaults. Real bug, caught via a
+    // targeted ASan build reproducing BelfrySCAD's own "step over a call,
+    // but honor a breakpoint set inside it" debug scenario: pausing deep
+    // inside a native (interpreter-forced, due to the breakpoint) callee
+    // walks the WHOLE call stack, including this compiled caller's own
+    // now-stale frame.
+    Evaluator::UserCallHandle handle = ev.enterUserCall(name, declNode, &bodyExpr, frame->ctxChain.back(), callPos,
+                                                          upvalueParent, /*skipDepthGuard=*/true);
     ev.vmCallStack_.push_back(std::move(frame));
     ev.vmCallBrackets_.push_back(std::move(handle));
 }
@@ -277,9 +292,6 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
     if (ev.vmCallStack_.size() >= Evaluator::kMaxVmCallStackDepth) {
         ev.error("Recursion too deep while calling module '" + decl.name->name + "'", decl);
     }
-    Evaluator::UserCallHandle handle = ev.enterUserCall(decl.name->name, decl, /*bodyExpr=*/nullptr, childCtx, callPos,
-                                                          /*upvalueParent=*/-1, /*skipDepthGuard=*/true,
-                                                          CallStackFrame::Kind::Module);
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
     frame->code = &chunk.bodyCode;
@@ -298,6 +310,15 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
     frame->tailHopGuard = 0;
     frame->logicalName = decl.name->name;
     frame->ownsModuleSplice = true;
+    // enterUserCall's own bodyCtx must point at frame->ctxChain's OWN
+    // storage, not the caller's own (about-to-be-destroyed) local
+    // `childCtx` -- see pushBracketedCallFrame's own doc comment, above,
+    // for the full dangling-pointer hazard this avoids (same fix, same
+    // root cause, module side).
+    Evaluator::UserCallHandle handle = ev.enterUserCall(decl.name->name, decl, /*bodyExpr=*/nullptr,
+                                                          frame->ctxChain.back(), callPos,
+                                                          /*upvalueParent=*/-1, /*skipDepthGuard=*/true,
+                                                          CallStackFrame::Kind::Module);
     frame->moduleRandsBefore = randsBefore;
     frame->moduleSpliceCallNode = &callNode;
     ev.vmCallStack_.push_back(std::move(frame));
