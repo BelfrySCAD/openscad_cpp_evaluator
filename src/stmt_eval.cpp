@@ -71,20 +71,6 @@ void Evaluator::evalAssertStatement(const oscad::ModularAssert& node, EvalContex
 }
 
 void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
-    struct AssignPair {
-        std::string name;
-        IterableValues values;
-    };
-    std::vector<AssignPair> pairs;
-    pairs.reserve(node.assignments.size());
-    for (const auto& assign : node.assignments) {
-        Value values = evalExprMaybeCompiled(*assign->expr, ctx);
-        const oscad::Position* pos = &assign->position();
-        pairs.push_back(AssignPair{assign->name->name, expandIterable(values, [&](size_t count) {
-            warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
-        })});
-    }
-
     std::vector<const oscad::ASTNode*> bodyNodes;
     bodyNodes.reserve(node.body.size());
     for (const auto& b : node.body) bodyNodes.push_back(b.get());
@@ -96,8 +82,23 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
     // _eval_for's `_nested` closure exactly) and binds just that one
     // variable, so inner levels/the body see all outer bindings already in
     // `let_`.
+    //
+    // Each dimension's own RHS is evaluated HERE, against `parentCtx` (not
+    // upfront against the original `ctx`), and re-evaluated on every entry
+    // into this recursion level -- i.e. once per combination of whatever
+    // dimensions 0..depth-1 are currently bound to. This is required for
+    // real OpenSCAD's own documented/verified behavior: a later `for`
+    // clause's range CAN depend on an earlier one (`for (i=[0:2], j=[0:i])`
+    // is a standard triangular-loop idiom; `pt = f(p)` inside `for (p=...,
+    // pt=f(p))` needs the same). Evaluating all dimensions upfront in one
+    // flat pass (the previous shape here) evaluated every RHS against the
+    // ORIGINAL ctx before ANY variable was bound, so a later dimension's
+    // own reference to an earlier one always failed with "unknown
+    // variable" -- confirmed wrong against real OpenSCAD.app directly
+    // (verified both `for(i=[0:2],j=[0:i])` and a dependent list-comp
+    // case), not just an internal inconsistency.
     std::function<void(size_t, EvalContext&)> recurse = [&](size_t depth, EvalContext& parentCtx) {
-        if (depth == pairs.size()) {
+        if (depth == node.assignments.size()) {
             // Per-full-iteration "entering the body" marker, separate from
             // (and before) the body's own per-statement checks in
             // evalChildren -- mirrors _eval_for's
@@ -106,14 +107,20 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
             evalChildren(bodyNodes, parentCtx);
             return;
         }
-        for (const Value& val : pairs[depth].values) {
+        const auto& assign = node.assignments[depth];
+        Value values = evalExprMaybeCompiled(*assign->expr, parentCtx);
+        const oscad::Position* pos = &assign->position();
+        IterableValues iter = expandIterable(values, [&](size_t count) {
+            warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
+        });
+        for (const Value& val : iter) {
             EvalContext childCtx = parentCtx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
-            childCtx.let_->set(pairs[depth].name, val);
+            childCtx.let_->set(assign->name->name, val);
             // One statement-level stop per (bound-so-far) combination, on
             // the loop-variable assignment itself -- so a breakpoint set
             // directly on an `i=[0:2],`/`j=[0:1]` line fires. Mirrors
             // _eval_for's `_check_debug(assign_node, child)`.
-            checkDebug(*node.assignments[depth], childCtx);
+            checkDebug(*assign, childCtx);
             recurse(depth + 1, childCtx);
         }
     };

@@ -97,24 +97,21 @@ ColoredBody combineBodies(const std::vector<ColoredBody>& bodies) {
 // children) -- same rationale as booleans.cpp's own group_sizes. Mirrors
 // _resolve_intersection_for/_generate_intersection_for.
 CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersectionFor& node, EvalContext& ctx) {
-    std::vector<std::pair<std::string, IterableValues>> varSeqs;
-    varSeqs.reserve(node.assignments.size());
-    for (const auto& assign : node.assignments) {
-        Value values = ev.evalExpr(*assign->expr, ctx);
-        const oscad::Position* pos = &assign->position();
-        varSeqs.emplace_back(assign->name->name, expandIterable(values, [&](size_t count) {
-            ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
-        }));
-    }
-
     std::vector<const oscad::ASTNode*> bodyNodes;
     bodyNodes.reserve(node.body.size());
     for (const auto& b : node.body) bodyNodes.push_back(b.get());
 
     std::vector<Value> groupSizes;
 
+    // Each dimension's own RHS is evaluated against `parentCtx` (not
+    // upfront against the original `ctx`), re-evaluated on every entry
+    // into this recursion level -- see evalFor's own doc comment
+    // (stmt_eval.cpp) for the full "verified against real OpenSCAD.app"
+    // rationale; this is the identical bug in intersection_for's own
+    // cartesian loop (e.g. `intersection_for (i=[0:2], j=[0:i]) ...`
+    // needs `i` visible in `j`'s own range expression).
     std::function<void(size_t, EvalContext&)> recurse = [&](size_t depth, EvalContext& parentCtx) {
-        if (depth == varSeqs.size()) {
+        if (depth == node.assignments.size()) {
             // One body-entry marker per full cartesian-product iteration
             // and nothing per individual variable binding (unlike
             // evalFor) -- mirrors _resolve_intersection_for's single
@@ -126,9 +123,15 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
             groupSizes.push_back(Value{static_cast<double>(after - before)});
             return;
         }
-        for (const Value& val : varSeqs[depth].second) {
+        const auto& assign = node.assignments[depth];
+        Value values = ev.evalExpr(*assign->expr, parentCtx);
+        const oscad::Position* pos = &assign->position();
+        IterableValues iter = expandIterable(values, [&](size_t count) {
+            ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
+        });
+        for (const Value& val : iter) {
             EvalContext childCtx = parentCtx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
-            childCtx.let_->set(varSeqs[depth].first, val);
+            childCtx.let_->set(assign->name->name, val);
             recurse(depth + 1, childCtx);
         }
     };

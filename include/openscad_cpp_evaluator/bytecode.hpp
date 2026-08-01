@@ -104,18 +104,29 @@ enum class Op {
     // themselves lists).
     AccumMergeEach,
 
-    // ListCompFor's per-assignment iteration -- materialize once (a
-    // dimension's own RHS expression is evaluated exactly once, matching
-    // the interpreter's own upfront `pairs.push_back(...)` loop), then
-    // reset+iterate however many times that dimension is (re-)entered
-    // (once per outer-dimension iteration for a nested `for`). `a` = an
-    // iterList id (see CompiledChunk::numIterLists), unique per assignment
-    // across the whole chunk.
+    // ListCompFor's per-assignment iteration. `a` = an iterList id (see
+    // CompiledChunk::numIterLists), unique per assignment across the whole
+    // chunk. Each dimension's own IterMaterialize is emitted INSIDE the
+    // enclosing dimension's own loop body (compileListElement's own
+    // emitDim recursion), so it re-executes once per outer-dimension
+    // binding -- required for a later dimension's own RHS to see an
+    // earlier one's current value (e.g. `[for (p=[1:N], pt=f(p)) pt]`),
+    // matching evalFor's own doc comment (stmt_eval.cpp) and real
+    // OpenSCAD.app's verified behavior.
     IterMaterialize, // pops one Value (the assignment's RHS), expandIterable()s it into iterLists[a], resets its index
-    IterReset,       // resets iterLists[a]'s index to 0 WITHOUT re-materializing (a re-entry, not the first entry)
+    // Resets iterLists[a]'s index to 0 WITHOUT re-materializing. UNREACHABLE
+    // as of the materialize-inside-the-nesting fix above: re-materializing
+    // on every dimension re-entry already resets the index as a side
+    // effect (see IterMaterialize's own doc comment), so there's no longer
+    // a "reset without re-materializing" case left to reach for either
+    // ListCompFor (compileListElement) or ModularFor (compileForLoop).
+    // Left defined rather than removed in the same change -- a distinct,
+    // lower-risk cleanup (same convention as LoadUpvalue's own doc
+    // comment, above).
+    IterReset,
     IterNext,        // a = loop-variable slot, b = iterList id, c = jump target for exhaustion: if iterLists[b] has a
                      // next value (at its current index), write it to slots[a], advance the index, fall through;
-                     // else jump to c (index is left as-is; the next IterReset for this id will restart it)
+                     // else jump to c (index is left as-is; the next IterMaterialize for this id will restart it)
 
     // ListCompCFor's runaway-loop guard, mirroring evalListElement's own
     // 1,000,000-iteration safety limit exactly (see its own doc comment
