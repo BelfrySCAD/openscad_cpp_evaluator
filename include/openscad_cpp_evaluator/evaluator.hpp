@@ -1218,6 +1218,12 @@ public:
         // and callStack_.back() is already gone by the time it runs. See
         // activeDeclRefcount_'s own doc comment.
         const oscad::ASTNode* declNode = nullptr;
+        // True only when THIS call incremented nativeUserCallDepth_ (i.e.
+        // skipDepthGuard was false) -- exitUserCall* needs it to decrement
+        // symmetrically, for the same "callStack_.back() is already gone"
+        // reason as `kind`/`declNode` above. See nativeUserCallDepth_'s
+        // own doc comment for why this can't just be "always decrement".
+        bool countedTowardNativeDepth = false;
     };
     // `skipDepthGuard`: kMaxUserCallDepth=50 exists purely to keep the
     // NATIVE C++ stack from overflowing (see its own doc comment) -- true
@@ -1426,6 +1432,37 @@ private:
     // self._call_stack (there, 4-tuples; here, CallStackFrame -- see
     // eval_error.hpp).
     std::vector<CallStackFrame> callStack_;
+
+    // Count of callStack_ entries that ACTUALLY cost native C++ stack --
+    // i.e. pushed with skipDepthGuard=false (enterUserCall's own
+    // interpreted-call sites: evalUserFunctionCore, evalUserModule).
+    // Deliberately NOT the same number as callStack_.size(): a compiled-
+    // to-compiled push (pushBracketedCallFrame/pushBracketedModuleFrame,
+    // bytecode_vm.cpp, skipDepthGuard=true) still grows callStack_ (for
+    // TRACE/closure-detection/$parent_modules bookkeeping) but costs ZERO
+    // native stack, serviced by driveVm's own heap-based loop instead.
+    //
+    // Checking callStack_.size() itself against kMaxUserCallDepth (the
+    // ORIGINAL design) conflates these two: a real BOSL2 script's own
+    // AMBIENT callStack_ depth, inflated by many cheap skip=true compiled
+    // module-call pushes sitting on callStack_ already, could push a
+    // LATER genuinely-native-recursive call (e.g. an interpreted-path
+    // function call like BOSL2's own `ident()`) over the threshold even
+    // though the REAL native C++ nesting at that point was nowhere near
+    // it -- caught for real: Anklet.scad's own ambient callStack_ depth
+    // (mostly cheap Op::CallModule pushes) reached the mid-30s, tripping
+    // kMaxUserCallDepth=30 for an `ident()` call that itself was nested
+    // only a couple of GENUINE native frames deep. Exactly the same class
+    // of "fixed-count guard conflates logical depth with native-stack
+    // cost" bug driveVmNativeDepth_ already exists to avoid for the
+    // OTHER guard site (bytecode_vm.cpp) -- this is that same fix,
+    // applied here. Incremented/decremented symmetrically by
+    // enterUserCall/exitUserCallSuccess/exitUserCallException, gated on
+    // UserCallHandle::countedTowardNativeDepth (skipDepthGuard is only
+    // available at enter time; the handle carries the decision forward
+    // to exit time, since callStack_.back() -- and thus skipDepthGuard's
+    // own original context -- is already gone by then).
+    size_t nativeUserCallDepth_ = 0;
 
     // Running count of Module-kind frames currently on callStack_ --
     // maintained incrementally by enterUserCall/exitUserCall* rather than

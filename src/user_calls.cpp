@@ -682,13 +682,22 @@ Evaluator::UserCallHandle Evaluator::enterUserCall(const std::string& name, cons
     // entirely; for what's left, the margin check is the proven-UNSAFE
     // mechanism on Windows (confirmed via real CI), this fixed count the
     // proven-safe one.
-    if (!skipDepthGuard && callStack_.size() >= kMaxUserCallDepth) {
+    //
+    // Checked against nativeUserCallDepth_, NOT callStack_.size() -- see
+    // that field's own doc comment (evaluator.hpp) for why: callStack_
+    // also grows from cheap, zero-native-cost skipDepthGuard=true pushes,
+    // which must not count toward this native-stack-safety ceiling.
+    if (!skipDepthGuard && nativeUserCallDepth_ >= kMaxUserCallDepth) {
         error("Recursion too deep while calling " + std::string(isModule ? "module" : "function") + " '" + name + "'",
               declNode);
     }
     UserCallHandle h;
     h.kind = kind;
     h.declNode = &declNode;
+    if (!skipDepthGuard) {
+        ++nativeUserCallDepth_;
+        h.countedTowardNativeDepth = true;
+    }
     h.prof = profileEnter(isModule ? "module" : "function", name, callPos, &declNode.position());
     callStack_.push_back(CallStackFrame{kind, name, callPos, &declNode.position(), &declNode, nullptr, upvalueParent});
     callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
@@ -710,6 +719,7 @@ void Evaluator::exitUserCallSuccess(const std::string& name, const UserCallHandl
     if (fireReturnHook && debugHooks_.returnHook) debugHooks_.returnHook(name, result, static_cast<int>(callStack_.size()));
     callStack_.pop_back();
     if (handle.kind == CallStackFrame::Kind::Module) --moduleCallDepth_;
+    if (handle.countedTowardNativeDepth) --nativeUserCallDepth_;
     noteActiveDeclExit(handle.declNode);
     if (handle.prof) profileExit(*handle.prof);
 }
@@ -717,6 +727,7 @@ void Evaluator::exitUserCallSuccess(const std::string& name, const UserCallHandl
 void Evaluator::exitUserCallException(const UserCallHandle& handle) {
     callStack_.pop_back();
     if (handle.kind == CallStackFrame::Kind::Module) --moduleCallDepth_;
+    if (handle.countedTowardNativeDepth) --nativeUserCallDepth_;
     noteActiveDeclExit(handle.declNode);
     if (handle.prof) profileExit(*handle.prof);
 }
