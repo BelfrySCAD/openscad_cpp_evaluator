@@ -1390,6 +1390,45 @@ TEST(ModuleBodyCompiles, UnionWrappedRecursionStillHitsTheNativeReentryGuardCont
     }
 }
 
+// Regression test for a real bug this same investigation caught:
+// enterUserCall's own depth guard used to check callStack_.size()
+// directly -- but callStack_ also grows from cheap, zero-native-cost
+// COMPILED module-call pushes (skipDepthGuard=true), which must not
+// count toward the native-stack-safety ceiling a LATER genuinely
+// interpreted call (skipDepthGuard=false) is guarded by. Caught for
+// real: a live BOSL2 script's own ambient callStack_ depth (mostly
+// compiled Op::CallModule pushes) reached the mid-30s, tripping
+// kMaxUserCallDepth=30 for a plain function call even though the REAL
+// native C++ nesting at that point was nowhere near it. Fixed via
+// nativeUserCallDepth_ (evaluator.hpp), a separate counter incremented
+// only for skipDepthGuard=false pushes.
+//
+// recur() recurses 100 levels deep via bare `recur(n-1);` (pure
+// Op::CallModule, skipDepthGuard=true, zero native cost, well past the
+// old kMaxUserCallDepth=30) before calling leaf() at the base case --
+// forced to run INTERPRETED (skipDepthGuard=false) via a fast-continue
+// breakpoint on its own declaration line (mirrors countDebugHookStops'
+// own "force one specific chunk native" trick, above this file's first
+// TEST). Before the fix, this leaf() call -- genuinely nested only 1
+// real native frame deep -- would have falsely tripped the guard purely
+// from callStack_'s own ambient depth.
+TEST(ModuleBodyCompiles, DeepCompiledModuleRecursionDoesNotFalselyTripTheInterpretedFunctionGuard) {
+    ScopedVm vm(true);
+    DebugHooks hooks;
+    hooks.debugHook = [](int, int, bool, bool, const std::string&, const std::vector<CallStackFrame>&,
+                          const DebugFramesFn&) { return DebugAction{}; };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
+    auto ast = parseSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(leaf()); } }\n"
+                        "function leaf() = 1;\n"
+                        "recur(100);");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    std::vector<std::unique_ptr<CSGNode>> tree = ev.resolveTree(ast, ctx);
+    ASSERT_EQ(tree.size(), 1u);
+    EXPECT_EQ(tree[0]->kind, "cube");
+}
+
 // The realistic case the NativeStatement-gap fix actually targets: the
 // RECURSIVE call itself is a bare statement (pure Op::CallModule, zero
 // native stack, bounded only by the heap-sized kMaxVmCallStackDepth), and
