@@ -1420,12 +1420,25 @@ public:
                     emitBuiltinWrap(*wrapKind, call.name->name, call, children, out);
                     return;
                 }
-                // Every other builtin, children(), or a name that didn't
-                // resolve to a user module statically -- native
-                // passthrough, exactly like echo/assert/etc. below. Never
-                // the recursion-depth risk this compiler targets for
-                // THESE (see NativeStatement's own doc comment,
-                // bytecode.hpp).
+                // children() -- the runtime-varying forwarding builtin,
+                // detected by the same function-pointer-identity pattern
+                // as Transform/Color above. Deliberately NO preceding
+                // Op::CheckDebugStatement (unlike emitBuiltinWrap's own
+                // emission): CallChildren's handler fires checkDebug
+                // itself against the SCOPE-WRAPPED ctx, byte-for-byte
+                // matching Op::NativeStatement's own handler -- the
+                // CheckDebugStatement handler passes the un-wrapped ctx,
+                // which would be a subtle behavior change for this node.
+                // See Op::CallChildren's own doc comment (bytecode.hpp).
+                if (dispatchIt != dispatch.end() && dispatchIt->second == &resolveChildren) {
+                    out.push_back({Op::CallChildren, internNativeStatement(&stmt), 0, &stmt.position()});
+                    return;
+                }
+                // Every other builtin, or a name that didn't resolve to a
+                // user module statically -- native passthrough, exactly
+                // like echo/assert/etc. below. Never the recursion-depth
+                // risk this compiler targets for THESE (see
+                // NativeStatement's own doc comment, bytecode.hpp).
                 out.push_back({Op::NativeStatement, internNativeStatement(&stmt), 0, &stmt.position()});
                 return;
             }

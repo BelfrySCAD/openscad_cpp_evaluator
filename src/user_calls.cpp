@@ -84,15 +84,29 @@ bool Evaluator::tryRunCompiledAssignmentBlock(const std::vector<const oscad::AST
 
 bool Evaluator::tryRunCompiledChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx) {
     if (children.empty() || !useBytecodeVm() || !inResolvePass_) return false;
+    const CompiledChunk* chunk = lookupOrCompileChildrenListChunk(children);
+    if (!chunk) return false;
+    runCompiledModuleBody(*this, *chunk, ctx);
+    return true;
+}
+
+// The cache-lookup half of tryRunCompiledChildren, shared with
+// Op::CallChildren's own runtime handler (bytecode_vm.cpp) -- both need
+// exactly this "list -> eligible chunk or nullptr" step, differing only
+// in how they then RUN the chunk (native runCompiledModuleBody reentry
+// here, a direct vmCallStack_ push there). Caller is responsible for the
+// useBytecodeVm()/inResolvePass_ gate (see childrenListChunkCache_'s own
+// doc comment for why the pass gate is load-bearing, not defensive).
+const CompiledChunk* Evaluator::lookupOrCompileChildrenListChunk(const std::vector<const oscad::ASTNode*>& children) {
     const oscad::ASTNode* first = children.front();
-    auto it = childrenListChunkCache_.find(first);
+    const auto key = std::make_pair(first, children.size());
+    auto it = childrenListChunkCache_.find(key);
     if (it == childrenListChunkCache_.end()) {
-        it = childrenListChunkCache_.emplace(first, tryCompileChildrenList(children, first->scope())).first;
+        it = childrenListChunkCache_.emplace(key, tryCompileChildrenList(children, first->scope())).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
-    if (!it->second || !chunkEligibleNow(*it->second)) return false;
-    runCompiledModuleBody(*this, *it->second, ctx);
-    return true;
+    if (!it->second || !chunkEligibleNow(*it->second)) return nullptr;
+    return &*it->second;
 }
 
 const Value* Evaluator::findUpvalue(const oscad::ASTNode* targetDecl, int slot) const {
@@ -897,15 +911,20 @@ Value Evaluator::parentModuleName(int idx) const {
     return Value{modules[static_cast<size_t>(revIdx)]};
 }
 
-void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
+std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(const CallArgs& args, EvalContext& ctx) {
     Value idxArg = getArg(args, 0, "index", Value{});
-    if (!ctx.childrenNodes || ctx.childrenNodes->empty()) return;
+    if (!ctx.childrenNodes || ctx.childrenNodes->empty()) return std::nullopt;
     const EvalContext* callerCtx = ctx.childrenCallerCtx;
-    if (!callerCtx) return;
+    if (!callerCtx) return std::nullopt;
 
     // A children() forwarding chain's own dyn/let_/etc. must alias the
     // *caller's* (not this ctx's) -- see EvalContext::withScope's rationale.
     EvalContext evalCtx = callerCtx->childCtx(nullptr, std::nullopt, callerCtx->childrenNodes, callerCtx->childrenCallerCtx);
+    // `ctx` here is the post-resolveCallArgs effCtx, deliberately: a
+    // `children($fn=12)`-style named-$ override lives only at effCtx's own
+    // trail level, and TrailView::items() is ancestry-visible, so reading
+    // from effCtx forwards both the call's own overrides AND everything
+    // the wrapper module's body set (`$fn = 100; children();`).
     for (const auto& [k, v] : ctx.dyn->items()) {
         if (!k.empty() && k[0] == '$') evalCtx.dyn->set(k, v);
     }
@@ -914,8 +933,7 @@ void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
     }
 
     if (std::holds_alternative<std::monostate>(idxArg)) {
-        evalChildren(*ctx.childrenNodes, evalCtx);
-        return;
+        return ChildrenForward{std::move(evalCtx), *ctx.childrenNodes};
     }
 
     // children(N) indexes child *statements*, not output bodies -- a
@@ -930,8 +948,14 @@ void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
             geoNodes.push_back(c);
         }
     }
-    if (idx < 0 || static_cast<size_t>(idx) >= geoNodes.size()) return;
-    evalChildren(std::vector<const oscad::ASTNode*>{geoNodes[static_cast<size_t>(idx)]}, evalCtx);
+    if (idx < 0 || static_cast<size_t>(idx) >= geoNodes.size()) return std::nullopt;
+    return ChildrenForward{std::move(evalCtx), {geoNodes[static_cast<size_t>(idx)]}};
+}
+
+void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
+    std::optional<ChildrenForward> fwd = prepareChildrenForward(args, ctx);
+    if (!fwd) return;
+    evalChildren(fwd->nodes, fwd->evalCtx);
 }
 
 } // namespace oscadeval

@@ -1299,6 +1299,35 @@ TEST(ModuleBodyCompiles, ReassignmentInsideForLoopBodyDoesNotSpuriouslyWarn) {
     for (const std::string& w : warnings) EXPECT_EQ(w.find("overwritten"), std::string::npos) << w;
 }
 
+// Regression test for a real cache-collision bug: childrenListChunkCache_
+// was keyed by the list's FIRST element alone (a convention borrowed from
+// assignBlockChunkCache_, where it IS sufficient) -- but children()'s
+// forwarding produces two DIFFERENT lists sharing a first element: bare
+// `children()` forwards the caller's whole list, `children(0)` a single-
+// element slice of it. Whichever form ran first poisoned the cache for
+// the other: here, bare children() cached a two-statement chunk keyed by
+// &cubeStmt, then children(0)'s single-element {&cubeStmt} lookup HIT
+// that key and emitted BOTH shapes. Fixed by keying on (front, size).
+TEST(ModuleBodyCompiles, BareAndIndexedChildrenForwardingDoNotShareACachedChunk) {
+    ScopedVm vm(true);
+    // m() emits: children() -> cube+sphere, then children(0) -> cube only.
+    // 3 bodies total; the collision bug produced 4 (children(0) emitting
+    // sphere too).
+    Evaluated e = evalSrc("module m() { children(); children(0); }\n"
+                          "m() { cube(1); sphere(r=1, $fn=8); }");
+    EXPECT_EQ(e.bodies.size(), 3u);
+}
+
+// Same collision, opposite statement order -- children(0) caching its
+// single-element chunk first used to TRUNCATE the later bare children()
+// (2 bodies where 3 belong).
+TEST(ModuleBodyCompiles, IndexedThenBareChildrenForwardingDoNotShareACachedChunk) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module m() { children(0); children(); }\n"
+                          "m() { cube(1); sphere(r=1, $fn=8); }");
+    EXPECT_EQ(e.bodies.size(), 3u);
+}
+
 TEST(ModuleBodyCompiles, RecursiveModuleWithIfSucceedsWellPastTheOldNativeLimitCompiled) {
     ScopedVm vm(true);
     Evaluated e = evalSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(10000);");
@@ -1388,6 +1417,59 @@ TEST(ModuleBodyCompiles, UnionWrappedRecursionStillHitsTheNativeReentryGuardCont
         const std::string what = e.what();
         EXPECT_NE(what.find("Recursion too deep"), std::string::npos) << what;
     }
+}
+
+// The BOSL2 attachable() shape this whole effort targets: a wrapper module
+// whose body is just `children();`, applied at every level of a recursive
+// chain. children() used to fall to Op::NativeStatement -- one genuine
+// native C++ reentry (evalStatement -> evalModularCall -> builtinChildren
+// -> evalChildren -> runCompiledModuleBody -> a fresh nested driveVm) per
+// level, measured as 85 of 93 native-reentry hits in a real BOSL2 script.
+// Op::CallChildren resolves the forwarded list at runtime and pushes its
+// chunk onto vmCallStack_ directly (zero native frames), so this now
+// SUCCEEDS well past the old ~40-level Windows-safe ceiling. Depth 1500:
+// same figure the PushBuiltinWrap per-construct tests use -- comfortably
+// past the old ceiling, and tree depth stays flat regardless (children()
+// and user-module calls both splice, no kMaxCsgTreeDepth interaction).
+TEST(ModuleBodyCompiles, RecursiveChildrenForwardingChainSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module wrap() { children(); }\n"
+                          "module recur(n) { if (n > 0) { wrap() recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// Same chain through the INDEXED form -- children(0) shares Op::
+// CallChildren with the bare form (the index is resolved at runtime by
+// the same prepareChildrenForward helper the native path uses), so it
+// gets the same zero-native-reentry treatment, not just bare children().
+TEST(ModuleBodyCompiles, RecursiveIndexedChildrenForwardingChainSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module wrap() { children(0); }\n"
+                          "module recur(n) { if (n > 0) { wrap() recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// $-forwarding parity for the compiled children() path: a wrapper module's
+// own $-writes (`$fn = 7; children();`) and a children($fn=9)-style
+// named-$ override must both reach the forwarded child, exactly as the
+// native builtinChildren path forwards them (prepareChildrenForward's own
+// $-loop, shared by both paths precisely so they can't drift -- these
+// tests are the proof it actually holds end-to-end through the compiled
+// opcode, not just by construction).
+TEST(ModuleBodyCompiles, ChildrenForwardingCarriesWrapperDollarWritesCompiled) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("module w() { $fn = 7; children(); }\n"
+                               "w() echo($fn);"),
+              "ECHO: 7");
+}
+
+TEST(ModuleBodyCompiles, ChildrenForwardingCarriesNamedDollarArgCompiled) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("module w() { children($fn = 9); }\n"
+                               "w() echo($fn);"),
+              "ECHO: 9");
 }
 
 // Regression test for a real bug this same investigation caught:

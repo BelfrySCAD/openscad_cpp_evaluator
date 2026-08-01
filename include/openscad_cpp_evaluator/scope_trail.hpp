@@ -368,12 +368,30 @@ public:
         dirty_[level].push_back(id);
     }
 
+    // Level-aware, NOT a blind pop_back() -- the exact fix
+    // ScopeTrailStorage::popLevel (above) already carries, for the exact
+    // out-of-order-pop bug class its own doc comment describes; this
+    // indexed twin never got the same fix because nothing violated LIFO
+    // view destruction on the dyn trail until Op::CallChildren's
+    // forwarding frame (bytecode_vm.cpp): its evalCtx (a dyn level opened
+    // AFTER the call's own effCtx level) is moved into a VmFrame and
+    // OUTLIVES effCtx, so effCtx's pop runs while evalCtx's later entry
+    // is still physically on top of the same name's stack -- the blind
+    // pop_back() silently removed the still-live forwarded value instead
+    // of the one actually being popped (caught for real: a
+    // children($fn=9) named-$ override read back as the root default 0
+    // inside the forwarded child).
     void popLevel(int level) {
         auto it = dirty_.find(level);
         if (it != dirty_.end()) {
             for (int id : it->second) {
                 auto& stack = stacks_[static_cast<size_t>(id)];
-                if (!stack.empty()) stack.pop_back();
+                for (auto rit = stack.rbegin(); rit != stack.rend(); ++rit) {
+                    if (rit->level == level) {
+                        stack.erase(std::next(rit).base());
+                        break;
+                    }
+                }
             }
             dirty_.erase(it);
         }
