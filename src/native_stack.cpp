@@ -1,8 +1,6 @@
-#define OSCADEVAL_NATIVE_STACK_DEBUG 1 // TEMPORARY diagnostic -- Windows CI investigation, revert before merge
 #include "openscad_cpp_evaluator/native_stack.hpp"
 
 #include <cstdint>
-#include <cstdio>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -88,15 +86,6 @@ bool nativeStackBoundsKnown() { return cachedBounds().low != kUnsupported; }
 
 bool nativeStackMarginLow(size_t marginBytes) {
     const StackBounds& bounds = cachedBounds();
-#ifdef OSCADEVAL_NATIVE_STACK_DEBUG
-    static thread_local bool printedOnce = false;
-    if (!printedOnce) {
-        printedOnce = true;
-        fprintf(stderr, "[native_stack] SIZE=%llu (low=%llu high=%llu unsupported=%d)\n",
-                (unsigned long long)(bounds.high - bounds.low), (unsigned long long)bounds.low,
-                (unsigned long long)bounds.high, bounds.low == kUnsupported);
-    }
-#endif
     if (bounds.low == kUnsupported) return false; // callers keep their own fixed-count backstop for this case
     // Any local variable's own address is a reasonable proxy for the
     // current stack pointer -- doesn't need to be exact, only close
