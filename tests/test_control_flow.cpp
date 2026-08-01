@@ -721,6 +721,30 @@ TEST(UserModule, DollarChildrenCountsStatementsNotBodies) {
     EXPECT_EQ(captured, "ECHO: 2");
 }
 
+TEST(UserModule, GuardedIndexedChildrenForwardingThroughWrapperPreservesRealChildrenCount) {
+    // Regression: prepareChildrenForward's dyn-copy loop (meant only to
+    // forward $fn/$fa/$fs/$t-style overrides) used to also overwrite
+    // $children/$parent_modules with the WRAPPER module's ("left" here) own
+    // single-statement bookkeeping instead of preserving the real target's
+    // ("outer()"'s actual call site) count already inherited via
+    // callerCtx. A bare children() forwarding chain through ANY
+    // intermediate wrapper silently corrupted $children, so a guard like
+    // `if ($children > N) children(N)` (a standard BOSL/BOSL2 idiom, e.g.
+    // GDMUtils.scad's left()/right()/up()) evaluated false and dropped
+    // geometry with no warning at all. Found via a real user project.
+    Evaluated e = evalSrc("module left(x=0) { translate([-x,0,0]) children(); }\n"
+                          "module outer() {\n"
+                          "    left(10) { if ($children > 0) children(0); }\n"
+                          "    left(20) { if ($children > 1) children(1); }\n"
+                          "}\n"
+                          "outer() { cube(101); cube(102); }");
+    ASSERT_EQ(e.bodies.size(), 2u);
+    manifold::Box bbox0 = e.bodies[0].body->BoundingBox();
+    manifold::Box bbox1 = e.bodies[1].body->BoundingBox();
+    EXPECT_NEAR(bbox0.max.x - bbox0.min.x, 101.0, 1e-9);
+    EXPECT_NEAR(bbox1.max.x - bbox1.min.x, 102.0, 1e-9);
+}
+
 TEST(UserModule, RecursiveModuleCall) {
     Evaluated e = evalSrc("module stack(n) {"
                           "  if (n > 0) {"

@@ -925,8 +925,28 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     // trail level, and TrailView::items() is ancestry-visible, so reading
     // from effCtx forwards both the call's own overrides AND everything
     // the wrapper module's body set (`$fn = 100; children();`).
+    //
+    // EXCLUDING "$children"/"$parent_modules" is required, not incidental:
+    // both are set on `ctx` by buildModuleChildCtx for the WRAPPER module's
+    // own invocation (e.g. a `left(x) { ... }` positioning helper's own
+    // child count/nesting depth), completely unrelated to the forwarded
+    // TARGET's real values -- which `evalCtx` already correctly inherited
+    // above, from `callerCtx` (the actual forwarding target), a few lines
+    // up. Before this exclusion, a bare `children()` forwarded through ANY
+    // intermediate wrapper module silently replaced the target's own real
+    // `$children` with the wrapper's own (e.g. `left(x) { if ($children >
+    // N) children(N); }`, an extremely common BOSL/BOSL2-style guarded-
+    // forwarding idiom, would read the WRAPPER's own 1-child count instead
+    // of the real caller's, corrupting every such conditional -- silently
+    // dropping geometry with no warning of any kind, since the guard just
+    // evaluates false instead of erroring. Found via a real user script
+    // (snappy-reprap's x_axis_assembly_1, GDMUtils.scad's left()/right()/
+    // up() positioning helpers) that render a large fraction of the model
+    // through exactly this pattern -- confirmed present since at least
+    // v0.13.4 (this port's very first PyPI release), unrelated to any
+    // 2026-08-01 VM work.
     for (const auto& [k, v] : ctx.dyn->items()) {
-        if (!k.empty() && k[0] == '$') evalCtx.dyn->set(k, v);
+        if (!k.empty() && k[0] == '$' && k != "$children" && k != "$parent_modules") evalCtx.dyn->set(k, v);
     }
     for (const auto& [k, v] : ctx.let_->items()) {
         if (!k.empty() && k[0] == '$') evalCtx.let_->set(k, v);
