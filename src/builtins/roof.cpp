@@ -417,10 +417,21 @@ manifold::Manifold voronoiRoof(const manifold::CrossSection& cs, double fa, doub
 // construction here -- this port has no CGAL-based "straight" method (see
 // the file header comment and CLAUDE.md). Mirrors _resolve_roof.
 
-CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    ev.evalChildren(node.children, effCtx);
-
+// Split like computeLinearExtrudeParams (extrude.cpp) -- but UNLIKE that
+// group, this one genuinely can't move before evalChildren: the "Unknown
+// roof method" warning below is an observable side effect (an echo/warn
+// message), and native resolveRoof always evaluates children FIRST, so
+// this warning fires AFTER any echo()/warn() a child produces. Op::
+// PushBuiltinWrap's own runtime handler (bytecode_vm.cpp) therefore calls
+// this at POP time (after children finish -- VmFrame::builtinWrapStack
+// retains `args` for exactly this) rather than at PUSH time the way
+// computeLinearExtrudeParams/computeTransformParams/computeColorParams are
+// called -- see Op::PushBuiltinWrap's own Roof-kind doc comment
+// (bytecode.hpp) for the full contract. Takes the already-resolved
+// `CallArgs`/`EvalContext` directly (not the raw node+ctx) since by POP
+// time the argument expressions have already run once and must not
+// re-run (double rands()/side effects).
+CSGParams computeRoofParams(Evaluator& ev, const CallArgs& args, EvalContext& effCtx) {
     Value methodArg = getArg(args, std::nullopt, "method", Value{std::string("voronoi")});
     std::string method = std::holds_alternative<std::string>(methodArg) ? std::get<std::string>(methodArg) : "voronoi";
     if (method != "voronoi" && method != "straight") {
@@ -443,6 +454,12 @@ CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     params["fs"] = Value{dynOr("$fs", 2.0)};
     params["color"] = colorToValue(effCtx.color);
     return params;
+}
+
+CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    ev.evalChildren(node.children, effCtx);
+    return computeRoofParams(ev, args, effCtx);
 }
 
 std::vector<ColoredBody> generateRoof(Evaluator& ev, const CSGParams& params, const std::vector<std::unique_ptr<CSGNode>>& children,
