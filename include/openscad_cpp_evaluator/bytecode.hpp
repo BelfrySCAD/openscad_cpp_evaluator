@@ -261,7 +261,9 @@ enum class Op {
     CallModule,
 
     // -- Builtin-wrap compilation (closes the "NativeStatement gap" for ----
-    // -- translate/rotate/scale/mirror/multmatrix/resize/color/#/%/!) ------
+    // -- translate/rotate/scale/mirror/multmatrix/resize/color/#/%/!, ------
+    // -- hull/minkowski/render/linear_extrude/rotate_extrude/projection/ ---
+    // -- offset/roof) --------------------------------------------------------
     // A builtin-with-children statement that isn't a "call" the way
     // Op::CallModule's target is (no callStack_/profiling participation,
     // no named scope with upvalue semantics -- see CompiledChunk::
@@ -284,31 +286,41 @@ enum class Op {
     // (mirrors Evaluator::buildTreeNode's own ordering exactly -- doing
     // this AFTER would silently drop uncacheable/ManifoldCache taint
     // tracking for a rands() call embedded in the wrapper's own
-    // arguments), computes this site's own params (and, for Transform/
-    // Color kinds, a possibly-$-scoped child EvalContext, pushed onto
-    // f.ctxChain unconditionally -- Modifier kind needs neither params
-    // nor a ctx push), pushes a fresh ev.treeStack_ frame, and stashes
-    // {params, randsBefore, siteIdx} onto VmFrame::builtinWrapStack (a
-    // real per-frame LIFO stack, not a single slot: Push/PopBuiltinWrap
-    // pairs can nest or sequence within one frame's own instruction
-    // stream, e.g. `translate(a) translate(b) recur();`). The compiler
-    // always emits a plain Op::CheckDebugStatement immediately before
-    // this (see emitBuiltinWrap, bytecode_compiler.cpp), mirroring
-    // ModularEcho/ModularAssert's own pattern -- NOT skipped the way
-    // Op::CallModule's own call site skips one: this is a genuine
-    // statement doing real work here, unlike a module call (which
-    // transfers control to a declaration whose OWN body statements each
-    // get their own check instead).
+    // arguments), computes this site's own params for every kind except
+    // Modifier (empty, no ctx push) and Roof (deferred to Pop -- see
+    // BuiltinWrapSite's own doc comment) via that kind's own native
+    // compute function (computeTransformParams/computeColorParams/etc.,
+    // builtins.hpp) -- always a possibly-$-scoped child EvalContext,
+    // pushed onto f.ctxChain unconditionally for every non-Modifier kind
+    // (Roof pushes it too, params or not) -- pushes a fresh ev.treeStack_
+    // frame, and stashes {params, randsBefore, siteIdx, (Roof only)
+    // deferredArgs} onto VmFrame::builtinWrapStack (a real per-frame LIFO
+    // stack, not a single slot: Push/PopBuiltinWrap pairs can nest or
+    // sequence within one frame's own instruction stream, e.g.
+    // `translate(a) translate(b) recur();`). The compiler always emits a
+    // plain Op::CheckDebugStatement immediately before this (see
+    // emitBuiltinWrap, bytecode_compiler.cpp), mirroring ModularEcho/
+    // ModularAssert's own pattern -- NOT skipped the way Op::CallModule's
+    // own call site skips one: this is a genuine statement doing real
+    // work here, unlike a module call (which transfers control to a
+    // declaration whose OWN body statements each get their own check
+    // instead).
     PushBuiltinWrap,
 
     // Closes the matching Op::PushBuiltinWrap bracket: pops
     // VmFrame::builtinWrapStack's own top entry FIRST (before anything
     // that can itself throw, e.g. Evaluator::setTreeDepthOrThrow below --
     // so the exception-teardown path's own pending count is already
-    // correct if THIS throws), pops the ctx push Push made (Transform/
-    // Color kinds only), pops ev.treeStack_ to retrieve the children this
-    // bracket's own body produced, and builds the tagged CSGNode exactly
-    // like Evaluator::buildTreeNode's own post-resolveBody() half does
+    // correct if THIS throws); for Roof only, computes `pending.params`
+    // HERE via computeRoofParams(ev, pending.deferredArgs, ctx) -- the one
+    // kind whose params computation has an observable side effect
+    // (ev.warn()) that must stay ordered AFTER children, unlike every
+    // other kind's params (computed at Push, before children, since
+    // nothing else in this group has an order-sensitive side effect); pops
+    // the ctx Push made (every kind except Modifier); pops ev.treeStack_
+    // to retrieve the children this bracket's own body produced, and
+    // builds the tagged CSGNode exactly like Evaluator::buildTreeNode's
+    // own post-resolveBody() half does
     // (kind/node/isBuiltin=true/children/params/uncacheable/
     // setTreeDepthOrThrow), pushing it onto the new top of treeStack_. a
     // = index into CompiledChunk::builtinWrapSites (same site Push used).
@@ -476,8 +488,9 @@ enum class Op {
     // A single "native passthrough" statement -- every builtin module call
     // not covered by Op::PushBuiltinWrap/Op::PushCsgWrap (see those ops'
     // own doc comments for exactly which builtins ARE covered -- cube/
-    // sphere/hull/linear_extrude/etc., the ones that never wrap a
-    // recursive call in idiomatic OpenSCAD), the `*` modifier's own no-op
+    // sphere/import/text/surface/etc., the true LEAVES that never take a
+    // `children` block at all, so wrapping a recursive call inside one
+    // isn't even syntactically possible), the `*` modifier's own no-op
     // case, or a user-module call that didn't resolve at compile time
     // (shadowed, forward-declared, or otherwise not statically known) --
     // anything compileStatementList doesn't give its own real bytecode.
@@ -499,14 +512,22 @@ enum class Op {
     // native-reentry risk among ModularCall-shaped statements (bespoke
     // group_sizes bookkeeping meant they couldn't just reuse
     // PushBuiltinWrap's own bracket) -- they now have Op::PushCsgWrap,
-    // above. intersection_for -- NOT a ModularCall at all, its own
-    // NodeKind -- fell here too and was the true LAST native-reentry gap;
-    // it now shares Op::PushCsgWrap's own bracket (CsgWrapSite::hasArgs/
-    // includeOpParam both false for it) wrapped around a compiled
-    // cartesian-product loop reusing Op::ForIterNext/ForIterEnd/
-    // NativeIterMaterialize verbatim (see compileIntersectionForLoop,
-    // bytecode_compiler.cpp) -- one Op::CsgGroupStart/CsgGroupEnd pair per
-    // full iteration instead of per source statement.)
+    // above. hull()/minkowski()/render()/linear_extrude()/rotate_extrude()/
+    // projection()/offset()/roof() fell here too, closing out every
+    // remaining non-leaf builtin whose OWN children can wrap a recursive
+    // call in an idiomatic script (a rounded-hull chain, a recursive
+    // extrude, etc.) -- they now share Op::PushBuiltinWrap's own bracket
+    // via 6 new Kind values (Passthrough/LinearExtrude/RotateExtrude/
+    // Projection/Offset/Roof), reusing the exact same mechanism rather
+    // than inventing another. intersection_for -- NOT a ModularCall at
+    // all, its own NodeKind -- fell here too and was the true LAST
+    // native-reentry gap; it now shares Op::PushCsgWrap's own bracket
+    // (CsgWrapSite::hasArgs/includeOpParam both false for it) wrapped
+    // around a compiled cartesian-product loop reusing Op::ForIterNext/
+    // ForIterEnd/NativeIterMaterialize verbatim (see
+    // compileIntersectionForLoop, bytecode_compiler.cpp) -- one Op::
+    // CsgGroupStart/CsgGroupEnd pair per full iteration instead of per
+    // source statement. Every non-leaf builtin construct is covered now.)
     // a = index into CompiledChunk::nativeStatements. Runtime just does
     // what Evaluator::evalChildren's own per-statement loop already does
     // for one node: derive childCtx via ctx.withScope(...), checkDebug,
@@ -831,8 +852,8 @@ struct CompiledChunk {
     // replay the native param-resolution step and rebuild the tagged
     // CSGNode at Pop time.
     //
-    // `node`'s concrete type depends on `kind`: Transform/Color sites are
-    // genuine `ModularCall`s (down-cast to read `.name`/`.arguments`/
+    // `node`'s concrete type depends on `kind`: every kind except Modifier
+    // is a genuine `ModularCall` (down-cast to read `.name`/`.arguments`/
     // `.children`); Modifier sites are the wrapper node itself
     // (`ModularModifierHighlight`/`Background`/`ShowOnly` -- `!`/`#`/`%`;
     // `*`/Disable never reaches here, its child never evaluates at all,
@@ -844,10 +865,30 @@ struct CompiledChunk {
     // union of concrete pointers) because that's all Op::PopBuiltinWrap
     // itself ever needs `node` for: the resulting CSGNode's own
     // `node`/error-position field.
+    //
+    // Passthrough/LinearExtrude/RotateExtrude/Projection/Offset/Roof
+    // (added for hull()/minkowski()/render()/linear_extrude()/
+    // rotate_extrude()/projection()/offset()/roof()) share Transform/
+    // Color's exact push-time-computed-params shape, just via a different
+    // native compute function each (Op::PushBuiltinWrap's own runtime
+    // handler switches on `kind` to pick it) -- see that op's own doc
+    // comment for the one exception (Roof, whose params computation has
+    // to run at POP time instead, after children, to preserve an
+    // observable warn() ordering).
     struct BuiltinWrapSite {
-        enum class Kind { Transform, Color, Modifier };
+        enum class Kind {
+            Transform,
+            Color,
+            Modifier,
+            Passthrough,   // hull()/minkowski()/render() -- empty params, no compute function needed
+            LinearExtrude,
+            RotateExtrude,
+            Projection,
+            Offset,
+            Roof,          // computed at POP time, not PUSH -- see this struct's own doc comment
+        };
         Kind kind;
-        std::string tagName; // "translate"/"rotate"/.../"color"/"highlight"/"background"/"show_only"
+        std::string tagName; // "translate"/"rotate"/.../"color"/"highlight"/"background"/"show_only"/"hull"/...
         const oscad::ASTNode* node = nullptr;
     };
 

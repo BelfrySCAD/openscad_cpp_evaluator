@@ -1498,17 +1498,17 @@ public:
                         {Op::CallModule, static_cast<int>(chunk_.moduleCallSites.size()) - 1, 0, &call.position()});
                     return;
                 }
-                // A user module never shadows a builtin transform/color
-                // name in a way that reaches here -- the `resolved` check
-                // above already ruled that out (isBuiltin per
-                // evalModularCall's own comment). So a name found in
-                // resolveDispatch() here is unambiguously the real C++
-                // builtin. Detected by FUNCTION-POINTER identity against
-                // &resolveTransform/&resolveColor, not a second,
-                // independently-maintained name list -- stays in sync
-                // with registry.cpp automatically if a 7th transform name
-                // is ever added there. See Op::PushBuiltinWrap's own doc
-                // comment (bytecode.hpp) for why this specific subset
+                // A user module never shadows a builtin name in a way that
+                // reaches here -- the `resolved` check above already ruled
+                // that out (isBuiltin per evalModularCall's own comment).
+                // So a name found in resolveDispatch() here is
+                // unambiguously the real C++ builtin. Detected by
+                // FUNCTION-POINTER identity against &resolveTransform/
+                // &resolveColor/&resolveHull/etc., not a second,
+                // independently-maintained name list -- stays in sync with
+                // registry.cpp automatically if a name is ever added to
+                // one of these groups there. See Op::PushBuiltinWrap's own
+                // doc comment (bytecode.hpp) for why this specific subset
                 // gets real bytecode instead of falling to
                 // Op::NativeStatement below like every other builtin
                 // still does.
@@ -1516,10 +1516,27 @@ public:
                 auto dispatchIt = dispatch.find(call.name->name);
                 std::optional<CompiledChunk::BuiltinWrapSite::Kind> wrapKind;
                 if (dispatchIt != dispatch.end()) {
+                    using Kind = CompiledChunk::BuiltinWrapSite::Kind;
                     if (dispatchIt->second == &resolveTransform) {
-                        wrapKind = CompiledChunk::BuiltinWrapSite::Kind::Transform;
+                        wrapKind = Kind::Transform;
                     } else if (dispatchIt->second == &resolveColor) {
-                        wrapKind = CompiledChunk::BuiltinWrapSite::Kind::Color;
+                        wrapKind = Kind::Color;
+                    } else if (dispatchIt->second == &resolveHull || dispatchIt->second == &resolveMinkowski ||
+                               dispatchIt->second == &resolveRender) {
+                        // Empty params, no compute function needed -- see
+                        // BuiltinWrapSite::Kind::Passthrough's own doc
+                        // comment (bytecode.hpp).
+                        wrapKind = Kind::Passthrough;
+                    } else if (dispatchIt->second == &resolveLinearExtrude) {
+                        wrapKind = Kind::LinearExtrude;
+                    } else if (dispatchIt->second == &resolveRotateExtrude) {
+                        wrapKind = Kind::RotateExtrude;
+                    } else if (dispatchIt->second == &resolveProjection) {
+                        wrapKind = Kind::Projection;
+                    } else if (dispatchIt->second == &resolveOffset) {
+                        wrapKind = Kind::Offset;
+                    } else if (dispatchIt->second == &resolveRoof) {
+                        wrapKind = Kind::Roof;
                     }
                 }
                 if (wrapKind) {

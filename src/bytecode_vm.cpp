@@ -1056,6 +1056,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     // rands() call embedded in the wrapper's own args).
                     const std::uint64_t randsBefore = ev.randsCallCount();
                     CSGParams params;
+                    CallArgs deferredArgs; // Roof only -- see PendingBuiltinWrap's own doc comment
                     switch (site.kind) {
                         case CompiledChunk::BuiltinWrapSite::Kind::Transform: {
                             BuiltinWrapParams result =
@@ -1076,9 +1077,63 @@ Value driveVm(Evaluator& ev, size_t floor) {
                             // own native shape runs its single child
                             // against the untouched ctx too.
                             break;
+                        case CompiledChunk::BuiltinWrapSite::Kind::Passthrough: {
+                            // hull()/minkowski()/render() -- resolve args
+                            // for their own $-propagation-into-children
+                            // side effect only (mirrors resolveHull/
+                            // resolveMinkowski/resolveRender's own
+                            // `(void)args;`); no params of their own ever.
+                            auto [args, effCtx] =
+                                resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node).arguments, ctx);
+                            (void)args;
+                            f.ctxChain.push_back(std::move(effCtx));
+                            break;
+                        }
+                        case CompiledChunk::BuiltinWrapSite::Kind::LinearExtrude: {
+                            BuiltinWrapParams result = computeLinearExtrudeParams(
+                                ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
+                            params = std::move(result.params);
+                            f.ctxChain.push_back(std::move(result.ctx));
+                            break;
+                        }
+                        case CompiledChunk::BuiltinWrapSite::Kind::RotateExtrude: {
+                            BuiltinWrapParams result = computeRotateExtrudeParams(
+                                ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
+                            params = std::move(result.params);
+                            f.ctxChain.push_back(std::move(result.ctx));
+                            break;
+                        }
+                        case CompiledChunk::BuiltinWrapSite::Kind::Projection: {
+                            BuiltinWrapParams result =
+                                computeProjectionParams(ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
+                            params = std::move(result.params);
+                            f.ctxChain.push_back(std::move(result.ctx));
+                            break;
+                        }
+                        case CompiledChunk::BuiltinWrapSite::Kind::Offset: {
+                            BuiltinWrapParams result =
+                                computeOffsetParams(ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
+                            params = std::move(result.params);
+                            f.ctxChain.push_back(std::move(result.ctx));
+                            break;
+                        }
+                        case CompiledChunk::BuiltinWrapSite::Kind::Roof: {
+                            // params stays empty here -- computed at Pop
+                            // instead (computeRoofParams calls ev.warn(),
+                            // which must stay ordered AFTER children; see
+                            // this Kind's own doc comment, bytecode.hpp).
+                            // `args` must be retained, not re-resolved at
+                            // Pop, or its argument expressions would run
+                            // twice.
+                            auto [args, effCtx] =
+                                resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node).arguments, ctx);
+                            deferredArgs = std::move(args);
+                            f.ctxChain.push_back(std::move(effCtx));
+                            break;
+                        }
                     }
                     ev.treeStack_.emplace_back();
-                    f.builtinWrapStack.push_back({std::move(params), randsBefore, ins.a});
+                    f.builtinWrapStack.push_back({std::move(params), randsBefore, ins.a, std::move(deferredArgs)});
                     ++f.pc;
                     break;
                 }
@@ -1093,6 +1148,14 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     f.builtinWrapStack.pop_back();
                     const CompiledChunk::BuiltinWrapSite& site =
                         f.chunk->builtinWrapSites[static_cast<size_t>(pending.siteIdx)];
+                    // Roof's params computation is deferred to here (see
+                    // this Kind's own doc comment, bytecode.hpp) -- ctx is
+                    // still on top of f.ctxChain, not yet popped below, so
+                    // computeRoofParams sees the exact same effCtx the
+                    // children just ran against.
+                    if (site.kind == CompiledChunk::BuiltinWrapSite::Kind::Roof) {
+                        pending.params = computeRoofParams(ev, pending.deferredArgs, f.ctxChain.back());
+                    }
                     if (site.kind != CompiledChunk::BuiltinWrapSite::Kind::Modifier) f.ctxChain.pop_back();
                     std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                     ev.treeStack_.pop_back();

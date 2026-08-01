@@ -1,5 +1,6 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/dispatch.hpp"
 
 #include <optional>
@@ -153,21 +154,30 @@ std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams& param
                                             const oscad::ASTNode& node);
 
 // linear_extrude()/rotate_extrude()/projection() -- extrude.cpp.
+// computeXParams: the pure "resolve args, build params" half, split out
+// like computeTransformParams/computeColorParams so Op::PushBuiltinWrap's
+// own runtime handler can call it directly (bytecode_vm.cpp) instead of
+// through the whole resolve function, whose OTHER half (evalChildren) is
+// exactly the native reentry that split exists to avoid.
+BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 CSGParams resolveLinearExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& params,
                                                 const std::vector<std::unique_ptr<CSGNode>>& children,
                                                 const oscad::ASTNode& node);
 
+BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& params,
                                                 const std::vector<std::unique_ptr<CSGNode>>& children,
                                                 const oscad::ASTNode& node);
 
+BuiltinWrapParams computeProjectionParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 CSGParams resolveProjection(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateProjection(Evaluator& ev, const CSGParams& params,
                                              const std::vector<std::unique_ptr<CSGNode>>& children,
                                              const oscad::ASTNode& node);
 
+BuiltinWrapParams computeOffsetParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateOffset(Evaluator& ev, const CSGParams& params,
                                          const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
@@ -176,6 +186,13 @@ std::vector<ColoredBody> generateOffset(Evaluator& ev, const CSGParams& params,
 // contour polygons) + Tier 3 (SDF/level-set fallback) only, per the plan --
 // Tier 2 (general multi-contour/hole straight skeleton) is a named,
 // documented follow-up, not silently dropped (see CLAUDE.md).
+// computeRoofParams: UNLIKE computeLinearExtrudeParams and friends above,
+// this is the params-computation half taken from AFTER evalChildren (it
+// calls ev.warn(), an observable side effect that must stay ordered after
+// any child's own echo/warn output) -- takes already-resolved CallArgs,
+// not a raw node+ctx, since Op::PushBuiltinWrap's own runtime handler
+// calls this at POP time. See its own doc comment (roof.cpp).
+CSGParams computeRoofParams(Evaluator& ev, const CallArgs& args, EvalContext& effCtx);
 CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateRoof(Evaluator& ev, const CSGParams& params,
                                        const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);

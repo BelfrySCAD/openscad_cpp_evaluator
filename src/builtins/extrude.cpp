@@ -13,10 +13,21 @@ namespace oscadeval {
 // mirrors _resolve_linear_extrude/_generate_linear_extrude. `scale` is
 // either a single number (applied to both X/Y) or a [x,y] pair for the top
 // face; the bottom face is always full-size.
-
-CSGParams resolveLinearExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+//
+// Split into computeLinearExtrudeParams (pure, no children-evaluation side
+// effect) + resolveLinearExtrude (adds the evalChildren call) so Op::
+// PushBuiltinWrap's own runtime handler (bytecode_vm.cpp) can call the pure
+// half directly instead of going through the whole resolve function --
+// exactly the same split computeTransformParams/computeColorParams already
+// use, extended to this builtin. Params computation here has no observable
+// side effect of its own (no warn()/echo()/rands() call), so moving it
+// before evalChildren (unlike this function's own former single-body
+// shape, which computed params AFTER children like every other builtin
+// still not covered by PushBuiltinWrap) is behaviorally unobservable --
+// see computeRoofParams's own doc comment (roof.cpp) for the one builtin
+// in this group where that ISN'T true and a different split was needed.
+BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    ev.evalChildren(node.children, effCtx);
 
     const double height = toDoubleLenient(getArg(args, 0, "height", Value{1.0}));
     const bool center = truthy(getArg(args, std::nullopt, "center", Value{false}));
@@ -40,7 +51,13 @@ CSGParams resolveLinearExtrude(Evaluator& ev, const oscad::ModularCall& node, Ev
     params["scale_x"] = Value{scaleX};
     params["scale_y"] = Value{scaleY};
     params["color"] = colorToValue(effCtx.color);
-    return params;
+    return BuiltinWrapParams{std::move(params), std::move(effCtx)};
+}
+
+CSGParams resolveLinearExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    BuiltinWrapParams result = computeLinearExtrudeParams(ev, node, ctx);
+    ev.evalChildren(node.children, result.ctx);
+    return std::move(result.params);
 }
 
 std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& params,
@@ -65,9 +82,10 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
 // so resolve only caches $fn/$fa/$fs for generate to call fnSegments()
 // with once the real max-x bound exists.
 
-CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+// Split the same way as computeLinearExtrudeParams, above -- see its own
+// doc comment.
+BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    ev.evalChildren(node.children, effCtx);
 
     const double angle = toDoubleLenient(getArg(args, 0, "angle", Value{360.0}));
 
@@ -84,7 +102,13 @@ CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, Ev
     params["fa"] = Value{dynOr("$fa", 12.0)};
     params["fs"] = Value{dynOr("$fs", 2.0)};
     params["color"] = colorToValue(effCtx.color);
-    return params;
+    return BuiltinWrapParams{std::move(params), std::move(effCtx)};
+}
+
+CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    BuiltinWrapParams result = computeRotateExtrudeParams(ev, node, ctx);
+    ev.evalChildren(node.children, result.ctx);
+    return std::move(result.params);
 }
 
 std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& params,
@@ -108,12 +132,19 @@ std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& p
 // FillRule::Positive to clean up self-intersections Manifold's own
 // Project() can produce.
 
-CSGParams resolveProjection(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+// Split the same way as computeLinearExtrudeParams, above -- see its own
+// doc comment.
+BuiltinWrapParams computeProjectionParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    ev.evalChildren(node.children, effCtx);
     CSGParams params;
     params["cut"] = Value{truthy(getArg(args, std::nullopt, "cut", Value{false}))};
-    return params;
+    return BuiltinWrapParams{std::move(params), std::move(effCtx)};
+}
+
+CSGParams resolveProjection(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    BuiltinWrapParams result = computeProjectionParams(ev, node, ctx);
+    ev.evalChildren(node.children, result.ctx);
+    return std::move(result.params);
 }
 
 std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
@@ -145,9 +176,10 @@ std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
 // (JoinType::Square, or Miter if chamfer=true) are mutually exclusive;
 // neither given passes the first child through unchanged.
 
-CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+// Split the same way as computeLinearExtrudeParams, above -- see its own
+// doc comment.
+BuiltinWrapParams computeOffsetParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    ev.evalChildren(node.children, effCtx);
 
     const Value rArg = getArg(args, std::nullopt, "r", Value{});
     const Value deltaArg = getArg(args, std::nullopt, "delta", Value{});
@@ -161,7 +193,13 @@ CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         params["segs"] = Value{static_cast<double>(fnSegmentsFromCtx(effCtx, std::fabs(toDoubleLenient(rArg))))};
     }
     params["color"] = colorToValue(effCtx.color);
-    return params;
+    return BuiltinWrapParams{std::move(params), std::move(effCtx)};
+}
+
+CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    BuiltinWrapParams result = computeOffsetParams(ev, node, ctx);
+    ev.evalChildren(node.children, result.ctx);
+    return std::move(result.params);
 }
 
 std::vector<ColoredBody> generateOffset(Evaluator&, const CSGParams& params, const std::vector<std::unique_ptr<CSGNode>>& children,
