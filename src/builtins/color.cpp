@@ -12,7 +12,7 @@ namespace oscadeval {
 // case). Sets the color on ctx for every descendant statement. Mirrors
 // _resolve_color/_generate_color.
 
-CSGParams resolveColor(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+BuiltinWrapParams computeColorParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     const Value defaultC =
         Value{std::make_shared<const ValueList>(ValueList{{Value{1.0}, Value{1.0}, Value{1.0}, Value{1.0}}})};
@@ -33,15 +33,19 @@ CSGParams resolveColor(Evaluator& ev, const oscad::ModularCall& node, EvalContex
     }
 
     EvalContext childCtx = effCtx.childCtx(nullptr, std::optional<std::array<double, 4>>(rgba));
+    CSGParams params;
+    params["rgba"] = colorToValue(rgba);
+    return BuiltinWrapParams{std::move(params), std::move(childCtx)};
+}
+
+CSGParams resolveColor(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    BuiltinWrapParams result = computeColorParams(ev, node, ctx);
     // Evaluated for the side effect of building the children's own CSGNodes
     // under the color-tagged context -- the returned bodies themselves are
     // unused here; generate reads them back via each child's own .bodies
     // and stamps `rgba` onto all of them. Mirrors _resolve_color.
-    ev.evalChildren(node.children, childCtx);
-
-    CSGParams params;
-    params["rgba"] = colorToValue(rgba);
-    return params;
+    ev.evalChildren(node.children, result.ctx);
+    return std::move(result.params);
 }
 
 std::vector<ColoredBody> generateColor(Evaluator&, const CSGParams& params,

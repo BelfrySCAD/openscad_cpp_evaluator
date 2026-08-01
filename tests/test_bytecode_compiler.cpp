@@ -1305,21 +1305,83 @@ TEST(ModuleBodyCompiles, RecursiveModuleWithIfSucceedsWellPastTheOldNativeLimitC
     ASSERT_EQ(e.bodies.size(), 1u);
 }
 
-// The "NativeStatement gap" pattern (Evaluator::tryRunCompiledChildren): a
-// builtin-with-children statement (translate here) always falls to
-// Op::NativeStatement, so a recursive call made ONLY from inside one is a
-// genuine, repeated native C++ re-entry into the VM (evalChildren ->
-// tryRunCompiledChildren -> runCompiledModuleBody -> driveVm) every single
-// level -- unlike a bare `recur(n-1);` statement, which compiles straight
-// to Op::CallModule and costs zero native stack. Before
-// driveVmNativeDepth_/kMaxDriveVmNativeDepth existed, this pattern
-// segfaulted (exit 139) around n=3000 instead of throwing; this proves it
-// now fails the same controlled way kMaxUserCallDepth already does for the
-// interpreted case.
-TEST(ModuleBodyCompiles, NativeReentrantRecursionHitsAControlledErrorInsteadOfCrashing) {
+// The "NativeStatement gap" this used to prove (Evaluator::
+// tryRunCompiledChildren): a builtin-with-children statement wrapping a
+// RECURSIVE call used to fall to Op::NativeStatement every single level --
+// a genuine, repeated native C++ re-entry into the VM (evalChildren ->
+// tryRunCompiledChildren -> runCompiledModuleBody -> driveVm), unlike a
+// bare `recur(n-1);` statement, which compiles straight to Op::CallModule
+// and costs zero native stack. Before driveVmNativeDepth_/
+// kMaxDriveVmNativeDepth existed, this pattern segfaulted (exit 139)
+// around n=3000. Op::PushBuiltinWrap (bytecode_compiler.cpp/bytecode_vm.cpp)
+// closes that gap for translate/rotate/scale/mirror/multmatrix/resize/
+// color/#/%/! specifically -- this construct now compiles to real bytecode
+// that runs entirely on the heap-based vmCallStack_, so it SUCCEEDS instead
+// of hitting the native-reentry guard at all. Depth 1500 (not the old
+// 3000): comfortably past the old ~40-55 native-reentry ceiling, but under
+// kMaxCsgTreeDepth's own 2000 -- translate() genuinely nests real tree
+// structure (unlike a bare module call, which splices flat), so 3000 would
+// now hit THAT unrelated guard instead, which isn't what this test is
+// about; see CsgTree's own depth-guard tests (test_csg_tree.cpp) for that
+// one. See UnionWrappedRecursionStillHitsTheNativeReentryGuardControlled-
+// Error, below, for proof the guard itself still works for a construct
+// this fix deliberately doesn't cover.
+TEST(ModuleBodyCompiles, RecursiveTranslateWrappedCallSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { translate([0,0,n]) recur2(n); }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// Same shape, multmatrix() instead of translate() -- both share
+// resolveTransform/computeTransformParams, but detected/dispatched
+// separately at compile time (a different registry.cpp entry), so this is
+// a real, independent proof it's not just translate() that got covered.
+TEST(ModuleBodyCompiles, RecursiveMultmatrixWrappedCallSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e =
+        evalSrc("module recur(n) { multmatrix([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]) recur2(n); }\n"
+                "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// Same shape, color() -- the Color-kind branch (computeColorParams, a
+// separate ctxChain-pushing path from Transform's own), not just Transform.
+TEST(ModuleBodyCompiles, RecursiveColorWrappedCallSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { color(\"red\") recur2(n); }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// Same shape, `#` (highlight) -- the Modifier-kind branch (no arg
+// resolution, no ctxChain push at all), and the ONLY one of the 3 kinds
+// reached via a NodeKind case rather than resolveDispatch() lookup.
+TEST(ModuleBodyCompiles, RecursiveModifierWrappedCallSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { #recur2(n); }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// union()/difference()/intersection() are deliberately NOT covered by
+// Op::PushBuiltinWrap (bespoke per-statement grouping/group_sizes logic,
+// genuinely different from the transform/color/modifier shape -- see that
+// op's own doc comment, bytecode.hpp) -- a recursive call wrapped in one
+// still falls to Op::NativeStatement and still costs one real native
+// frame per level, exactly like every covered construct used to. Proves
+// the guard itself (driveVmNativeDepth_/kMaxDriveVmNativeDepth, or
+// nativeStackMarginLow when this thread's stack bounds are known) is
+// still live and still catches this, not accidentally disabled by
+// Op::PushBuiltinWrap's own changes to the shared NativeStatement path.
+TEST(ModuleBodyCompiles, UnionWrappedRecursionStillHitsTheNativeReentryGuardControlledError) {
     ScopedVm vm(true);
     try {
-        evalSrc("module recur(n) { translate([0,0,n]) recur2(n); }\n"
+        evalSrc("module recur(n) { union() { recur2(n); } }\n"
                 "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
                 "recur(3000);");
         FAIL() << "expected EvalError";

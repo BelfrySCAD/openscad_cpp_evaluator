@@ -1,7 +1,10 @@
 #include "openscad_cpp_evaluator/bytecode_compiler.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
+#include "openscad_cpp_evaluator/dispatch.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
+
+#include "builtins/builtins.hpp"
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
 #include "openscad_cpp_parser/ast/expression.hpp"
@@ -1163,6 +1166,42 @@ public:
         out.push_back({Op::CloseExprScope, 0, 0, nullptr});
     }
 
+    // Shared by ModularCall's Transform/Color-kind branch and the 3 real
+    // modifier cases (ModularModifierHighlight/Background/ShowOnly),
+    // below -- emits one Op::PushBuiltinWrap/PopBuiltinWrap bracket around
+    // `children` compiled inline (exactly like ModularLet's own body
+    // does, via this same compileStatementList recursion). See
+    // Op::PushBuiltinWrap's own doc comment (bytecode.hpp) for the full
+    // design and why this specific set doesn't fall to Op::NativeStatement
+    // like other builtins-with-children still do.
+    //
+    // Op::CheckDebugStatement emitted first, mirroring ModularEcho/
+    // ModularAssert's own pattern (both above) -- NOT Op::CallModule's own
+    // lack of one: that omission is specific to a resolved USER MODULE
+    // call, whose own body statements each get their own check instead
+    // (mirrors evalUserModule's "no body-entry checkDebug of its own",
+    // evaluator.hpp). A builtin wrap statement isn't "control transferring
+    // to a declaration" the way a module call is -- it's a plain statement
+    // representing real work happening HERE, exactly like echo/assert/
+    // assignment, which is why those get their own checkpoint. Confirmed
+    // for real: DebugHooks.FastContinueNotHookSkippableStillFiresEvery-
+    // Checkpoint (a translate()-wrapped script) caught the miscount when
+    // this was first omitted by analogy to Op::CallModule.
+    void emitBuiltinWrap(CompiledChunk::BuiltinWrapSite::Kind kind, const std::string& tagName,
+                          const oscad::ASTNode& wrapperNode, const std::vector<const oscad::ASTNode*>& children,
+                          std::vector<Instruction>& out) {
+        out.push_back({Op::CheckDebugStatement, internNativeStatement(&wrapperNode), 0, nullptr});
+        CompiledChunk::BuiltinWrapSite site;
+        site.kind = kind;
+        site.tagName = tagName;
+        site.node = &wrapperNode;
+        chunk_.builtinWrapSites.push_back(std::move(site));
+        const int idx = static_cast<int>(chunk_.builtinWrapSites.size()) - 1;
+        out.push_back({Op::PushBuiltinWrap, idx, 0, &wrapperNode.position()});
+        compileStatementList(children, out);
+        out.push_back({Op::PopBuiltinWrap, idx, 0, &wrapperNode.position()});
+    }
+
     void compileOneStatement(const oscad::ASTNode& stmt, std::vector<Instruction>& out) {
         using oscad::NodeKind;
         trackSpan(stmt);
@@ -1350,12 +1389,59 @@ public:
                         {Op::CallModule, static_cast<int>(chunk_.moduleCallSites.size()) - 1, 0, &call.position()});
                     return;
                 }
-                // Builtin, children(), or a name that didn't resolve to a
-                // user module statically -- native passthrough, exactly
-                // like echo/assert/etc. below. Never the recursion-depth
-                // risk this compiler targets (see NativeStatement's own
-                // doc comment, bytecode.hpp).
+                // A user module never shadows a builtin transform/color
+                // name in a way that reaches here -- the `resolved` check
+                // above already ruled that out (isBuiltin per
+                // evalModularCall's own comment). So a name found in
+                // resolveDispatch() here is unambiguously the real C++
+                // builtin. Detected by FUNCTION-POINTER identity against
+                // &resolveTransform/&resolveColor, not a second,
+                // independently-maintained name list -- stays in sync
+                // with registry.cpp automatically if a 7th transform name
+                // is ever added there. See Op::PushBuiltinWrap's own doc
+                // comment (bytecode.hpp) for why this specific subset
+                // gets real bytecode instead of falling to
+                // Op::NativeStatement below like every other builtin
+                // still does.
+                const auto& dispatch = resolveDispatch();
+                auto dispatchIt = dispatch.find(call.name->name);
+                std::optional<CompiledChunk::BuiltinWrapSite::Kind> wrapKind;
+                if (dispatchIt != dispatch.end()) {
+                    if (dispatchIt->second == &resolveTransform) {
+                        wrapKind = CompiledChunk::BuiltinWrapSite::Kind::Transform;
+                    } else if (dispatchIt->second == &resolveColor) {
+                        wrapKind = CompiledChunk::BuiltinWrapSite::Kind::Color;
+                    }
+                }
+                if (wrapKind) {
+                    std::vector<const oscad::ASTNode*> children;
+                    children.reserve(call.children.size());
+                    for (const auto& c : call.children) children.push_back(c.get());
+                    emitBuiltinWrap(*wrapKind, call.name->name, call, children, out);
+                    return;
+                }
+                // Every other builtin, children(), or a name that didn't
+                // resolve to a user module statically -- native
+                // passthrough, exactly like echo/assert/etc. below. Never
+                // the recursion-depth risk this compiler targets for
+                // THESE (see NativeStatement's own doc comment,
+                // bytecode.hpp).
                 out.push_back({Op::NativeStatement, internNativeStatement(&stmt), 0, &stmt.position()});
+                return;
+            }
+            case NodeKind::ModularModifierHighlight: {
+                auto& n = static_cast<const oscad::ModularModifierHighlight&>(stmt);
+                emitBuiltinWrap(CompiledChunk::BuiltinWrapSite::Kind::Modifier, "highlight", n, {n.child.get()}, out);
+                return;
+            }
+            case NodeKind::ModularModifierBackground: {
+                auto& n = static_cast<const oscad::ModularModifierBackground&>(stmt);
+                emitBuiltinWrap(CompiledChunk::BuiltinWrapSite::Kind::Modifier, "background", n, {n.child.get()}, out);
+                return;
+            }
+            case NodeKind::ModularModifierShowOnly: {
+                auto& n = static_cast<const oscad::ModularModifierShowOnly&>(stmt);
+                emitBuiltinWrap(CompiledChunk::BuiltinWrapSite::Kind::Modifier, "show_only", n, {n.child.get()}, out);
                 return;
             }
             case NodeKind::ModularIf: {
@@ -1389,10 +1475,17 @@ public:
                 return;
             }
             default:
-                // modifiers/intersection_for -- deliberately native (see
-                // this section's own header comment above); echo/assert/
-                // assignment/let-block now have their own real bytecode
-                // cases, above.
+                // ModularModifierDisable (`*`) -- deliberately native: its
+                // child never evaluates at all (see evalStatement's own
+                // ModularModifierDisable case, stmt_eval.cpp), so there's
+                // no recursion to eliminate here in the first place.
+                // intersection_for -- deliberately native (bespoke
+                // per-statement grouping, same reasoning as union/
+                // difference/intersection; not covered by
+                // Op::PushBuiltinWrap, see that op's own doc comment).
+                // `#`/`%`/`!` and translate/rotate/scale/mirror/multmatrix/
+                // resize/color have their own real bytecode cases now,
+                // above; echo/assert/assignment/let-block already did.
                 out.push_back({Op::NativeStatement, internNativeStatement(&stmt), 0, &stmt.position()});
                 return;
         }

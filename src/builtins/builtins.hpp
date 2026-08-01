@@ -38,13 +38,29 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
 std::vector<ColoredBody> generate2d(Evaluator& ev, const CSGParams& params,
                                      const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
 
+// Shared return shape for computeTransformParams/computeColorParams,
+// below -- the "resolve args, build params, compute a possibly-$-scoped
+// child ctx" half of resolveTransform/resolveColor, split out so
+// Op::PushBuiltinWrap's own runtime handler (bytecode_vm.cpp) can call it
+// directly instead of going through the full resolve function (whose
+// OTHER half, `ev.evalChildren(...)`, is exactly the native reentry this
+// split exists to avoid). `ctx` is the input ctx unchanged unless this
+// builtin's own resolution opened a new one (mirrors ResolvedCallArgs's
+// own `ctx` field, call_args.hpp).
+struct BuiltinWrapParams {
+    CSGParams params;
+    EvalContext ctx;
+};
+
 // translate/rotate/scale/mirror/multmatrix/resize share one resolve/
 // generate pair (2D/3D dispatch happens per-body at generate time).
+BuiltinWrapParams computeTransformParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 CSGParams resolveTransform(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateTransform(Evaluator& ev, const CSGParams& params,
                                             const std::vector<std::unique_ptr<CSGNode>>& children,
                                             const oscad::ASTNode& node);
 
+BuiltinWrapParams computeColorParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 CSGParams resolveColor(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateColor(Evaluator& ev, const CSGParams& params,
                                         const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);

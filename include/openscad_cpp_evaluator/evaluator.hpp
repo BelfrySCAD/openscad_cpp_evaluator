@@ -559,18 +559,25 @@ private:
     void buildTreeNode(const std::string& kind, const oscad::ASTNode& node,
                         const std::function<CSGParams()>& resolveBody);
 
+    // -- User function/module calls (Phase 4) --------------------------
+
+public:
     // Sets node.treeDepth from its own (already-finalized) `children`,
     // throwing (kMaxCsgTreeDepth's own doc comment, above, for why) if
     // it's now too deep. Called by every csg_resolve.cpp site that
     // finalizes a CSGNode's own `children` -- buildTreeNode,
     // evalModularCall's non-splice tail, spliceModuleChildren's
     // union-wrap branch -- right after assigning `children`, before the
-    // node is ever linked into anything a caller could see.
+    // node is ever linked into anything a caller could see. Public (not
+    // alongside buildTreeNode/evalModularCall, just above, which stay
+    // private member functions): Op::PopBuiltinWrap's own runtime handler
+    // (bytecode_vm.cpp, a free function, same "needs direct access, no
+    // friend declaration in play" reasoning as treeStack_/randsCallCount()
+    // above) calls this directly, replicating buildTreeNode's own
+    // post-resolveBody() half rather than going through it (the "body"
+    // there already ran as bytecode, not a callback buildTreeNode could
+    // invoke).
     void setTreeDepthOrThrow(CSGNode& node, const oscad::ASTNode& errNode);
-
-    // -- User function/module calls (Phase 4) --------------------------
-
-public:
     // Picks between an isolated call scope (callCtx()) and a closure-
     // capturing one (childCtx()) for entering `decl`'s body: walks the
     // live call stack, and if `decl`'s own declaration span is *strictly*
