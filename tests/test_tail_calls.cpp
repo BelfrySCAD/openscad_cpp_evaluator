@@ -299,9 +299,9 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpr
     // (confirmed present in the wild -- a plain, closure-free
     // FunctionDeclaration, nothing specific to closures/letrec/tail-call
     // machinery at all). Interpreted-path variant; see the compiled-path
-    // one below. f(500) is comfortably past kMaxUserCallDepth (50, see its
+    // one below. f(500) is comfortably past kMaxUserCallDepth (30, see its
     // own doc comment, evaluator.hpp) -- the actual native recursion never
-    // gets anywhere near 500, since the guard fires at 50 regardless of
+    // gets anywhere near 500, since the guard fires at 30 regardless of
     // what depth the script asks for.
     Evaluator ev;
     auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(500);");

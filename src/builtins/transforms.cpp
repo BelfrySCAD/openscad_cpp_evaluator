@@ -164,7 +164,7 @@ manifold::CrossSection applyTransform2d(const std::string& name, const CallArgs&
 
 } // namespace
 
-CSGParams resolveTransform(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+BuiltinWrapParams computeTransformParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     const std::string& name = node.name->name;
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
@@ -176,9 +176,13 @@ CSGParams resolveTransform(Evaluator& ev, const oscad::ModularCall& node, EvalCo
     // getArg() again in applyTransform2d/3d below, instead of resolving
     // e.g. "v"/"a" to a concrete vec3/vec2 here.
     params["args"] = callArgsToValue(args);
+    return BuiltinWrapParams{std::move(params), std::move(effCtx)};
+}
 
-    ev.evalChildren(node.children, effCtx);
-    return params;
+CSGParams resolveTransform(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    BuiltinWrapParams result = computeTransformParams(ev, node, ctx);
+    ev.evalChildren(node.children, result.ctx);
+    return std::move(result.params);
 }
 
 std::vector<ColoredBody> generateTransform(Evaluator&, const CSGParams& params,

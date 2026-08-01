@@ -260,26 +260,101 @@ enum class Op {
     // which splice is unconditional).
     CallModule,
 
-    // A single "native passthrough" statement -- a modifier wrapper,
-    // intersection_for, children(), a builtin module call, or a user-
-    // module call that didn't resolve at compile time (shadowed, forward-
-    // declared, or otherwise not statically known) -- anything
-    // compileStatementList doesn't give its own real bytecode. (Assignment/
-    // ModularEcho/ModularAssert/ModularLet used to fall here too; they now
-    // have their own real bytecode -- Op::StoreModuleVar/Op::Echo/
-    // Op::AssertStatement/Op::OpenLetScope+StoreLetVar -- purely a
-    // throughput change, since none of these were ever the recursion-depth
-    // risk this compiler targets.)
+    // -- Builtin-wrap compilation (closes the "NativeStatement gap" for ----
+    // -- translate/rotate/scale/mirror/multmatrix/resize/color/#/%/!) ------
+    // A builtin-with-children statement that isn't a "call" the way
+    // Op::CallModule's target is (no callStack_/profiling participation,
+    // no named scope with upvalue semantics -- see CompiledChunk::
+    // BuiltinWrapSite's own doc comment for the full "why this doesn't
+    // need vmCallStack_/pushBracketedModuleFrame-style bracketing"
+    // reasoning) -- so unlike Op::CallModule, its children compile INLINE
+    // into the SAME instruction stream (via compileStatementList, exactly
+    // like Op::OpenLetScope's own body does for ModularLet) rather than
+    // becoming a separate chunk. Exists because falling through to
+    // Op::NativeStatement here was a REAL, proven Windows/MSVC crash risk
+    // for a recursive translate()/multmatrix()-wrapped module chain (see
+    // this project's own session notes: BOSL2's attachable() machinery
+    // needs native reentry depth ~55, past the empirically-proven-unsafe
+    // Windows ceiling for that reentry mechanism -- no depth-guard tuning
+    // could satisfy both "the real script works" and "Windows doesn't
+    // crash", only eliminating the native reentry itself could).
+    //
+    // a = index into CompiledChunk::builtinWrapSites. Runtime handler:
+    // captures ev.randsCallCount() BEFORE any argument resolution
+    // (mirrors Evaluator::buildTreeNode's own ordering exactly -- doing
+    // this AFTER would silently drop uncacheable/ManifoldCache taint
+    // tracking for a rands() call embedded in the wrapper's own
+    // arguments), computes this site's own params (and, for Transform/
+    // Color kinds, a possibly-$-scoped child EvalContext, pushed onto
+    // f.ctxChain unconditionally -- Modifier kind needs neither params
+    // nor a ctx push), pushes a fresh ev.treeStack_ frame, and stashes
+    // {params, randsBefore, siteIdx} onto VmFrame::builtinWrapStack (a
+    // real per-frame LIFO stack, not a single slot: Push/PopBuiltinWrap
+    // pairs can nest or sequence within one frame's own instruction
+    // stream, e.g. `translate(a) translate(b) recur();`). The compiler
+    // always emits a plain Op::CheckDebugStatement immediately before
+    // this (see emitBuiltinWrap, bytecode_compiler.cpp), mirroring
+    // ModularEcho/ModularAssert's own pattern -- NOT skipped the way
+    // Op::CallModule's own call site skips one: this is a genuine
+    // statement doing real work here, unlike a module call (which
+    // transfers control to a declaration whose OWN body statements each
+    // get their own check instead).
+    PushBuiltinWrap,
+
+    // Closes the matching Op::PushBuiltinWrap bracket: pops
+    // VmFrame::builtinWrapStack's own top entry FIRST (before anything
+    // that can itself throw, e.g. Evaluator::setTreeDepthOrThrow below --
+    // so the exception-teardown path's own pending count is already
+    // correct if THIS throws), pops the ctx push Push made (Transform/
+    // Color kinds only), pops ev.treeStack_ to retrieve the children this
+    // bracket's own body produced, and builds the tagged CSGNode exactly
+    // like Evaluator::buildTreeNode's own post-resolveBody() half does
+    // (kind/node/isBuiltin=true/children/params/uncacheable/
+    // setTreeDepthOrThrow), pushing it onto the new top of treeStack_. a
+    // = index into CompiledChunk::builtinWrapSites (same site Push used).
+    //
+    // teardownVmCallStackDownTo's own exception path (bytecode_vm.cpp)
+    // pops frame->builtinWrapStack.size() additional treeStack_ entries
+    // per torn-down frame, on top of its existing ownsModuleSplice-gated
+    // pop -- required because an exception can leave N of these brackets
+    // open in one frame, unlike the "at most one Op::CallModule splice
+    // per frame" shape that gated pop was originally sized for. See
+    // releaseVmFrame's own doc comment (user_calls.cpp) for a real,
+    // previously-ASan-caught bug from exactly this class of mismatched-
+    // bookkeeping-vs-treeStack_-depth mistake (a 1-bit version of the
+    // same seam, now a counter).
+    PopBuiltinWrap,
+
+    // A single "native passthrough" statement -- intersection_for,
+    // children(), union/difference/intersection and every other builtin
+    // module call NOT covered by Op::PushBuiltinWrap (see that op's own
+    // doc comment for exactly which builtins ARE covered), the `*`
+    // modifier's own no-op case, or a user-module call that didn't
+    // resolve at compile time (shadowed, forward-declared, or otherwise
+    // not statically known) -- anything compileStatementList doesn't give
+    // its own real bytecode. (Assignment/ModularEcho/ModularAssert/
+    // ModularLet used to fall here too; they now have their own real
+    // bytecode -- Op::StoreModuleVar/Op::Echo/Op::AssertStatement/
+    // Op::OpenLetScope+StoreLetVar -- purely a throughput change, since
+    // none of these were ever the recursion-depth risk this compiler
+    // targets. `#`/`%`/`!` modifiers and translate/rotate/scale/mirror/
+    // multmatrix/resize/color used to fall here too, for the SAME
+    // throughput reasoning -- WRONG in that one specific case: a
+    // recursive module call wrapped in one of these is exactly the
+    // pattern that made this op's own native reentry a genuine Windows
+    // crash risk in practice, not just a missed optimization. See
+    // Op::PushBuiltinWrap's own doc comment for the real story and the
+    // fix.)
     // a = index into CompiledChunk::nativeStatements. Runtime just does
     // what Evaluator::evalChildren's own per-statement loop already does
     // for one node: derive childCtx via ctx.withScope(...), checkDebug,
-    // evalStatement. These are "leaf-shaped" in the sense the Stage 2 plan
-    // means it: whatever native recursion they make (a builtin's own
-    // resolve function walking ITS children, etc.) is bounded by ordinary
-    // script structure, not by how deep a recursive module chain goes --
-    // that risk is fully covered by CallModule/ForIterNext/the Jump-based
-    // if/for control flow instead, regardless of how many of THESE sit
-    // alongside them in the same body.
+    // evalStatement. These are still "leaf-shaped" for what's left here
+    // after Op::PushBuiltinWrap peeled off the proven-risky subset: real
+    // recursion safety for a recursive module chain is covered by
+    // CallModule/PushBuiltinWrap/ForIterNext/the Jump-based if/for control
+    // flow, not by how many of THESE sit alongside them in the same body
+    // -- true again now that the one construct that violated it
+    // (translate()-wrapped recursion) has its own real bytecode instead.
     NativeStatement,
 
     // If/if-else's own condition, evaluated NATIVELY (Evaluator::
@@ -583,6 +658,38 @@ struct CompiledChunk {
         std::string calleeName;
     };
 
+    // One Op::PushBuiltinWrap/PopBuiltinWrap site pair -- a builtin-with-
+    // children statement recognized at COMPILE time as one of the small,
+    // closed set this covers (see Op::PushBuiltinWrap's own doc comment
+    // for the full list and the Windows-crash rationale). Unlike
+    // ModuleCallSite, this is NOT "a call" -- see this struct's own `kind`
+    // discriminator and Evaluator::evalModularCall/buildTreeNode/
+    // evalModifier (csg_resolve.cpp): builtins never touch callStack_ or
+    // fire profileEnter/profileExit, native or compiled, so there's no
+    // enterUserCall-style bracketing to represent here, just enough to
+    // replay the native param-resolution step and rebuild the tagged
+    // CSGNode at Pop time.
+    //
+    // `node`'s concrete type depends on `kind`: Transform/Color sites are
+    // genuine `ModularCall`s (down-cast to read `.name`/`.arguments`/
+    // `.children`); Modifier sites are the wrapper node itself
+    // (`ModularModifierHighlight`/`Background`/`ShowOnly` -- `!`/`#`/`%`;
+    // `*`/Disable never reaches here, its child never evaluates at all,
+    // so it stays Op::NativeStatement's no-op-shaped native path), which
+    // does NOT derive from ModularCall (it derives from
+    // ModuleInstantiation directly and carries a single `child`) -- read
+    // via its own concrete type when kind == Modifier, never as a
+    // ModularCall. Stored as the generic `ASTNode*` here (not a tagged
+    // union of concrete pointers) because that's all Op::PopBuiltinWrap
+    // itself ever needs `node` for: the resulting CSGNode's own
+    // `node`/error-position field.
+    struct BuiltinWrapSite {
+        enum class Kind { Transform, Color, Modifier };
+        Kind kind;
+        std::string tagName; // "translate"/"rotate"/.../"color"/"highlight"/"background"/"show_only"
+        const oscad::ASTNode* node = nullptr;
+    };
+
     // One Op::AssertStatement site -- see that op's own doc comment for
     // the full contract. `conditionArgIndex`/`messageArgIndex` are indices
     // into the site's own argCount-sized popped-argument array (source
@@ -644,6 +751,7 @@ struct CompiledChunk {
     // NativeCondJumpIfFalse/NativeCheckDebugExprLevel/NativeIterMaterialize's
     // own doc comments, above) -- always empty for a function chunk.
     std::vector<ModuleCallSite> moduleCallSites;
+    std::vector<BuiltinWrapSite> builtinWrapSites;
     std::vector<AssertSite> assertSites;
     std::vector<const oscad::Expression*> nativeExprs;
     std::vector<const oscad::ASTNode*> nativeStatements;

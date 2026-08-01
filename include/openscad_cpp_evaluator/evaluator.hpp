@@ -559,18 +559,25 @@ private:
     void buildTreeNode(const std::string& kind, const oscad::ASTNode& node,
                         const std::function<CSGParams()>& resolveBody);
 
+    // -- User function/module calls (Phase 4) --------------------------
+
+public:
     // Sets node.treeDepth from its own (already-finalized) `children`,
     // throwing (kMaxCsgTreeDepth's own doc comment, above, for why) if
     // it's now too deep. Called by every csg_resolve.cpp site that
     // finalizes a CSGNode's own `children` -- buildTreeNode,
     // evalModularCall's non-splice tail, spliceModuleChildren's
     // union-wrap branch -- right after assigning `children`, before the
-    // node is ever linked into anything a caller could see.
+    // node is ever linked into anything a caller could see. Public (not
+    // alongside buildTreeNode/evalModularCall, just above, which stay
+    // private member functions): Op::PopBuiltinWrap's own runtime handler
+    // (bytecode_vm.cpp, a free function, same "needs direct access, no
+    // friend declaration in play" reasoning as treeStack_/randsCallCount()
+    // above) calls this directly, replicating buildTreeNode's own
+    // post-resolveBody() half rather than going through it (the "body"
+    // there already ran as bytecode, not a callback buildTreeNode could
+    // invoke).
     void setTreeDepthOrThrow(CSGNode& node, const oscad::ASTNode& errNode);
-
-    // -- User function/module calls (Phase 4) --------------------------
-
-public:
     // Picks between an isolated call scope (callCtx()) and a closure-
     // capturing one (childCtx()) for entering `decl`'s body: walks the
     // live call stack, and if `decl`'s own declaration span is *strictly*
@@ -1351,18 +1358,44 @@ public:
     // doubled to 100 for headroom -- that immediately segfaulted on
     // Windows CI (ModuleBodyCompiles.
     // NativeReentrantRecursionHitsAControlledErrorInsteadOfCrashing, its
-    // own guard-safety regression test). Backed off to 50 -- STILL
-    // segfaulted there. Confirms this chain's real per-level native-frame
-    // cost is heavier than kMaxUserCallDepth's own (which needed the SAME
-    // kind of comedown, an initial 50 down to 30, for a shallower chain),
-    // and that Windows' real safe ceiling for THIS chain sits somewhere
-    // below 50, above the already-Windows-verified-safe 30 (confirmed
-    // safe by PR #60's own successful merge, before this value ever
-    // changed). Currently at 40 -- ALSO still functionally sufficient
-    // (all 3 real scripts still render locally at this value) -- bisecting
-    // downward toward Windows' actual ceiling via successive CI runs, one
-    // step at a time; if 40 itself is still unsafe there, keep coming
-    // down. Do not raise this value again based on local (macOS/Linux)
+    // own guard-safety regression test at the time -- since renamed/
+    // repurposed, see Op::PushBuiltinWrap below). Backed off to 50 --
+    // STILL segfaulted there. Confirms this chain's real per-level
+    // native-frame cost is heavier than kMaxUserCallDepth's own (which
+    // needed the SAME kind of comedown, an initial 50 down to 30, for a
+    // shallower chain), and that Windows' real safe ceiling for THIS
+    // chain sits somewhere below 50, above the already-Windows-verified-
+    // safe 30 (confirmed safe by PR #60's own successful merge, before
+    // this value ever changed). Landed at 40.
+    //
+    // A real stack-margin check (nativeStackMarginLow(), since removed --
+    // see git history for `native_stack.hpp`/`.cpp` if the exact mechanism
+    // is ever needed again) was tried as a REPLACEMENT for this fixed
+    // count, specifically because BOSL2's attachable() machinery
+    // (Anklet.scad) needed native reentry depth 55, past this ceiling --
+    // and confirmed working for that: Anklet.scad rendered successfully
+    // with an unmodified build. But the margin-based check was THEN
+    // confirmed, via two separate real Windows CI runs, to segfault for a
+    // DIFFERENT deep native-reentry chain (union()-wrapped recursion)
+    // regardless of total thread stack size (an 8 MiB Windows stack,
+    // matching macOS's own default byte-for-byte, still crashed at the
+    // same depth) -- i.e. this fixed count, not the margin check, is the
+    // mechanism actually proven safe on Windows for genuine deep native
+    // reentry; the margin check is not a safe general replacement for it.
+    //
+    // The REAL fix for Anklet.scad turned out to be architectural, not a
+    // better safety-check mechanism: Op::PushBuiltinWrap/PopBuiltinWrap
+    // (bytecode.hpp/bytecode_compiler.cpp/bytecode_vm.cpp) eliminates
+    // native reentry ENTIRELY for the specific pattern that needed depth
+    // 55 (translate/rotate/scale/mirror/multmatrix/resize/color/#/%/!-
+    // wrapped recursion) by compiling it to run on the heap-based
+    // vmCallStack_ instead of falling to Op::NativeStatement -- so this
+    // guard no longer needs to accommodate that case at all. What's left
+    // uncovered (union/difference/intersection-wrapped recursion, other
+    // builtins, fully interpreted-mode scripts) is genuinely "leaf-shaped"
+    // again in the sense Stage 2's original design assumed, comfortably
+    // within this fixed, Windows-proven-safe ceiling for any realistic
+    // script. Do not raise this value again based on local (macOS/Linux)
     // testing alone -- only a real Windows CI pass is evidence of safety
     // here. Deliberately its own named constant (not a reuse of
     // kMaxUserCallDepth) so the two can be recalibrated independently.

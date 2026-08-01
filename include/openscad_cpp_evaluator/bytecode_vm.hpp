@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/bound_args.hpp"
 #include "openscad_cpp_evaluator/bytecode.hpp"
+#include "openscad_cpp_evaluator/csg_node.hpp"
 #include "openscad_cpp_evaluator/eval_context.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
 
@@ -15,6 +16,19 @@
 namespace oscadeval {
 
 class Evaluator;
+
+// One still-open Op::PushBuiltinWrap bracket's own state, needed again by
+// its matching Op::PopBuiltinWrap -- see that op's own doc comment
+// (bytecode.hpp) for the full contract. Lives in the header for the same
+// reason IterList does, just above: it travels with a VmFrame (VmFrame::
+// builtinWrapStack, below), not a free-standing local, since Push/
+// PopBuiltinWrap pairs can nest or sequence within one frame's own
+// instruction stream.
+struct PendingBuiltinWrap {
+    CSGParams params;
+    std::uint64_t randsBefore = 0;
+    int siteIdx = -1;
+};
 
 // One ListCompFor/statement-for assignment's own materialized iteration
 // state -- see Op::IterMaterialize/IterReset/IterNext's own doc comments
@@ -102,6 +116,17 @@ struct VmFrame {
     std::vector<std::vector<Value>> accumStack;
     std::vector<IterList> iterLists;
     std::vector<EvalContext> ctxChain;
+    // Still-open Op::PushBuiltinWrap brackets, LIFO, scoped to THIS frame's
+    // own instruction stream -- mirrors accumStack/iterLists' own role for
+    // their respective bracket pairs. Normal execution always drains this
+    // back to empty (every Push has a compile-time-matched Pop); only the
+    // exception-teardown path (teardownVmCallStackDownTo, bytecode_vm.cpp)
+    // needs to know its size, to pop the matching number of extra
+    // treeStack_ entries for a frame torn down mid-bracket. Not explicitly
+    // cleared in releaseVmFrame, same as accumStack/ctxChain -- the
+    // existing invariant ("whoever pops this frame drains its own open
+    // brackets first") already covers it.
+    std::vector<PendingBuiltinWrap> builtinWrapStack;
     // The ORIGINAL callee name at push time, used by
     // Evaluator::exitUserCallSuccess's own returnHook call when this frame
     // carries a bracket -- deliberately NOT updated by a later tail hop

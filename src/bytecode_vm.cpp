@@ -9,6 +9,10 @@
 #include "openscad_cpp_parser/ast/declarations.hpp"
 #include "openscad_cpp_parser/ast/module_instantiation.hpp"
 
+#include "builtins/builtins.hpp"
+
+#include <algorithm>
+
 namespace oscadeval {
 
 namespace {
@@ -341,6 +345,19 @@ void teardownVmCallStackDownTo(Evaluator& ev, size_t floor) {
         std::optional<Evaluator::UserCallHandle> bracket = std::move(ev.vmCallBrackets_.back());
         ev.vmCallBrackets_.pop_back();
         while (!frame->ctxChain.empty()) frame->ctxChain.pop_back();
+        // Any still-open Op::PushBuiltinWrap bracket(s) this frame's own
+        // execution left behind -- each pushed its own treeStack_
+        // accumulator (Op::PushBuiltinWrap's own runtime handler, above)
+        // that would normally be popped by its matching Op::PopBuiltinWrap;
+        // on the exception path that never runs. These are the MOST
+        // RECENTLY pushed treeStack_ entries relative to this frame's own
+        // (below) -- pop them first to respect treeStack_'s own LIFO order.
+        // See Op::PopBuiltinWrap's own doc comment (bytecode.hpp) for why
+        // this is a real counter, not the single-bool shape
+        // ownsModuleSplice, below, gets away with (N of these can be open
+        // at once; at most one module-call splice ever can).
+        for (size_t i = 0; i < frame->builtinWrapStack.size(); ++i) ev.treeStack_.pop_back();
+        frame->builtinWrapStack.clear();
         // A module frame's own CALLER (Op::CallModule, mirroring
         // evalModularCall/buildTreeNode) always pushes a treeStack_
         // accumulator for it before pushing this frame -- normally popped
@@ -376,6 +393,22 @@ Value driveVm(Evaluator& ev, size_t floor) {
         ~NativeDepthGuard() { --ev.driveVmNativeDepth_; }
     } nativeDepthGuard(ev);
     try {
+        // Fixed count, not nativeStackMarginLow() -- see kMaxDriveVmNative
+        // Depth's own doc comment (evaluator.hpp) for why: the margin-based
+        // check was added specifically because BOSL2's attachable() chain
+        // (translate/multmatrix/color/modifier-wrapped recursion) needed
+        // native reentry depth 55, past this fixed ceiling -- but
+        // Op::PushBuiltinWrap (bytecode_compiler.cpp/bytecode_vm.cpp) has
+        // since eliminated native reentry for exactly that pattern, so
+        // this guard now only has to catch what's genuinely still
+        // uncovered (union/difference/intersection-wrapped recursion,
+        // other builtins) -- comfortably within this fixed ceiling for any
+        // realistic script. The margin-based check was tried here and
+        // confirmed, via two separate real Windows CI runs, to still
+        // segfault for a deep uncovered-construct chain regardless of how
+        // much total stack the process has (this fixed count is the
+        // proven-safe mechanism for THIS specific native-reentry chain --
+        // see its own doc comment for the real Windows bisection history).
         if (ev.driveVmNativeDepth_ > Evaluator::kMaxDriveVmNativeDepth) {
             const oscad::ASTNode* node = ev.currentCallDeclNode();
             if (!node) node = ev.vmCallStack_.back()->chunk->selfDecl;
@@ -898,6 +931,73 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         ev.spliceModuleChildren(std::move(children), randsBefore, *site.callNode);
                         ++f.pc;
                     }
+                    break;
+                }
+                case Op::PushBuiltinWrap: {
+                    const CompiledChunk::BuiltinWrapSite& site = f.chunk->builtinWrapSites[static_cast<size_t>(ins.a)];
+                    // Captured BEFORE any argument resolution -- mirrors
+                    // Evaluator::buildTreeNode's own ordering exactly (see
+                    // this op's own doc comment, bytecode.hpp, for why
+                    // getting this backwards would silently drop
+                    // uncacheable/ManifoldCache taint tracking for a
+                    // rands() call embedded in the wrapper's own args).
+                    const std::uint64_t randsBefore = ev.randsCallCount();
+                    CSGParams params;
+                    switch (site.kind) {
+                        case CompiledChunk::BuiltinWrapSite::Kind::Transform: {
+                            BuiltinWrapParams result =
+                                computeTransformParams(ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
+                            params = std::move(result.params);
+                            f.ctxChain.push_back(std::move(result.ctx));
+                            break;
+                        }
+                        case CompiledChunk::BuiltinWrapSite::Kind::Color: {
+                            BuiltinWrapParams result =
+                                computeColorParams(ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
+                            params = std::move(result.params);
+                            f.ctxChain.push_back(std::move(result.ctx));
+                            break;
+                        }
+                        case CompiledChunk::BuiltinWrapSite::Kind::Modifier:
+                            // No params, no ctx change -- evalModifier's
+                            // own native shape runs its single child
+                            // against the untouched ctx too.
+                            break;
+                    }
+                    ev.treeStack_.emplace_back();
+                    f.builtinWrapStack.push_back({std::move(params), randsBefore, ins.a});
+                    ++f.pc;
+                    break;
+                }
+                case Op::PopBuiltinWrap: {
+                    // Pop this bracket's own bookkeeping FIRST -- before
+                    // anything below that can itself throw
+                    // (setTreeDepthOrThrow) -- so the exception-teardown
+                    // path's own builtinWrapStack.size() is already
+                    // correct if THIS throws (see Op::PopBuiltinWrap's own
+                    // doc comment, bytecode.hpp).
+                    PendingBuiltinWrap pending = std::move(f.builtinWrapStack.back());
+                    f.builtinWrapStack.pop_back();
+                    const CompiledChunk::BuiltinWrapSite& site =
+                        f.chunk->builtinWrapSites[static_cast<size_t>(pending.siteIdx)];
+                    if (site.kind != CompiledChunk::BuiltinWrapSite::Kind::Modifier) f.ctxChain.pop_back();
+                    std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
+                    ev.treeStack_.pop_back();
+                    // Mirrors Evaluator::buildTreeNode's own post-
+                    // resolveBody() half exactly (csg_resolve.cpp).
+                    const bool uncacheable =
+                        (ev.randsCallCount() != pending.randsBefore) ||
+                        std::any_of(children.begin(), children.end(), [](const auto& c) { return c->uncacheable; });
+                    auto treeNode = std::make_unique<CSGNode>();
+                    treeNode->kind = site.tagName;
+                    treeNode->node = site.node;
+                    treeNode->isBuiltin = true;
+                    treeNode->children = std::move(children);
+                    treeNode->params = std::move(pending.params);
+                    treeNode->uncacheable = uncacheable;
+                    ev.setTreeDepthOrThrow(*treeNode, *site.node);
+                    ev.treeStack_.back().push_back(std::move(treeNode));
+                    ++f.pc;
                     break;
                 }
                 case Op::NativeStatement: {

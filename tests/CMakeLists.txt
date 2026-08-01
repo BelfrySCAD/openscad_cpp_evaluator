@@ -41,5 +41,18 @@ target_link_libraries(oscad_eval_tests PRIVATE openscad_cpp_evaluator oscad_cli_
 # fixture for ToRenderableBodies/surface() image-loading tests.
 target_include_directories(oscad_eval_tests PRIVATE ${stb_SOURCE_DIR})
 
+# MSVC's default thread stack reserve is ~1 MiB, dwarfed by macOS/Linux's
+# default (~8 MiB) -- match the other platforms' stack size rather than
+# run this test binary on an unusually small one. Kept even after a
+# real-stack-margin-based safety check (tried, then reverted -- see
+# kMaxDriveVmNativeDepth's own doc comment, evaluator.hpp, for the full
+# story of why a fixed-count guard turned out to be the right mechanism
+# after all) stopped depending on the exact stack size: a bigger stack is
+# still strictly safer for this binary's own deep-recursion regression
+# tests, independent of that.
+if(MSVC)
+  target_link_options(oscad_eval_tests PRIVATE /STACK:8388608)
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(oscad_eval_tests)

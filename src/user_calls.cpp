@@ -674,6 +674,14 @@ Evaluator::UserCallHandle Evaluator::enterUserCall(const std::string& name, cons
                                                     const oscad::Position* callPos, int upvalueParent,
                                                     bool skipDepthGuard, CallStackFrame::Kind kind) {
     const bool isModule = kind == CallStackFrame::Kind::Module;
+    // Fixed count, not nativeStackMarginLow() -- see kMaxDriveVmNativeDepth's
+    // own doc comment (evaluator.hpp, bytecode_vm.cpp's identical guard)
+    // for the full reasoning: the margin-based check was needed only for
+    // a native-reentry pattern (BOSL2's attachable() chain) Op::
+    // PushBuiltinWrap has since eliminated the native reentry for
+    // entirely; for what's left, the margin check is the proven-UNSAFE
+    // mechanism on Windows (confirmed via real CI), this fixed count the
+    // proven-safe one.
     if (!skipDepthGuard && callStack_.size() >= kMaxUserCallDepth) {
         error("Recursion too deep while calling " + std::string(isModule ? "module" : "function") + " '" + name + "'",
               declNode);
