@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/bound_args.hpp"
 #include "openscad_cpp_evaluator/bytecode.hpp"
+#include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/csg_node.hpp"
 #include "openscad_cpp_evaluator/eval_context.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
@@ -28,6 +29,15 @@ struct PendingBuiltinWrap {
     CSGParams params;
     std::uint64_t randsBefore = 0;
     int siteIdx = -1;
+    // Only populated for BuiltinWrapSite::Kind::Roof -- the already-
+    // resolved call arguments, retained across the whole bracket so
+    // Op::PopBuiltinWrap's handler can compute roof()'s own params AFTER
+    // children finish (computeRoofParams needs them; re-running
+    // resolveCallArgs at Pop time instead would re-evaluate every argument
+    // expression a second time -- double rands()/side effects). Every
+    // other kind computes its params at Push time and leaves this default-
+    // empty.
+    CallArgs deferredArgs;
 };
 
 // One still-open Op::PushCsgWrap bracket's own state -- see that op's own

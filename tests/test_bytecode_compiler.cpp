@@ -1514,6 +1514,120 @@ TEST(ModuleBodyCompiles, CompiledCsgWrapEvaluatesAllAssignmentsBeforeAnyGeometry
     EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-6);
 }
 
+// -- hull()/minkowski()/render()/linear_extrude()/rotate_extrude()/ --------
+// -- projection()/offset()/roof() -- closing the last real native-reentry --
+// -- gap, via 6 new BuiltinWrapSite::Kind values sharing Op::PushBuiltinWrap
+// -- itself rather than a new bracket (see that op's own doc comment). ------
+// Every test here mirrors UnionWrappedRecursionSucceedsWellPastTheOldNative
+// ReentryLimit's own shape/depth (1500 -- comfortably past the old 40-level
+// native ceiling, comfortably under kMaxCsgTreeDepth=2000). Dimension-
+// mismatched constructs (linear_extrude/rotate_extrude/projection/offset/
+// roof all expect 2D children, but nesting one inside itself recursively
+// means every non-leaf level's own "child" is really the 3D/2D RESULT of
+// the next level down, not raw 2D input) intentionally don't assert a
+// specific body count/volume -- recursively self-nesting one of these
+// isn't an idiomatic real pattern the way union()/hull()/translate() are;
+// the only thing worth proving here is that deep recursion no longer
+// throws "Recursion too deep (native call stack)".
+
+TEST(ModuleBodyCompiles, HullWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { hull() { recur2(n); } }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+TEST(ModuleBodyCompiles, MinkowskiWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { minkowski() { cube(0.1); recur2(n); } }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+TEST(ModuleBodyCompiles, RenderWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { render() { recur2(n); } }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+TEST(ModuleBodyCompiles, LinearExtrudeWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    evalSrc("module recur(n) { linear_extrude(1) { recur2(n); } }\n"
+            "module recur2(n) { if (n > 0) { recur(n - 1); } else { square(1); } }\n"
+            "recur(1500);");
+}
+
+TEST(ModuleBodyCompiles, RotateExtrudeWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    evalSrc("module recur(n) { rotate_extrude() { recur2(n); } }\n"
+            "module recur2(n) { if (n > 0) { recur(n - 1); } else { translate([1,0]) square(1); } }\n"
+            "recur(1500);");
+}
+
+TEST(ModuleBodyCompiles, ProjectionWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    evalSrc("module recur(n) { projection() { recur2(n); } }\n"
+            "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+            "recur(1500);");
+}
+
+// offset() is 2D->2D -- unlike the dimension-changing group above, nesting
+// it inside itself really does feed each level's REAL 2D output into the
+// next level's real offsetting work at generate time, unlike linear_
+// extrude/rotate_extrude/projection/roof (whose intermediate levels see a
+// dimension-mismatched, effectively-empty child). offset(r=1) with a
+// nonzero radius compounds: each level's rounded-join offsetting grows
+// both the shape's size AND its vertex count (more arc segments per
+// corner, applied to an already-larger corner count from the level below)
+// -- genuinely exponential blowup by depth 1500, confirmed by hanging for
+// minutes before this test was rewritten. delta=0 (Square/Miter join,
+// never the Round path that adds arc segments) is a real geometric no-op
+// at every level -- exercises the exact same compiled opcode path with
+// none of the compounding cost.
+TEST(ModuleBodyCompiles, OffsetWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    evalSrc("module recur(n) { offset(delta=0) { recur2(n); } }\n"
+            "module recur2(n) { if (n > 0) { recur(n - 1); } else { square(1); } }\n"
+            "recur(1500);");
+}
+
+TEST(ModuleBodyCompiles, RoofWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    evalSrc("module recur(n) { roof() { recur2(n); } }\n"
+            "module recur2(n) { if (n > 0) { recur(n - 1); } else { square(4, center=true); } }\n"
+            "recur(1500);");
+}
+
+// $-named-argument propagation into a compiled Passthrough-kind wrap's
+// children -- mirrors DollarArgPropagatesIntoCompiledCsgWrapChildren, above,
+// for the OTHER kind (Passthrough/LinearExtrude/etc.) that also pushes a
+// possibly-$-scoped ctx unconditionally.
+TEST(ModuleBodyCompiles, DollarArgPropagatesIntoCompiledHullWrapChildren) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("module m() { hull($fn = 9) { echo($fn); cube(1); } }\n"
+                               "m();"),
+              "ECHO: 9");
+}
+
+// The ONE behavioral subtlety Op::PushBuiltinWrap's Roof kind introduces:
+// computeRoofParams's own "Unknown roof method" warning is computed at POP
+// time (after children), deliberately, so it stays ordered AFTER any
+// echo()/warn() a child produces -- exactly matching native resolveRoof's
+// own evalChildren-then-compute-params order. Pins that ordering under the
+// compiled path specifically (every other kind in this group computes its
+// params at PUSH time instead, since none of them has an order-sensitive
+// side effect to preserve).
+TEST(ModuleBodyCompiles, CompiledRoofUnknownMethodWarningStaysOrderedAfterChildrensOwnEcho) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("module m() { roof(method=\"bogus\") { echo(\"child\"); square(4, center=true); } }\n"
+                               "m();"),
+              "ECHO: \"child\"\nWARNING: Unknown roof method 'bogus'. Using 'voronoi'.");
+}
+
 // The BOSL2 attachable() shape this whole effort targets: a wrapper module
 // whose body is just `children();`, applied at every level of a recursive
 // chain. children() used to fall to Op::NativeStatement -- one genuine
