@@ -7,3 +7,13 @@ target_link_libraries(oscad_cli_lib PUBLIC openscad_cpp_evaluator)
 
 add_executable(openscad-cpp-evaluator main.cpp)
 target_link_libraries(openscad-cpp-evaluator PRIVATE oscad_cli_lib)
+
+# See tests/CMakeLists.txt's own identical block for the full rationale --
+# MSVC's ~1 MiB default thread stack is too small for both "legitimate
+# deep BOSL2-style recursion" and "the throw+unwind path itself" to
+# safely coexist under any single margin threshold; match macOS/Linux's
+# own ~8 MiB default instead. Applies here too, not just the test binary
+# -- this is the actual shipped CLI a real Windows user runs.
+if(MSVC)
+  target_link_options(openscad-cpp-evaluator PRIVATE /STACK:8388608)
+endif()

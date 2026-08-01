@@ -1,8 +1,6 @@
-#define OSCADEVAL_NATIVE_STACK_DEBUG 1 // TEMPORARY diagnostic -- Windows CI investigation, revert before merge
 #include "openscad_cpp_evaluator/native_stack.hpp"
 
 #include <cstdint>
-#include <cstdio>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -88,39 +86,15 @@ bool nativeStackBoundsKnown() { return cachedBounds().low != kUnsupported; }
 
 bool nativeStackMarginLow(size_t marginBytes) {
     const StackBounds& bounds = cachedBounds();
-#ifdef OSCADEVAL_NATIVE_STACK_DEBUG
-    static thread_local bool printedBounds = false;
-    static thread_local unsigned long callCount = 0;
-    ++callCount;
-    if (!printedBounds) {
-        printedBounds = true;
-        fprintf(stderr, "[native_stack] FIRST CALL bounds.low=%llu bounds.high=%llu (size=%llu) unsupported=%d\n",
-                (unsigned long long)bounds.low, (unsigned long long)bounds.high,
-                (unsigned long long)(bounds.high - bounds.low), bounds.low == kUnsupported);
-    }
-#endif
     if (bounds.low == kUnsupported) return false; // callers keep their own fixed-count backstop for this case
     // Any local variable's own address is a reasonable proxy for the
     // current stack pointer -- doesn't need to be exact, only close
     // enough to compare against a margin measured in tens/hundreds of KB.
     volatile char marker = 0;
     const uintptr_t currentSp = reinterpret_cast<uintptr_t>(const_cast<char*>(&marker));
-    if (currentSp < bounds.low) {
-#ifdef OSCADEVAL_NATIVE_STACK_DEBUG
-        fprintf(stderr, "[native_stack] TRIP (past low) call#%lu currentSp=%llu bounds.low=%llu\n", callCount,
-                (unsigned long long)currentSp, (unsigned long long)bounds.low);
-#endif
-        return true; // already past the known low bound -- no margin left, by definition
-    }
+    if (currentSp < bounds.low) return true; // already past the known low bound -- no margin left, by definition
     const uintptr_t remaining = currentSp - bounds.low;
-    const bool low = remaining < static_cast<uintptr_t>(marginBytes);
-#ifdef OSCADEVAL_NATIVE_STACK_DEBUG
-    if (low || callCount % 200 == 0) {
-        fprintf(stderr, "[native_stack] call#%lu currentSp=%llu remaining=%llu marginBytes=%zu low=%d\n", callCount,
-                (unsigned long long)currentSp, (unsigned long long)remaining, marginBytes, low);
-    }
-#endif
-    return low;
+    return remaining < static_cast<uintptr_t>(marginBytes);
 }
 
 } // namespace oscadeval

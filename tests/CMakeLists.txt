@@ -41,5 +41,19 @@ target_link_libraries(oscad_eval_tests PRIVATE openscad_cpp_evaluator oscad_cli_
 # fixture for ToRenderableBodies/surface() image-loading tests.
 target_include_directories(oscad_eval_tests PRIVATE ${stb_SOURCE_DIR})
 
+# MSVC's default thread stack reserve is ~1 MiB, dwarfed by macOS/Linux's
+# default (~8 MiB) -- see native_stack.hpp/kNativeStackSafetyMarginBytes
+# (evaluator.hpp) for the investigation this came out of: on a 1 MiB
+# stack, there's no single margin threshold that leaves both "room for
+# legitimate deep recursion" and "room for the throw+unwind path itself
+# to safely finish" -- real Windows CI segfaulted on 3 different margin
+# values, immediately after the guard correctly fired, because the
+# margin and the unwind's own transient stack cost draw from the SAME
+# tiny 1 MiB budget. Match the other platforms' stack size instead of
+# fighting over scraps of Windows' unusually small default.
+if(MSVC)
+  target_link_options(oscad_eval_tests PRIVATE /STACK:8388608)
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(oscad_eval_tests)
