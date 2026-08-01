@@ -384,6 +384,53 @@ TEST(DebugHooks, ForcedBreakpointBuiltinAlwaysFiresEvenInHookSkippableMode) {
     EXPECT_EQ(normalCalls, 0); // cube/breakpoint()-as-statement/sphere: no breakpoint line matches, all skipped
 }
 
+// Regression test for a real dangling-pointer bug (found via a targeted
+// ASan build reproducing BelfrySCAD's own "step over a call, but honor a
+// breakpoint set inside it" debug scenario): pushBracketedCallFrame/
+// pushBracketedModuleFrame (bytecode_vm.cpp) used to point
+// CallStackFrame::bodyCtx at their own LOCAL `childCtx` variable, which is
+// destroyed the instant they return -- but bodyCtx is read LATER, by any
+// subsequent checkDebug() call that walks the WHOLE call stack to build
+// per-frame debugger locals (getFrame(), below). A compiled caller
+// (`stepped_over`, no breakpoint of its own, so it runs compiled) calling
+// a callee forced into the interpreter by an active breakpoint on ITS OWN
+// line (`heavy`) reproduces this exactly: pausing deep inside `heavy` and
+// calling getFrame() used to segfault reading the compiled caller's own
+// already-dangling frame.
+TEST(DebugHooks, GetFrameDoesNotCrashWalkingACompiledCallerAboveAForcedInterpretedCallee) {
+    ScopedVm vm(true);
+    std::vector<size_t> frameCountsAtLine1;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int line, int depth, bool, bool exprLevel, const std::string&,
+                           const std::vector<CallStackFrame>& callStack, const DebugFramesFn& getFrame) {
+        if (line == 1 && depth == 2 && !exprLevel) {
+            std::vector<DebugFrame> frames = getFrame();
+            frameCountsAtLine1.push_back(frames.size());
+            EXPECT_EQ(callStack.size(), 2u);
+        }
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    // Mirrors BelfrySCAD's own _apply_fast_continue for an active step:
+    // a real breakpoint set (on heavy's own line 1, forcing IT specifically
+    // to stay interpreted via chunkEligibleNow) with hookSkippable=false.
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{{"<string>", {1}}},
+                                   /*hookSkippable=*/false);
+    auto ast = parseSrc("function heavy(n) = [for (i=[0:1:n-1]) i*i];\n"
+                        "function stepped_over() = let(r = heavy(3)) len(r);\n"
+                        "b = stepped_over();\n");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+    // The actual point of this test is that getFrame() doesn't crash
+    // reading the compiled `stepped_over` frame's own (previously
+    // dangling) bodyCtx -- a consistent, non-empty frame list is enough
+    // evidence it read something real rather than garbage each time.
+    ASSERT_FALSE(frameCountsAtLine1.empty());
+    for (size_t count : frameCountsAtLine1) EXPECT_EQ(count, frameCountsAtLine1.front());
+    EXPECT_GT(frameCountsAtLine1.front(), 0u);
+}
+
 // ---------------------------------------------------------------------------
 // Full parity with the Python reference's _check_debug call sites.
 //
