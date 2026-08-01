@@ -1514,6 +1514,46 @@ TEST(ModuleBodyCompiles, CompiledCsgWrapEvaluatesAllAssignmentsBeforeAnyGeometry
     EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-6);
 }
 
+// -- intersection_for -- the TRUE last native-reentry gap, closed by -------
+// -- reusing Op::PushCsgWrap around a compiled cartesian-product loop. -----
+// DebugHooksParity.IntersectionForMarksBodyEntryOnlyNotEachBinding
+// (test_debug_hooks.cpp) and every existing IntersectionFor.* test
+// (test_control_flow.cpp -- including the multi-body-per-iteration
+// grouping case, combineBodies' own union branch) already exercise this
+// new compiled path under the ambient VM-on default and pass unchanged;
+// these two are the NEW behavior this fix specifically adds.
+
+// A recursive call wrapped in intersection_for() used to fall to
+// Op::NativeStatement like every other uncovered construct -- one real
+// native reentry per level, capped at the old kMaxDriveVmNativeDepth=40.
+// `i=[0:0]` (a single-element range) keeps this to one group per level,
+// same shape/depth as the union/difference/intersection depth tests above
+// (comfortably under kMaxCsgTreeDepth=2000).
+TEST(ModuleBodyCompiles, IntersectionForWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { intersection_for (i = [0:0]) { recur2(n); } }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// Nested (2-dimensional) cartesian product, compiled -- proves
+// compileIntersectionForLoop's reuse of compileForLoop's own multi-
+// dimension IterReset/ForIterNext/ForIterEnd scaffold is correct for MORE
+// than one dimension, not just the single-assignment shape every other
+// existing intersection_for test uses. i in {0,1}, j in {0,1} -> 4 total
+// iterations, each contributing exactly one echo() call.
+TEST(ModuleBodyCompiles, CompiledIntersectionForHandlesTwoDimensionalCartesianProduct) {
+    ScopedVm vm(true);
+    int echoCount = 0;
+    Evaluator ev([&](const std::string&) { ++echoCount; });
+    auto ast = parseSrc("intersection_for (i = [0,1], j = [0,1]) { echo(i, j); cube(1); }");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    EXPECT_EQ(echoCount, 4);
+}
+
 // The BOSL2 attachable() shape this whole effort targets: a wrapper module
 // whose body is just `children();`, applied at every level of a recursive
 // chain. children() used to fall to Op::NativeStatement -- one genuine

@@ -1241,6 +1241,76 @@ public:
         out.push_back({Op::PopCsgWrap, idx, 0, &call.position()});
     }
 
+    // intersection_for(assignments...) { body } -- the cartesian-product
+    // analog of emitCsgWrap: same bracket (CsgWrapSite::hasArgs=false,
+    // includeOpParam=false -- see that struct's own doc comment,
+    // bytecode.hpp), but each "group" is one full loop ITERATION's own
+    // contribution instead of one top-level source STATEMENT's, mirroring
+    // resolveIntersectionFor's own two-level shape exactly (control.cpp):
+    // a cartesian-product loop over `node.assignments`, and at the
+    // innermost base case, ONE currentTreeFrameSize()-delta group per full
+    // iteration. Reuses compileForLoop's own cartesian-loop scaffold
+    // verbatim (Op::NativeIterMaterialize/ForIterNext/ForIterEnd/
+    // IterReset) -- Op::ForIterNext's own ctx construction,
+    // `ctx.childCtx(nullptr, std::nullopt, ctx.childrenNodes,
+    // ctx.childrenCallerCtx)`, is exactly what resolveIntersectionFor's
+    // own recurse lambda does too (`parentCtx.childCtx(nullptr,
+    // std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx)`), since
+    // childrenNodes/childrenCallerCtx propagate unchanged through every
+    // nested childCtx either way -- just with Op::CsgGroupStart/
+    // CsgGroupEnd wrapped around the body instead of a bare
+    // compileStatementList. The leading checkDebug is only emitted when
+    // node.body isn't empty, mirroring resolveIntersectionFor's own `if
+    // (!bodyNodes.empty())` guard exactly (unlike compileForLoop's own
+    // ModularFor sibling, which always emits one even for an empty body,
+    // against the FOR node itself as a fallback marker -- intersection_for
+    // has no such native fallback, so neither does this) -- but
+    // CsgGroupStart/CsgGroupEnd themselves are UNCONDITIONAL, since native
+    // measures a (possibly zero-size) group regardless of body emptiness.
+    void compileIntersectionForLoop(const oscad::ModularIntersectionFor& n, std::vector<Instruction>& out) {
+        out.push_back({Op::CheckDebugStatement, internNativeStatement(&n), 0, nullptr});
+        CompiledChunk::CsgWrapSite site;
+        site.op = "intersection_for";
+        site.hasArgs = false;
+        site.includeOpParam = false;
+        site.node = &n;
+        chunk_.csgWrapSites.push_back(std::move(site));
+        const int idx = static_cast<int>(chunk_.csgWrapSites.size()) - 1;
+        out.push_back({Op::PushCsgWrap, idx, 0, &n.position()});
+
+        const size_t numDims = n.assignments.size();
+        std::vector<int> iterListIds(numDims);
+        for (size_t d = 0; d < numDims; ++d) {
+            iterListIds[d] = nextIterList_++;
+            out.push_back({Op::NativeIterMaterialize, internNativeExpr(n.assignments[d]->expr.get()), iterListIds[d],
+                            &n.assignments[d]->position()});
+        }
+        std::vector<size_t> topIdx(numDims);
+        std::vector<size_t> forIterNextIdx(numDims);
+        for (size_t d = 0; d < numDims; ++d) {
+            if (d > 0) out.push_back({Op::IterReset, iterListIds[d], 0, nullptr});
+            topIdx[d] = out.size();
+            forIterNextIdx[d] = out.size();
+            Instruction ins;
+            ins.op = Op::ForIterNext;
+            ins.a = internName(n.assignments[d]->name->name);
+            ins.b = iterListIds[d];
+            ins.node = n.assignments[d].get();
+            out.push_back(ins);
+        }
+        if (!n.body.empty()) {
+            out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(n.body.front().get()), 0, nullptr});
+        }
+        out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
+        compileStatementList(n.body, out);
+        out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});
+        for (size_t i = numDims; i-- > 0;) {
+            out.push_back({Op::ForIterEnd, static_cast<int>(topIdx[i]), 0, nullptr});
+            out[forIterNextIdx[i]].c = static_cast<int>(out.size());
+        }
+        out.push_back({Op::PopCsgWrap, idx, 0, &n.position()});
+    }
+
     void compileOneStatement(const oscad::ASTNode& stmt, std::vector<Instruction>& out) {
         using oscad::NodeKind;
         trackSpan(stmt);
@@ -1533,18 +1603,20 @@ public:
                 compileForLoop(static_cast<const oscad::ModularFor&>(stmt), out);
                 return;
             }
+            case NodeKind::ModularIntersectionFor: {
+                compileIntersectionForLoop(static_cast<const oscad::ModularIntersectionFor&>(stmt), out);
+                return;
+            }
             default:
                 // ModularModifierDisable (`*`) -- deliberately native: its
                 // child never evaluates at all (see evalStatement's own
                 // ModularModifierDisable case, stmt_eval.cpp), so there's
                 // no recursion to eliminate here in the first place.
-                // intersection_for -- deliberately native (bespoke
-                // per-statement grouping, same reasoning as union/
-                // difference/intersection; not covered by
-                // Op::PushBuiltinWrap, see that op's own doc comment).
                 // `#`/`%`/`!` and translate/rotate/scale/mirror/multmatrix/
                 // resize/color have their own real bytecode cases now,
-                // above; echo/assert/assignment/let-block already did.
+                // above; echo/assert/assignment/let-block already did;
+                // intersection_for has its own case now too (above),
+                // reusing Op::PushCsgWrap via compileIntersectionForLoop.
                 out.push_back({Op::NativeStatement, internNativeStatement(&stmt), 0, &stmt.position()});
                 return;
         }

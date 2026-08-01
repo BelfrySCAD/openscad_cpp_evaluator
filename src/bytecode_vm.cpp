@@ -1118,14 +1118,23 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     // Captured BEFORE argument resolution -- same
                     // rands-in-args taint reasoning as Op::PushBuiltinWrap.
                     const std::uint64_t randsBefore = ev.randsCallCount();
-                    // union/difference/intersection take no positional
-                    // arguments in real OpenSCAD -- `args` is discarded,
-                    // exactly mirroring resolveCsg's own `(void)args;`
-                    // (booleans.cpp). Only `effCtx` (a possibly-$-scoped
-                    // child ctx, e.g. `difference($fn=8) {...}`) matters.
-                    auto [args, effCtx] = resolveCallArgs(ev, site.node->arguments, ctx);
-                    (void)args;
-                    f.ctxChain.push_back(std::move(effCtx));
+                    if (site.hasArgs) {
+                        // union/difference/intersection take no positional
+                        // arguments in real OpenSCAD -- `args` is discarded,
+                        // exactly mirroring resolveCsg's own `(void)args;`
+                        // (booleans.cpp). Only `effCtx` (a possibly-$-scoped
+                        // child ctx, e.g. `difference($fn=8) {...}`) matters.
+                        auto [args, effCtx] =
+                            resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node).arguments, ctx);
+                        (void)args;
+                        f.ctxChain.push_back(std::move(effCtx));
+                    }
+                    // intersection_for (hasArgs=false) isn't a call at all
+                    // -- no arguments to resolve, no ctx of its own to
+                    // push; matches resolveIntersectionFor's own use of
+                    // its caller's ctx unchanged (control.cpp). Its per-
+                    // ITERATION child ctxs are pushed separately, by the
+                    // compiled loop's own Op::ForIterNext.
                     ev.treeStack_.emplace_back();
                     f.csgWrapStack.push_back({site.op, randsBefore, ins.a, {}, 0});
                     ++f.pc;
@@ -1152,12 +1161,15 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     f.csgWrapStack.pop_back();
                     const CompiledChunk::CsgWrapSite& site =
                         f.chunk->csgWrapSites[static_cast<size_t>(pending.siteIdx)];
-                    f.ctxChain.pop_back();
+                    if (site.hasArgs) f.ctxChain.pop_back();
                     std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                     ev.treeStack_.pop_back();
-                    // Mirrors resolveCsg's own params exactly (booleans.cpp).
+                    // Mirrors resolveCsg's own params exactly for union/
+                    // difference/intersection (booleans.cpp) -- and
+                    // resolveIntersectionFor's own (no "op" key at all,
+                    // control.cpp) when !includeOpParam.
                     CSGParams params;
-                    params["op"] = Value{pending.op};
+                    if (site.includeOpParam) params["op"] = Value{pending.op};
                     params["group_sizes"] =
                         Value{std::make_shared<const ValueList>(ValueList{std::move(pending.groupSizes)})};
                     // Mirrors Evaluator::buildTreeNode's own post-
