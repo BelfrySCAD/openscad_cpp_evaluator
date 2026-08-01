@@ -1368,6 +1368,34 @@ public:
     // kMaxUserCallDepth) so the two can be recalibrated independently.
     static constexpr size_t kMaxDriveVmNativeDepth = 40;
 
+    // Real stack-margin threshold, checked INSTEAD OF (not alongside)
+    // kMaxDriveVmNativeDepth above and kMaxUserCallDepth below, at both
+    // native-reentry guard sites, whenever nativeStackBoundsKnown() says
+    // this thread's real stack bounds were determined -- see
+    // native_stack.hpp's own doc comment for the full rationale: a fixed
+    // frame count is a PROXY for actual native stack usage, and a
+    // provably bad one. Confirmed for real fixing the Anklet.scad
+    // regression: with kMaxDriveVmNativeDepth ORed in alongside this
+    // check (the first attempt), Anklet.scad's legitimate,
+    // attachable()-wrapped cyl() chain still tripped the guard -- while
+    // the ACTUAL remaining native stack, measured at that exact call,
+    // was over 8 MiB free out of an 8 MiB stack. The fixed count was
+    // simply wrong, calibrated as a blunt worst-case guess (see that
+    // constant's own doc comment) rather than a real measurement, and
+    // OR-ing it in meant it kept firing regardless of what this
+    // accurate check reported. So the two are now an either/or choice,
+    // not both: when bounds are known, this is the ONLY signal that
+    // matters; the fixed counts above are the ONLY guard, and only when
+    // bounds can't be determined at all (unknown platform/thread).
+    // 128 KiB: comfortably below the smallest realistic thread stack
+    // seen in this project's own CI history (Windows' ~1 MiB default
+    // reserve) while leaving enough headroom for error()'s own TRACE
+    // walk and the exception unwind itself to run without themselves
+    // overflowing. Recalibrate via the same real-CI-run method already
+    // used for kMaxDriveVmNativeDepth if this ever proves wrong in
+    // practice.
+    static constexpr size_t kNativeStackSafetyMarginBytes = 128 * 1024;
+
     // Bracketed public in place: Op::CallModule's own runtime handler and
     // driveVm's module-frame completion branch (bytecode_vm.cpp, a
     // separate translation unit) push/pop this directly -- exactly the

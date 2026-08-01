@@ -690,10 +690,17 @@ TEST(UserModule, DeepNonTailRecursionHitsAControlledErrorInterpreted) {
     // RecursiveModuleWithIfSucceedsWellPastTheOldNativeLimitCompiled
     // (test_bytecode_compiler.cpp) -- these two together are the
     // differential proof Stage 2 actually changed something, not a
-    // reversion.
+    // reversion. Depth 5000000 (not the old 500): the guard is now
+    // nativeStackMarginLow() (native_stack.hpp), which fires on genuine
+    // remaining-stack exhaustion rather than an arbitrary fixed count --
+    // recur(500) no longer trips it at all (see kNativeStackSafetyMarginBytes'
+    // own doc comment, evaluator.hpp, for why -- a real Anklet.scad
+    // regression this fixed). 5000000 reliably exhausts any real native
+    // call stack this test process could have, on any of this project's
+    // CI platforms, well before it would ever crash.
     ScopedVm vm(false);
     try {
-        evalSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(500);");
+        evalSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(5000000);");
         FAIL() << "expected EvalError";
     } catch (const EvalError& e) {
         const std::string what = e.what();

@@ -4,6 +4,7 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 #include "openscad_cpp_evaluator/import_builtin.hpp"
+#include "openscad_cpp_evaluator/native_stack.hpp"
 #include "openscad_cpp_evaluator/scope_trail.hpp"
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
@@ -376,7 +377,8 @@ Value driveVm(Evaluator& ev, size_t floor) {
         ~NativeDepthGuard() { --ev.driveVmNativeDepth_; }
     } nativeDepthGuard(ev);
     try {
-        if (ev.driveVmNativeDepth_ > Evaluator::kMaxDriveVmNativeDepth) {
+        if (nativeStackBoundsKnown() ? nativeStackMarginLow(Evaluator::kNativeStackSafetyMarginBytes)
+                                      : ev.driveVmNativeDepth_ > Evaluator::kMaxDriveVmNativeDepth) {
             const oscad::ASTNode* node = ev.currentCallDeclNode();
             if (!node) node = ev.vmCallStack_.back()->chunk->selfDecl;
             ev.error("Recursion too deep (native call stack)", *node);

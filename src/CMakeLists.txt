@@ -1,4 +1,5 @@
 add_library(openscad_cpp_evaluator STATIC
+  native_stack.cpp
   value.cpp
   eval_error.cpp
   eval_context.cpp

@@ -299,12 +299,17 @@ TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpr
     // (confirmed present in the wild -- a plain, closure-free
     // FunctionDeclaration, nothing specific to closures/letrec/tail-call
     // machinery at all). Interpreted-path variant; see the compiled-path
-    // one below. f(500) is comfortably past kMaxUserCallDepth (50, see its
-    // own doc comment, evaluator.hpp) -- the actual native recursion never
-    // gets anywhere near 500, since the guard fires at 50 regardless of
-    // what depth the script asks for.
+    // one below. The guard is now nativeStackMarginLow() (native_stack.hpp)
+    // instead of a fixed kMaxUserCallDepth count wherever this thread's
+    // real stack bounds are determinable -- it fires on genuine remaining-
+    // stack exhaustion, not an arbitrary depth, so f(500) (the old depth,
+    // comfortably past the retired fixed count) no longer trips it at all.
+    // f(5000000) does: comfortably past what any real native call stack
+    // (this test process's own, on any of this project's CI platforms)
+    // can hold, so it reliably exhausts the real margin and throws well
+    // before it would ever crash.
     Evaluator ev;
-    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(500);");
+    auto ast = parseSrc("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\nresult = f(5000000);");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     try {
