@@ -7,8 +7,13 @@
 #elif defined(__linux__)
 #include <pthread.h>
 #elif defined(_WIN32)
-#include <processthreadsapi.h>
+// windows.h must come first -- it defines the target-architecture macros
+// (_AMD64_/_X86_/_ARM64_) that processthreadsapi.h's own transitive
+// winnt.h include needs; including processthreadsapi.h standalone first
+// hits winnt.h before those are set, MSVC error C1189 "No Target
+// Architecture" (confirmed for real: broke Windows CI, PR #63).
 #include <windows.h>
+#include <processthreadsapi.h>
 #endif
 
 namespace oscadeval {
