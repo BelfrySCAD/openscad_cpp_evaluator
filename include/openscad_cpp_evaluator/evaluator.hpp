@@ -1387,14 +1387,29 @@ public:
     // not both: when bounds are known, this is the ONLY signal that
     // matters; the fixed counts above are the ONLY guard, and only when
     // bounds can't be determined at all (unknown platform/thread).
-    // 128 KiB: comfortably below the smallest realistic thread stack
-    // seen in this project's own CI history (Windows' ~1 MiB default
-    // reserve) while leaving enough headroom for error()'s own TRACE
-    // walk and the exception unwind itself to run without themselves
-    // overflowing. Recalibrate via the same real-CI-run method already
-    // used for kMaxDriveVmNativeDepth if this ever proves wrong in
-    // practice.
-    static constexpr size_t kNativeStackSafetyMarginBytes = 128 * 1024;
+    // 512 KiB, not the 128 KiB first tried: that smaller value crashed
+    // for real on Windows CI (real segfaults, not the intended clean
+    // EvalError, in exactly the 3 tests built to prove this guard works:
+    // ModuleBodyCompiles.NativeReentrantRecursionHitsAControlledError-
+    // InsteadOfCrashing, UserModule.DeepNonTailRecursionHitsAControlled-
+    // ErrorInterpreted, TailCalls.DeepNonTailRecursionHitsAControlled-
+    // ErrorInsteadOfCrashingInterpreted). Root cause: 128 KiB is enough
+    // margin to detect the low-stack condition, but NOT enough for what
+    // has to run AFTER that -- error()'s own TRACE walk (formatting a
+    // frame per active call) and the exception unwind back out through
+    // every nested native frame -- to complete without itself running
+    // off the end of a ~1 MiB Windows default reserve; MSVC's codegen
+    // for that path costs meaningfully more stack per frame than clang's
+    // did locally. 512 KiB (half of Windows' own ~1 MiB default reserve)
+    // still leaves the guard tripping only once the thread is genuinely
+    // deep into its own stack, and stays enormous headroom on macOS/
+    // Linux's much larger (8 MiB+) default stacks -- confirmed still
+    // sufficient for real BOSL2 usage (Anklet.scad's own legitimate
+    // recursion measured well under 512 KiB of real usage even at its
+    // deepest, in the investigation that motivated this whole guard).
+    // Recalibrate via the same real-CI-run method already used for
+    // kMaxDriveVmNativeDepth if this ever proves wrong in practice.
+    static constexpr size_t kNativeStackSafetyMarginBytes = 512 * 1024;
 
     // Bracketed public in place: Op::CallModule's own runtime handler and
     // driveVm's module-frame completion branch (bytecode_vm.cpp, a
