@@ -12,6 +12,8 @@
 
 #include "builtins/builtins.hpp"
 
+#include <algorithm>
+
 namespace oscadeval {
 
 namespace {
