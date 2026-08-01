@@ -325,6 +325,101 @@ enum class Op {
     // same seam, now a counter).
     PopBuiltinWrap,
 
+    // -- CSG-wrap compilation (closes the LAST native-reentry source in ----
+    // -- the original NativeStatement gap: union()/difference()/           -
+    // -- intersection()) ----------------------------------------------------
+    // union()/difference()/intersection() weren't covered by the original
+    // Op::PushBuiltinWrap (see that op's own doc comment) because they need
+    // bespoke bookkeeping PushBuiltinWrap's single all-children bracket
+    // doesn't do: Evaluator's own resolveCsg (booleans.cpp) evaluates each
+    // TOP-LEVEL child statement of the block SEPARATELY and records how
+    // many CSGNodes it individually contributed ("group_sizes") -- e.g.
+    // `difference(){ A; B; C; }` = A - (B u C), preserving A's own group
+    // even when A itself expands to more than one body (an attachable()-
+    // style call returning parent+children as one operand). A flat
+    // all-children bracket the way Transform/Color/Modifier use would lose
+    // that grouping entirely. This op pair (PushCsgWrap/PopCsgWrap) plus
+    // Op::CsgGroupStart/CsgGroupEnd (below) replicate resolveCsg's exact
+    // two-pass shape (all assignments first, THEN one evalChildren-per-
+    // geometry-statement) as inline compiled bytecode instead, exactly as
+    // PushBuiltinWrap already did for translate/rotate/scale/mirror/
+    // multmatrix/resize/color/#/%/! -- same rationale (a recursive
+    // union()/difference()/intersection()-wrapped module chain was still a
+    // real Windows native-reentry depth risk, just never independently
+    // fixed when PushBuiltinWrap's own set was).
+    //
+    // a = index into CompiledChunk::csgWrapSites. Runtime handler: captures
+    // ev.randsCallCount() BEFORE argument resolution (same rands-in-args
+    // taint reasoning as PushBuiltinWrap), resolves the (rare, $-only)
+    // arguments via resolveCallArgs exactly like resolveCsg itself does
+    // (discarding the positional/named result -- union/difference/
+    // intersection take no real parameters -- keeping only the possibly-
+    // $-scoped child ctx), pushes that ctx onto f.ctxChain unconditionally
+    // (mirrors Transform/Color's own unconditional push -- a bare
+    // `union() {...}` with no `$fn=...` override still pushes a ctx that's
+    // merely a copy, cheap and uniform rather than a special-cased branch),
+    // pushes a fresh ev.treeStack_ frame (every child statement's own
+    // CSGNode(s), across every group, land flat in this ONE frame --
+    // mirrors Evaluator::buildTreeNode/evalModularCall's own single
+    // treeStack_.emplace_back() around the whole call, not one per group),
+    // and stashes {op, randsBefore, siteIdx, empty groupSizes} onto
+    // VmFrame::csgWrapStack (a real per-frame LIFO, same reasoning as
+    // builtinWrapStack: nested/sequenced CSG wraps within one frame's own
+    // instruction stream, e.g. `union() { difference() {...} }`). The
+    // compiler always emits a plain Op::CheckDebugStatement immediately
+    // before this (see emitCsgWrap, bytecode_compiler.cpp), mirroring
+    // emitBuiltinWrap's own pattern -- this is a genuine statement doing
+    // real work here, not a call transferring control to a declaration.
+    PushCsgWrap,
+
+    // Opens one "group" within an already-open Op::PushCsgWrap bracket --
+    // emitted immediately before each top-level GEOMETRY child statement's
+    // own inline-compiled bytecode (compileStatementList of exactly that
+    // one statement). Records ev.treeStack_.back().size() into
+    // csgWrapStack.back().groupStartSize -- always operates on the
+    // TOPMOST (innermost still-open) csgWrapStack entry, matching
+    // PopBuiltinWrap's own back()-is-always-mine LIFO discipline, so no
+    // operand is needed. Assignments among the block's children are
+    // compiled separately, BEFORE any CsgGroupStart/End pair at all (see
+    // emitCsgWrap) -- mirrors resolveCsg's own two-pass split exactly
+    // (Evaluator::evalChildren(assignNodes, effCtx) always runs to
+    // completion before the per-geoNode loop starts).
+    CsgGroupStart,
+
+    // Closes the matching Op::CsgGroupStart: computes
+    // ev.treeStack_.back().size() - csgWrapStack.back().groupStartSize
+    // (how many CSGNodes THIS one top-level statement just contributed,
+    // however many that turned out to be -- 0 for a statement whose own
+    // evaluation spliced nothing, e.g. a no-op unknown-module warning; >1
+    // for an attachable()-style multi-body operand) and appends it, as a
+    // Value, onto csgWrapStack.back().groupSizes -- exactly one entry per
+    // top-level geometry statement, in source order, mirroring resolveCsg's
+    // own `groupSizes.push_back(Value{...})` loop.
+    CsgGroupEnd,
+
+    // Closes the matching Op::PushCsgWrap bracket: pops
+    // VmFrame::csgWrapStack's own top entry FIRST (before anything that can
+    // itself throw, e.g. setTreeDepthOrThrow below -- same "exception-
+    // teardown's own pending count must already be right" reasoning as
+    // PopBuiltinWrap), pops the ctx PushCsgWrap unconditionally pushed,
+    // pops ev.treeStack_ to retrieve every group's own CSGNode(s) (flat,
+    // exactly like resolveCsg's own `children` result -- group boundaries
+    // live only in group_sizes, never in the CSGNode list's own shape), and
+    // builds the tagged CSGNode exactly like Evaluator::buildTreeNode's own
+    // post-resolveBody() half does, with params = {"op": site.op,
+    // "group_sizes": ValueList(pending.groupSizes)} -- byte-for-byte what
+    // native resolveCsg returns -- pushing the result onto the new top of
+    // treeStack_. a = index into CompiledChunk::csgWrapSites (same site
+    // Push used).
+    //
+    // teardownVmCallStackDownTo's own exception path (bytecode_vm.cpp) pops
+    // frame->csgWrapStack.size() additional treeStack_ entries per
+    // torn-down frame, alongside its existing builtinWrapStack/
+    // ownsModuleSplice accounting -- same reasoning as PopBuiltinWrap's own
+    // doc comment: an exception can leave N of these brackets open in one
+    // frame.
+    PopCsgWrap,
+
     // A `children()` / `children(N)` statement -- the runtime-varying
     // sibling of Op::CallModule/Op::PushBuiltinWrap, closing the LAST
     // dominant native-reentry source (BOSL2's attachable() calls
@@ -367,10 +462,11 @@ enum class Op {
     // no separate site table needed).
     CallChildren,
 
-    // A single "native passthrough" statement -- intersection_for,
-    // union/difference/intersection and every other builtin
-    // module call NOT covered by Op::PushBuiltinWrap (see that op's own
-    // doc comment for exactly which builtins ARE covered), the `*`
+    // A single "native passthrough" statement -- intersection_for, every
+    // OTHER builtin module call not covered by Op::PushBuiltinWrap/
+    // Op::PushCsgWrap (see those ops' own doc comments for exactly which
+    // builtins ARE covered -- cube/sphere/hull/linear_extrude/etc., the
+    // ones that never wrap a recursive call in idiomatic OpenSCAD), the `*`
     // modifier's own no-op case, or a user-module call that didn't
     // resolve at compile time (shadowed, forward-declared, or otherwise
     // not statically known) -- anything compileStatementList doesn't give
@@ -387,18 +483,21 @@ enum class Op {
     // crash risk in practice, not just a missed optimization. See
     // Op::PushBuiltinWrap's own doc comment for the real story and the
     // fix. children() fell here too, and was the LAST and largest such
-    // reentry source once PushBuiltinWrap's own set was covered -- it
-    // now has Op::CallChildren, above.)
+    // reentry source once PushBuiltinWrap's own set was covered -- it now
+    // has Op::CallChildren, above. union()/difference()/intersection()
+    // fell here too, and were the last remaining REAL native-reentry risk
+    // (bespoke group_sizes bookkeeping meant they couldn't just reuse
+    // PushBuiltinWrap's own bracket) -- they now have Op::PushCsgWrap,
+    // above.)
     // a = index into CompiledChunk::nativeStatements. Runtime just does
     // what Evaluator::evalChildren's own per-statement loop already does
     // for one node: derive childCtx via ctx.withScope(...), checkDebug,
     // evalStatement. These are still "leaf-shaped" for what's left here
-    // after Op::PushBuiltinWrap peeled off the proven-risky subset: real
-    // recursion safety for a recursive module chain is covered by
-    // CallModule/PushBuiltinWrap/ForIterNext/the Jump-based if/for control
-    // flow, not by how many of THESE sit alongside them in the same body
-    // -- true again now that the one construct that violated it
-    // (translate()-wrapped recursion) has its own real bytecode instead.
+    // now that Op::PushBuiltinWrap/Op::PushCsgWrap have peeled off every
+    // proven-risky construct: real recursion safety for a recursive module
+    // chain is covered by CallModule/PushBuiltinWrap/PushCsgWrap/
+    // ForIterNext/the Jump-based if/for control flow, not by how many of
+    // THESE sit alongside them in the same body.
     NativeStatement,
 
     // If/if-else's own condition, evaluated NATIVELY (Evaluator::
@@ -734,6 +833,19 @@ struct CompiledChunk {
         const oscad::ASTNode* node = nullptr;
     };
 
+    // One Op::PushCsgWrap/PopCsgWrap site pair -- see those ops' own doc
+    // comments for the full "why union/difference/intersection need
+    // bespoke group_sizes bookkeeping instead of just reusing
+    // BuiltinWrapSite" rationale. `op` is always "union"/"difference"/
+    // "intersection" (the only 3 names resolveDispatch() maps to
+    // resolveCsg) -- always a genuine ModularCall (unlike BuiltinWrapSite's
+    // Modifier kind, this construct has no non-ModularCall variant), so
+    // `node` is typed precisely rather than a generic ASTNode*.
+    struct CsgWrapSite {
+        std::string op;
+        const oscad::ModularCall* node = nullptr;
+    };
+
     // One Op::AssertStatement site -- see that op's own doc comment for
     // the full contract. `conditionArgIndex`/`messageArgIndex` are indices
     // into the site's own argCount-sized popped-argument array (source
@@ -796,6 +908,7 @@ struct CompiledChunk {
     // own doc comments, above) -- always empty for a function chunk.
     std::vector<ModuleCallSite> moduleCallSites;
     std::vector<BuiltinWrapSite> builtinWrapSites;
+    std::vector<CsgWrapSite> csgWrapSites;
     std::vector<AssertSite> assertSites;
     std::vector<const oscad::Expression*> nativeExprs;
     std::vector<const oscad::ASTNode*> nativeStatements;

@@ -1202,6 +1202,45 @@ public:
         out.push_back({Op::PopBuiltinWrap, idx, 0, &wrapperNode.position()});
     }
 
+    // union()/difference()/intersection() -- see Op::PushCsgWrap's own doc
+    // comment (bytecode.hpp) for why these can't just reuse emitBuiltinWrap:
+    // resolveCsg (booleans.cpp) needs per-top-level-child-statement
+    // "group_sizes" bookkeeping, replicated here as one Op::CsgGroupStart/
+    // CsgGroupEnd pair per GEOMETRY child, with every ASSIGNMENT child
+    // compiled first, unconditionally, regardless of interleaving in
+    // source -- mirrors resolveCsg's own two-pass split (`assignNodes`
+    // fully evaluated, THEN one evalChildren call per `geoNodes` entry)
+    // exactly, including its ModuleDeclaration/FunctionDeclaration
+    // exclusion (a nested declaration inside a CSG block contributes to
+    // neither pass -- already hoisted into scope, nothing to run here).
+    void emitCsgWrap(const oscad::ModularCall& call, std::vector<Instruction>& out) {
+        out.push_back({Op::CheckDebugStatement, internNativeStatement(&call), 0, nullptr});
+        CompiledChunk::CsgWrapSite site;
+        site.op = call.name->name;
+        site.node = &call;
+        chunk_.csgWrapSites.push_back(std::move(site));
+        const int idx = static_cast<int>(chunk_.csgWrapSites.size()) - 1;
+        out.push_back({Op::PushCsgWrap, idx, 0, &call.position()});
+
+        std::vector<const oscad::ASTNode*> assignNodes;
+        std::vector<const oscad::ASTNode*> geoNodes;
+        for (const auto& c : call.children) {
+            if (c->kind() == oscad::NodeKind::Assignment) {
+                assignNodes.push_back(c.get());
+            } else if (c->kind() != oscad::NodeKind::ModuleDeclaration &&
+                       c->kind() != oscad::NodeKind::FunctionDeclaration) {
+                geoNodes.push_back(c.get());
+            }
+        }
+        compileStatementList(assignNodes, out);
+        for (const oscad::ASTNode* geoNode : geoNodes) {
+            out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
+            compileStatementList(std::vector<const oscad::ASTNode*>{geoNode}, out);
+            out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});
+        }
+        out.push_back({Op::PopCsgWrap, idx, 0, &call.position()});
+    }
+
     void compileOneStatement(const oscad::ASTNode& stmt, std::vector<Instruction>& out) {
         using oscad::NodeKind;
         trackSpan(stmt);
@@ -1432,6 +1471,13 @@ public:
                 // See Op::CallChildren's own doc comment (bytecode.hpp).
                 if (dispatchIt != dispatch.end() && dispatchIt->second == &resolveChildren) {
                     out.push_back({Op::CallChildren, internNativeStatement(&stmt), 0, &stmt.position()});
+                    return;
+                }
+                // union()/difference()/intersection() -- see emitCsgWrap's
+                // own doc comment for why these need their own bespoke
+                // bracket rather than emitBuiltinWrap's.
+                if (dispatchIt != dispatch.end() && dispatchIt->second == &resolveCsg) {
+                    emitCsgWrap(call, out);
                     return;
                 }
                 // Every other builtin, or a name that didn't resolve to a

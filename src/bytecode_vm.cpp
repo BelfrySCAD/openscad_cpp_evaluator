@@ -401,6 +401,11 @@ void teardownVmCallStackDownTo(Evaluator& ev, size_t floor) {
         // at once; at most one module-call splice ever can).
         for (size_t i = 0; i < frame->builtinWrapStack.size(); ++i) ev.treeStack_.pop_back();
         frame->builtinWrapStack.clear();
+        // Same reasoning, same LIFO-order requirement, for any still-open
+        // Op::PushCsgWrap bracket(s) -- see PendingCsgWrap's/Op::PushCsgWrap's
+        // own doc comments.
+        for (size_t i = 0; i < frame->csgWrapStack.size(); ++i) ev.treeStack_.pop_back();
+        frame->csgWrapStack.clear();
         // A module frame's own CALLER (Op::CallModule, mirroring
         // evalModularCall/buildTreeNode) always pushes a treeStack_
         // accumulator for it before pushing this frame -- normally popped
@@ -1102,6 +1107,70 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     treeNode->isBuiltin = true;
                     treeNode->children = std::move(children);
                     treeNode->params = std::move(pending.params);
+                    treeNode->uncacheable = uncacheable;
+                    ev.setTreeDepthOrThrow(*treeNode, *site.node);
+                    ev.treeStack_.back().push_back(std::move(treeNode));
+                    ++f.pc;
+                    break;
+                }
+                case Op::PushCsgWrap: {
+                    const CompiledChunk::CsgWrapSite& site = f.chunk->csgWrapSites[static_cast<size_t>(ins.a)];
+                    // Captured BEFORE argument resolution -- same
+                    // rands-in-args taint reasoning as Op::PushBuiltinWrap.
+                    const std::uint64_t randsBefore = ev.randsCallCount();
+                    // union/difference/intersection take no positional
+                    // arguments in real OpenSCAD -- `args` is discarded,
+                    // exactly mirroring resolveCsg's own `(void)args;`
+                    // (booleans.cpp). Only `effCtx` (a possibly-$-scoped
+                    // child ctx, e.g. `difference($fn=8) {...}`) matters.
+                    auto [args, effCtx] = resolveCallArgs(ev, site.node->arguments, ctx);
+                    (void)args;
+                    f.ctxChain.push_back(std::move(effCtx));
+                    ev.treeStack_.emplace_back();
+                    f.csgWrapStack.push_back({site.op, randsBefore, ins.a, {}, 0});
+                    ++f.pc;
+                    break;
+                }
+                case Op::CsgGroupStart: {
+                    f.csgWrapStack.back().groupStartSize = ev.treeStack_.back().size();
+                    ++f.pc;
+                    break;
+                }
+                case Op::CsgGroupEnd: {
+                    PendingCsgWrap& pending = f.csgWrapStack.back();
+                    const size_t after = ev.treeStack_.back().size();
+                    pending.groupSizes.push_back(Value{static_cast<double>(after - pending.groupStartSize)});
+                    ++f.pc;
+                    break;
+                }
+                case Op::PopCsgWrap: {
+                    // Pop this bracket's own bookkeeping FIRST -- before
+                    // anything below that can itself throw
+                    // (setTreeDepthOrThrow) -- same ordering reasoning as
+                    // Op::PopBuiltinWrap's own doc comment.
+                    PendingCsgWrap pending = std::move(f.csgWrapStack.back());
+                    f.csgWrapStack.pop_back();
+                    const CompiledChunk::CsgWrapSite& site =
+                        f.chunk->csgWrapSites[static_cast<size_t>(pending.siteIdx)];
+                    f.ctxChain.pop_back();
+                    std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
+                    ev.treeStack_.pop_back();
+                    // Mirrors resolveCsg's own params exactly (booleans.cpp).
+                    CSGParams params;
+                    params["op"] = Value{pending.op};
+                    params["group_sizes"] =
+                        Value{std::make_shared<const ValueList>(ValueList{std::move(pending.groupSizes)})};
+                    // Mirrors Evaluator::buildTreeNode's own post-
+                    // resolveBody() half exactly (csg_resolve.cpp).
+                    const bool uncacheable =
+                        (ev.randsCallCount() != pending.randsBefore) ||
+                        std::any_of(children.begin(), children.end(), [](const auto& c) { return c->uncacheable; });
+                    auto treeNode = std::make_unique<CSGNode>();
+                    treeNode->kind = site.op;
+                    treeNode->node = site.node;
+                    treeNode->isBuiltin = true;
+                    treeNode->children = std::move(children);
+                    treeNode->params = std::move(params);
                     treeNode->uncacheable = uncacheable;
                     ev.setTreeDepthOrThrow(*treeNode, *site.node);
                     ev.treeStack_.back().push_back(std::move(treeNode));
