@@ -42,15 +42,14 @@ target_link_libraries(oscad_eval_tests PRIVATE openscad_cpp_evaluator oscad_cli_
 target_include_directories(oscad_eval_tests PRIVATE ${stb_SOURCE_DIR})
 
 # MSVC's default thread stack reserve is ~1 MiB, dwarfed by macOS/Linux's
-# default (~8 MiB) -- see native_stack.hpp/kNativeStackSafetyMarginBytes
-# (evaluator.hpp) for the investigation this came out of: on a 1 MiB
-# stack, there's no single margin threshold that leaves both "room for
-# legitimate deep recursion" and "room for the throw+unwind path itself
-# to safely finish" -- real Windows CI segfaulted on 3 different margin
-# values, immediately after the guard correctly fired, because the
-# margin and the unwind's own transient stack cost draw from the SAME
-# tiny 1 MiB budget. Match the other platforms' stack size instead of
-# fighting over scraps of Windows' unusually small default.
+# default (~8 MiB) -- match the other platforms' stack size rather than
+# run this test binary on an unusually small one. Kept even after a
+# real-stack-margin-based safety check (tried, then reverted -- see
+# kMaxDriveVmNativeDepth's own doc comment, evaluator.hpp, for the full
+# story of why a fixed-count guard turned out to be the right mechanism
+# after all) stopped depending on the exact stack size: a bigger stack is
+# still strictly safer for this binary's own deep-recursion regression
+# tests, independent of that.
 if(MSVC)
   target_link_options(oscad_eval_tests PRIVATE /STACK:8388608)
 endif()

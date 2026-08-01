@@ -4,7 +4,6 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 #include "openscad_cpp_evaluator/import_builtin.hpp"
-#include "openscad_cpp_evaluator/native_stack.hpp"
 #include "openscad_cpp_evaluator/scope_trail.hpp"
 
 #include "openscad_cpp_parser/ast/declarations.hpp"
@@ -394,8 +393,23 @@ Value driveVm(Evaluator& ev, size_t floor) {
         ~NativeDepthGuard() { --ev.driveVmNativeDepth_; }
     } nativeDepthGuard(ev);
     try {
-        if (nativeStackBoundsKnown() ? nativeStackMarginLow(Evaluator::kNativeStackSafetyMarginBytes)
-                                      : ev.driveVmNativeDepth_ > Evaluator::kMaxDriveVmNativeDepth) {
+        // Fixed count, not nativeStackMarginLow() -- see kMaxDriveVmNative
+        // Depth's own doc comment (evaluator.hpp) for why: the margin-based
+        // check was added specifically because BOSL2's attachable() chain
+        // (translate/multmatrix/color/modifier-wrapped recursion) needed
+        // native reentry depth 55, past this fixed ceiling -- but
+        // Op::PushBuiltinWrap (bytecode_compiler.cpp/bytecode_vm.cpp) has
+        // since eliminated native reentry for exactly that pattern, so
+        // this guard now only has to catch what's genuinely still
+        // uncovered (union/difference/intersection-wrapped recursion,
+        // other builtins) -- comfortably within this fixed ceiling for any
+        // realistic script. The margin-based check was tried here and
+        // confirmed, via two separate real Windows CI runs, to still
+        // segfault for a deep uncovered-construct chain regardless of how
+        // much total stack the process has (this fixed count is the
+        // proven-safe mechanism for THIS specific native-reentry chain --
+        // see its own doc comment for the real Windows bisection history).
+        if (ev.driveVmNativeDepth_ > Evaluator::kMaxDriveVmNativeDepth) {
             const oscad::ASTNode* node = ev.currentCallDeclNode();
             if (!node) node = ev.vmCallStack_.back()->chunk->selfDecl;
             ev.error("Recursion too deep (native call stack)", *node);

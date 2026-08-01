@@ -1374,9 +1374,8 @@ TEST(ModuleBodyCompiles, RecursiveModifierWrappedCallSucceedsWellPastTheOldNativ
 // op's own doc comment, bytecode.hpp) -- a recursive call wrapped in one
 // still falls to Op::NativeStatement and still costs one real native
 // frame per level, exactly like every covered construct used to. Proves
-// the guard itself (driveVmNativeDepth_/kMaxDriveVmNativeDepth, or
-// nativeStackMarginLow when this thread's stack bounds are known) is
-// still live and still catches this, not accidentally disabled by
+// the guard itself (driveVmNativeDepth_/kMaxDriveVmNativeDepth) is still
+// live and still catches this, not accidentally disabled by
 // Op::PushBuiltinWrap's own changes to the shared NativeStatement path.
 TEST(ModuleBodyCompiles, UnionWrappedRecursionStillHitsTheNativeReentryGuardControlledError) {
     ScopedVm vm(true);
