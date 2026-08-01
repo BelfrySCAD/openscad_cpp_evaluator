@@ -1397,16 +1397,35 @@ TEST(ModuleBodyCompiles, RecursiveModifierWrappedCallSucceedsWellPastTheOldNativ
     ASSERT_EQ(e.bodies.size(), 1u);
 }
 
-// union()/difference()/intersection() are deliberately NOT covered by
-// Op::PushBuiltinWrap (bespoke per-statement grouping/group_sizes logic,
-// genuinely different from the transform/color/modifier shape -- see that
-// op's own doc comment, bytecode.hpp) -- a recursive call wrapped in one
-// still falls to Op::NativeStatement and still costs one real native
-// frame per level, exactly like every covered construct used to. Proves
-// the guard itself (driveVmNativeDepth_/kMaxDriveVmNativeDepth) is still
-// live and still catches this, not accidentally disabled by
-// Op::PushBuiltinWrap's own changes to the shared NativeStatement path.
-TEST(ModuleBodyCompiles, UnionWrappedRecursionStillHitsTheNativeReentryGuardControlledError) {
+// union()/difference()/intersection() now have their own real bytecode
+// (Op::PushCsgWrap/CsgGroupStart/CsgGroupEnd/PopCsgWrap) instead of falling
+// to Op::NativeStatement -- see that op's own doc comment (bytecode.hpp)
+// for why they needed a bespoke bracket rather than just reusing
+// Op::PushBuiltinWrap's. A union()/difference()/intersection()-wrapped
+// recursive call no longer costs any native reentry at all: `recur2(n);`
+// (a resolved user-module call) compiles inline to Op::CallModule, a pure
+// in-VM push, so the whole chain never touches driveVmNativeDepth_.
+// Depth 1500 (same figure the PushBuiltinWrap/CallChildren tests above use)
+// comfortably clears the old 40-level Windows-unsafe native-reentry ceiling
+// while staying under kMaxCsgTreeDepth=2000 -- each `recur` level's own
+// union() still contributes one real CSGNode to the tree (this fix
+// eliminates native-stack cost, not CSG-tree depth, which is an orthogonal,
+// unrelated cap on the RESULT shape, not the call chain).
+TEST(ModuleBodyCompiles, UnionWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { union() { recur2(n); } }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// The SAME chain pushed deep enough (3000 levels, one union() CSGNode per
+// `recur` level) now hits the orthogonal, pre-existing CSG-TREE-depth guard
+// (kMaxCsgTreeDepth=2000, csg_resolve.cpp) instead of a native-reentry
+// guard -- proves the native-reentry elimination didn't silently trade one
+// crash risk for an unguarded one; something still stops an unreasonably
+// deep result, just a different (and correctly-named) error now.
+TEST(ModuleBodyCompiles, UnionWrappedRecursionPastCsgTreeDepthLimitStillErrorsCleanly) {
     ScopedVm vm(true);
     try {
         evalSrc("module recur(n) { union() { recur2(n); } }\n"
@@ -1415,8 +1434,84 @@ TEST(ModuleBodyCompiles, UnionWrappedRecursionStillHitsTheNativeReentryGuardCont
         FAIL() << "expected EvalError";
     } catch (const EvalError& e) {
         const std::string what = e.what();
-        EXPECT_NE(what.find("Recursion too deep"), std::string::npos) << what;
+        EXPECT_NE(what.find("Recursion too deep while building geometry"), std::string::npos) << what;
     }
+}
+
+// difference()/intersection() get the same treatment -- one representative
+// test each rather than the full union() coverage above, since all three
+// share emitCsgWrap/Op::PushCsgWrap verbatim (only the runtime `op` string
+// differs, consumed solely by generateCsg at generate time, never by the
+// compiled path itself).
+TEST(ModuleBodyCompiles, DifferenceWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { difference() { recur2(n); } }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+TEST(ModuleBodyCompiles, IntersectionWrappedRecursionSucceedsWellPastTheOldNativeReentryLimit) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { intersection() { recur2(n); } }\n"
+                          "module recur2(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\n"
+                          "recur(1500);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+}
+
+// group_sizes/multi-body-operand grouping correctness under the COMPILED
+// path (test_booleans.cpp's own Difference.MultipleBodiesInFirstStatement
+// FormOnePositiveOperand/Union.MultipleBodiesInFirstStatementAllSurvive
+// already cover this for the default ambient VM state; this pins it
+// explicitly under ScopedVm(true) plus a MODULE body, not just a top-level
+// script, since that's the shape emitCsgWrap actually compiles).
+TEST(ModuleBodyCompiles, CsgWrapGroupingSurvivesInsideACompiledModuleBody) {
+    ScopedVm vm(true);
+    // First statement's own union() contributes TWO disjoint bodies (one
+    // group, size 2); the second statement subtracts a cube overlapping
+    // only the first of those two by 1. A flat (non-grouped) evaluation
+    // would instead treat the second cube as its own separate operand.
+    Evaluated e = evalSrc("module m() {"
+                          "  difference() {"
+                          "    union() { cube(2); translate([10,0,0]) cube(2); }"
+                          "    translate([1,0,0]) cube(2);"
+                          "  }"
+                          "}"
+                          "m();");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    // 16 - overlap(1*2*2=4) = 12, same expected volume as the top-level test.
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 12.0, 1e-6);
+}
+
+// $-named-argument propagation into a compiled CSG wrap's children --
+// union/difference/intersection take no positional args in real OpenSCAD,
+// but `difference($fn=8) {...}` is legal and must still reach its children,
+// exactly like resolveCsg's own resolveCallArgs call preserves natively
+// (booleans.cpp). Verifies Op::PushCsgWrap's ctx push (unconditional,
+// unlike PushBuiltinWrap's Transform/Color-only push) actually carries it.
+TEST(ModuleBodyCompiles, DollarArgPropagatesIntoCompiledCsgWrapChildren) {
+    ScopedVm vm(true);
+    EXPECT_EQ(runCapturingEcho("module m() { union($fn = 9) { echo($fn); cube(1); } }\n"
+                               "m();"),
+              "ECHO: 9");
+}
+
+// Assignment-before-geometry ordering: resolveCsg evaluates EVERY
+// assignment child first, regardless of source interleaving with geometry
+// statements, THEN each geometry statement in its own group -- emitCsgWrap
+// mirrors this with a separate compile pass, not source order. A geometry
+// statement referencing a LATER-in-source assignment must still see it.
+TEST(ModuleBodyCompiles, CompiledCsgWrapEvaluatesAllAssignmentsBeforeAnyGeometryStatement) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module m() {"
+                          "  union() {"
+                          "    translate([sz, 0, 0]) cube(1);" // geometry statement first in SOURCE order
+                          "    sz = 5;"                        // assignment second in source order
+                          "  }"
+                          "}"
+                          "m();");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-6);
 }
 
 // The BOSL2 attachable() shape this whole effort targets: a wrapper module

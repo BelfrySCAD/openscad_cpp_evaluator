@@ -30,6 +30,24 @@ struct PendingBuiltinWrap {
     int siteIdx = -1;
 };
 
+// One still-open Op::PushCsgWrap bracket's own state -- see that op's own
+// doc comment (bytecode.hpp) for the full contract. `groupSizes` is built
+// up incrementally, one entry per Op::CsgGroupStart/CsgGroupEnd pair (one
+// per top-level GEOMETRY child statement); `groupStartSize` is scratch
+// space for the CURRENTLY OPEN group only (set by CsgGroupStart, consumed
+// by the matching CsgGroupEnd) -- safe as a single scalar, not a stack of
+// its own, because groups within one CSG wrap are siblings in sequence,
+// never nested (unlike PushCsgWrap brackets themselves, which CAN nest,
+// e.g. `union() { difference() {...} }` -- that's what makes
+// VmFrame::csgWrapStack itself a real LIFO, below).
+struct PendingCsgWrap {
+    std::string op;
+    std::uint64_t randsBefore = 0;
+    int siteIdx = -1;
+    std::vector<Value> groupSizes;
+    size_t groupStartSize = 0;
+};
+
 // One ListCompFor/statement-for assignment's own materialized iteration
 // state -- see Op::IterMaterialize/IterReset/IterNext's own doc comments
 // (bytecode.hpp). Lives in the header (not bytecode_vm.cpp's own anonymous
@@ -127,6 +145,15 @@ struct VmFrame {
     // existing invariant ("whoever pops this frame drains its own open
     // brackets first") already covers it.
     std::vector<PendingBuiltinWrap> builtinWrapStack;
+    // Op::PushCsgWrap's own per-frame LIFO -- same role/lifetime/teardown
+    // discipline as builtinWrapStack, just for union()/difference()/
+    // intersection() (see PendingCsgWrap's own doc comment, above, and
+    // Op::PushCsgWrap's, bytecode.hpp). Not explicitly cleared in
+    // releaseVmFrame, same as builtinWrapStack/accumStack/ctxChain -- the
+    // existing invariant ("whoever pops this frame drains its own open
+    // brackets first", normally via matched Push/Pop, or via
+    // teardownVmCallStackDownTo on the exception path) already covers it.
+    std::vector<PendingCsgWrap> csgWrapStack;
     // The ORIGINAL callee name at push time, used by
     // Evaluator::exitUserCallSuccess's own returnHook call when this frame
     // carries a bracket -- deliberately NOT updated by a later tail hop
