@@ -84,15 +84,29 @@ bool Evaluator::tryRunCompiledAssignmentBlock(const std::vector<const oscad::AST
 
 bool Evaluator::tryRunCompiledChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx) {
     if (children.empty() || !useBytecodeVm() || !inResolvePass_) return false;
+    const CompiledChunk* chunk = lookupOrCompileChildrenListChunk(children);
+    if (!chunk) return false;
+    runCompiledModuleBody(*this, *chunk, ctx);
+    return true;
+}
+
+// The cache-lookup half of tryRunCompiledChildren, shared with
+// Op::CallChildren's own runtime handler (bytecode_vm.cpp) -- both need
+// exactly this "list -> eligible chunk or nullptr" step, differing only
+// in how they then RUN the chunk (native runCompiledModuleBody reentry
+// here, a direct vmCallStack_ push there). Caller is responsible for the
+// useBytecodeVm()/inResolvePass_ gate (see childrenListChunkCache_'s own
+// doc comment for why the pass gate is load-bearing, not defensive).
+const CompiledChunk* Evaluator::lookupOrCompileChildrenListChunk(const std::vector<const oscad::ASTNode*>& children) {
     const oscad::ASTNode* first = children.front();
-    auto it = childrenListChunkCache_.find(first);
+    const auto key = std::make_pair(first, children.size());
+    auto it = childrenListChunkCache_.find(key);
     if (it == childrenListChunkCache_.end()) {
-        it = childrenListChunkCache_.emplace(first, tryCompileChildrenList(children, first->scope())).first;
+        it = childrenListChunkCache_.emplace(key, tryCompileChildrenList(children, first->scope())).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
-    if (!it->second || !chunkEligibleNow(*it->second)) return false;
-    runCompiledModuleBody(*this, *it->second, ctx);
-    return true;
+    if (!it->second || !chunkEligibleNow(*it->second)) return nullptr;
+    return &*it->second;
 }
 
 const Value* Evaluator::findUpvalue(const oscad::ASTNode* targetDecl, int slot) const {

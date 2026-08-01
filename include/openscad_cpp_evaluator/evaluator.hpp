@@ -532,6 +532,17 @@ private:
     // into the caller's scope exactly the way the native per-statement
     // loop's own writes already do.
     bool tryRunCompiledChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx);
+public:
+    // The cache-lookup half of tryRunCompiledChildren, shared with
+    // Op::CallChildren's runtime handler (bytecode_vm.cpp, a free
+    // function -- public for the same no-friend-declaration reasoning as
+    // vmCallStack_/treeStack_). Returns the eligible compiled chunk for
+    // `children` or nullptr. Caller owns the useBytecodeVm()/
+    // inResolvePass_ gate -- the pass gate is load-bearing
+    // (childrenListChunkCache_ is pass-scoped, see its own doc comment),
+    // not defensive.
+    const CompiledChunk* lookupOrCompileChildrenListChunk(const std::vector<const oscad::ASTNode*>& children);
+private:
     void evalModularCall(const oscad::ModularCall& node, EvalContext& ctx);
     void evalFor(const oscad::ModularFor& node, EvalContext& ctx);
     void evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx);
@@ -951,15 +962,38 @@ private:
     // body -- so a resolvable module call anywhere in that list gets
     // Op::CallModule bytecode, and any if/for control flow around it gets
     // real Jump-based bytecode too, instead of falling through to the
-    // native per-statement loop. Keyed by the list's own FIRST element,
-    // same convention as assignBlockChunkCache_ (stable and unique per
-    // list: a given evalChildren() call site is always handed the same
-    // leading element across repeated evaluations). Same nullopt-means-
+    // native per-statement loop.
+    //
+    // Keyed by (FIRST element, list SIZE) -- NOT the first element alone,
+    // the original convention borrowed from assignBlockChunkCache_
+    // (where it IS sufficient: a leading-assignment run's first member
+    // uniquely determines the run). Here it wasn't: children()'s
+    // forwarding produces two DIFFERENT lists sharing a first element --
+    // bare `children()` forwards the caller's whole list, `children(0)`
+    // a single-element slice of it -- and keying by front alone made
+    // whichever form ran first poison the cache for the other (caught
+    // for real: `module m() { children(); children(0); }\n
+    // m() { cube(); sphere(); }` made children(0) emit BOTH shapes,
+    // or bare children() emit only one, depending on statement order).
+    // (front, size) fully disambiguates every real producer: fixed AST
+    // lists have unique fronts per call site, and the only same-front
+    // pair (bare vs indexed forwarding) always differs in size except
+    // when the lists are literally identical anyway. Same nullopt-means-
     // tried-and-failed convention, same dangling-pointer hazard, same
     // two-part fix (cleared alongside stmtExprChunkCache_ at the top of
     // every resolveTreeImpl call, only read/written while inResolvePass_)
     // as stmtExprChunkCache_ itself.
-    std::unordered_map<const oscad::ASTNode*, std::optional<CompiledChunk>> childrenListChunkCache_;
+    struct ChildrenListKeyHash {
+        size_t operator()(const std::pair<const oscad::ASTNode*, size_t>& k) const {
+            // Standard hash-combine (boost-style golden-ratio mix) --
+            // either half alone collides by construction here.
+            const size_t h1 = std::hash<const oscad::ASTNode*>{}(k.first);
+            const size_t h2 = std::hash<size_t>{}(k.second);
+            return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+        }
+    };
+    std::unordered_map<std::pair<const oscad::ASTNode*, size_t>, std::optional<CompiledChunk>, ChildrenListKeyHash>
+        childrenListChunkCache_;
 
     // See stmtExprChunkCache_'s own doc comment, immediately above, for why
     // this exists. Not a reentrancy guard (resolveTreeImpl is never called

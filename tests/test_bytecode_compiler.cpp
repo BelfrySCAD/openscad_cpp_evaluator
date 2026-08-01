@@ -1299,6 +1299,35 @@ TEST(ModuleBodyCompiles, ReassignmentInsideForLoopBodyDoesNotSpuriouslyWarn) {
     for (const std::string& w : warnings) EXPECT_EQ(w.find("overwritten"), std::string::npos) << w;
 }
 
+// Regression test for a real cache-collision bug: childrenListChunkCache_
+// was keyed by the list's FIRST element alone (a convention borrowed from
+// assignBlockChunkCache_, where it IS sufficient) -- but children()'s
+// forwarding produces two DIFFERENT lists sharing a first element: bare
+// `children()` forwards the caller's whole list, `children(0)` a single-
+// element slice of it. Whichever form ran first poisoned the cache for
+// the other: here, bare children() cached a two-statement chunk keyed by
+// &cubeStmt, then children(0)'s single-element {&cubeStmt} lookup HIT
+// that key and emitted BOTH shapes. Fixed by keying on (front, size).
+TEST(ModuleBodyCompiles, BareAndIndexedChildrenForwardingDoNotShareACachedChunk) {
+    ScopedVm vm(true);
+    // m() emits: children() -> cube+sphere, then children(0) -> cube only.
+    // 3 bodies total; the collision bug produced 4 (children(0) emitting
+    // sphere too).
+    Evaluated e = evalSrc("module m() { children(); children(0); }\n"
+                          "m() { cube(1); sphere(r=1, $fn=8); }");
+    EXPECT_EQ(e.bodies.size(), 3u);
+}
+
+// Same collision, opposite statement order -- children(0) caching its
+// single-element chunk first used to TRUNCATE the later bare children()
+// (2 bodies where 3 belong).
+TEST(ModuleBodyCompiles, IndexedThenBareChildrenForwardingDoNotShareACachedChunk) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module m() { children(0); children(); }\n"
+                          "m() { cube(1); sphere(r=1, $fn=8); }");
+    EXPECT_EQ(e.bodies.size(), 3u);
+}
+
 TEST(ModuleBodyCompiles, RecursiveModuleWithIfSucceedsWellPastTheOldNativeLimitCompiled) {
     ScopedVm vm(true);
     Evaluated e = evalSrc("module recur(n) { if (n > 0) { recur(n - 1); } else { cube(1); } }\nrecur(10000);");
