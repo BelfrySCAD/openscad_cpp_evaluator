@@ -87,6 +87,25 @@ TEST(Difference, EmptySubtractorLeavesBaseUnchanged) {
     EXPECT_NEAR(e.bodies[0].body->Volume(), 64.0, 1e-6);
 }
 
+TEST(Union, OneInvalidOperandDoesNotDiscardValidSiblings) {
+    // Regression: Manifold's own `+` propagates a non-NoError Status()
+    // (e.g. NonFiniteVertex, from a degenerate NaN-vertex polyhedron here --
+    // in the wild, from an accumulated transform deep in an unrelated
+    // ancestor's own positioning math) onto the WHOLE combined result
+    // instead of treating the bad operand as a no-op contributor. Before
+    // filtering invalid operands out in generateCsg, a single bad part
+    // anywhere in a many-operand union() silently discarded every valid
+    // sibling too -- found via a real user project (snappy-reprap) where
+    // this zeroed out an entire ~65-part extruder assembly with no warning.
+    Evaluated e = evalSrc("union() {"
+                          "  polyhedron(points=[[0,0,0],[2,0,0],[0,2,0],[0/0,0,2]],"
+                          "             faces=[[0,1,2],[0,3,1],[0,2,3],[1,3,2]]);"
+                          "  translate([10,0,0]) cube(2);"
+                          "}");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6); // just the valid cube -- the NaN polyhedron is dropped, not fatal
+}
+
 // -- 2D-native boolean CSG (union/difference/intersection applied directly
 // to 2D children, not mediated through linear_extrude()) -----------------
 
