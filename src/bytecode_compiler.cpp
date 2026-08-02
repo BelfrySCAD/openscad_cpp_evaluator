@@ -884,22 +884,27 @@ public:
         switch (elem.kind()) {
             case NodeKind::ListCompFor: {
                 auto& n = static_cast<const oscad::ListCompFor&>(elem);
-                // Each assignment's RHS is evaluated exactly once, against
-                // the OUTER scope (never seeing an earlier sibling
-                // assignment's own loop variable) -- mirrors the
-                // interpreter's own upfront `pairs.push_back(...)` loop,
-                // and vector_element.hpp's own doc comment on this
-                // asymmetry with ListCompCFor.
-                std::vector<int> iterIds;
-                iterIds.reserve(n.assignments.size());
-                for (const auto& assign : n.assignments) {
-                    compileExpr(*assign->expr, out, scope);
-                    int id = nextIterList_++;
-                    iterIds.push_back(id);
-                    out.push_back({Op::IterMaterialize, id, 0, &assign->position()});
-                }
                 scope.push();
                 const bool isNestedLc = (n.body->kind() == NodeKind::ListComprehension);
+                // Each dimension's own RHS is compiled+materialized INSIDE
+                // the enclosing dimension's own loop body (nested, via the
+                // recursive call below), so it naturally re-executes once
+                // per outer binding, resolved against `scope` with every
+                // OUTER dimension's own slot already declared -- see
+                // compileForLoop's own doc comment (this file) / evalFor's
+                // (stmt_eval.cpp) for the full "verified against real
+                // OpenSCAD.app" rationale. This used to evaluate every
+                // dimension's RHS exactly once, upfront, against the outer
+                // scope -- justified at the time by appeal to
+                // vector_element.hpp's own buildScope() "asymmetric with
+                // ListCompCFor" comment, but that comment describes STATIC
+                // scope-TREE construction for name resolution (module/
+                // function lookups), not RUNTIME value-binding order
+                // (always the dynamic ctx.let_ chain regardless of the
+                // Scope tree) -- it doesn't justify this, and real
+                // OpenSCAD.app confirms a later dimension's range CAN
+                // depend on an earlier one's current value (e.g. `[for
+                // (p=[1:N], pt=f(p)) pt]`).
                 std::function<void(size_t)> emitDim = [&](size_t depth) {
                     if (depth == n.assignments.size()) {
                         if (isNestedLc) {
@@ -910,17 +915,16 @@ public:
                         }
                         return;
                     }
-                    // Every re-entry (every outer-dimension iteration)
-                    // restarts this dimension from its already-materialized
-                    // values -- IterReset, not another IterMaterialize (the
-                    // RHS expression itself is never re-evaluated).
-                    if (depth > 0) out.push_back({Op::IterReset, iterIds[depth], 0, nullptr});
-                    int loopVarSlot = declareLocal(scope, n.assignments[depth]->name->name);
+                    const auto& assign = n.assignments[depth];
+                    compileExpr(*assign->expr, out, scope);
+                    const int iterId = nextIterList_++;
+                    out.push_back({Op::IterMaterialize, iterId, 0, &assign->position()});
+                    int loopVarSlot = declareLocal(scope, assign->name->name);
                     size_t loopStart = out.size();
                     Instruction iterNext;
                     iterNext.op = Op::IterNext;
                     iterNext.a = loopVarSlot;
-                    iterNext.b = iterIds[depth];
+                    iterNext.b = iterId;
                     size_t iterNextIdx = out.size();
                     out.push_back(iterNext);
                     emitDim(depth + 1);
@@ -1250,23 +1254,27 @@ public:
     // a cartesian-product loop over `node.assignments`, and at the
     // innermost base case, ONE currentTreeFrameSize()-delta group per full
     // iteration. Reuses compileForLoop's own cartesian-loop scaffold
-    // verbatim (Op::NativeIterMaterialize/ForIterNext/ForIterEnd/
-    // IterReset) -- Op::ForIterNext's own ctx construction,
-    // `ctx.childCtx(nullptr, std::nullopt, ctx.childrenNodes,
-    // ctx.childrenCallerCtx)`, is exactly what resolveIntersectionFor's
-    // own recurse lambda does too (`parentCtx.childCtx(nullptr,
-    // std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx)`), since
-    // childrenNodes/childrenCallerCtx propagate unchanged through every
-    // nested childCtx either way -- just with Op::CsgGroupStart/
-    // CsgGroupEnd wrapped around the body instead of a bare
-    // compileStatementList. The leading checkDebug is only emitted when
-    // node.body isn't empty, mirroring resolveIntersectionFor's own `if
-    // (!bodyNodes.empty())` guard exactly (unlike compileForLoop's own
-    // ModularFor sibling, which always emits one even for an empty body,
-    // against the FOR node itself as a fallback marker -- intersection_for
-    // has no such native fallback, so neither does this) -- but
-    // CsgGroupStart/CsgGroupEnd themselves are UNCONDITIONAL, since native
-    // measures a (possibly zero-size) group regardless of body emptiness.
+    // verbatim (Op::NativeIterMaterialize/ForIterNext/ForIterEnd, each
+    // dimension nested INSIDE the enclosing one's own loop body -- see
+    // compileForLoop's own doc comment for why this shape, not a flat
+    // materialize-everything-upfront pass, is required for a later
+    // dimension's range to see an earlier one's binding) -- Op::
+    // ForIterNext's own ctx construction, `ctx.childCtx(nullptr,
+    // std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx)`, is exactly
+    // what resolveIntersectionFor's own recurse lambda does too
+    // (`parentCtx.childCtx(nullptr, std::nullopt, ctx.childrenNodes,
+    // ctx.childrenCallerCtx)`), since childrenNodes/childrenCallerCtx
+    // propagate unchanged through every nested childCtx either way --
+    // just with Op::CsgGroupStart/CsgGroupEnd wrapped around the body
+    // instead of a bare compileStatementList. The leading checkDebug is
+    // only emitted when node.body isn't empty, mirroring
+    // resolveIntersectionFor's own `if (!bodyNodes.empty())` guard
+    // exactly (unlike compileForLoop's own ModularFor sibling, which
+    // always emits one even for an empty body, against the FOR node
+    // itself as a fallback marker -- intersection_for has no such native
+    // fallback, so neither does this) -- but CsgGroupStart/CsgGroupEnd
+    // themselves are UNCONDITIONAL, since native measures a (possibly
+    // zero-size) group regardless of body emptiness.
     void compileIntersectionForLoop(const oscad::ModularIntersectionFor& n, std::vector<Instruction>& out) {
         out.push_back({Op::CheckDebugStatement, internNativeStatement(&n), 0, nullptr});
         CompiledChunk::CsgWrapSite site;
@@ -1279,35 +1287,32 @@ public:
         out.push_back({Op::PushCsgWrap, idx, 0, &n.position()});
 
         const size_t numDims = n.assignments.size();
-        std::vector<int> iterListIds(numDims);
-        for (size_t d = 0; d < numDims; ++d) {
-            iterListIds[d] = nextIterList_++;
-            out.push_back({Op::NativeIterMaterialize, internNativeExpr(n.assignments[d]->expr.get()), iterListIds[d],
+        std::function<void(size_t)> emitDim = [&](size_t d) {
+            if (d == numDims) {
+                if (!n.body.empty()) {
+                    out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(n.body.front().get()), 0, nullptr});
+                }
+                out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
+                compileStatementList(n.body, out);
+                out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});
+                return;
+            }
+            const int iterListId = nextIterList_++;
+            out.push_back({Op::NativeIterMaterialize, internNativeExpr(n.assignments[d]->expr.get()), iterListId,
                             &n.assignments[d]->position()});
-        }
-        std::vector<size_t> topIdx(numDims);
-        std::vector<size_t> forIterNextIdx(numDims);
-        for (size_t d = 0; d < numDims; ++d) {
-            if (d > 0) out.push_back({Op::IterReset, iterListIds[d], 0, nullptr});
-            topIdx[d] = out.size();
-            forIterNextIdx[d] = out.size();
+            const size_t topIdx = out.size();
+            const size_t forIterNextIdx = out.size();
             Instruction ins;
             ins.op = Op::ForIterNext;
             ins.a = internName(n.assignments[d]->name->name);
-            ins.b = iterListIds[d];
+            ins.b = iterListId;
             ins.node = n.assignments[d].get();
             out.push_back(ins);
-        }
-        if (!n.body.empty()) {
-            out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(n.body.front().get()), 0, nullptr});
-        }
-        out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
-        compileStatementList(n.body, out);
-        out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});
-        for (size_t i = numDims; i-- > 0;) {
-            out.push_back({Op::ForIterEnd, static_cast<int>(topIdx[i]), 0, nullptr});
-            out[forIterNextIdx[i]].c = static_cast<int>(out.size());
-        }
+            emitDim(d + 1);
+            out.push_back({Op::ForIterEnd, static_cast<int>(topIdx), 0, nullptr});
+            out[forIterNextIdx].c = static_cast<int>(out.size());
+        };
+        emitDim(0);
         out.push_back({Op::PopCsgWrap, idx, 0, &n.position()});
     }
 
@@ -1643,54 +1648,57 @@ public:
     // based code at COMPILE time (bounded by the source's own for-clause
     // count, always small -- never runtime-driven) rather than the
     // interpreter's own runtime recursion (evalFor's `recurse(depth+1,
-    // ...)`, stmt_eval.cpp). Each dimension: materialize once (native RHS
-    // eval + expandIterable), then a ForIterNext/ForIterEnd pair wrapping
-    // everything inner -- see Op::ForIterNext/ForIterEnd's own doc
-    // comments (bytecode.hpp) for exactly why a fresh per-iteration ctx
-    // (not an in-place mutation) is required for correctness, not just
-    // parity.
+    // ...)`, stmt_eval.cpp) -- but structurally mirroring that SAME
+    // recursion shape at compile time (emitDim, below), not a flat
+    // "materialize every dimension, then loop every dimension" two-pass
+    // shape (what used to be here): dimension d's own Op::
+    // NativeIterMaterialize is emitted INSIDE dimension d-1's own loop
+    // body (nested, via the recursive call), so it naturally re-executes
+    // once per (d-1)-and-outer binding, evaluated against whatever ctx is
+    // current at that point in the instruction stream -- i.e. with every
+    // OUTER dimension's own loop variable already bound. Required for real
+    // OpenSCAD's own documented/verified behavior: a later `for` clause's
+    // range CAN depend on an earlier one (`for (i=[0:2], j=[0:i])` is a
+    // standard triangular-loop idiom) -- the old flat-materialize-upfront
+    // shape evaluated every dimension's RHS before ANY variable was bound,
+    // so a later dimension's own reference to an earlier one always failed
+    // with "unknown variable" (confirmed wrong against real OpenSCAD.app
+    // directly, not just an internal inconsistency; see evalFor's own doc
+    // comment, stmt_eval.cpp, for the fuller story -- same bug, same fix
+    // shape, on the interpreter side).
+    //
+    // No Op::IterReset needed any more: since Materialize now runs exactly
+    // once per entry into this dimension's own block (not once total),
+    // its own index-reset (see that op's own doc comment) already covers
+    // "restart this dimension for the next outer binding" -- the OLD
+    // separate reset-without-rematerializing step existed purely to avoid
+    // an unnecessary re-evaluation under the old (buggy) "materialize
+    // once ever" shape, which no longer exists.
     void compileForLoop(const oscad::ModularFor& n, std::vector<Instruction>& out) {
         const size_t numDims = n.assignments.size();
-        std::vector<int> iterListIds(numDims);
-        for (size_t d = 0; d < numDims; ++d) {
-            iterListIds[d] = nextIterList_++;
-            out.push_back({Op::NativeIterMaterialize, internNativeExpr(n.assignments[d]->expr.get()),
-                            iterListIds[d], &n.assignments[d]->position()});
-        }
-        std::vector<size_t> topIdx(numDims);
-        std::vector<size_t> forIterNextIdx(numDims);
-        for (size_t d = 0; d < numDims; ++d) {
-            // Every dimension but the outermost needs its own IterList
-            // index reset to 0 each time it's (re-)entered from the
-            // ENCLOSING dimension's own successful bind -- NativeIterMaterialize
-            // only resets it once, up front, before ANY iteration runs; by
-            // the second (and every later) outer-dimension value, this
-            // dimension's own index is still sitting at "exhausted" from
-            // the PREVIOUS pass, and would immediately look exhausted
-            // again without this. Placed strictly BEFORE this dimension's
-            // own ForIterNext/topIdx (not at it) so this dimension's OWN
-            // "try the next value" jump (its own ForIterEnd, below) lands
-            // AT ForIterNext directly and skips the reset -- only the
-            // fall-through from the enclosing dimension's bind passes
-            // through it. Harmless (a no-op) the very first time, since
-            // the index is already 0 from NativeIterMaterialize then.
-            if (d > 0) out.push_back({Op::IterReset, iterListIds[d], 0, nullptr});
-            topIdx[d] = out.size();
-            forIterNextIdx[d] = out.size();
+        std::function<void(size_t)> emitDim = [&](size_t d) {
+            if (d == numDims) {
+                const oscad::ASTNode* marker = n.body.empty() ? static_cast<const oscad::ASTNode*>(&n) : n.body.front().get();
+                out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(marker), 0, nullptr});
+                compileStatementList(n.body, out);
+                return;
+            }
+            const int iterListId = nextIterList_++;
+            out.push_back({Op::NativeIterMaterialize, internNativeExpr(n.assignments[d]->expr.get()), iterListId,
+                            &n.assignments[d]->position()});
+            const size_t topIdx = out.size();
+            const size_t forIterNextIdx = out.size();
             Instruction ins;
             ins.op = Op::ForIterNext;
             ins.a = internName(n.assignments[d]->name->name);
-            ins.b = iterListIds[d];
+            ins.b = iterListId;
             ins.node = n.assignments[d].get();
             out.push_back(ins); // ins.c (exhaustion target) patched below
-        }
-        const oscad::ASTNode* marker = n.body.empty() ? static_cast<const oscad::ASTNode*>(&n) : n.body.front().get();
-        out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(marker), 0, nullptr});
-        compileStatementList(n.body, out);
-        for (size_t i = numDims; i-- > 0;) {
-            out.push_back({Op::ForIterEnd, static_cast<int>(topIdx[i]), 0, nullptr});
-            out[forIterNextIdx[i]].c = static_cast<int>(out.size());
-        }
+            emitDim(d + 1);
+            out.push_back({Op::ForIterEnd, static_cast<int>(topIdx), 0, nullptr});
+            out[forIterNextIdx].c = static_cast<int>(out.size());
+        };
+        emitDim(0);
     }
 
 private:

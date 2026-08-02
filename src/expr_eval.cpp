@@ -144,23 +144,18 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
     switch (elem.kind()) {
         case oscad::NodeKind::ListCompFor: {
             auto& n = static_cast<const oscad::ListCompFor&>(elem);
-            struct Pair {
-                std::string name;
-                IterableValues values;
-            };
-            std::vector<Pair> pairs;
-            pairs.reserve(n.assignments.size());
-            for (const auto& assign : n.assignments) {
-                Value values = evalExpr(*assign->expr, ctx);
-                const oscad::Position* pos = &assign->position();
-                pairs.push_back(Pair{assign->name->name, expandIterable(values, [&](size_t count) {
-                    warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
-                })});
-            }
             const bool isNestedLc = (n.body->kind() == oscad::NodeKind::ListComprehension);
 
+            // Each dimension's own RHS is evaluated against `parentCtx`
+            // (not upfront against the original `ctx`), re-evaluated on
+            // every entry into this recursion level -- see evalFor's own
+            // doc comment (stmt_eval.cpp) for the full "verified against
+            // real OpenSCAD.app" rationale; this is the identical bug in
+            // the list-comprehension sibling of that same construct (e.g.
+            // `[for (p=[1:N], pt=f(p)) pt]` needs `p` visible in `pt`'s own
+            // range expression).
             std::function<void(size_t, EvalContext&)> recurse = [&](size_t depth, EvalContext& parentCtx) {
-                if (depth == pairs.size()) {
+                if (depth == n.assignments.size()) {
                     if (isNestedLc) {
                         out.push_back(evalListLiteral(static_cast<const oscad::ListComprehension&>(*n.body), parentCtx));
                     } else {
@@ -168,14 +163,20 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                     }
                     return;
                 }
-                for (const Value& val : pairs[depth].values) {
+                const auto& assign = n.assignments[depth];
+                Value values = evalExpr(*assign->expr, parentCtx);
+                const oscad::Position* pos = &assign->position();
+                IterableValues iter = expandIterable(values, [&](size_t count) {
+                    warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
+                });
+                for (const Value& val : iter) {
                     EvalContext childCtx = parentCtx.letChildCtx();
-                    childCtx.let_->set(pairs[depth].name, val);
+                    childCtx.let_->set(assign->name->name, val);
                     // Per-binding stop, same shape as evalFor's -- but with
                     // NO separate body-entry marker at depth == pairs.size()
                     // (_eval_listcomp_for has none; the body's own element
                     // check below supplies the expr-level stop instead).
-                    checkDebug(*n.assignments[depth], childCtx);
+                    checkDebug(*assign, childCtx);
                     recurse(depth + 1, childCtx);
                 }
             };

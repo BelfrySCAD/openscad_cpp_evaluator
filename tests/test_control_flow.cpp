@@ -70,6 +70,31 @@ TEST(ForLoop, MultipleVariablesProduceCartesianProduct) {
     EXPECT_EQ(e.bodies.size(), 4u); // 2x2
 }
 
+// A later `for`-clause dimension's own range CAN depend on an earlier
+// dimension's current binding (a standard triangular-loop idiom) --
+// verified directly against real OpenSCAD.app: `for (i=[0:2], j=[0:i])`
+// produces (0,0)(1,0)(1,1)(2,0)(2,1)(2,2), NOT a flat 3x3 product and NOT
+// an "unknown variable 'i'" warning. Regression test for a real bug: this
+// used to evaluate every dimension's own range expression exactly once,
+// upfront, against the ORIGINAL (pre-loop) ctx, so `j`'s own `[0:i]` never
+// saw `i` at all. Pinned under both VM states explicitly (compileForLoop
+// and evalFor had independent copies of the same bug).
+TEST(ForLoop, LaterDimensionRangeCanDependOnEarlierBindingCompiled) {
+    ScopedVm vm(true);
+    std::vector<std::string> echoed;
+    runScript("for (i = [0:2], j = [0:i]) echo(i, j);", [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: 0, 0", "ECHO: 1, 0", "ECHO: 1, 1", "ECHO: 2, 0", "ECHO: 2, 1",
+                                                 "ECHO: 2, 2"}));
+}
+
+TEST(ForLoop, LaterDimensionRangeCanDependOnEarlierBindingInterpreted) {
+    ScopedVm vm(false);
+    std::vector<std::string> echoed;
+    runScript("for (i = [0:2], j = [0:i]) echo(i, j);", [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: 0, 0", "ECHO: 1, 0", "ECHO: 1, 1", "ECHO: 2, 0", "ECHO: 2, 1",
+                                                 "ECHO: 2, 2"}));
+}
+
 TEST(ForLoop, IteratesOverAPlainList) {
     Evaluated e = evalSrc("for (r = [1,2,3]) translate([r*10,0,0]) sphere(r=r, $fn=8);");
     EXPECT_EQ(e.bodies.size(), 3u);
@@ -208,6 +233,33 @@ TEST(ListComprehension, ForClauseExpandsRange) {
     auto items = std::get<ListPtr>(varValue(r, "x"))->items;
     ASSERT_EQ(items.size(), 5u);
     EXPECT_DOUBLE_EQ(asNum(items[4]), 4.0);
+}
+
+// Same "later dimension depends on earlier one" fix as ForLoop's own
+// (stmt_eval.cpp's evalFor) but for the list-comprehension sibling
+// (evalListElement's ListCompFor case / compileListElement's own compiled
+// form) -- this exact shape (`p` bound by the first clause, referenced by
+// the second clause's own RHS) is a real, common BOSL/BOSL2 idiom (e.g.
+// snappy-reprap's wiring.scad `fillet_path`). Verified against real
+// OpenSCAD.app: `[for (p=[1:3], pt=p*10) pt]` == `[10,20,30]`.
+TEST(ListComprehension, LaterForClauseCanDependOnEarlierBindingCompiled) {
+    ScopedVm vm(true);
+    RunResult r = runScript("x = [for (p = [1:3], pt = p*10) pt];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 3u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 10.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 20.0);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 30.0);
+}
+
+TEST(ListComprehension, LaterForClauseCanDependOnEarlierBindingInterpreted) {
+    ScopedVm vm(false);
+    RunResult r = runScript("x = [for (p = [1:3], pt = p*10) pt];");
+    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    ASSERT_EQ(items.size(), 3u);
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 10.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 20.0);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 30.0);
 }
 
 TEST(ListComprehension, ForIfFiltersElements) {
@@ -669,6 +721,30 @@ TEST(UserModule, DollarChildrenCountsStatementsNotBodies) {
     EXPECT_EQ(captured, "ECHO: 2");
 }
 
+TEST(UserModule, GuardedIndexedChildrenForwardingThroughWrapperPreservesRealChildrenCount) {
+    // Regression: prepareChildrenForward's dyn-copy loop (meant only to
+    // forward $fn/$fa/$fs/$t-style overrides) used to also overwrite
+    // $children/$parent_modules with the WRAPPER module's ("left" here) own
+    // single-statement bookkeeping instead of preserving the real target's
+    // ("outer()"'s actual call site) count already inherited via
+    // callerCtx. A bare children() forwarding chain through ANY
+    // intermediate wrapper silently corrupted $children, so a guard like
+    // `if ($children > N) children(N)` (a standard BOSL/BOSL2 idiom, e.g.
+    // GDMUtils.scad's left()/right()/up()) evaluated false and dropped
+    // geometry with no warning at all. Found via a real user project.
+    Evaluated e = evalSrc("module left(x=0) { translate([-x,0,0]) children(); }\n"
+                          "module outer() {\n"
+                          "    left(10) { if ($children > 0) children(0); }\n"
+                          "    left(20) { if ($children > 1) children(1); }\n"
+                          "}\n"
+                          "outer() { cube(101); cube(102); }");
+    ASSERT_EQ(e.bodies.size(), 2u);
+    manifold::Box bbox0 = e.bodies[0].body->BoundingBox();
+    manifold::Box bbox1 = e.bodies[1].body->BoundingBox();
+    EXPECT_NEAR(bbox0.max.x - bbox0.min.x, 101.0, 1e-9);
+    EXPECT_NEAR(bbox1.max.x - bbox1.min.x, 102.0, 1e-9);
+}
+
 TEST(UserModule, RecursiveModuleCall) {
     Evaluated e = evalSrc("module stack(n) {"
                           "  if (n > 0) {"
@@ -809,6 +885,29 @@ TEST(FunctionBuiltins, ParentModuleAtTopLevelIsUndef) {
 }
 
 // -- intersection_for -----------------------------------------------------
+
+// Same "later dimension depends on earlier one" fix as ForLoop's own, for
+// intersection_for's own cartesian loop (resolveIntersectionFor/
+// compileIntersectionForLoop). Verified against real OpenSCAD.app:
+// `intersection_for(i=[0:1], j=[0:i]) { echo(i,j); cube(1); }` fires the
+// body (and its echo) exactly 3 times, for (0,0),(1,0),(1,1) -- a flat
+// 2x2 product (4 firings) or an "unknown variable 'i'" warning would both
+// be wrong.
+TEST(IntersectionFor, LaterDimensionRangeCanDependOnEarlierBindingCompiled) {
+    ScopedVm vm(true);
+    std::vector<std::string> echoed;
+    runScript("intersection_for (i = [0:1], j = [0:i]) { echo(i, j); cube(1); }",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: 0, 0", "ECHO: 1, 0", "ECHO: 1, 1"}));
+}
+
+TEST(IntersectionFor, LaterDimensionRangeCanDependOnEarlierBindingInterpreted) {
+    ScopedVm vm(false);
+    std::vector<std::string> echoed;
+    runScript("intersection_for (i = [0:1], j = [0:i]) { echo(i, j); cube(1); }",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: 0, 0", "ECHO: 1, 0", "ECHO: 1, 1"}));
+}
 
 TEST(IntersectionFor, IntersectsAllIterations) {
     // Each iteration cube(2) is centered at a different offset; the
