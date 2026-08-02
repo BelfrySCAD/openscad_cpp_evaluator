@@ -176,7 +176,23 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
 
         std::vector<ColoredBody> bodies3d, sections2d;
         for (const ColoredBody& c : split.foreground) {
-            if (c.body) bodies3d.push_back(c);
+            // A body whose own Manifold::Status() isn't NoError (e.g.
+            // NonFiniteVertex, from a degenerate accumulated transform deep
+            // in an unrelated ancestor's positioning math -- found via a
+            // real user script, snappy-reprap's z_tower_assembly chain,
+            // where one already-invalid sub-part silently zeroed out an
+            // entire 65-operand union of otherwise-valid geometry) must
+            // never reach Manifold's own `+`/`-`/`^` operators: unlike a
+            // genuinely empty operand (0 triangles, NoError), Manifold
+            // propagates a non-NoError status through boolean ops onto the
+            // WHOLE result instead of treating it as a no-op contributor,
+            // so a single bad part silently discards every valid sibling.
+            // Real OpenSCAD's CGAL backend doesn't hit this at all here
+            // (more robust to the same input) -- dropping the one invalid
+            // operand and unioning everything else is the closest match to
+            // its own behavior available without new numerical-robustness
+            // work on Manifold's own boolean ops.
+            if (c.body && c.body->Status() == manifold::Manifold::Error::NoError) bodies3d.push_back(c);
         }
         for (const ColoredBody& c : split.foreground) {
             if (c.section) sections2d.push_back(c);
