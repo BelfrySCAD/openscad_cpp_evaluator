@@ -3,6 +3,7 @@
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
+#include <array>
 #include <cmath>
 #include <numbers>
 
@@ -30,6 +31,21 @@ manifold::vec2 toVec2(const Value& v, double defaultX = 0.0, double defaultY = 0
         return manifold::vec2(x, y);
     }
     return manifold::vec2(defaultX, defaultY);
+}
+
+// resize()'s `auto` argument: a bare bool applies to all three axes, a
+// list applies element-wise (missing elements are false), anything else
+// (including undef) disables auto entirely. Mirrors the reference's
+// Value::toBool()/vector handling.
+std::array<bool, 3> toAutoAxes(const Value& v) {
+    if (const bool* b = std::get_if<bool>(&v)) return {*b, *b, *b};
+    if (const ListPtr* l = std::get_if<ListPtr>(&v); l && *l) {
+        const auto& items = (*l)->items;
+        std::array<bool, 3> out{false, false, false};
+        for (size_t i = 0; i < 3 && i < items.size(); ++i) out[i] = truthy(items[i]);
+        return out;
+    }
+    return {false, false, false};
 }
 
 // Rodrigues' rotation formula as a 3x4 transform (rotate(angle, axis) --
@@ -117,13 +133,35 @@ manifold::Manifold applyTransform3d(const std::string& name, const CallArgs& arg
         return body.Mirror(toVec3(getArg(args, 0, "v", Value{}), 1.0, 0.0, 0.0));
     }
     if (name == "resize") {
-        const manifold::vec3 newSize = toVec3(getArg(args, 0, "newsize", Value{}));
+        const manifold::vec3 newSizeV = toVec3(getArg(args, 0, "newsize", Value{}));
+        std::array<bool, 3> autoAxes = toAutoAxes(getArg(args, 1, "auto", Value{}));
         const manifold::Box bbox = body.BoundingBox();
-        const manifold::vec3 span = bbox.max - bbox.min;
-        const double sx = (newSize.x != 0.0 && span.x != 0.0) ? newSize.x / span.x : 1.0;
-        const double sy = (newSize.y != 0.0 && span.y != 0.0) ? newSize.y / span.y : 1.0;
-        const double sz = (newSize.z != 0.0 && span.z != 0.0) ? newSize.z / span.z : 1.0;
-        return body.Scale(manifold::vec3(sx, sy, sz));
+        const manifold::vec3 spanV = bbox.max - bbox.min;
+        const double ns[3] = {newSizeV.x, newSizeV.y, newSizeV.z};
+        const double span[3] = {spanV.x, spanV.y, spanV.z};
+
+        // An `auto` axis takes the scale factor of whichever axis asked for
+        // the LARGEST new size -- not its own (it has none) and not the
+        // first specified one. Mirrors the reference's newsizemax_index:
+        // ties keep the earlier axis, and an all-zero newsize leaves the
+        // factor at 1 so `resize([0,0,0], true)` is a no-op.
+        int maxIdx = 0;
+        for (int i = 1; i < 3; ++i) {
+            if (ns[i] > ns[maxIdx]) maxIdx = i;
+        }
+        const double autoScale = (ns[maxIdx] != 0.0 && span[maxIdx] != 0.0) ? ns[maxIdx] / span[maxIdx] : 1.0;
+
+        double scale[3];
+        for (int i = 0; i < 3; ++i) {
+            if (ns[i] != 0.0 && span[i] != 0.0) {
+                scale[i] = ns[i] / span[i];
+            } else if (ns[i] == 0.0 && autoAxes[static_cast<size_t>(i)]) {
+                scale[i] = autoScale;
+            } else {
+                scale[i] = 1.0;
+            }
+        }
+        return body.Scale(manifold::vec3(scale[0], scale[1], scale[2]));
     }
     if (name == "multmatrix") {
         Value m = getArg(args, 0, "m", Value{});

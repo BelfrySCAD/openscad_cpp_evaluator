@@ -181,8 +181,19 @@ std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
 BuiltinWrapParams computeOffsetParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    const Value rArg = getArg(args, std::nullopt, "r", Value{});
+    // `r` owns position 0 (offset(2) == offset(r=2)); delta/chamfer are
+    // named-only, matching the reference. `r` also wins outright when both
+    // are given -- the reference never even looks at delta in that case.
+    Value rArg = getArg(args, 0, "r", Value{});
     const Value deltaArg = getArg(args, std::nullopt, "delta", Value{});
+    // A bare offset() is offset(r=1), not a pass-through: the reference
+    // initialises delta to 1 with a round join and only ever overwrites it
+    // from an argument, so "neither given" lands on the same state "r=1"
+    // does. Verified against OpenSCAD 2022.08.22 -- offset() and offset(r=1)
+    // produce a byte-identical mesh for the same input.
+    if (std::holds_alternative<std::monostate>(rArg) && std::holds_alternative<std::monostate>(deltaArg)) {
+        rArg = Value{1.0};
+    }
     const bool chamfer = truthy(getArg(args, std::nullopt, "chamfer", Value{false}));
 
     CSGParams params;

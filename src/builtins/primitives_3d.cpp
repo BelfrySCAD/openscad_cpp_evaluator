@@ -144,34 +144,38 @@ std::vector<ColoredBody> generateSphere(Evaluator& ev, const CSGParams& params, 
 CSGParams resolveCylinder(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     const double h = toDoubleLenient(getArg(args, 0, "h", Value{1.0}));
-    Value rV = getArg(args, 1, "r", Value{});
-    Value r1V = getArg(args, std::nullopt, "r1", Value{});
-    Value r2V = getArg(args, std::nullopt, "r2", Value{});
+    // Positional order is (h, r1, r2, center); r/d/d1/d2 are named-only.
+    // NOTE r1/r2 -- not r -- own positions 1 and 2, so `cylinder(10, 5, 2)`
+    // is a cone, and `cylinder(10, 5)` is a cone tapering to the r2 default
+    // of 1 rather than a straight r=5 cylinder. Both match the reference.
+    Value rV = getArg(args, std::nullopt, "r", Value{});
     Value dV = getArg(args, std::nullopt, "d", Value{});
+    Value r1V = getArg(args, 1, "r1", Value{});
+    Value r2V = getArg(args, 2, "r2", Value{});
     Value d1V = getArg(args, std::nullopt, "d1", Value{});
     Value d2V = getArg(args, std::nullopt, "d2", Value{});
-    const bool center = truthy(getArg(args, std::nullopt, "center", Value{false}));
+    const bool center = truthy(getArg(args, 3, "center", Value{false}));
 
-    std::optional<double> r = isUndef(rV) ? std::nullopt : std::optional<double>(toDoubleLenient(rV));
-    std::optional<double> r1 = isUndef(r1V) ? std::nullopt : std::optional<double>(toDoubleLenient(r1V));
-    std::optional<double> r2 = isUndef(r2V) ? std::nullopt : std::optional<double>(toDoubleLenient(r2V));
+    // Application order is significant and mirrors the reference's own
+    // sequence of independent `if (x.isNumber()) ...` assignments: r, then
+    // d (which overrides r outright rather than deferring to it), then the
+    // per-end r1/r2, then the per-end d1/d2. So `cylinder(h=10, d=8, r1=5)`
+    // is r1=5/r2=4, and `cylinder(h=10, r=5, r2=2)` is r1=5/r2=2. Both ends
+    // default to 1 independently -- r2 does NOT fall back to r1.
+    double r1 = 1.0, r2 = 1.0;
+    if (!isUndef(rV)) r1 = r2 = toDoubleLenient(rV);
+    if (!isUndef(dV)) r1 = r2 = toDoubleLenient(dV) / 2.0;
+    if (!isUndef(r1V)) r1 = toDoubleLenient(r1V);
+    if (!isUndef(r2V)) r2 = toDoubleLenient(r2V);
+    if (!isUndef(d1V)) r1 = toDoubleLenient(d1V) / 2.0;
+    if (!isUndef(d2V)) r2 = toDoubleLenient(d2V) / 2.0;
 
-    if (!isUndef(dV) && !r) r = toDoubleLenient(dV) / 2.0;
-    if (!isUndef(d1V) && !r1) r1 = toDoubleLenient(d1V) / 2.0;
-    if (!isUndef(d2V) && !r2) r2 = toDoubleLenient(d2V) / 2.0;
-    if (r) {
-        r1 = *r;
-        r2 = *r;
-    }
-    if (!r1) r1 = 1.0;
-    if (!r2) r2 = *r1;
-
-    const int segs = fnSegmentsFromCtx(effCtx, std::max(*r1, *r2));
+    const int segs = fnSegmentsFromCtx(effCtx, std::max(r1, r2));
 
     CSGParams params;
     params["h"] = Value{h};
-    params["r1"] = Value{*r1};
-    params["r2"] = Value{*r2};
+    params["r1"] = Value{r1};
+    params["r2"] = Value{r2};
     params["center"] = Value{center};
     params["segs"] = Value{static_cast<double>(segs)};
     params["color"] = colorToValue(effCtx.color);

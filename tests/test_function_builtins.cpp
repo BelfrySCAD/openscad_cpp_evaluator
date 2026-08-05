@@ -96,6 +96,56 @@ TEST(MathBuiltins, BoolArgumentIsUndefForNumericOnlyFns) {
     EXPECT_TRUE(isUndef(evalSrc("norm([true, 0])", ev)));
 }
 
+// Every scalar-numeric builtin rejects a non-number argument outright
+// rather than coercing it through toDoubleLenient()'s 0.0. Each expected
+// value below was confirmed against real OpenSCAD 2022.08.22, which warns
+// ("parameter could not be converted") and yields undef. Before this,
+// `cos(undef)` was 1, `ln(undef)` was -inf and `acos([1,2])` was 90 --
+// a misspelled variable produced plausible geometry instead of failing.
+TEST(MathBuiltins, NonNumericArgumentIsUndefForScalarNumericFns) {
+    Evaluator ev;
+    for (const char* fn : {"abs", "sign", "ceil", "floor", "round", "sqrt", "ln", "log", "exp",
+                           "sin", "cos", "tan", "asin", "acos", "atan"}) {
+        const std::string f(fn);
+        EXPECT_TRUE(isUndef(evalSrc(f + "(undef)", ev))) << f << "(undef)";
+        EXPECT_TRUE(isUndef(evalSrc(f + "(\"hi\")", ev))) << f << "(\"hi\")";
+        EXPECT_TRUE(isUndef(evalSrc(f + "([1,2])", ev))) << f << "([1,2])";
+        EXPECT_TRUE(isUndef(evalSrc(f + "(true)", ev))) << f << "(true)";
+    }
+    EXPECT_TRUE(isUndef(evalSrc("atan2(1, undef)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("atan2(undef, 1)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("pow(2, undef)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("pow(undef, 2)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("rands(undef, 1, 3, 42)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("rands(0, 1, undef, 42)", ev)));
+    // lookup() can't use the same rule (its second argument is a table),
+    // so it guards its key separately -- without that, a non-numeric key
+    // became 0.0 and silently returned the table's first value.
+    EXPECT_TRUE(isUndef(evalSrc("lookup(undef, [[0,1],[10,5]])", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("lookup(5, undef)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("lookup(5, \"hi\")", ev)));
+}
+
+// Too few arguments is a type error too, not a call against an implicit 0.
+TEST(MathBuiltins, MissingArgumentIsUndefForScalarNumericFns) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("abs()", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("pow(2)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("atan2(1)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("rands(0, 1)", ev)));
+}
+
+// The guard must not disturb the functions that legitimately take lists.
+TEST(MathBuiltins, ListAcceptingNumericFnsStillWork) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("max([4,9,2])", ev)), 9.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("min([4,9,2])", ev)), 2.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("norm([3,4])", ev)), 5.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("lookup(5, [[0,5],[10,8],[20,2]])", ev)), 6.5);
+    EXPECT_TRUE(isUndef(evalSrc("max(undef, 1)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("norm(undef)", ev)));
+}
+
 TEST(MathBuiltins, Rands) {
     Evaluator ev;
     Value v = evalSrc("rands(1, 2, 5, 42)", ev);
