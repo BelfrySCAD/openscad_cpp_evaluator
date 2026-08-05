@@ -279,7 +279,13 @@ Value builtinSearch(const CallArgs& args) {
 }
 
 Value builtinLookup(const CallArgs& args) {
-    const double key = toDoubleLenient(getArg(args, 0, "key", Value{}));
+    // Guarded here rather than via scalarNumericArity() -- the second
+    // argument is a table, so the all-arguments-are-numbers rule can't
+    // apply. Without this, toDoubleLenient() turns a non-numeric key into
+    // 0.0 and the lookup silently returns the table's first value.
+    const Value keyArg = getArg(args, 0, "key", Value{});
+    if (!std::holds_alternative<double>(keyArg)) return Value{};
+    const double key = std::get<double>(keyArg);
     const Value tableArg = getArg(args, 1, "table", Value{});
     const ListPtr* tablePtr = std::get_if<ListPtr>(&tableArg);
     if (!tablePtr || !*tablePtr) return Value{};
@@ -359,11 +365,35 @@ Value builtinFontmetrics(Evaluator& ev, const CallArgs& args) {
     });
 }
 
-const std::unordered_set<std::string>& numericOnlyNames() {
-    static const std::unordered_set<std::string> names = {
-        "abs", "sign", "ceil", "floor", "round", "sqrt", "ln", "log", "exp", "sin", "cos", "tan",
-        "asin", "acos", "atan", "atan2", "pow", "max", "min", "norm", "cross",
+// Take only scalar numbers, mapped to how many leading positional
+// arguments must each actually BE a number. Anything else there (undef, a
+// string, a list, a bool, an object) is a type error yielding undef, and
+// so is supplying fewer arguments than the arity -- matching the
+// reference, which rejects the call outright rather than coercing.
+//
+// This has to be checked up front rather than left to each case below:
+// toDoubleLenient() silently turns undef/string/list into 0.0, which
+// would make `cos(misspelled_var)` quietly 1 instead of undef, and a
+// typo'd variable then produces plausible-looking geometry instead of an
+// obvious failure. Arity is deliberately a floor, not an exact match --
+// the reference also rejects EXTRA arguments, but tightening that too
+// risks breaking working library code for no correctness gain here.
+const std::unordered_map<std::string, size_t>& scalarNumericArity() {
+    static const std::unordered_map<std::string, size_t> arity = {
+        {"abs", 1}, {"sign", 1}, {"ceil", 1}, {"floor", 1}, {"round", 1}, {"sqrt", 1},
+        {"ln", 1}, {"log", 1}, {"exp", 1}, {"sin", 1}, {"cos", 1}, {"tan", 1},
+        {"asin", 1}, {"acos", 1}, {"atan", 1}, {"atan2", 2}, {"pow", 2}, {"rands", 3},
     };
+    return arity;
+}
+
+// Numeric functions that legitimately take a LIST argument, so the
+// all-arguments-must-be-numbers rule above can't apply -- each validates
+// its own operands, and only needs the bool case caught here (Value's
+// bool and double are distinct alternatives, but the reference rejects
+// `max(true, 1)` as a type error rather than treating true as 1).
+const std::unordered_set<std::string>& numericOnlyNames() {
+    static const std::unordered_set<std::string> names = {"max", "min", "norm", "cross"};
     return names;
 }
 
@@ -479,7 +509,13 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
     // elsewhere before reaching here) -- mirrors the old chain's fallthrough.
     if (idIt == ids.end()) return Value{};
 
-    if (numericOnlyNames().count(name)) {
+    if (const auto arityIt = scalarNumericArity().find(name); arityIt != scalarNumericArity().end()) {
+        const std::vector<Value> positional = allPositional(args);
+        if (positional.size() < arityIt->second) return Value{};
+        for (size_t i = 0; i < arityIt->second; ++i) {
+            if (!std::holds_alternative<double>(positional[i])) return Value{};
+        }
+    } else if (numericOnlyNames().count(name)) {
         for (const Value& v : allPositional(args)) {
             if (isBoolOrListContainsBool(v)) return Value{};
         }

@@ -78,10 +78,47 @@ TEST(Cylinder, NoRadiusArgumentAtAllDefaultsToRadiusOne) {
     EXPECT_NEAR(withNoArgs.bodies[0].body->Volume(), withExplicitR.bodies[0].body->Volume(), 1e-9);
 }
 
-TEST(Cylinder, R1OnlyDefaultsR2ToR1) {
+// r2 does NOT fall back to r1 -- each end defaults to 1 on its own, so
+// `cylinder(h, r1=3)` is a cone tapering 3 -> 1, not a straight r=3
+// cylinder. Verified against OpenSCAD 2022.08.22 (rbot 3, rtop 1).
+TEST(Cylinder, R1OnlyLeavesR2AtItsOwnDefaultOfOne) {
     Evaluated withR1Only = evalSrc("cylinder(h=5, r1=3, $fn=16);");
-    Evaluated withBoth = evalSrc("cylinder(h=5, r1=3, r2=3, $fn=16);");
-    EXPECT_NEAR(withR1Only.bodies[0].body->Volume(), withBoth.bodies[0].body->Volume(), 1e-9);
+    Evaluated asCone = evalSrc("cylinder(h=5, r1=3, r2=1, $fn=16);");
+    Evaluated asStraight = evalSrc("cylinder(h=5, r1=3, r2=3, $fn=16);");
+    EXPECT_NEAR(withR1Only.bodies[0].body->Volume(), asCone.bodies[0].body->Volume(), 1e-9);
+    EXPECT_GT(std::abs(withR1Only.bodies[0].body->Volume() - asStraight.bodies[0].body->Volume()), 1.0);
+}
+
+// Positional order is (h, r1, r2, center) -- position 1 is r1, not r, so a
+// third positional argument really does make a cone and a fourth really
+// does centre it. This is the arg-order bug that made `cylinder(10, 5, 2)`
+// silently render as a straight r=5 cylinder.
+TEST(Cylinder, PositionalArgsAreHR1R2Center) {
+    Evaluated positional = evalSrc("cylinder(10, 5, 2, true, $fn=16);");
+    Evaluated named = evalSrc("cylinder(h=10, r1=5, r2=2, center=true, $fn=16);");
+    EXPECT_NEAR(positional.bodies[0].body->Volume(), named.bodies[0].body->Volume(), 1e-9);
+    const manifold::Box bb = positional.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bb.min.z, -5.0, 1e-9);
+    EXPECT_NEAR(bb.max.z, 5.0, 1e-9);
+}
+
+// Application order: r, then d (which overrides r outright), then r1/r2,
+// then d1/d2. Each verified against OpenSCAD 2022.08.22.
+TEST(Cylinder, DiameterAndRadiusOverrideOrderMatchesReference) {
+    // d=8 sets both ends to 4; the explicit r1=5 then overrides the bottom.
+    Evaluated dThenR1 = evalSrc("cylinder(h=10, d=8, r1=5, $fn=16);");
+    Evaluated expected1 = evalSrc("cylinder(h=10, r1=5, r2=4, $fn=16);");
+    EXPECT_NEAR(dThenR1.bodies[0].body->Volume(), expected1.bodies[0].body->Volume(), 1e-9);
+
+    // r=5 sets both ends; the explicit r2=2 then overrides the top.
+    Evaluated rThenR2 = evalSrc("cylinder(h=10, r=5, r2=2, $fn=16);");
+    Evaluated expected2 = evalSrc("cylinder(h=10, r1=5, r2=2, $fn=16);");
+    EXPECT_NEAR(rThenR2.bodies[0].body->Volume(), expected2.bodies[0].body->Volume(), 1e-9);
+
+    // d wins over r outright rather than deferring to it.
+    Evaluated dWinsOverR = evalSrc("cylinder(h=10, r=5, d=8, $fn=16);");
+    Evaluated expected3 = evalSrc("cylinder(h=10, r=4, $fn=16);");
+    EXPECT_NEAR(dWinsOverR.bodies[0].body->Volume(), expected3.bodies[0].body->Volume(), 1e-9);
 }
 
 // -- polyhedron -----------------------------------------------------------

@@ -151,11 +151,27 @@ TEST(Offset, NegativeDeltaShrinksTheSquare) {
     EXPECT_NEAR(e.bodies[0].section->Area(), 2.0 * 2.0, 1e-6);
 }
 
-TEST(Offset, NoRadiusOrDeltaPassesThroughFirstChild) {
-    Evaluated e = evalSrc("offset() square(4, center=true);");
-    ASSERT_EQ(e.bodies.size(), 1u);
-    ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 16.0, 1e-6);
+// `r` owns position 0, so offset(2) == offset(r=2). It used to be
+// named-only, making a bare offset(2) a silent no-op.
+TEST(Offset, FirstPositionalArgumentIsRadius) {
+    Evaluated positional = evalSrc("offset(1, $fn=64) square(4, center=true);");
+    Evaluated named = evalSrc("offset(r=1, $fn=64) square(4, center=true);");
+    ASSERT_TRUE(positional.bodies[0].section.has_value());
+    EXPECT_NEAR(positional.bodies[0].section->Area(), named.bodies[0].section->Area(), 1e-9);
+    EXPECT_GT(positional.bodies[0].section->Area(), 16.0);
+}
+
+// A bare offset() is offset(r=1), NOT a pass-through -- the reference
+// initialises its delta to 1 with a round join and only overwrites it from
+// an argument. Verified against OpenSCAD 2022.08.22, where offset() and
+// offset(r=1) produce identical geometry.
+TEST(Offset, NoRadiusOrDeltaDefaultsToRadiusOne) {
+    Evaluated bare = evalSrc("offset() square(4, center=true);");
+    Evaluated explicitR = evalSrc("offset(r=1) square(4, center=true);");
+    ASSERT_EQ(bare.bodies.size(), 1u);
+    ASSERT_TRUE(bare.bodies[0].section.has_value());
+    EXPECT_NEAR(bare.bodies[0].section->Area(), explicitR.bodies[0].section->Area(), 1e-9);
+    EXPECT_GT(bare.bodies[0].section->Area(), 16.0); // grew, rather than passing through
 }
 
 // -- roof -----------------------------------------------------------------

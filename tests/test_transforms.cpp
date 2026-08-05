@@ -150,6 +150,56 @@ TEST(Resize, ZeroComponentLeavesThatAxisUnscaled) {
     EXPECT_NEAR(bbox.max.z, 1.0, 1e-9); // unscaled
 }
 
+// `auto` scales the zero-valued axes by the factor of whichever axis asked
+// for the LARGEST new size. Every expectation below was confirmed against
+// real OpenSCAD 2022.08.22; before this, `auto` was accepted and ignored.
+TEST(Resize, AutoScalesZeroAxesByTheLargestRequestedAxisFactor) {
+    // Bare `true` covers all three axes: 20/5 = 4x on X, so Y and Z too.
+    Evaluated allAxes = evalSrc("resize([20,0,0], true) cube(5);");
+    manifold::Box bbox = allAxes.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 20.0, 1e-9);
+    EXPECT_NEAR(bbox.max.y, 20.0, 1e-9);
+    EXPECT_NEAR(bbox.max.z, 20.0, 1e-9);
+
+    // Named form is identical to the positional one.
+    Evaluated named = evalSrc("resize([20,0,0], auto=true) cube(5);");
+    manifold::Box nbox = named.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(nbox.max.y, 20.0, 1e-9);
+
+    // A per-axis list only auto-scales the axes it names.
+    Evaluated perAxis = evalSrc("resize([20,0,0], [false,true,false]) cube(5);");
+    manifold::Box pbox = perAxis.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(pbox.max.x, 20.0, 1e-9);
+    EXPECT_NEAR(pbox.max.y, 20.0, 1e-9);
+    EXPECT_NEAR(pbox.max.z, 5.0, 1e-9); // not auto -- left alone
+}
+
+TEST(Resize, AutoFactorComesFromTheLargestNewsizeNotTheFirst) {
+    // span (5,10,20); newsize (20,30,0). The largest requested size is 30
+    // on Y, so the auto Z axis scales by 30/10 = 3 -> 60, NOT by X's 20/5.
+    Evaluated e = evalSrc("resize([20,30,0], true) cube([5,10,20]);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 20.0, 1e-9);
+    EXPECT_NEAR(bbox.max.y, 30.0, 1e-9);
+    EXPECT_NEAR(bbox.max.z, 60.0, 1e-9);
+}
+
+TEST(Resize, AutoWithNoRequestedSizeIsANoOp) {
+    Evaluated e = evalSrc("resize([0,0,0], true) cube(5);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 5.0, 1e-9);
+    EXPECT_NEAR(bbox.max.y, 5.0, 1e-9);
+    EXPECT_NEAR(bbox.max.z, 5.0, 1e-9);
+}
+
+TEST(Resize, AutoFalseLeavesZeroAxesUnscaled) {
+    Evaluated e = evalSrc("resize([20,0,0], false) cube(5);");
+    manifold::Box bbox = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bbox.max.x, 20.0, 1e-9);
+    EXPECT_NEAR(bbox.max.y, 5.0, 1e-9);
+    EXPECT_NEAR(bbox.max.z, 5.0, 1e-9);
+}
+
 // -- 2D transform dispatch (a transform's child is a CrossSection, not a
 // Manifold -- resolved per-body at generate time) ---------------------------
 
