@@ -14,6 +14,45 @@ namespace oscadeval {
 
 namespace {
 bool isUndef(const Value& v) { return std::holds_alternative<std::monostate>(v); }
+
+// Edges used by an odd number of triangles -- i.e. the mesh's open border.
+// A closed solid has none; every edge is shared by exactly two faces.
+//
+// Counted on the UNDIRECTED edge (sorted endpoints) rather than the
+// directed half-edge, so a hole reads as a hole regardless of winding:
+// counting directed edges would also flag a merely back-to-front face,
+// which builds into a perfectly valid solid and is not what this reports.
+// Whether a mesh Manifold rejected is nonetheless safe to hand to a
+// renderer. Only NotManifold qualifies: it means "the triangles are fine,
+// they just don't close a solid", which is exactly the open-surface case
+// worth drawing. Every other status (NonFiniteVertex above all, but also
+// VertexOutOfBounds and friends) means the vertex data itself is broken --
+// drawing NaN coordinates would poison the scene bounding box and send the
+// camera auto-fit to infinity, which is worse than showing nothing. The
+// explicit finite check is belt-and-braces, since nothing documents that a
+// NotManifold mesh can't ALSO contain a NaN.
+bool isDrawableFailure(const manifold::Manifold& body, const manifold::MeshGL& mesh) {
+    if (body.Status() != manifold::Manifold::Error::NotManifold) return false;
+    if (mesh.triVerts.empty()) return false;
+    return std::all_of(mesh.vertProperties.begin(), mesh.vertProperties.end(),
+                        [](float v) { return std::isfinite(v); });
+}
+
+size_t countBoundaryEdges(const manifold::MeshGL& mesh) {
+    std::map<std::pair<uint32_t, uint32_t>, int> uses;
+    for (size_t i = 0; i + 2 < mesh.triVerts.size(); i += 3) {
+        const uint32_t v[3] = {mesh.triVerts[i], mesh.triVerts[i + 1], mesh.triVerts[i + 2]};
+        for (int e = 0; e < 3; ++e) {
+            const uint32_t a = v[e], b = v[(e + 1) % 3];
+            ++uses[{std::min(a, b), std::max(a, b)}];
+        }
+    }
+    size_t open = 0;
+    for (const auto& [edge, count] : uses) {
+        if (count % 2 != 0) ++open;
+    }
+    return open;
+}
 } // namespace
 
 // cube(size = 1, center = false) -- mirrors _resolve_cube/_generate_cube.
@@ -292,6 +331,31 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
         mesh.triVerts.push_back(static_cast<uint32_t>(std::get<double>(t)));
     }
     manifold::Manifold body(mesh);
+    if (isDrawableFailure(body, mesh)) {
+        // An open surface -- faces that don't close the solid. Manifold
+        // signals that by returning an EMPTY body rather than throwing, so
+        // without this branch the polyhedron simply vanishes from the
+        // render with nothing said, leaving the author to guess which face
+        // they forgot.
+        //
+        // Report the boundary-edge count rather than Manifold's own
+        // "NotManifold" status string, which is actively misleading here: a
+        // closed mesh with reversed winding, non-manifold vertices or
+        // self-intersections builds perfectly well, and only an OPEN one
+        // reaches this branch. The count points straight at the problem.
+        ev.warn("polyhedron: mesh is not closed -- " + std::to_string(countBoundaryEdges(mesh)) +
+                    " boundary edge(s); drawing it as a surface, but it cannot "
+                    "take part in any CSG operation",
+                &node.position());
+        return {ev.tagDisplayOnly(std::move(mesh), node, params.at("color"))};
+    }
+    if (body.Status() != manifold::Manifold::Error::NoError) {
+        // Broken vertex data rather than merely-open topology (a NaN
+        // coordinate, an out-of-range index). Not drawable, so this keeps
+        // the old drop-it behaviour -- but says so, which it never used to.
+        ev.warn(std::string("polyhedron: ") + manifoldErrorName(body.Status()) + "; geometry discarded",
+                &node.position());
+    }
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 

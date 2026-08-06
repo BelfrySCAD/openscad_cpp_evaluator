@@ -27,8 +27,19 @@ RoleSplit splitByRole(const std::vector<ColoredBody>& bodies) {
     for (const ColoredBody& c : bodies) {
         if (c.role == BodyRole::Background) r.background.push_back(c);
     }
+    // Checked before the foreground sweep below and excluded from it: a
+    // display-only body has an empty Manifold, so letting it reach a
+    // boolean would silently zero the whole operation (the same failure
+    // mode invalid operands caused before they were filtered out).
     for (const ColoredBody& c : bodies) {
-        if (c.role != BodyRole::Background && c.role != BodyRole::ShowOnly) r.foreground.push_back(c);
+        if (c.isDisplayOnly() && c.role != BodyRole::Background && c.role != BodyRole::ShowOnly) {
+            r.displayOnly.push_back(c);
+        }
+    }
+    for (const ColoredBody& c : bodies) {
+        if (c.role != BodyRole::Background && c.role != BodyRole::ShowOnly && !c.isDisplayOnly()) {
+            r.foreground.push_back(c);
+        }
     }
     for (const ColoredBody& c : r.foreground) {
         if (c.role == BodyRole::Highlight) r.highlight.push_back(c);
@@ -160,7 +171,7 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
     const std::string& op = std::get<std::string>(params.at("op"));
     const auto& groupSizes = std::get<ListPtr>(params.at("group_sizes"))->items;
 
-    std::vector<ColoredBody> allBg, allHi, allSo;
+    std::vector<ColoredBody> allBg, allHi, allSo, allDo;
     std::optional<ColoredBody> csgResult;
     size_t idx = 0;
 
@@ -173,6 +184,7 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         allBg.insert(allBg.end(), split.background.begin(), split.background.end());
         allHi.insert(allHi.end(), split.highlight.begin(), split.highlight.end());
         allSo.insert(allSo.end(), split.showOnly.begin(), split.showOnly.end());
+        allDo.insert(allDo.end(), split.displayOnly.begin(), split.displayOnly.end());
 
         std::vector<ColoredBody> bodies3d, sections2d;
         for (const ColoredBody& c : split.foreground) {
@@ -251,6 +263,7 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
     result.insert(result.end(), allBg.begin(), allBg.end());
     result.insert(result.end(), allHi.begin(), allHi.end());
     result.insert(result.end(), allSo.begin(), allSo.end());
+    result.insert(result.end(), allDo.begin(), allDo.end());
     return result;
 }
 

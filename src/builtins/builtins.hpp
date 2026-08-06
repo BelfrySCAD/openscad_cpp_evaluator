@@ -77,11 +77,23 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params,
 // splitting/2D-merge logic.
 struct RoleSplit {
     std::vector<ColoredBody> background;
-    std::vector<ColoredBody> foreground; // role != Background && role != ShowOnly
+    std::vector<ColoredBody> foreground; // role != Background && role != ShowOnly, and not display-only
     std::vector<ColoredBody> highlight;  // the subset of `foreground` that's role == Highlight
     std::vector<ColoredBody> showOnly;
+    // Bodies with no Manifold to operate on (an open polyhedron -- see
+    // ColoredBody::rawMesh). Split out for the same reason showOnly is:
+    // they must survive a CSG/hull/minkowski step untouched rather than be
+    // merged into it, since there is nothing to merge. Kept separate from
+    // `background` because they render as ordinary geometry, not as a
+    // translucent ghost.
+    std::vector<ColoredBody> displayOnly;
 };
 RoleSplit splitByRole(const std::vector<ColoredBody>& bodies);
+
+// manifold::ToString(Manifold::Error) only exists under MANIFOLD_DEBUG --
+// not enabled in this build -- so this mirrors it. Shared by import.cpp and
+// primitives_3d.cpp, both of which report why a mesh wouldn't build.
+std::string manifoldErrorName(manifold::Manifold::Error e);
 std::optional<manifold::CrossSection> toCrossSection(const std::vector<ColoredBody>& bodies);
 
 // Merges a statement's bodies into one (3D union, else 2D union, else an

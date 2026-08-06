@@ -236,6 +236,18 @@ public:
     // comment for why that reference exists at all).
     ColoredBody tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue);
 
+    // tagGenerated()'s counterpart for a mesh Manifold refused to build --
+    // an open polyhedron(). Returns a display-only ColoredBody (see
+    // ColoredBody::rawMesh) carrying the triangle soup as-is, so it can
+    // still be drawn even though no CSG operation can ever touch it.
+    //
+    // A failed Manifold has no run IDs of its own, so one is reserved here
+    // and written onto the raw mesh -- otherwise the body would be
+    // invisible to selection and to the originalID -> AST node mapping
+    // that drives click-to-source, which is exactly when a user most wants
+    // to click the broken thing and be shown the line that made it.
+    ColoredBody tagDisplayOnly(manifold::MeshGL mesh, const oscad::ASTNode& node, const Value& colorValue);
+
     // Raises an OpenSCAD-level runtime error: throws EvalError with the
     // formatted "ERROR: {msg}{TRACE lines}" message (see eval_error.hpp),
     // walking the real user function/module call stack for the TRACE lines
