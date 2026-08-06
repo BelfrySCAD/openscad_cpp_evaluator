@@ -232,6 +232,122 @@ def test_role_defaults_to_normal_and_reflects_modifiers():
     assert roles == ["highlight", "show_only"]
 
 
+# -- parse_ast: AST snapshot ---------------------------------------------
+
+
+def test_parse_ast_spans_recover_original_number_text():
+    # The whole point of exposing spans: a parsed NumberLiteral is a double,
+    # so the source spelling is gone from `val` -- but the span still points
+    # at it, letting a rewriter reuse the author's own text verbatim.
+    from openscad_cpp_evaluator import parse_ast_string
+    src = "translate([1.500, 2.250, 1e3]) cube(2);"
+    vec = parse_ast_string(src)[0]["arguments"][0]["expr"]
+    spellings = [src[e["position"]["start_offset"]:e["position"]["end_offset"]] for e in vec["elements"]]
+    assert spellings == ["1.500", "2.250", "1e3"], spellings
+    assert [e["val"] for e in vec["elements"]] == [1.5, 2.25, 1000.0]
+
+
+def test_parse_ast_node_shapes():
+    from openscad_cpp_evaluator import parse_ast_string
+    ast = parse_ast_string("module m(a, b=2) { cube(a); } m(1, b=3) sphere(2);")
+    decl, call = ast
+    assert decl["kind"] == "ModuleDeclaration"
+    assert decl["name"]["name"] == "m"
+    assert [p["name"]["name"] for p in decl["parameters"]] == ["a", "b"]
+    # An absent optional child is None, not a missing key.
+    assert decl["parameters"][0]["default_value"] is None
+    assert decl["parameters"][1]["default_value"]["val"] == 2.0
+    assert call["kind"] == "ModularCall"
+    assert [a["kind"] for a in call["arguments"]] == ["PositionalArgument", "NamedArgument"]
+    assert call["arguments"][1]["name"]["name"] == "b"
+    assert [c["kind"] for c in call["children"]] == ["ModularCall"]
+
+
+def test_parse_ast_covers_every_node_kind_reachable_from_source():
+    # Guards the exhaustive switch in ast_to_py.cpp: a node kind added to
+    # the parser without a case here would produce a dict with only
+    # kind/position, silently losing its fields.
+    from openscad_cpp_evaluator import parse_ast_string
+    src = """
+    include <x.scad>
+    use <y.scad>
+    A = 1; B = "s"; C = true; D = undef; E = [0:2:10]; F = -A; G = !C; H = ~1;
+    I = A+1-2*3/4%5^2; J = A<1 && A>2 || A<=3 && A>=4 && A==5 && A!=6;
+    K = A&1 | 2 << 3 >> 4;
+    L = C ? A : B; M = [1,2,3][0]; N = let(x=1) x; O = echo("e") 1;
+    P = assert(true) 2; Q = function(a) a; R = [for (i=[0:3]) i*2];
+    S = [for (i=[0:3]) if (i%2==0) i else -i];
+    S2 = [for (i=[0:3]) if (i%2==0) i];              // bare if -> ListCompIf
+    T = [for (i=0; i<3; i=i+1) i]; U = [for (v=[[1,2]]) each v];
+    V = [let(z=2) for (i=[0:1]) z*i]; W = object(a=1).a;
+    function fn(p) = p; module mod(m) { cube(m); children(); }
+    mod(1) { sphere(2); }
+    for (i=[0:1]) cube(1);
+    intersection_for (i=[0:1]) cube(2);
+    let (t=1) cube(t); echo("hi") cube(1); assert(true) cube(1);
+    if (A>0) cube(1); else sphere(1);
+    if (A>0) cube(1);                                 // bare if -> ModularIf
+    !cube(1); #cube(1); %cube(1); *cube(1);
+    """
+    seen = set()
+
+    def walk(n):
+        if isinstance(n, dict) and "kind" in n:
+            seen.add(n["kind"])
+            pos = n["position"]
+            assert pos["end_offset"] >= pos["start_offset"], n["kind"]
+            for k, v in n.items():
+                if k not in ("kind", "position"):
+                    walk(v)
+        elif isinstance(n, list):
+            for x in n:
+                walk(x)
+
+    for node in parse_ast_string(src, True):
+        walk(node)
+    # Every kind above, minus the three only produced by comment
+    # preservation on a file with comments in the right places.
+    expected = {
+        "IncludeStatement", "UseStatement", "Assignment", "Identifier", "NumberLiteral", "StringLiteral",
+        "BooleanLiteral", "UndefinedLiteral", "RangeLiteral", "UnaryMinusOp", "LogicalNotOp", "BitwiseNotOp",
+        "AdditionOp", "SubtractionOp", "MultiplicationOp", "DivisionOp", "ModuloOp", "ExponentOp",
+        "BitwiseAndOp", "BitwiseOrOp", "BitwiseShiftLeftOp", "BitwiseShiftRightOp", "LogicalAndOp",
+        "LogicalOrOp", "EqualityOp", "InequalityOp", "GreaterThanOp", "GreaterThanOrEqualOp", "LessThanOp",
+        "LessThanOrEqualOp", "TernaryOp", "PrimaryCall", "PrimaryIndex", "PrimaryMember", "LetOp", "EchoOp",
+        "AssertOp", "FunctionLiteral", "ListComprehension", "ListCompFor", "ListCompIf", "ListCompIfElse",
+        "ListCompCFor", "ListCompEach", "ListCompLet", "FunctionDeclaration", "ModuleDeclaration",
+        "ParameterDeclaration", "PositionalArgument", "NamedArgument", "ModularCall", "ModularFor",
+        "ModularIntersectionFor", "ModularLet", "ModularEcho", "ModularAssert", "ModularIf", "ModularIfElse",
+        "ModularModifierShowOnly", "ModularModifierHighlight", "ModularModifierBackground",
+        "ModularModifierDisable",
+    }
+    missing = expected - seen
+    assert not missing, f"node kinds not emitted: {sorted(missing)}"
+
+
+def test_parse_ast_snapshot_outlives_the_parse():
+    # It is a copy, not a view into parser memory -- the point of the
+    # snapshot design. Holding it after many further parses (which reuse
+    # and free the same arenas) must not corrupt it.
+    from openscad_cpp_evaluator import parse_ast_string
+    held = parse_ast_string("a = 1.500;")
+    for i in range(200):
+        parse_ast_string(f"b{i} = [for (j=[0:20]) j*{i}];")
+    assert held[0]["expr"]["val"] == 1.5
+    assert held[0]["name"]["name"] == "a"
+    held[0]["expr"]["val"] = 99.0  # plain dicts: mutable, owned by the caller
+    assert held[0]["expr"]["val"] == 99.0
+
+
+def test_parse_ast_raises_parse_error_on_bad_syntax():
+    from openscad_cpp_evaluator import ParseError, parse_ast_string
+    try:
+        parse_ast_string("cube(")
+    except ParseError:
+        return
+    raise AssertionError("expected ParseError")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = []
