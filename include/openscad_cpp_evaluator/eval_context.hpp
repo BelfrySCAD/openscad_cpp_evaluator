@@ -59,6 +59,21 @@ struct EvalContext {
     std::shared_ptr<const ChildrenNodeList> childrenNodes;
     const EvalContext* childrenCallerCtx = nullptr;
 
+    // True while evaluating statements that a children() forwarded, so a
+    // module call reached this way profiles as kind "child" rather than
+    // "module". `foo() foo();` and `module foo() { foo(); }` both produce a
+    // foo->foo edge, but only the second is recursion, and a profile that
+    // cannot tell them apart is misleading.
+    //
+    // Propagates through withScope/childCtx (a forwarded `translate()
+    // foo()` is still child-passing) but NOT through callCtx, which resets
+    // it by omission -- entering a body ends the forwarding. The one
+    // deliberate exception is buildModuleChildCtx, which copies the
+    // caller's flag onto the body ctx so enterUserCall can read it there;
+    // enterUserCall then clears it, so the call it describes is the only
+    // one that sees it.
+    bool viaChildren = false;
+
     // The one genuinely fresh construction: seeds `dyn` with OpenSCAD's
     // built-in $-variable defaults ($fn=0, $fa=12, $fs=2, $t=0,
     // $parent_modules=0). Every other EvalContext in a run is derived

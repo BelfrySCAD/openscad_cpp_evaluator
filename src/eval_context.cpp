@@ -41,6 +41,7 @@ EvalContext EvalContext::childCtx(const oscad::Scope* newScope, std::optional<st
     result.color = newColor.has_value() ? newColor : color;
     result.childrenNodes = newChildrenNodes ? newChildrenNodes : childrenNodes;
     result.childrenCallerCtx = newChildrenCallerCtx ? newChildrenCallerCtx : childrenCallerCtx;
+    result.viaChildren = viaChildren;
     return result;
 }
 

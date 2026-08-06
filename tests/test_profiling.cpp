@@ -259,6 +259,47 @@ TEST(ProfilePaths, RootCoversTheProfiledWork) {
     EXPECT_LE(r.paths[0].cumulativeTime, r.resolveTime + 1e-9);
 }
 
+// A module reached through children() is kind "child", not "module".
+// Both shapes produce a foo->foo edge in the tree, but only one of them is
+// recursion, and a profile that cannot tell them apart is misleading.
+TEST(Profiling, ChildForwardedCallIsKindChildNotModule) {
+    const ProfileResult r = profileSrc(
+        "module recur(x) { cube(1); if (x < 3) recur(x + 1); }\n"
+        "recur(0);\n"
+        "module wrap() { children(); }\n"
+        "wrap() wrap() cube(1);\n");
+
+    bool sawRecur = false, sawChildWrap = false;
+    for (const auto& s : r.callSites) {
+        if (s.name == "recur") {
+            sawRecur = true;
+            EXPECT_EQ(s.kind, "module") << "recursion must not be reported as a child";
+        }
+        if (s.name == "wrap" && s.kind == "child") sawChildWrap = true;
+    }
+    EXPECT_TRUE(sawRecur) << "fixture produced no recur call site";
+    EXPECT_TRUE(sawChildWrap) << "the wrap() handed to wrap() as a child was not kind \"child\"";
+}
+
+// The flag is consumed on entry: a plain call sitting in the body of a
+// module that was itself child-forwarded is an ordinary module call.
+TEST(Profiling, ChildKindDoesNotLeakIntoTheForwardedBody) {
+    const ProfileResult r = profileSrc(
+        "module inner() { sphere(1); }\n"
+        "module outer() { inner(); children(); }\n"
+        "module wrap() { children(); }\n"
+        "wrap() outer() cube(1);\n");
+
+    bool sawInner = false;
+    for (const auto& s : r.callSites) {
+        if (s.name == "inner") {
+            sawInner = true;
+            EXPECT_EQ(s.kind, "module") << "a direct call inside a forwarded body is not a child";
+        }
+    }
+    EXPECT_TRUE(sawInner) << "fixture produced no inner call site";
+}
+
 // Profiling off must cost nothing and produce no tree.
 TEST(ProfilePaths, NoTreeWhenProfilingIsOff) {
     Evaluator ev;  // profiling off

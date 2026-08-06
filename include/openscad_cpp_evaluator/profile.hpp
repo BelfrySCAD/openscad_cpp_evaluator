@@ -13,7 +13,7 @@ namespace oscadeval {
 // node (and thus its position) is identical across those invocations.
 // Mirrors the reference's CallSiteProfile.
 struct CallSiteProfile {
-    std::string kind; // "module" | "function"
+    std::string kind; // "module" | "child" (forwarded via children()) | "function"
     std::string name;
     std::string callerName; // enclosing module/function's own name, or "<toplevel>"
     std::string callOrigin;
@@ -45,7 +45,7 @@ struct CallSiteProfile {
 struct ProfilePathNode {
     int parent = -1;              // index into ProfileResult::paths; -1 for the root
     std::vector<int> children;    // indices, in first-call order
-    std::string kind;             // "module" | "function"; empty for the root
+    std::string kind;             // "module" | "child" | "function"; empty for the root
     std::string name;             // callee; "<toplevel>" for the root
     std::string callOrigin;
     int callLine = 0;
