@@ -15,6 +15,7 @@ find_package(nanobind CONFIG REQUIRED)
 # from-source Manifold/Boost rebuild per interpreter in CI.
 nanobind_add_module(_openscad_cpp_evaluator NB_STATIC STABLE_ABI
   module.cpp
+  ast_to_py.cpp
 )
 
 # The static evaluator lib PUBLIC-links parser + manifold + Boost::polygon,

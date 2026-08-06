@@ -40,6 +40,14 @@
 
 namespace nb = nanobind;
 
+// Defined in ast_to_py.cpp -- snapshots the parser's AST into plain Python
+// dicts. Declared here rather than in a header since these two entry points
+// are the whole interface and only this file calls them.
+namespace oscadbind {
+nb::list parseAstFromFile(const std::string& path, bool includeComments);
+nb::list parseAstFromString(const std::string& code, bool includeComments);
+} // namespace oscadbind
+
 namespace {
 
 // Moves a std::vector's storage into a NumPy array that owns it via a
@@ -649,6 +657,12 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).");
     m.def("parse_decls", &parseDecls, nb::arg("path"),
           "Parse a .scad file; return top-level declaration (namespace, name, start, end, line, column, origin) tuples.");
+    m.def("parse_ast", &oscadbind::parseAstFromFile, nb::arg("path"), nb::arg("include_comments") = false,
+          "Parse a .scad file; return the AST as a list of plain nested dicts "
+          "(kind, position, plus that kind's own fields). A snapshot, not a view -- "
+          "safe to keep, share across threads, and outlive the parse.");
+    m.def("parse_ast_string", &oscadbind::parseAstFromString, nb::arg("code"), nb::arg("include_comments") = false,
+          "As parse_ast(), but parses a source string instead of a file.");
     m.def("debug_evaluate", &debugEvaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("debug_hook"),
           nb::arg("error_break"), nb::arg("echo_fn"), nb::arg("manifold_cache") = nullptr,
           nb::arg("return_hook") = nb::none(), nb::arg("fast_continue_signal") = nullptr,

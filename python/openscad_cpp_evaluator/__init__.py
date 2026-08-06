@@ -18,7 +18,7 @@ from ._openscad_cpp_evaluator import FastContinueSignal, ManifoldCache
 __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
-    "FastContinueSignal",
+    "FastContinueSignal", "parse_ast", "parse_ast_string",
 ]
 
 
@@ -254,6 +254,41 @@ def parse(path: str) -> RootScope:
     except Exception as e:
         raise ParseError(str(e)) from e
     return RootScope(decls)
+
+
+def parse_ast(path: str, include_comments: bool = False) -> list:
+    """Parse a .scad file; return its AST as a list of plain nested dicts.
+
+    Each node is `{"kind": str, "position": {...}, **fields}`, where fields
+    are that kind's own (e.g. NumberLiteral has "val"; ModularCall has
+    "name"/"arguments"/"children"). Child nodes nest as dicts, child lists
+    as lists, and an absent optional child is None.
+
+    `position` carries `start_offset`/`end_offset`, which is the point of
+    this API: they let a caller slice the ORIGINAL source text of any
+    subexpression and reuse it verbatim, instead of re-serialising a parsed
+    value and losing how it was written (`1.500` -> `1.5`, `1e3` -> `1000`).
+
+    This is a SNAPSHOT, not a view of live parser memory: it is safe to
+    keep, mutate, share across threads, and outlive the parse. That costs
+    one walk per call, which is why it is a separate entry point rather
+    than something evaluate() always pays for.
+
+    Raises ParseError on a syntax error.
+    """
+    try:
+        return _ext.parse_ast(path, include_comments)
+    except Exception as e:
+        raise ParseError(str(e)) from e
+
+
+def parse_ast_string(code: str, include_comments: bool = False) -> list:
+    """As `parse_ast`, but parses a source string. `position.origin` is
+    "<string>" for every node. Raises ParseError on a syntax error."""
+    try:
+        return _ext.parse_ast_string(code, include_comments)
+    except Exception as e:
+        raise ParseError(str(e)) from e
 
 
 class _MeshShim:
