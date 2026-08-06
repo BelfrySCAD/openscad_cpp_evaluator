@@ -117,4 +117,16 @@ std::string formatError(const std::string& msg, const oscad::Position* nodePosit
                          const std::vector<CallStackFrame>& callStack,
                          const std::string& innermostFrame = "");
 
+// "WARNING: {msg}{locSuffix(nodePosition)}, from {entry file}, line {N}"
+// followed by traceLines(). The "from" clause names the OUTERMOST frame's
+// call site -- the user's own line that entered the call chain -- because
+// a warning raised inside a library otherwise reports only the library's
+// own line, which the reader can neither act on nor trace back.
+//
+// Omitted when the stack is empty (a top-level warning, the common case,
+// which stays a single line) or when it would merely repeat the headline.
+// Deliberately richer than real OpenSCAD, which prints neither.
+std::string formatWarning(const std::string& msg, const oscad::Position* nodePosition,
+                           const std::vector<CallStackFrame>& callStack);
+
 } // namespace oscadeval

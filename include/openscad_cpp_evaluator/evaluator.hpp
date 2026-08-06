@@ -234,6 +234,24 @@ public:
     // GenerateFn is a free function, not a method -- it needs to call this
     // on the Evaluator& it's handed (see dispatch.hpp's GenerateFn doc
     // comment for why that reference exists at all).
+    // The call site that entered the current call chain from the top
+    // level (callStack_ is outermost-first), or nullptr at top level.
+    // Captured into each CSGNode at resolve time so a warning raised
+    // during generate -- after the stack has unwound -- can still name the
+    // user's own line. See CSGNode::warnEntry.
+    const oscad::Position* currentWarnEntry() const {
+        return callStack_.empty() ? nullptr : callStack_.front().callPosition;
+    }
+
+    // Set by generateTreeImpl() to the CSGNode currently being generated,
+    // so warn() can name the user's own call site during a phase where
+    // callStack_ is necessarily empty. Public for the same reason
+    // tagGenerated() is: a GenerateFn is a free function holding only an
+    // Evaluator&. Read only by warn(); a plain scoped save/restore rather
+    // than anything reentrancy-aware, since generateTreeImpl recurses
+    // depth-first on one thread.
+    const oscad::Position* generateWarnEntry = nullptr;
+
     ColoredBody tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue);
 
     // tagGenerated()'s counterpart for a mesh Manifold refused to build --

@@ -1168,6 +1168,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     treeNode->kind = site.tagName;
                     treeNode->node = site.node;
                     treeNode->isBuiltin = true;
+                    treeNode->warnEntry = ev.currentWarnEntry();
                     treeNode->children = std::move(children);
                     treeNode->params = std::move(pending.params);
                     treeNode->uncacheable = uncacheable;
@@ -1244,6 +1245,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     treeNode->kind = site.op;
                     treeNode->node = site.node;
                     treeNode->isBuiltin = true;
+                    treeNode->warnEntry = ev.currentWarnEntry();
                     treeNode->children = std::move(children);
                     treeNode->params = std::move(params);
                     treeNode->uncacheable = uncacheable;

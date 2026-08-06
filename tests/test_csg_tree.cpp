@@ -244,3 +244,73 @@ TEST(CsgTree, DeepNonTailChainErrorTraceStaysBoundedInsteadOfMegabytes) {
         EXPECT_LE(count, 41u); // 40 shown (20 each end, 2 lines/Module frame) + 1 marker
     }
 }
+
+// -- Warning call-site attribution ----------------------------------------
+
+// A warning raised inside a module reports where it happened AND which
+// top-level line reached it. Without the latter, a warning from library
+// code names only the library's own line, which the reader can neither act
+// on nor trace back to their own script.
+//
+// Deliberately richer than real OpenSCAD, which prints the raising location
+// alone and no trace (verified against 2022.08.22).
+TEST(WarningTrace, EvalTimeWarningNamesTheTopLevelCallSite) {
+    std::string warning;
+    evalSrc("function helper(n) = n + nope;\n"      // line 1: warning raised here
+            "module inner(v) { x = helper(v); cube(1); }\n"
+            "module outer(q) { inner(q); }\n"
+            "outer(2);\n",                           // line 4: the user's own line
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+
+    EXPECT_NE(warning.find("Ignoring unknown variable 'nope'"), std::string::npos) << warning;
+    EXPECT_NE(warning.find("line 1"), std::string::npos) << warning;      // where it happened
+    EXPECT_NE(warning.find("from <string>, line 4"), std::string::npos) << warning; // who caused it
+    // Full chain follows, same shape as an error's trace.
+    EXPECT_NE(warning.find("TRACE:"), std::string::npos) << warning;
+}
+
+// A GenerateFn runs after resolve has unwound the call stack, so this case
+// has no live frames to walk -- the entry position is captured onto the
+// CSGNode at resolve time instead (CSGNode::warnEntry). This is the case
+// that motivated the whole change: an open polyhedron() inside BOSL2 used
+// to report only "BOSL2/vnf.scad, line 1624".
+TEST(WarningTrace, GenerateTimeWarningNamesTheTopLevelCallSite) {
+    std::string warning;
+    evalSrc("module openbox() {\n"
+            "  polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],\n"
+            "                     [0,0,10],[10,0,10],[10,10,10],[0,10,10]],\n"
+            "             faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3]]);\n"
+            "}\n"
+            "openbox();\n",                          // line 6: the user's own line
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+
+    EXPECT_NE(warning.find("mesh is not closed"), std::string::npos) << warning;
+    EXPECT_NE(warning.find("from <string>, line 6"), std::string::npos) << warning;
+}
+
+// A warning with nothing above it stays exactly one line. The overwhelmingly
+// common case, and the reason the "from" clause and TRACE are conditional --
+// ordinary warnings must not sprout a trace nobody needs.
+TEST(WarningTrace, TopLevelWarningStaysASingleLineWithNoTrace) {
+    std::string warning;
+    evalSrc("x = nope;\n", [&](const std::string& m) { if (warning.empty()) warning = m; });
+
+    EXPECT_NE(warning.find("Ignoring unknown variable 'nope'"), std::string::npos) << warning;
+    EXPECT_EQ(warning.find("TRACE:"), std::string::npos) << warning;
+    EXPECT_EQ(warning.find(", from "), std::string::npos) << warning;
+    EXPECT_EQ(warning.find('\n'), std::string::npos) << warning;
+}
+
+// The clause names the OUTERMOST frame, not the immediate caller: the
+// question being answered is "which line of mine started this", and the
+// intermediate frames are already in the TRACE below.
+TEST(WarningTrace, FromClauseNamesOutermostFrameNotImmediateCaller) {
+    std::string warning;
+    evalSrc("module a() { y = nope; cube(1); }\n"    // line 1: raised here
+            "module b() { a(); }\n"                   // line 2: immediate caller of a()
+            "b();\n",                                 // line 3: the top-level entry
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+
+    EXPECT_NE(warning.find("from <string>, line 3"), std::string::npos) << warning;
+    EXPECT_EQ(warning.find("from <string>, line 2"), std::string::npos) << warning;
+}

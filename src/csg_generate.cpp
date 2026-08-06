@@ -59,7 +59,14 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
 
             auto it = dispatch.find(node.kind);
             if (node.isBuiltin && it != dispatch.end()) {
+                // Resolve captured which user-level call reached this node;
+                // republish it so a warning raised inside the GenerateFn
+                // can name that line. Restored after (rather than left set)
+                // so a sibling generated at top level doesn't inherit it.
+                const oscad::Position* savedWarnEntry = generateWarnEntry;
+                generateWarnEntry = node.warnEntry;
                 node.bodies = it->second(*this, node.params, node.children, *node.node);
+                generateWarnEntry = savedWarnEntry;
             } else {
                 // No registered GenerateFn for this kind (a builtin with
                 // display-only semantics like render(), or a non-builtin

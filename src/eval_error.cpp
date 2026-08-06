@@ -78,4 +78,48 @@ std::string formatError(const std::string& msg, const oscad::Position* nodePosit
     return full;
 }
 
+std::string formatWarning(const std::string& msg, const oscad::Position* nodePosition,
+                           const std::vector<CallStackFrame>& callStack) {
+    // The warning keeps its OWN location in the headline: that is where the
+    // problem actually is, and it's what you need in order to fix a genuine
+    // library bug. But on its own, a warning raised deep inside a library
+    // ("in file BOSL2/vnf.scad, line 1624") is close to useless -- the
+    // reader's next question is always "which line of MINE caused that?",
+    // and nothing in the message answered it.
+    //
+    // callStack is outermost-first, so front() is the call that entered
+    // this chain from the top level -- the user's own line, however deep
+    // the warning surfaced. Naming it inline makes the common case a
+    // one-line answer; the TRACE lines below carry the full chain for when
+    // an intermediate frame is the real culprit.
+    //
+    // Real OpenSCAD reports only the raising location and no trace at all
+    // (verified against 2022.08.22), so this is deliberately more than the
+    // reference gives: warnings there routinely point into library
+    // internals with no way back to the caller.
+    std::string full = "WARNING: " + msg + locSuffix(nodePosition);
+
+    if (!callStack.empty()) {
+        const oscad::Position* entry = callStack.front().callPosition;
+        // Skip the clause when it would only repeat the headline (a warning
+        // raised directly at the top-level call site), or when the entry
+        // frame recorded no call position.
+        const bool sameSpot = entry != nullptr && nodePosition != nullptr &&
+                               entry->origin == nodePosition->origin && entry->line == nodePosition->line;
+        if (entry != nullptr && !sameSpot) {
+            full += ", from " + entry->origin + ", line " + std::to_string(entry->line);
+        }
+    }
+
+    // Same shape and truncation as an error's trace, including the
+    // 10-frames-each-end bound for pathologically deep chains. A warning
+    // raised outside any call has an empty stack and stays a single line --
+    // the overwhelmingly common case, which keeps ordinary warnings from
+    // sprouting a trace nobody needs.
+    for (const std::string& line : traceLines(nodePosition, callStack, "")) {
+        full += "\n" + line;
+    }
+    return full;
+}
+
 } // namespace oscadeval
