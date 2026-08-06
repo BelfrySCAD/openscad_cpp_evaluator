@@ -249,7 +249,30 @@ nb::object profileResultToPy(const std::optional<oscadeval::ProfileResult>& pr) 
         sites.append(facadeAttr("CallSiteProfile")(s.kind, s.name, s.callerName, s.callOrigin, s.callLine, s.declOrigin,
                                                      s.declLine, s.callCount, s.selfTime, s.cumulativeTime));
     }
-    return facadeAttr("ProfileResult")(sites, pr->resolveTime, pr->generateTime, pr->totalTime, pr->unattributedTime);
+    // The calling-context tree, as plain dicts. Parent/child INDICES, not
+    // nested objects: the C++ side is already a flat vector keyed that way,
+    // and a self-referential nesting would have to be rebuilt here for no
+    // gain -- a consumer walks it by index just as C++ does.
+    nb::list paths;
+    for (const oscadeval::ProfilePathNode& n : pr->paths) {
+        nb::dict d;
+        d["parent"] = n.parent;
+        nb::list kids;
+        for (int c : n.children) kids.append(c);
+        d["children"] = kids;
+        d["kind"] = n.kind;
+        d["name"] = n.name;
+        d["call_origin"] = n.callOrigin;
+        d["call_line"] = n.callLine;
+        d["decl_origin"] = n.declOrigin;
+        d["decl_line"] = n.declLine;
+        d["call_count"] = n.callCount;
+        d["self_time"] = n.selfTime;
+        d["cumulative_time"] = n.cumulativeTime;
+        paths.append(d);
+    }
+    return facadeAttr("ProfileResult")(sites, pr->resolveTime, pr->generateTime, pr->totalTime, pr->unattributedTime,
+                                        paths);
 }
 
 // ctx.dyn / ctx.dynExplicit -> (dict[str, Any], set[str]) -- every currently-

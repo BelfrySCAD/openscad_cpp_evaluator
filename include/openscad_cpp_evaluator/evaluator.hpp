@@ -1252,6 +1252,13 @@ private:
         ProfileSiteKey key;
         bool recursiveReentry;
         std::chrono::steady_clock::time_point start;
+        // Node this call occupies in the calling-context tree, and the one
+        // to restore on exit. `pathRecursive` is the per-PATH equivalent of
+        // recursiveReentry: true when this entry folded back onto a node
+        // already on the path, so only the outermost entry adds cumulative
+        // time -- the same rule callSites uses, applied per node.
+        int pathNode = -1;
+        int pathPrev = -1;
     };
     std::optional<ProfileHandle> profileEnter(const std::string& kind, const std::string& name,
                                                const oscad::Position* callPos, const oscad::Position* declPos);
@@ -1712,6 +1719,34 @@ private:
     std::map<ProfileSiteKey, CallSiteProfile> profileSites_;
     std::set<ProfileSiteKey> profileActive_; // site keys with a call currently on callStack_
     std::vector<double> profileChildTime_;   // parallel aux stack to callStack_
+
+    // Calling-context tree (see ProfilePathNode). profilePaths_[0] is the
+    // <toplevel> root, created lazily on the first profiled call;
+    // profileCurrentPath_ is the node the running call belongs to, so a
+    // profileEnter knows which parent to hang its node off.
+    std::vector<ProfilePathNode> profilePaths_;
+    int profileCurrentPath_ = -1;
+
+    // Safety valve. The tree is bounded by distinct ACYCLIC paths (see
+    // ProfilePathNode on recursion folding), which is finite but can still
+    // be large for a deeply-layered library. Past this, no new nodes are
+    // created and further calls fold onto their parent -- the report stays
+    // truthful about totals and simply stops subdividing, rather than the
+    // profiler becoming the thing that runs out of memory.
+    static constexpr size_t kMaxProfilePathNodes = 200000;
+
+    // Finds-or-creates the child of profileCurrentPath_ for this call site
+    // and returns its index. Sets `folded` when the returned node was
+    // already on the current path (recursion, or the node cap) rather than
+    // a fresh or sibling child -- the caller must then skip cumulative
+    // time for this entry, exactly as recursiveReentry does for callSites.
+    int profilePathEnter(const std::string& kind, const std::string& name, const std::string& callOrigin,
+                          int callLine, const oscad::Position* declPos, bool& folded);
+
+    // Fills in every node's cumulativeTime as selfTime + the cumulative of
+    // its children, bottom-up. See profileExit for why this is derived
+    // rather than measured.
+    void finalizeProfilePaths();
 };
 
 } // namespace oscadeval

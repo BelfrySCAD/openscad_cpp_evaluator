@@ -269,8 +269,10 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
             selfSum += site.selfTime;
             sites.push_back(site);
         }
+        finalizeProfilePaths();
         profileResult = ProfileResult{
-            std::move(sites), resolveTime, generateTime, resolveTime + generateTime, std::max(0.0, resolveTime - selfSum),
+            std::move(sites), profilePaths_, resolveTime, generateTime, resolveTime + generateTime,
+            std::max(0.0, resolveTime - selfSum),
         };
     }
 

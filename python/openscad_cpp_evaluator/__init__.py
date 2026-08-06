@@ -9,7 +9,7 @@ like a manifold3d body (`.is_empty()` / `.to_mesh()`), so the renderer reads
 `cb.body.to_mesh().vert_properties/tri_verts/run_original_id/run_index`
 exactly as before -- no cross-module Manifold objects are ever exchanged.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from . import _openscad_cpp_evaluator as _ext
@@ -165,6 +165,23 @@ class ProfileResult:
     generate_time: float
     total_time: float
     unattributed_time: float
+    # Calling-context tree: a flat list of dicts, paths[0] the <toplevel>
+    # root, linked by `parent`/`children` INDICES into this same list.
+    #
+    # Where call_sites aggregates a site over every path that reached it,
+    # each node here is one call site on ONE path -- so `cuboid` called
+    # from `bracket` and from `rail` are separate nodes with their own
+    # times, and a report can say what a particular path cost rather than
+    # only what a name cost in total.
+    #
+    # Keys: parent, children, kind, name, call_origin, call_line,
+    # decl_origin, decl_line, call_count, self_time, cumulative_time.
+    #
+    # Recursion is folded: re-entering a site already on the path reuses
+    # that node (call_count rises) instead of unrolling a node per level.
+    # Defaults to empty so a ProfileResult built by older code still
+    # constructs.
+    paths: list = field(default_factory=list)
 
 
 def _summarize_param(value, max_items: int = 6, max_len: int = 40) -> str:
