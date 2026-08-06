@@ -110,4 +110,27 @@ ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNod
     return cb;
 }
 
+ColoredBody Evaluator::tagDisplayOnly(manifold::MeshGL mesh, const oscad::ASTNode& node, const Value& colorValue) {
+    const std::optional<std::array<float, 4>> color = valueToColor(colorValue);
+
+    // A Manifold that failed to build carries no run IDs, so reserve one
+    // and describe the whole soup as a single run. ReserveIDs() draws from
+    // the same global counter Manifold hands to real bodies, so an ID
+    // minted here can never collide with one of theirs.
+    const uint32_t originalId = manifold::Manifold::ReserveIDs(1);
+    mesh.runOriginalID = {originalId};
+    mesh.runIndex = {0, static_cast<uint32_t>(mesh.triVerts.size())};
+    idToNode[originalId] = &node;
+    idToColor[originalId] = color;
+
+    ColoredBody cb;
+    // Left set-but-empty rather than nullopt: consumers dereference
+    // cb.body unconditionally, and an empty Manifold is also the honest
+    // answer to "what solid is this?" -- there isn't one.
+    cb.body = manifold::Manifold();
+    cb.color = color;
+    cb.rawMesh = std::move(mesh);
+    return cb;
+}
+
 } // namespace oscadeval

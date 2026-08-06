@@ -49,29 +49,6 @@ LoadedMesh loadMeshByExt(const std::string& path, const std::string& ext) {
 
 bool isMeshExt(const std::string& ext) { return ext == ".stl" || ext == ".obj" || ext == ".off" || ext == ".3mf"; }
 
-// manifold::ToString(Manifold::Error) only exists under MANIFOLD_DEBUG --
-// not enabled in this project's build -- so this mirrors it locally for the
-// not-manifold warning message.
-std::string manifoldErrorName(manifold::Manifold::Error e) {
-    switch (e) {
-        case manifold::Manifold::Error::NoError: return "NoError";
-        case manifold::Manifold::Error::NonFiniteVertex: return "NonFiniteVertex";
-        case manifold::Manifold::Error::NotManifold: return "NotManifold";
-        case manifold::Manifold::Error::VertexOutOfBounds: return "VertexOutOfBounds";
-        case manifold::Manifold::Error::PropertiesWrongLength: return "PropertiesWrongLength";
-        case manifold::Manifold::Error::MissingPositionProperties: return "MissingPositionProperties";
-        case manifold::Manifold::Error::MergeVectorsDifferentLengths: return "MergeVectorsDifferentLengths";
-        case manifold::Manifold::Error::MergeIndexOutOfBounds: return "MergeIndexOutOfBounds";
-        case manifold::Manifold::Error::TransformWrongLength: return "TransformWrongLength";
-        case manifold::Manifold::Error::RunIndexWrongLength: return "RunIndexWrongLength";
-        case manifold::Manifold::Error::FaceIDWrongLength: return "FaceIDWrongLength";
-        case manifold::Manifold::Error::InvalidConstruction: return "InvalidConstruction";
-        case manifold::Manifold::Error::ResultTooLarge: return "ResultTooLarge";
-        case manifold::Manifold::Error::InvalidTangents: return "InvalidTangents";
-        case manifold::Manifold::Error::Cancelled: return "Cancelled";
-    }
-    return "Unknown";
-}
 
 Value jsonToValue(const nlohmann::ordered_json& j) {
     if (j.is_boolean()) return Value{j.get<bool>()};
@@ -134,6 +111,30 @@ Value meshToVnf(const LoadedMesh& mesh) {
 }
 
 } // namespace
+
+// manifold::ToString(Manifold::Error) only exists under MANIFOLD_DEBUG --
+// not enabled in this project's build -- so this mirrors it locally for the
+// not-manifold warning message.
+std::string manifoldErrorName(manifold::Manifold::Error e) {
+    switch (e) {
+        case manifold::Manifold::Error::NoError: return "NoError";
+        case manifold::Manifold::Error::NonFiniteVertex: return "NonFiniteVertex";
+        case manifold::Manifold::Error::NotManifold: return "NotManifold";
+        case manifold::Manifold::Error::VertexOutOfBounds: return "VertexOutOfBounds";
+        case manifold::Manifold::Error::PropertiesWrongLength: return "PropertiesWrongLength";
+        case manifold::Manifold::Error::MissingPositionProperties: return "MissingPositionProperties";
+        case manifold::Manifold::Error::MergeVectorsDifferentLengths: return "MergeVectorsDifferentLengths";
+        case manifold::Manifold::Error::MergeIndexOutOfBounds: return "MergeIndexOutOfBounds";
+        case manifold::Manifold::Error::TransformWrongLength: return "TransformWrongLength";
+        case manifold::Manifold::Error::RunIndexWrongLength: return "RunIndexWrongLength";
+        case manifold::Manifold::Error::FaceIDWrongLength: return "FaceIDWrongLength";
+        case manifold::Manifold::Error::InvalidConstruction: return "InvalidConstruction";
+        case manifold::Manifold::Error::ResultTooLarge: return "ResultTooLarge";
+        case manifold::Manifold::Error::InvalidTangents: return "InvalidTangents";
+        case manifold::Manifold::Error::Cancelled: return "Cancelled";
+    }
+    return "Unknown";
+}
 
 namespace {
 
@@ -269,7 +270,15 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
 
     manifold::Manifold body(mesh);
     if (body.Status() != manifold::Manifold::Error::NoError) {
-        ev.warn("import: mesh is not manifold (" + manifoldErrorName(body.Status()) + ")", &node.position());
+        // Same treatment as an open polyhedron() (see generatePolyhedron):
+        // keep the triangles so the file can still be LOOKED at. Previously
+        // this warned and then handed back an empty body, which was dropped
+        // downstream -- so a broken STL warned once and showed nothing,
+        // giving no way to see what was actually wrong with it.
+        ev.warn("import: mesh is not a closed solid (" + manifoldErrorName(body.Status()) +
+                    "); drawing it as a surface, but it cannot take part in any CSG operation",
+                &node.position());
+        return {ev.tagDisplayOnly(std::move(mesh), node, params.at("color"))};
     }
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }

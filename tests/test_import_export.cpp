@@ -137,7 +137,14 @@ TEST(ImportModuleContext, NonManifoldMeshWarns) {
     }
     std::string lastWarning;
     Evaluated e = evalSrc("import(\"" + path.string() + "\");", [&](const std::string& msg) { lastWarning = msg; });
-    EXPECT_NE(lastWarning.find("import: mesh is not manifold"), std::string::npos);
+    EXPECT_NE(lastWarning.find("import: mesh is not a closed solid"), std::string::npos);
+    // The triangle is now handed back for display rather than dropped: a
+    // file that warns once and then shows nothing gives no way to see what
+    // is actually wrong with it. It carries no Manifold, so it still can't
+    // take part in a CSG operation.
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_TRUE(e.bodies[0].isDisplayOnly());
+    EXPECT_EQ(e.bodies[0].rawMesh->triVerts.size(), 3u);
     std::filesystem::remove(path);
 }
 

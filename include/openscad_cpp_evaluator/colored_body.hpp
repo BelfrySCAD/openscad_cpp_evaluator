@@ -26,6 +26,27 @@ struct ColoredBody {
     bool flatPreview = false;
     BodyRole role = BodyRole::Normal;
     std::optional<std::vector<std::array<float, 4>>> triColors; // per-triangle RGBA, multi-color CSG merges only
+
+    // Set ONLY when a mesh could not be built into a valid Manifold -- in
+    // practice a polyhedron() whose faces don't close the surface (it has
+    // boundary edges), which Manifold reports by returning an *empty* body
+    // with Status() == NotManifold rather than by failing. Note the status
+    // name is misleading: a closed mesh with reversed winding, non-manifold
+    // vertices or self-intersections builds fine; only an OPEN one lands
+    // here.
+    //
+    // Carrying the raw triangle soup alongside lets the renderer still draw
+    // what the script described, which is far more use for spotting the
+    // missing face than an empty viewport. `body` is deliberately left set
+    // (and empty), so every existing `cb.body->...` path keeps working.
+    //
+    // Such a body is display-only: it can never take part in a CSG
+    // operation, since there is no Manifold for Manifold to operate on.
+    // splitByRole() pulls it aside much as it does a `%` background body,
+    // and the CSG/hull/minkowski generators re-join it unchanged.
+    std::optional<manifold::MeshGL> rawMesh;
+
+    bool isDisplayOnly() const { return rawMesh.has_value(); }
 };
 
 // `EvalContext::color`/CSGParams round-trip: a resolve function reads

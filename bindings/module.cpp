@@ -129,7 +129,11 @@ const char* roleToString(oscadeval::BodyRole role) {
 // tri_verts (nTri, 3), run_original_id (nRun,), run_index (nRun+1,) -- the
 // same flat 3*triangle units manifold3d's own run_index uses).
 nb::dict bodyToDict(oscadeval::ColoredBody& cb) {
-    manifold::MeshGL mesh = cb.body->GetMeshGL();
+    // A display-only body's Manifold is empty by construction, so its
+    // GetMeshGL() would hand back nothing -- take the raw triangle soup
+    // that failed to build instead. Everything downstream reads plain
+    // arrays, so the two cases are indistinguishable from here on.
+    manifold::MeshGL mesh = cb.isDisplayOnly() ? *cb.rawMesh : cb.body->GetMeshGL();
     const size_t numProp = mesh.numProp;
     const size_t numVert = numProp ? mesh.vertProperties.size() / numProp : 0;
     const size_t numTri = mesh.triVerts.size() / 3;
@@ -184,7 +188,9 @@ void collectIdSpans(const oscadeval::Evaluator& ev, std::vector<IdSpan>& out) {
 nb::list bodiesToList(std::vector<oscadeval::ColoredBody>& bodies) {
     nb::list out;
     for (oscadeval::ColoredBody& cb : bodies) {
-        if (!cb.body || cb.body->IsEmpty()) continue;
+        // isDisplayOnly() bodies are ALWAYS IsEmpty() -- that's what made
+        // an open polyhedron() silently vanish here rather than render.
+        if (!cb.isDisplayOnly() && (!cb.body || cb.body->IsEmpty())) continue;
         out.append(bodyToDict(cb));
     }
     return out;
@@ -210,7 +216,7 @@ nb::object csgNodeToPy(const oscadeval::CSGNode& node) {
     for (const auto& [k, v] : node.params) params[nb::str(k.c_str())] = valueToPy(v);
     nb::list bodies;
     for (const oscadeval::ColoredBody& cb : node.bodies) {
-        if (!cb.body || cb.body->IsEmpty()) continue;
+        if (!cb.isDisplayOnly() && (!cb.body || cb.body->IsEmpty())) continue;
         // ColoredBody here is const in this walk (tree ownership stays with
         // the caller) -- GetMeshGL() itself is logically read-only, so a
         // const_cast here is safe/local, mirroring bodyToDict's mutating

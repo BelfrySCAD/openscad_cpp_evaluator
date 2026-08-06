@@ -61,6 +61,7 @@ std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::v
     result.insert(result.end(), split.background.begin(), split.background.end());
     result.insert(result.end(), split.highlight.begin(), split.highlight.end());
     result.insert(result.end(), split.showOnly.begin(), split.showOnly.end());
+    result.insert(result.end(), split.displayOnly.begin(), split.displayOnly.end());
     return result;
 }
 
@@ -89,6 +90,7 @@ std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams&, cons
     passthrough.insert(passthrough.end(), split.background.begin(), split.background.end());
     passthrough.insert(passthrough.end(), split.highlight.begin(), split.highlight.end());
     passthrough.insert(passthrough.end(), split.showOnly.begin(), split.showOnly.end());
+    passthrough.insert(passthrough.end(), split.displayOnly.begin(), split.displayOnly.end());
 
     if (bodies3d.empty()) return passthrough;
     if (bodies3d.size() == 1) {

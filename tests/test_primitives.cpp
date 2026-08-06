@@ -181,3 +181,95 @@ TEST(Primitives2d, PolygonWithPathsSelectsIndexedContour) {
     Evaluated e = evalSrc("polygon(points=[[0,0],[2,0],[2,2],[0,2]], paths=[[0,1,2,3]]);");
     EXPECT_NEAR(e.bodies[0].section->Area(), 4.0, 1e-9);
 }
+
+// -- open (non-closed) polyhedron: display-only ---------------------------
+
+namespace {
+// A cube with the -x face omitted: five quads, so four boundary edges.
+constexpr const char* kOpenCube =
+    "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],"
+    "                   [0,0,10],[10,0,10],[10,10,10],[0,10,10]],"
+    "           faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3]]);";
+} // namespace
+
+// Manifold cannot represent an open surface, but silently rendering nothing
+// left no way to tell a broken polyhedron from a missing one. The triangles
+// are kept for display instead, tagged so nothing tries to CSG them.
+TEST(Polyhedron, OpenMeshIsKeptForDisplayAndWarns) {
+    std::string warning;
+    Evaluated e = evalSrc(kOpenCube, [&](const std::string& m) { warning = m; });
+
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_TRUE(e.bodies[0].isDisplayOnly());
+    EXPECT_TRUE(e.bodies[0].body->IsEmpty());       // no solid, by definition
+    EXPECT_EQ(e.bodies[0].rawMesh->triVerts.size(), 10u * 3u);  // 5 quads -> 10 tris
+
+    EXPECT_NE(warning.find("not closed"), std::string::npos) << warning;
+    EXPECT_NE(warning.find("4 boundary edge"), std::string::npos) << warning;
+}
+
+// The originalID is what maps a picked triangle back to its source line, so
+// a display-only body has to carry one or clicking it would select nothing
+// -- precisely when a user most wants to be shown the offending code.
+TEST(Polyhedron, OpenMeshCarriesAnOriginalIdForPicking) {
+    Evaluated e = evalSrc(kOpenCube);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::MeshGL& mesh = *e.bodies[0].rawMesh;
+    ASSERT_EQ(mesh.runOriginalID.size(), 1u);
+    EXPECT_EQ(e.ev.idToNode.count(mesh.runOriginalID[0]), 1u);
+    ASSERT_EQ(mesh.runIndex.size(), 2u);
+    EXPECT_EQ(mesh.runIndex[1], mesh.triVerts.size());
+}
+
+// A closed mesh is still a solid however badly it's wound or built -- only
+// an OPEN one takes the display-only path. Manifold's own status name for
+// that case ("NotManifold") reads as though it covers these too; it doesn't.
+TEST(Polyhedron, ClosedButUglyMeshesStillBuildSolids) {
+    // All faces reversed (inside-out).
+    Evaluated inverted = evalSrc(
+        "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],"
+        "                   [0,0,10],[10,0,10],[10,10,10],[0,10,10]],"
+        "           faces=[[3,2,1,0],[5,6,7,4],[1,5,4,0],[2,6,5,1],[3,7,6,2],[0,4,7,3]]);");
+    ASSERT_EQ(inverted.bodies.size(), 1u);
+    EXPECT_FALSE(inverted.bodies[0].isDisplayOnly());
+
+    // Two tetrahedra meeting at a single (non-manifold) vertex.
+    Evaluated pinched = evalSrc(
+        "polyhedron(points=[[0,0,0],[10,0,0],[0,10,0],[0,0,10],"
+        "                   [0,0,0],[-10,0,0],[0,-10,0],[0,0,-10]],"
+        "           faces=[[0,2,1],[0,1,3],[1,2,3],[0,3,2],"
+        "                  [4,6,5],[4,5,7],[5,6,7],[4,7,6]]);");
+    ASSERT_EQ(pinched.bodies.size(), 1u);
+    EXPECT_FALSE(pinched.bodies[0].isDisplayOnly());
+}
+
+// A NaN coordinate is NOT drawable: it would poison the scene bounding box
+// and send a renderer's camera auto-fit to infinity. Such a mesh keeps the
+// old drop-it behaviour -- but now says so instead of vanishing mutely.
+TEST(Polyhedron, NonFiniteVertexIsDiscardedNotDisplayed) {
+    std::string warning;
+    Evaluated e = evalSrc("polyhedron(points=[[0,0,0],[2,0,0],[0,2,0],[0/0,0,2]],"
+                          "           faces=[[0,1,2],[0,3,1],[0,2,3],[1,3,2]]);",
+                          [&](const std::string& m) { warning = m; });
+    for (const ColoredBody& b : e.bodies) EXPECT_FALSE(b.isDisplayOnly());
+    EXPECT_NE(warning.find("NonFiniteVertex"), std::string::npos) << warning;
+}
+
+// It has no Manifold, so a boolean would have nothing to operate on. It is
+// pulled aside like a `%` body and re-joined afterwards, leaving its valid
+// siblings to merge normally.
+TEST(Polyhedron, OpenMeshIsExcludedFromCsgButSurvivesIt) {
+    Evaluated e = evalSrc(std::string("union() { translate([50,0,0]) cube(4); ") + kOpenCube + " }");
+    ASSERT_EQ(e.bodies.size(), 2u);
+
+    int solids = 0, displayOnly = 0;
+    for (const ColoredBody& b : e.bodies) {
+        if (b.isDisplayOnly()) ++displayOnly;
+        else if (b.body && !b.body->IsEmpty()) {
+            ++solids;
+            EXPECT_NEAR(b.body->Volume(), 64.0, 1e-6);  // the cube, unharmed
+        }
+    }
+    EXPECT_EQ(solids, 1);
+    EXPECT_EQ(displayOnly, 1);
+}
