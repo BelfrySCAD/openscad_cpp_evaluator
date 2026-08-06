@@ -246,8 +246,8 @@ nb::object profileResultToPy(const std::optional<oscadeval::ProfileResult>& pr) 
     if (!pr) return nb::none();
     nb::list sites;
     for (const oscadeval::CallSiteProfile& s : pr->callSites) {
-        sites.append(facadeAttr("CallSiteProfile")(s.kind, s.name, s.callerName, s.callOrigin, s.callLine, s.declOrigin,
-                                                     s.declLine, s.callCount, s.selfTime, s.cumulativeTime));
+        sites.append(facadeAttr("CallSiteProfile")(s.kind, s.name, s.callerName, s.callOrigin, s.callLine, s.callColumn,
+                                                     s.declOrigin, s.declLine, s.callCount, s.selfTime, s.cumulativeTime));
     }
     // The calling-context tree, as plain dicts. Parent/child INDICES, not
     // nested objects: the C++ side is already a flat vector keyed that way,
@@ -264,6 +264,7 @@ nb::object profileResultToPy(const std::optional<oscadeval::ProfileResult>& pr) 
         d["name"] = n.name;
         d["call_origin"] = n.callOrigin;
         d["call_line"] = n.callLine;
+        d["call_column"] = n.callColumn;
         d["decl_origin"] = n.declOrigin;
         d["decl_line"] = n.declLine;
         d["call_count"] = n.callCount;

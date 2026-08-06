@@ -47,7 +47,7 @@ struct ProfileOptions {
 
 // Filters profile.callSites to selfTime >= minSelf and callCount >=
 // minCalls, then sorts by opts.sortKey. Every non-"name" order is
-// tie-broken by (callOrigin, callLine, name) -- CallSiteProfile's own
+// tie-broken by (callOrigin, callLine, callColumn, name) -- CallSiteProfile's own
 // storage order (a std::map's key order) isn't sorted by any of these, so
 // this needs an explicit, deterministic tie-break regardless of sort key.
 // Ported identically to the Python reference's own
@@ -61,6 +61,7 @@ std::vector<CallSiteProfile> selectAndSortCallSites(const ProfileResult& profile
     auto tieBreak = [](const CallSiteProfile& a, const CallSiteProfile& b) {
         if (a.callOrigin != b.callOrigin) return a.callOrigin < b.callOrigin;
         if (a.callLine != b.callLine) return a.callLine < b.callLine;
+        if (a.callColumn != b.callColumn) return a.callColumn < b.callColumn;
         return a.name < b.name;
     };
     if (opts.sortKey == "cumulative") {
@@ -75,7 +76,8 @@ std::vector<CallSiteProfile> selectAndSortCallSites(const ProfileResult& profile
         std::sort(sites.begin(), sites.end(), [](const CallSiteProfile& a, const CallSiteProfile& b) {
             if (a.name != b.name) return a.name < b.name;
             if (a.callOrigin != b.callOrigin) return a.callOrigin < b.callOrigin;
-            return a.callLine < b.callLine;
+            if (a.callLine != b.callLine) return a.callLine < b.callLine;
+            return a.callColumn < b.callColumn;
         });
     } else { // "self" (default)
         std::sort(sites.begin(), sites.end(), [&](const CallSiteProfile& a, const CallSiteProfile& b) {
@@ -101,7 +103,8 @@ std::string renderProfileReportText(const std::string& sourcePath, const Profile
 
     for (const CallSiteProfile& site : sites) {
         const std::string& origin = site.callOrigin.empty() ? sourcePath : site.callOrigin;
-        const std::string location = std::filesystem::path(origin).filename().string() + ":" + std::to_string(site.callLine);
+        const std::string location = std::filesystem::path(origin).filename().string() + ":" + std::to_string(site.callLine) + ":" +
+                                   std::to_string(site.callColumn);
         out << std::left << std::setw(8) << site.kind << " " << std::setw(24) << site.name << " " << std::setw(24)
             << site.callerName << " " << std::setw(28) << location << " " << std::right << std::setw(6) << site.callCount
             << " " << std::setw(12) << std::fixed << std::setprecision(6) << site.selfTime << " " << std::setw(14)
@@ -137,11 +140,11 @@ std::string renderProfileReportCsv(const std::string& sourcePath, const ProfileR
     out << "# resolve_time," << profile.resolveTime << "\n";
     out << "# generate_time," << profile.generateTime << "\n";
     out << "# unattributed_time," << profile.unattributedTime << "\n";
-    out << "kind,name,caller,call_origin,call_line,call_count,self_time,cumulative_time\n";
+    out << "kind,name,caller,call_origin,call_line,call_column,call_count,self_time,cumulative_time\n";
     for (const CallSiteProfile& site : sites) {
         const std::string origin = site.callOrigin.empty() ? sourcePath : site.callOrigin;
         out << csvField(site.kind) << "," << csvField(site.name) << "," << csvField(site.callerName) << ","
-            << csvField(origin) << "," << site.callLine << "," << site.callCount << "," << std::fixed
+            << csvField(origin) << "," << site.callLine << "," << site.callColumn << "," << site.callCount << "," << std::fixed
             << std::setprecision(6) << site.selfTime << "," << std::fixed << std::setprecision(6) << site.cumulativeTime
             << "\n";
     }

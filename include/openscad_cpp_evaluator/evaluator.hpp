@@ -1234,12 +1234,16 @@ private:
 
     // -- Profiling (Phase 9) --------------------------------------------
 
-    // (kind, name, callOrigin, callLine) -- the exact call-site identity a
+    // (kind, name, callOrigin, callLine, callColumn) -- the exact call-site
+    // identity a
     // CallSiteProfile aggregates by. std::map (not unordered_map): a plain
     // tuple of comparable fields already gets a free operator< from the
     // standard library, so this needs no custom hash function for a table
     // that's never more than a few thousand entries even on a large script.
-    using ProfileSiteKey = std::tuple<std::string, std::string, std::string, int>;
+    // Column is part of the key, not decoration: `foo() foo();` and
+    // `f(g(x))` put two distinct call sites on one line, and without it
+    // they aggregate into one entry whose times belong to neither.
+    using ProfileSiteKey = std::tuple<std::string, std::string, std::string, int, int>;
 
     // Pushes profiling state for a user module/function call about to
     // start -- shared by evalUserModule/evalUserFunction/
@@ -1741,7 +1745,7 @@ private:
     // a fresh or sibling child -- the caller must then skip cumulative
     // time for this entry, exactly as recursiveReentry does for callSites.
     int profilePathEnter(const std::string& kind, const std::string& name, const std::string& callOrigin,
-                          int callLine, const oscad::Position* declPos, bool& folded);
+                          int callLine, int callColumn, const oscad::Position* declPos, bool& folded);
 
     // Fills in every node's cumulativeTime as selfTime + the cumulative of
     // its children, bottom-up. See profileExit for why this is derived

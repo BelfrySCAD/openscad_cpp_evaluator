@@ -222,7 +222,7 @@ TEST(CliProfile, CsvFormatWritesHeaderAndCommaSeparatedRows) {
               0);
     const std::string text = readFile(report);
     EXPECT_NE(text.find("# total_time,"), std::string::npos);
-    EXPECT_NE(text.find("kind,name,caller,call_origin,call_line,call_count,self_time,cumulative_time\n"), std::string::npos);
+    EXPECT_NE(text.find("kind,name,caller,call_origin,call_line,call_column,call_count,self_time,cumulative_time\n"), std::string::npos);
     EXPECT_NE(text.find("function,fib,"), std::string::npos);
     std::filesystem::remove(src);
     std::filesystem::remove(out);

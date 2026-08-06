@@ -117,7 +117,7 @@ void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool fo
 }
 
 int Evaluator::profilePathEnter(const std::string& kind, const std::string& name, const std::string& callOrigin,
-                                 int callLine, const oscad::Position* declPos, bool& folded) {
+                                 int callLine, int callColumn, const oscad::Position* declPos, bool& folded) {
     folded = false;
     if (profilePaths_.empty()) {
         ProfilePathNode root;
@@ -131,14 +131,16 @@ int Evaluator::profilePathEnter(const std::string& kind, const std::string& name
     // per recursive level (see ProfilePathNode).
     for (int walk = parent; walk > 0; walk = profilePaths_[static_cast<size_t>(walk)].parent) {
         const ProfilePathNode& n = profilePaths_[static_cast<size_t>(walk)];
-        if (n.name == name && n.callOrigin == callOrigin && n.callLine == callLine && n.kind == kind) {
+        if (n.name == name && n.callOrigin == callOrigin && n.callLine == callLine &&
+            n.callColumn == callColumn && n.kind == kind) {
             folded = true;   // recursion: this site is already open on this path
             return walk;
         }
     }
     for (int childIdx : profilePaths_[static_cast<size_t>(parent)].children) {
         const ProfilePathNode& n = profilePaths_[static_cast<size_t>(childIdx)];
-        if (n.name == name && n.callOrigin == callOrigin && n.callLine == callLine && n.kind == kind) {
+        if (n.name == name && n.callOrigin == callOrigin && n.callLine == callLine &&
+            n.callColumn == callColumn && n.kind == kind) {
             return childIdx;
         }
     }
@@ -153,6 +155,7 @@ int Evaluator::profilePathEnter(const std::string& kind, const std::string& name
     node.name = name;
     node.callOrigin = callOrigin;
     node.callLine = callLine;
+    node.callColumn = callColumn;
     node.declOrigin = declPos ? declPos->origin : "";
     node.declLine = declPos ? declPos->line : 0;
     const int idx = static_cast<int>(profilePaths_.size());
@@ -179,7 +182,8 @@ std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::strin
     if (!profiling_) return std::nullopt;
     const std::string callOrigin = callPos ? callPos->origin : "";
     const int callLine = callPos ? callPos->line : 0;
-    const ProfileSiteKey key{kind, name, callOrigin, callLine};
+    const int callColumn = callPos ? callPos->column : 0;
+    const ProfileSiteKey key{kind, name, callOrigin, callLine, callColumn};
 
     auto it = profileSites_.find(key);
     if (it == profileSites_.end()) {
@@ -195,6 +199,7 @@ std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::strin
         site.callerName = callStack_.empty() ? "<toplevel>" : callStack_.back().name;
         site.callOrigin = callOrigin;
         site.callLine = callLine;
+        site.callColumn = callColumn;
         site.declOrigin = declPos ? declPos->origin : "";
         site.declLine = declPos ? declPos->line : 0;
         it = profileSites_.emplace(key, std::move(site)).first;
@@ -207,7 +212,7 @@ std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::strin
 
     const int prevPath = profileCurrentPath_;
     bool folded = false;   // only affects node reuse now, not accounting
-    const int pathNode = profilePathEnter(kind, name, callOrigin, callLine, declPos, folded);
+    const int pathNode = profilePathEnter(kind, name, callOrigin, callLine, callColumn, declPos, folded);
     profilePaths_[static_cast<size_t>(pathNode)].callCount += 1;
     profileCurrentPath_ = pathNode;
 
@@ -222,7 +227,8 @@ void Evaluator::profileRecordTailHop(const std::string& kind, const std::string&
     if (!profiling_) return;
     const std::string callOrigin = callPos ? callPos->origin : "";
     const int callLine = callPos ? callPos->line : 0;
-    const ProfileSiteKey key{kind, name, callOrigin, callLine};
+    const int callColumn = callPos ? callPos->column : 0;
+    const ProfileSiteKey key{kind, name, callOrigin, callLine, callColumn};
 
     auto it = profileSites_.find(key);
     if (it == profileSites_.end()) {
@@ -242,6 +248,7 @@ void Evaluator::profileRecordTailHop(const std::string& kind, const std::string&
         site.callerName = callStack_.empty() ? "<toplevel>" : callStack_.back().name;
         site.callOrigin = callOrigin;
         site.callLine = callLine;
+        site.callColumn = callColumn;
         site.declOrigin = declPos ? declPos->origin : "";
         site.declLine = declPos ? declPos->line : 0;
         it = profileSites_.emplace(key, std::move(site)).first;

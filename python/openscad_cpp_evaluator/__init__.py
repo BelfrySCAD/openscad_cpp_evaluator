@@ -142,11 +142,12 @@ class _CSGNode:
 class CallSiteProfile:
     """Aggregated profiling data for one call site. Mirrors the reference's
     CallSiteProfile -- see ProfileResult's own docstring."""
-    kind: str            # "module" | "function"
+    kind: str            # "module" | "child" | "function"
     name: str
     caller_name: str
     call_origin: str
     call_line: int
+    call_column: int
     decl_origin: str
     decl_line: int
     call_count: int = 0

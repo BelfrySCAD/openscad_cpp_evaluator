@@ -18,6 +18,7 @@ struct CallSiteProfile {
     std::string callerName; // enclosing module/function's own name, or "<toplevel>"
     std::string callOrigin;
     int callLine = 0;
+    int callColumn = 0; // distinguishes two calls sharing one line
     std::string declOrigin;
     int declLine = 0;
     int callCount = 0;
@@ -49,6 +50,7 @@ struct ProfilePathNode {
     std::string name;             // callee; "<toplevel>" for the root
     std::string callOrigin;
     int callLine = 0;
+    int callColumn = 0;           // distinguishes two calls sharing one line
     std::string declOrigin;
     int declLine = 0;
     int callCount = 0;

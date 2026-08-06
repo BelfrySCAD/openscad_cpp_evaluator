@@ -259,6 +259,29 @@ TEST(ProfilePaths, RootCoversTheProfiledWork) {
     EXPECT_LE(r.paths[0].cumulativeTime, r.resolveTime + 1e-9);
 }
 
+// Two calls to the same module on one line are two call sites. Without
+// column in the key they aggregate into one entry whose times and call
+// count belong to neither, and the tree shows one row where there are two.
+TEST(Profiling, TwoCallsOnOneLineAreSeparateCallSites) {
+    const ProfileResult r = profileSrc(
+        "module m() { cube(1); }\n"
+        "m(); m();\n");
+
+    std::vector<int> columns;
+    for (const auto& s : r.callSites) {
+        if (s.name == "m") {
+            EXPECT_EQ(s.callLine, 2);
+            columns.push_back(s.callColumn);
+        }
+    }
+    ASSERT_EQ(columns.size(), 2u) << "the two m() calls on line 2 did not stay separate";
+    EXPECT_NE(columns[0], columns[1]) << "both sites reported the same column";
+
+    size_t mNodes = 0;
+    for (const auto& n : r.paths) if (n.name == "m") ++mNodes;
+    EXPECT_EQ(mNodes, 2u) << "the call tree collapsed both calls onto one node";
+}
+
 // A module reached through children() is kind "child", not "module".
 // Both shapes produce a foo->foo edge in the tree, but only one of them is
 // recursion, and a profile that cannot tell them apart is misleading.
