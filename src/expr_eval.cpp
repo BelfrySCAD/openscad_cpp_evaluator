@@ -95,7 +95,25 @@ FontProvider& Evaluator::fontProvider() {
 }
 
 void Evaluator::warn(const std::string& message, const oscad::Position* position) {
-    if (echoFn_) echoFn_("WARNING: " + message + locSuffix(position));
+    if (!echoFn_) return;
+    // During generate the call stack has already unwound, so fall back to
+    // the entry position resolve captured onto the CSGNode being generated
+    // (see CSGNode::warnEntry). Passed as a synthetic single-frame stack so
+    // formatWarning needs no second code path -- the frame carries no name,
+    // which traceLines renders as a bare "called by ''" line, so it is
+    // deliberately NOT included there; only the headline's "from" clause
+    // uses it.
+    if (callStack_.empty() && generateWarnEntry != nullptr) {
+        std::string out = formatWarning(message, position, {});
+        const bool sameSpot = position != nullptr && generateWarnEntry->origin == position->origin &&
+                               generateWarnEntry->line == position->line;
+        if (!sameSpot) {
+            out += ", from " + generateWarnEntry->origin + ", line " + std::to_string(generateWarnEntry->line);
+        }
+        echoFn_(out);
+        return;
+    }
+    echoFn_(formatWarning(message, position, callStack_));
 }
 
 Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* position, EvalContext& ctx,

@@ -1623,9 +1623,17 @@ TEST(ModuleBodyCompiles, DollarArgPropagatesIntoCompiledHullWrapChildren) {
 // side effect to preserve).
 TEST(ModuleBodyCompiles, CompiledRoofUnknownMethodWarningStaysOrderedAfterChildrensOwnEcho) {
     ScopedVm vm(true);
-    EXPECT_EQ(runCapturingEcho("module m() { roof(method=\"bogus\") { echo(\"child\"); square(4, center=true); } }\n"
-                               "m();"),
-              "ECHO: \"child\"\nWARNING: Unknown roof method 'bogus'. Using 'voronoi'.");
+    const std::string out = runCapturingEcho(
+        "module m() { roof(method=\"bogus\") { echo(\"child\"); square(4, center=true); } }\n"
+        "m();");
+    // Asserted as an ordering rather than one exact string: the warning also
+    // carries call-site attribution (", from ... line N" plus TRACE lines,
+    // see formatWarning), which is orthogonal to what this test pins.
+    const size_t echoAt = out.find("ECHO: \"child\"");
+    const size_t warnAt = out.find("WARNING: Unknown roof method 'bogus'. Using 'voronoi'.");
+    ASSERT_NE(echoAt, std::string::npos) << out;
+    ASSERT_NE(warnAt, std::string::npos) << out;
+    EXPECT_LT(echoAt, warnAt) << out;
 }
 
 // -- intersection_for -- the TRUE last native-reentry gap, closed by -------

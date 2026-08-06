@@ -34,6 +34,22 @@ struct CSGNode {
     CSGParams params;                      // resolve step's plain-data output
     bool uncacheable = false;              // set by a later phase (ManifoldCache, Phase 8)
 
+    // The call site that entered this node's call chain from the top
+    // level, captured at RESOLVE time -- non-owning, AST-lifetime-bound
+    // like `node`. nullptr for a node resolved at top level.
+    //
+    // Needed because a GenerateFn runs long after resolve has unwound the
+    // call stack, so a warning raised there (an open polyhedron(), a
+    // non-manifold import()) has no stack left to walk and could only ever
+    // name the library's own line. One pointer per node, deliberately, so
+    // this stays affordable on a BOSL2-scale tree; the full frame list a
+    // TRACE would need is not worth the per-node cost.
+    //
+    // Not part of cacheKey() (an explicit allowlist of kind/isBuiltin/
+    // params/children), so two identical subtrees reached from different
+    // call sites still share a cache entry.
+    const oscad::Position* warnEntry = nullptr;
+
     // 1 + the deepest child's own treeDepth (1 for a leaf) -- set once,
     // at construction, by whichever csg_resolve.cpp site finalizes this
     // node's own `children` (buildTreeNode, evalModularCall's non-splice
