@@ -116,12 +116,74 @@ void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool fo
     if (action.stop) throw EvalError(kDebuggingStoppedMessage);
 }
 
+int Evaluator::profilePathEnter(const std::string& kind, const std::string& name, const std::string& callOrigin,
+                                 int callLine, int callColumn, const oscad::Position* declPos, bool& folded) {
+    folded = false;
+    if (profilePaths_.empty()) {
+        ProfilePathNode root;
+        root.name = "<toplevel>";
+        profilePaths_.push_back(std::move(root));
+        profileCurrentPath_ = 0;
+    }
+    const int parent = profileCurrentPath_ < 0 ? 0 : profileCurrentPath_;
+
+    // Already on this path? Fold onto that node rather than growing a chain
+    // per recursive level (see ProfilePathNode).
+    for (int walk = parent; walk > 0; walk = profilePaths_[static_cast<size_t>(walk)].parent) {
+        const ProfilePathNode& n = profilePaths_[static_cast<size_t>(walk)];
+        if (n.name == name && n.callOrigin == callOrigin && n.callLine == callLine &&
+            n.callColumn == callColumn && n.kind == kind) {
+            folded = true;   // recursion: this site is already open on this path
+            return walk;
+        }
+    }
+    for (int childIdx : profilePaths_[static_cast<size_t>(parent)].children) {
+        const ProfilePathNode& n = profilePaths_[static_cast<size_t>(childIdx)];
+        if (n.name == name && n.callOrigin == callOrigin && n.callLine == callLine &&
+            n.callColumn == callColumn && n.kind == kind) {
+            return childIdx;
+        }
+    }
+    if (profilePaths_.size() >= kMaxProfilePathNodes) {
+        folded = true;       // cap reached: stop subdividing, keep totals honest
+        return parent;
+    }
+
+    ProfilePathNode node;
+    node.parent = parent;
+    node.kind = kind;
+    node.name = name;
+    node.callOrigin = callOrigin;
+    node.callLine = callLine;
+    node.callColumn = callColumn;
+    node.declOrigin = declPos ? declPos->origin : "";
+    node.declLine = declPos ? declPos->line : 0;
+    const int idx = static_cast<int>(profilePaths_.size());
+    profilePaths_.push_back(std::move(node));
+    profilePaths_[static_cast<size_t>(parent)].children.push_back(idx);
+    return idx;
+}
+
+void Evaluator::finalizeProfilePaths() {
+    // Children always have a higher index than their parent (a node is
+    // appended when first reached, and folding never creates an edge back
+    // to an ancestor), so one reverse sweep resolves the whole tree with
+    // no recursion and no risk of an unbounded native stack.
+    for (size_t i = profilePaths_.size(); i-- > 0;) {
+        ProfilePathNode& n = profilePaths_[i];
+        double total = n.selfTime;
+        for (int c : n.children) total += profilePaths_[static_cast<size_t>(c)].cumulativeTime;
+        n.cumulativeTime = total;
+    }
+}
+
 std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::string& kind, const std::string& name,
                                                                   const oscad::Position* callPos, const oscad::Position* declPos) {
     if (!profiling_) return std::nullopt;
     const std::string callOrigin = callPos ? callPos->origin : "";
     const int callLine = callPos ? callPos->line : 0;
-    const ProfileSiteKey key{kind, name, callOrigin, callLine};
+    const int callColumn = callPos ? callPos->column : 0;
+    const ProfileSiteKey key{kind, name, callOrigin, callLine, callColumn};
 
     auto it = profileSites_.find(key);
     if (it == profileSites_.end()) {
@@ -137,6 +199,7 @@ std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::strin
         site.callerName = callStack_.empty() ? "<toplevel>" : callStack_.back().name;
         site.callOrigin = callOrigin;
         site.callLine = callLine;
+        site.callColumn = callColumn;
         site.declOrigin = declPos ? declPos->origin : "";
         site.declLine = declPos ? declPos->line : 0;
         it = profileSites_.emplace(key, std::move(site)).first;
@@ -146,7 +209,17 @@ std::optional<Evaluator::ProfileHandle> Evaluator::profileEnter(const std::strin
     const bool recursiveReentry = profileActive_.count(key) > 0;
     if (!recursiveReentry) profileActive_.insert(key);
     profileChildTime_.push_back(0.0);
-    return ProfileHandle{key, recursiveReentry, std::chrono::steady_clock::now()};
+
+    const int prevPath = profileCurrentPath_;
+    bool folded = false;   // only affects node reuse now, not accounting
+    const int pathNode = profilePathEnter(kind, name, callOrigin, callLine, callColumn, declPos, folded);
+    profilePaths_[static_cast<size_t>(pathNode)].callCount += 1;
+    profileCurrentPath_ = pathNode;
+
+    ProfileHandle handle{key, recursiveReentry, std::chrono::steady_clock::now()};
+    handle.pathNode = pathNode;
+    handle.pathPrev = prevPath;
+    return handle;
 }
 
 void Evaluator::profileRecordTailHop(const std::string& kind, const std::string& name, const oscad::Position* callPos,
@@ -154,7 +227,8 @@ void Evaluator::profileRecordTailHop(const std::string& kind, const std::string&
     if (!profiling_) return;
     const std::string callOrigin = callPos ? callPos->origin : "";
     const int callLine = callPos ? callPos->line : 0;
-    const ProfileSiteKey key{kind, name, callOrigin, callLine};
+    const int callColumn = callPos ? callPos->column : 0;
+    const ProfileSiteKey key{kind, name, callOrigin, callLine, callColumn};
 
     auto it = profileSites_.find(key);
     if (it == profileSites_.end()) {
@@ -174,6 +248,7 @@ void Evaluator::profileRecordTailHop(const std::string& kind, const std::string&
         site.callerName = callStack_.empty() ? "<toplevel>" : callStack_.back().name;
         site.callOrigin = callOrigin;
         site.callLine = callLine;
+        site.callColumn = callColumn;
         site.declOrigin = declPos ? declPos->origin : "";
         site.declLine = declPos ? declPos->line : 0;
         it = profileSites_.emplace(key, std::move(site)).first;
@@ -199,6 +274,31 @@ void Evaluator::profileExit(const ProfileHandle& handle) {
         site.cumulativeTime += elapsed;
         profileActive_.erase(handle.key);
     }
+
+    // Same accounting, but attributed to this call's own node in the
+    // calling-context tree rather than to the site aggregated over every
+    // path that reached it.
+    if (handle.pathNode >= 0 && static_cast<size_t>(handle.pathNode) < profilePaths_.size()) {
+        // Self time only. Cumulative is DERIVED from the subtree once the
+        // run finishes (finalizeProfilePaths), not measured here.
+        //
+        // Measuring it per entry is wrong at a fold point: when a site
+        // recurses, every level lands on the same node, but only the
+        // outermost entry may add its elapsed (or nested time double-
+        // counts) -- while the calls made from every level still attach as
+        // that node's children. The node then reads smaller than the
+        // children under it. Found on a real model: a `_translate` entered
+        // 7 times via recursion showed 22.85ms with 90.09ms of children.
+        //
+        // Self time has no such problem: it is disjoint by construction
+        // (the child-time stack subtracts nested work), so summing it
+        // across every entry is exactly this node's own cost on this path,
+        // and cumulative built from it can never contradict the subtree.
+        ProfilePathNode& node = profilePaths_[static_cast<size_t>(handle.pathNode)];
+        node.selfTime += elapsed - childTime;
+        profileCurrentPath_ = handle.pathPrev;
+    }
+
     if (!profileChildTime_.empty()) profileChildTime_.back() += elapsed;
 }
 

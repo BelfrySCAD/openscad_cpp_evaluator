@@ -337,6 +337,9 @@ EvalContext Evaluator::buildModuleChildCtx(const oscad::ModuleDeclaration& decl,
     for (const auto& c : call.children) childrenNodes->push_back(c.get());
 
     EvalContext childCtx = callCtxFor(decl, ctx, childScope, childrenNodes, &ctx);
+    // callCtx reset this to false; carry the CALLER's value across so
+    // enterUserCall can tell a forwarded child from a recursive call.
+    childCtx.viaChildren = ctx.viaChildren;
 
     // $children counts module-instantiation child *statements* passed in
     // `{}`, not the number of geometries they produce -- e.g. children()
@@ -712,7 +715,12 @@ Evaluator::UserCallHandle Evaluator::enterUserCall(const std::string& name, cons
         ++nativeUserCallDepth_;
         h.countedTowardNativeDepth = true;
     }
-    h.prof = profileEnter(isModule ? "module" : "function", name, callPos, &declNode.position());
+    // Consumed, not just read: the body's own statements run in this same
+    // ctx, and a plain call among them is not itself a forwarded child.
+    const bool viaChildren = childCtx.viaChildren;
+    childCtx.viaChildren = false;
+    h.prof = profileEnter(isModule ? (viaChildren ? "child" : "module") : "function", name, callPos,
+                          &declNode.position());
     callStack_.push_back(CallStackFrame{kind, name, callPos, &declNode.position(), &declNode, nullptr, upvalueParent});
     callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
     if (isModule) ++moduleCallDepth_;
@@ -920,6 +928,11 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     // A children() forwarding chain's own dyn/let_/etc. must alias the
     // *caller's* (not this ctx's) -- see EvalContext::withScope's rationale.
     EvalContext evalCtx = callerCtx->childCtx(nullptr, std::nullopt, callerCtx->childrenNodes, callerCtx->childrenCallerCtx);
+    // Everything evaluated from this context is a forwarded child, so a
+    // module call reached through it profiles as "child" not "module".
+    // Set here rather than at the returns: there are two of them (bare
+    // children() and indexed children(i)).
+    evalCtx.viaChildren = true;
     // `ctx` here is the post-resolveCallArgs effCtx, deliberately: a
     // `children($fn=12)`-style named-$ override lives only at effCtx's own
     // trail level, and TrailView::items() is ancestry-visible, so reading
