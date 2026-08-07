@@ -30,6 +30,7 @@ add_executable(oscad_eval_tests
   test_dxf_svg_import.cpp
   test_text.cpp
   test_manifold_cache.cpp
+  test_mesh_check.cpp
   test_profiling.cpp
   test_debug_hooks.cpp
   test_multi_color_merge.cpp
