@@ -158,9 +158,13 @@ const oscadeval::ProfilePathNode* childNamed(const oscadeval::ProfileResult& r,
 // never "expensive *when called from here*".
 TEST(ProfilePaths, SameCalleeUnderTwoCallersGetsSeparateNodes) {
     const ProfileResult r = profileSrc(
-        "function work(n) = n <= 0 ? 0 : work(n - 1) + 1;\n"
-        "module light() { x = work(20); cube(1); }\n"
-        "module heavy() { x = work(400); cube(1); }\n"
+        // Depth stays under kMaxUserCallDepth (30) -- the native path
+        // enforces it and only the VM may skip it, so a deeper fixture
+        // passes with the VM on and dies with it off. The light/heavy
+        // contrast comes from per-call work, not from depth.
+        "function work(n) = n <= 0 ? 0 : work(n - 1) + len([for (i = [0:300]) i]);\n"
+        "module light() { x = work(2); cube(1); }\n"
+        "module heavy() { x = work(20); cube(1); }\n"
         "light();\n"
         "heavy();\n");
     ASSERT_FALSE(r.paths.empty());
@@ -194,8 +198,11 @@ TEST(ProfilePaths, SameCalleeUnderTwoCallersGetsSeparateNodes) {
 // level, or a 400-deep recursion would be 400 nodes.
 TEST(ProfilePaths, RecursionFoldsOntoASingleNode) {
     const ProfileResult r = profileSrc(
+        // 20, not 200: see SameCalleeUnderTwoCallersGetsSeparateNodes on
+        // kMaxUserCallDepth. Folding is just as visible at this depth --
+        // 20 levels still must not become 20 nodes.
         "function down(n) = n <= 0 ? 0 : down(n - 1) + 1;\n"
-        "x = down(200);\n"
+        "x = down(20);\n"
         "cube(x > 0 ? 1 : 2);\n");
     ASSERT_FALSE(r.paths.empty());
     size_t downNodes = 0;
@@ -224,9 +231,12 @@ TEST(ProfilePaths, RecursionFoldsOntoASingleNode) {
 // construction.
 TEST(ProfilePaths, CumulativeTimeContainsChildrenEvenThroughRecursion) {
     const ProfileResult r = profileSrc(
-        "function work(n) = n <= 0 ? 0 : work(n - 1) + 1;\n"
+        // work() is called from inside a module that itself recurses, so
+        // the two depths ADD -- kMaxUserCallDepth counts the whole native
+        // stack, not one function's own levels.
+        "function work(n) = n <= 0 ? 0 : work(n - 1) + len([for (i = [0:200]) i]);\n"
         "module step(n) {\n"
-        "    x = work(40);\n"
+        "    x = work(8);\n"
         "    cube(1);\n"
         "    if (n > 0) translate([0, 0, 2]) step(n - 1);\n"
         "}\n"
