@@ -259,6 +259,71 @@ TEST(ProfilePaths, CumulativeTimeContainsChildrenEvenThroughRecursion) {
     EXPECT_GT(multiEntry, 0u) << "fixture never produced a multi-entry node";
 }
 
+// A call site reached by exactly one path must show the same total in both
+// views.
+//
+// The two are computed differently -- the flat view measures elapsed time
+// across a site's entries, the tree derives cumulative bottom-up from what
+// is actually beneath each node -- so they agree only if the tree really
+// contains the work. Folding a re-entered site onto a DISTANT ancestor
+// broke that: the subtree's time was credited up there and every node in
+// between lost it. On a BOSL2 attachment chain, restore() read 226ms in the
+// flat view and 2.5ms in the tree for the same call site.
+//
+// Restricted to single-node sites deliberately. A site that nests within
+// itself has a node per level now, and summing those double-counts, while
+// the flat view is recursion-guarded and counts only the outermost -- so
+// the two legitimately differ there and comparing them proves nothing.
+TEST(ProfilePaths, TreeAndFlatAgreeForASiteReachedOneWay) {
+    const ProfileResult r = profileSrc(
+        // m()'s call site sits inside step(), which inner() re-enters, so
+        // the second m() finds an m() already open ABOVE inner() and step().
+        // That is the shape that used to fold across, stripping the work
+        // below out of both of them. Anything simpler never folds and so
+        // passes either way -- the first fixture written here did exactly
+        // that and proved nothing.
+        "function work(n) = n <= 0 ? 0 : work(n - 1) + len([for (i = [0:400]) i]);\n"
+        "module leaf() { x = work(10); cube(1); }\n"
+        "module m() { children(); }\n"
+        "module step(n) { m() inner(n); }\n"
+        "module inner(n) { if (n > 0) step(n - 1); else leaf(); }\n"
+        "step(2);\n");
+    ASSERT_FALSE(r.paths.empty());
+
+    size_t checked = 0;
+    for (const auto& site : r.callSites) {
+        double treeTotal = 0.0;
+        size_t nodes = 0;
+        for (const auto& n : r.paths) {
+            if (n.name == site.name && n.kind == site.kind
+                && n.callOrigin == site.callOrigin && n.callLine == site.callLine
+                && n.callColumn == site.callColumn) {
+                treeTotal += n.cumulativeTime;
+                ++nodes;
+            }
+        }
+        if (nodes != 1) continue;
+        ++checked;
+        EXPECT_NEAR(treeTotal, site.cumulativeTime, 1e-6)
+            << site.kind << " " << site.name << " at line " << site.callLine
+            << ":" << site.callColumn << " -- flat " << site.cumulativeTime
+            << " vs tree " << treeTotal;
+    }
+    EXPECT_GT(checked, 2u) << "fixture produced too few single-path sites to mean anything";
+}
+
+// Direct self-recursion still folds: the whole point of folding is that
+// `f` calling `f` 400 deep is not 400 nodes.
+TEST(ProfilePaths, DirectSelfRecursionStillFolds) {
+    const ProfileResult r = profileSrc(
+        "function down(n) = n <= 0 ? 0 : down(n - 1) + 1;\n"
+        "x = down(20);\n"
+        "cube(x >= 0 ? 1 : 2);\n");
+    size_t downNodes = 0;
+    for (const auto& n : r.paths) if (n.name == "down") ++downNodes;
+    EXPECT_LE(downNodes, 2u) << downNodes;
+}
+
 // The root accounts for essentially the whole resolve pass -- the gap is
 // top-level work outside any user call, which is what unattributedTime is.
 TEST(ProfilePaths, RootCoversTheProfiledWork) {
