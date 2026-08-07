@@ -127,14 +127,27 @@ int Evaluator::profilePathEnter(const std::string& kind, const std::string& name
     }
     const int parent = profileCurrentPath_ < 0 ? 0 : profileCurrentPath_;
 
-    // Already on this path? Fold onto that node rather than growing a chain
-    // per recursive level (see ProfilePathNode).
-    for (int walk = parent; walk > 0; walk = profilePaths_[static_cast<size_t>(walk)].parent) {
-        const ProfilePathNode& n = profilePaths_[static_cast<size_t>(walk)];
+    // Immediate self-recursion folds onto the parent rather than growing a
+    // chain per level (see ProfilePathNode).
+    //
+    // Only the parent, never a deeper ancestor. Folding across intervening
+    // nodes credits the whole re-entered subtree to the ancestor, and every
+    // node between it and here loses that time -- cumulative is derived
+    // bottom-up, so it can only count what is actually below. A BOSL2
+    // attachment chain showed restore() at 226ms in the flat view and 2.5ms
+    // in the tree for the same call site, because its callees re-entered a
+    // multmatrix already open further up and took 223ms with them.
+    //
+    // A cycle through other call sites therefore gets a real node. That is
+    // what makes the tree's numbers agree with the flat view's; the cost is
+    // more nodes on mutually-recursive chains, which kMaxProfilePathNodes
+    // still bounds.
+    if (parent > 0) {
+        const ProfilePathNode& n = profilePaths_[static_cast<size_t>(parent)];
         if (n.name == name && n.callOrigin == callOrigin && n.callLine == callLine &&
             n.callColumn == callColumn && n.kind == kind) {
-            folded = true;   // recursion: this site is already open on this path
-            return walk;
+            folded = true;   // direct recursion: this site called itself
+            return parent;
         }
     }
     for (int childIdx : profilePaths_[static_cast<size_t>(parent)].children) {
