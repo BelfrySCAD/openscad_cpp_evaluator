@@ -1,5 +1,7 @@
 #include "openscad_cpp_evaluator/export.hpp"
 
+#include "openscad_cpp_evaluator/mesh_check.hpp"
+
 #include "openscad_cpp_evaluator/zip_stored.hpp"
 
 #include <manifold/manifold.h>
@@ -221,6 +223,20 @@ void writeThreeMf(const std::string& path, const std::vector<ColoredBody>& bodie
         {"3D/3dmodel.model", toBytes(model)},
     };
     writeDeflateZip(path, entries);
+}
+
+std::vector<std::string> checkExportBodies(const std::vector<ColoredBody>& bodies) {
+    std::vector<std::string> out;
+    size_t n = 0;
+    for (const auto& b : bodies) {
+        ++n;
+        if (!b.body || b.body->IsEmpty()) continue;
+        const MeshDiagnosis d = checkMesh(b.body->GetMeshGL());
+        if (d.ok()) continue;
+        out.push_back("part " + std::to_string(n) + " is not a closed manifold solid -- "
+                      + d.summary());
+    }
+    return out;
 }
 
 } // namespace oscadeval

@@ -376,6 +376,13 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
                 profileFile << formatProfileReport(inputPath, *evaluator.profileResult, profileOpts);
             }
 
+            // Checked before writing, warned rather than refused: a
+            // deliberately open surface is a legitimate export, and
+            // blocking a save would be worse than saying so.
+            for (const std::string& problem : checkExportBodies(bodies)) {
+                err << "WARNING: export: " << problem << "\n";
+            }
+
             if (fmt == "stl") {
                 writeStl(outputPath, bodies);
             } else if (fmt == "obj") {

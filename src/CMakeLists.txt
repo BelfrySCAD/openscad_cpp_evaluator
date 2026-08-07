@@ -15,6 +15,7 @@ add_library(openscad_cpp_evaluator STATIC
   debug_profile.cpp
   eval_use.cpp
   export.cpp
+  mesh_check.cpp
   zip_stored.cpp
   import/mesh_import.cpp
   import/surface_load.cpp
