@@ -7,6 +7,8 @@
 #include "openscad_cpp_evaluator/mesh_import.hpp"
 
 #include <manifold/manifold.h>
+
+#include "openscad_cpp_evaluator/mesh_check.hpp"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -174,6 +176,9 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     const Value fileArg = getArg(args, 0, "file", Value{});
     const Value layerArg = getArg(args, std::nullopt, "layer", Value{});
+    // Not an OpenSCAD parameter. A script using it will not run upstream,
+    // which is why it has to be asked for rather than being the default.
+    const bool repair = truthy(getArg(args, std::nullopt, "repair", Value{false}));
 
     CSGParams params;
     params["color"] = colorToValue(effCtx.color);
@@ -225,6 +230,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
             trisFlat.push_back(Value{static_cast<double>(t[2])});
         }
         params["kind"] = Value{std::string("mesh")};
+        params["repair"] = Value{repair};
         params["verts"] = Value{std::make_shared<const ValueList>(ValueList{std::move(vertsFlat)})};
         params["tris"] = Value{std::make_shared<const ValueList>(ValueList{std::move(trisFlat)})};
         return params;
@@ -268,6 +274,26 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     }
     for (const Value& t : tris) mesh.triVerts.push_back(static_cast<uint32_t>(std::get<double>(t)));
 
+    const auto repairIt = params.find("repair");
+    const bool repair = repairIt != params.end() && truthy(repairIt->second);
+    if (repair) {
+        const MeshDiagnosis before = checkMesh(mesh);
+        MeshRepairReport rep;
+        manifold::MeshGL fixed = repairMesh(mesh, rep);
+        const MeshDiagnosis after = checkMesh(fixed);
+        if (rep.didAnything()) {
+            ev.warn("import: repaired the mesh -- " + rep.summary(), &node.position());
+        }
+        if (!after.ok() && !before.ok()) {
+            // Say what is left rather than only what was done: a repair
+            // that helped but did not finish is the case where the user
+            // most needs to know the difference.
+            ev.warn("import: still not manifold after repair -- " + after.summary(),
+                    &node.position());
+        }
+        mesh = std::move(fixed);
+    }
+
     manifold::Manifold body(mesh);
     if (body.Status() != manifold::Manifold::Error::NoError) {
         // Same treatment as an open polyhedron() (see generatePolyhedron):
@@ -275,8 +301,12 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         // this warned and then handed back an empty body, which was dropped
         // downstream -- so a broken STL warned once and showed nothing,
         // giving no way to see what was actually wrong with it.
-        ev.warn("import: mesh is not a closed solid (" + manifoldErrorName(body.Status()) +
-                    "); drawing it as a surface, but it cannot take part in any CSG operation",
+        const MeshDiagnosis d = checkMesh(mesh);
+        std::string why = d.summary();
+        if (why.empty()) why = manifoldErrorName(body.Status());
+        ev.warn("import: mesh is not a closed solid (" + why +
+                    "); drawing it as a surface, but it cannot take part in any CSG "
+                    "operation" + (repair ? "" : ". Try import(..., repair=true)"),
                 &node.position());
         return {ev.tagDisplayOnly(std::move(mesh), node, params.at("color"))};
     }

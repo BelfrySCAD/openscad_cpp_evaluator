@@ -14,6 +14,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/vector.h>
 #include <nanobind/stl/string.h>
 
 #include "openscad_cpp_evaluator/colored_body.hpp"
@@ -21,6 +22,7 @@
 #include "openscad_cpp_evaluator/eval_context.hpp"
 #include "openscad_cpp_evaluator/eval_use.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/mesh_check.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
 #include "openscad_cpp_evaluator/profile.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
@@ -239,6 +241,31 @@ nb::object csgNodeToPy(const oscadeval::CSGNode& node) {
 nb::list csgTreeToPy(const std::vector<std::unique_ptr<oscadeval::CSGNode>>& tree) {
     nb::list out;
     for (const std::unique_ptr<oscadeval::CSGNode>& node : tree) out.append(csgNodeToPy(*node));
+    return out;
+}
+
+// Exposed so a front end that writes its own files -- BelfrySCAD's GUI has
+// its own exporters -- can run the same check the CLI does rather than a
+// second, drifting implementation.
+nb::dict checkMeshPy(const std::vector<float>& verts, const std::vector<uint32_t>& tris) {
+    manifold::MeshGL m;
+    m.numProp = 3;
+    m.vertProperties = verts;
+    m.triVerts = tris;
+    const oscadeval::MeshDiagnosis d = oscadeval::checkMesh(m);
+    nb::dict out;
+    out["boundary_edges"] = d.boundaryEdges;
+    out["non_manifold_edges"] = d.nonManifoldEdges;
+    out["pinched_vertices"] = d.pinchedVertices;
+    out["inconsistent_edges"] = d.inconsistentEdges;
+    out["degenerate_faces"] = d.degenerateFaces;
+    out["duplicate_faces"] = d.duplicateFaces;
+    out["unwelded_vertices"] = d.unweldedVertices;
+    out["watertight"] = d.watertight();
+    out["manifold"] = d.manifold();
+    out["orientable"] = d.orientable();
+    out["ok"] = d.ok();
+    out["summary"] = d.summary();
     return out;
 }
 
@@ -681,6 +708,11 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).");
     m.def("parse_decls", &parseDecls, nb::arg("path"),
           "Parse a .scad file; return top-level declaration (namespace, name, start, end, line, column, origin) tuples.");
+    m.def("check_mesh", &checkMeshPy, nb::arg("verts"), nb::arg("tris"),
+          "Diagnose a triangle mesh against the manifoldness conditions. "
+          "verts is a flat [x,y,z,...] list, tris a flat index list. Returns "
+          "counts per condition plus watertight/manifold/orientable/ok and a "
+          "one-line summary.");
     m.def("parse_ast", &oscadbind::parseAstFromFile, nb::arg("path"), nb::arg("include_comments") = false,
           "Parse a .scad file; return the AST as a list of plain nested dicts "
           "(kind, position, plus that kind's own fields). A snapshot, not a view -- "

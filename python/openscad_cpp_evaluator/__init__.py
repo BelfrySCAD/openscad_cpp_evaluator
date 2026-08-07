@@ -18,7 +18,7 @@ from ._openscad_cpp_evaluator import FastContinueSignal, ManifoldCache
 __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
-    "FastContinueSignal", "parse_ast", "parse_ast_string",
+    "FastContinueSignal", "parse_ast", "parse_ast_string", "check_mesh",
 ]
 
 
@@ -272,6 +272,22 @@ def parse(path: str) -> RootScope:
     except Exception as e:
         raise ParseError(str(e)) from e
     return RootScope(decls)
+
+
+def check_mesh(verts, tris) -> dict:
+    """Diagnose a triangle mesh against the manifoldness conditions.
+
+    `verts` is a flat [x, y, z, ...] sequence, `tris` a flat index sequence.
+    Returns a count per condition -- boundary_edges, non_manifold_edges,
+    pinched_vertices, inconsistent_edges, degenerate_faces, duplicate_faces,
+    unwelded_vertices -- plus watertight/manifold/orientable/ok and a
+    one-line `summary`.
+
+    The conditions are separate because they fail separately: a mesh can be
+    watertight and still non-manifold, and one that is both can still be
+    wound inconsistently.
+    """
+    return _ext.check_mesh([float(v) for v in verts], [int(t) for t in tris])
 
 
 def parse_ast(path: str, include_comments: bool = False) -> list:

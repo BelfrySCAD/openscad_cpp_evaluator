@@ -17,6 +17,15 @@ namespace oscadeval {
 //
 // 3MF and format-from-extension dispatch land in Phase 5 per the plan's
 // phased build order.
+// One message per body that is not a closed manifold solid, ready to print.
+// Empty when everything is sound.
+//
+// Returned rather than logged so each front end can surface it its own way,
+// and so export.cpp needs no logging dependency. Nothing here refuses to
+// write: a deliberately open surface is a legitimate thing to export, and
+// silently blocking a save would be worse than an honest warning.
+std::vector<std::string> checkExportBodies(const std::vector<ColoredBody>& bodies);
+
 void writeStl(const std::string& path, const std::vector<ColoredBody>& bodies);
 
 // Wavefront OBJ: "v x y z" per vertex then "f i j k" per triangle
