@@ -595,17 +595,50 @@ TEST(DebugHooksParity, ListCompCForFiresEveryInitAndIncrSeparately) {
     EXPECT_EQ(stops.size(), 14u);           // + 3 condition checks + 2 body expressions
 }
 
-// (13) User function / function-literal call sites: a statement-level stop
-// in the CALLER's context, before the callee's own body-entry stop.
+// (13) User function / function-literal call sites: a stop in the CALLER's
+// context, before the callee's own body-entry stop.
+//
+// DELIBERATE DIVERGENCE from the reference, and only for the case that
+// duplicates: when the call sits on the same line and depth as the
+// statement that just stopped, its call-site stop is dropped. Otherwise
+// every consumer treating a statement-level stop as a breakpoint hit
+// pauses twice for one execution of `a = double(5);` -- BelfrySCAD's
+// debugger stuttered on Continue and reported the same loop iteration
+// twice. Consumers cannot collapse it themselves: fast-continue skips the
+// checkpoints in between, so a duplicate is indistinguishable from a
+// genuine second visit to the line.
+//
+// A call on a different line from its enclosing statement still stops --
+// see CallSiteOnItsOwnLineStillStops, which is what keeps Step Over
+// through a list comprehension alternating for-line/call-line.
 TEST(DebugHooksParity, UserFunctionCallSiteStopsBeforeDescendingIntoTheCallee) {
-    // line 2 twice (assignment, then call site), then line 1 (body entry).
+    // line 2 (assignment; the call site on the same line is collapsed),
+    // then line 1 (body entry).
     EXPECT_EQ(recordStops("function double(x) = x * 2;\na = double(5);\n"),
-              (std::vector<Stop>{{2, false, false}, {2, false, false}, {1, false, false}}));
+              (std::vector<Stop>{{2, false, false}, {1, false, false}}));
 }
 
 TEST(DebugHooksParity, FunctionLiteralCallSiteAlsoStops) {
     EXPECT_EQ(recordStops("f = function(x) x * 2;\na = f(5);\n"),
-              (std::vector<Stop>{{1, false, false}, {2, false, false}, {2, false, false}, {1, false, false}}));
+              (std::vector<Stop>{{1, false, false}, {2, false, false}, {1, false, false}}));
+}
+
+// The other half of the rule above: a call that is NOT on its enclosing
+// statement's line keeps its own stop, so stepping still pauses on the
+// call before descending. This is the list-comprehension shape.
+TEST(DebugHooksParity, CallSiteOnItsOwnLineStillStops) {
+    const std::vector<Stop> stops = recordStops("function fx(x) = x*2;\n"
+                                                 "a = [\n"
+                                                 "    for (i = [0:1])\n"
+                                                 "        fx(i)\n"
+                                                 "];\n");
+    // Line 4 holds only the call. Two iterations, so two call-site stops,
+    // both statement-level and none collapsed -- the statement that
+    // stopped before each was the `for` on line 3.
+    int line4 = 0;
+    for (const Stop& s : stmtStops(stops))
+        if (s.line == 4) ++line4;
+    EXPECT_EQ(line4, 2);
 }
 
 TEST(DebugHooksParity, BuiltinFunctionCallGetsNoCallSiteStop) {

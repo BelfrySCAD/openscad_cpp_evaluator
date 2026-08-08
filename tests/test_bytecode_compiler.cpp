@@ -197,13 +197,13 @@ TEST(BytecodeCompiler, DollarPrefixedParameterCompiles) {
     EXPECT_EQ(runCapturingEcho("function withFn($fn) = $fn;\necho(let($fn = 99) withFn());"), "ECHO: undef");
     // The proof this is actually running compiled, not silently falling
     // back: same ternary-bodied shape and technique as
-    // FastContinueWithNoBreakpointInFunctionUsesVm above (3 stops =
-    // compiled, 5 = interpreted), with $fn substituted in for the plain
+    // FastContinueWithNoBreakpointInFunctionUsesVm above (2 stops =
+    // compiled, 4 = interpreted), with $fn substituted in for the plain
     // parameter both as the declared name and every body reference.
     const int stops = countDebugHookStops("function f($fn) = $fn > 0 ? $fn + 1 : $fn - 1;\n"
                                            "echo(f(5));",
                                            std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
-    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(stops, 2);
 }
 
 TEST(BytecodeCompiler, UndeclaredDollarNamedArgumentReachesDynInsideCompiledFunction) {
@@ -828,7 +828,7 @@ TEST(BytecodeCompiler, ClosureWithDollarParameterNowCompilesToo) {
     // silent even for a closure capturing an enclosing binding with its
     // own $-parameter.
     const int stops = countDebugHookStops(script, std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
-    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(stops, 2);
 }
 
 // -- Tail-call optimization, VM path (Phase B) -----------------------------
@@ -1156,7 +1156,7 @@ TEST(BytecodeCompiler, DebugAttachedWithoutFastContinueAlwaysInterprets) {
     const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
                                            "echo(f(5));",
                                            std::nullopt);
-    EXPECT_EQ(stops, 5);
+    EXPECT_EQ(stops, 4);
 }
 
 TEST(BytecodeCompiler, FastContinueWithNoBreakpointInFunctionUsesVm) {
@@ -1167,7 +1167,7 @@ TEST(BytecodeCompiler, FastContinueWithNoBreakpointInFunctionUsesVm) {
     const int stops = countDebugHookStops("function f(x) = x > 0 ? x + 1 : x - 1;\n"
                                            "echo(f(5));",
                                            std::unordered_map<std::string, std::set<int>>{{"<string>", {2}}});
-    EXPECT_EQ(stops, 3);
+    EXPECT_EQ(stops, 2);
 }
 
 TEST(BytecodeCompiler, FastContinueWithBreakpointInsideFunctionStillInterprets) {
