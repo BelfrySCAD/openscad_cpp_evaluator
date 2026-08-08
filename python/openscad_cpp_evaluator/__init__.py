@@ -18,7 +18,7 @@ from ._openscad_cpp_evaluator import FastContinueSignal, ManifoldCache
 __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
-    "FastContinueSignal", "parse_ast", "parse_ast_string", "check_mesh",
+    "FastContinueSignal", "parse_ast", "parse_ast_string", "check_mesh", "strip_slivers",
 ]
 
 
@@ -272,6 +272,20 @@ def parse(path: str) -> RootScope:
     except Exception as e:
         raise ParseError(str(e)) from e
     return RootScope(decls)
+
+
+def strip_slivers(verts, tris):
+    """Remove zero-area faces and repair the T-joints removal exposes.
+
+    A sliver's three vertices are collinear, so one lies between the other
+    two. Dropping the face leaves that middle vertex on the interior of the
+    neighbour's edge, and the two sides no longer share an edge -- which
+    reads as a hole. Splitting the neighbour there restores the match
+    without moving any geometry.
+
+    Returns (verts, tris, report).
+    """
+    return _ext.strip_slivers([float(v) for v in verts], [int(t) for t in tris])
 
 
 def check_mesh(verts, tris) -> dict:

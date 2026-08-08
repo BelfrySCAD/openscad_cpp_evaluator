@@ -82,4 +82,22 @@ struct MeshRepairReport {
 // improved as far as it got, with the remainder reported in `report`.
 manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& report);
 
+struct SliverStripReport {
+    size_t removed = 0;        // zero-area faces taken out
+    size_t restitched = 0;     // neighbours split to close the gap they left
+    size_t leftBehind = 0;     // slivers whose neighbour could not be found
+    size_t passes = 0;         // removing one can expose another
+};
+
+// Remove zero-area faces and repair the T-joints their removal exposes.
+//
+// A sliver's three vertices are collinear, so one lies between the other
+// two. Dropping the face leaves that middle vertex sitting on the interior
+// of the neighbour's edge -- a T-joint -- and the two sides no longer share
+// an edge, which reads as a hole. Splitting the neighbour at the middle
+// vertex restores the match without moving any geometry.
+//
+// The mesh is returned unchanged if it has no slivers.
+manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& report);
+
 }  // namespace oscadeval

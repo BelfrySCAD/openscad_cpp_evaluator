@@ -429,4 +429,123 @@ manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& repo
     return out;
 }
 
+
+namespace {
+
+// Index of the vertex opposite the longest edge -- for three collinear
+// points that is the one in the middle.
+int middleOfCollinear(const manifold::MeshGL& m, const std::array<Vert, 3>& f) {
+    double p[3][3];
+    for (int i = 0; i < 3; ++i) pos(m, f[i], p[i]);
+    auto d2 = [&](int a, int b) {
+        double s = 0;
+        for (int k = 0; k < 3; ++k) { const double d = p[a][k] - p[b][k]; s += d * d; }
+        return s;
+    };
+    const double opp[3] = {d2(1, 2), d2(0, 2), d2(0, 1)};
+    int best = 0;
+    for (int i = 1; i < 3; ++i) if (opp[i] > opp[best]) best = i;
+    return best;
+}
+
+}  // namespace
+
+manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& report) {
+    report = SliverStripReport{};
+    std::vector<std::array<Vert, 3>> tris;
+    tris.reserve(triCount(mesh));
+    for (size_t t = 0; t < triCount(mesh); ++t) {
+        Vert v[3];
+        triVerts(mesh, t, v);
+        tris.push_back({v[0], v[1], v[2]});
+    }
+
+    // Removing a sliver can leave its neighbour split into pieces that are
+    // themselves slivers, so this repeats. Bounded because each pass must
+    // remove at least one face to continue.
+    const int kMaxPasses = 12;
+    for (int pass = 0; pass < kMaxPasses; ++pass) {
+        std::vector<size_t> slivers;
+        for (size_t i = 0; i < tris.size(); ++i) {
+            const auto& f = tris[i];
+            if (f[0] == f[1] || f[1] == f[2] || f[0] == f[2]) continue;  // handled elsewhere
+            double a[3], b[3], c[3];
+            pos(mesh, f[0], a); pos(mesh, f[1], b); pos(mesh, f[2], c);
+            const double ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+            const double wx = c[0] - a[0], wy = c[1] - a[1], wz = c[2] - a[2];
+            const double cx = uy * wz - uz * wy, cy = uz * wx - ux * wz, cz = ux * wy - uy * wx;
+            if ((cx * cx + cy * cy + cz * cz) < 1e-24) slivers.push_back(i);
+        }
+        if (slivers.empty()) break;
+        ++report.passes;
+
+        // Which face owns each edge, so a sliver's long-edge neighbour can
+        // be found. Rebuilt per pass: splitting changes it.
+        std::map<Edge, std::vector<size_t>> owners;
+        for (size_t i = 0; i < tris.size(); ++i) {
+            for (int e = 0; e < 3; ++e) {
+                owners[undirected(tris[i][e], tris[i][(e + 1) % 3])].push_back(i);
+            }
+        }
+
+        std::vector<char> dead(tris.size(), 0);
+        std::vector<std::array<Vert, 3>> added;
+        for (size_t si : slivers) {
+            if (dead[si]) continue;
+            const auto f = tris[si];
+            const int mid = middleOfCollinear(mesh, f);
+            const Vert m = f[mid], a = f[(mid + 1) % 3], b = f[(mid + 2) % 3];
+
+            // The neighbour across the long edge a-b, which is the one the
+            // middle vertex now sits inside.
+            size_t nb = SIZE_MAX;
+            for (size_t cand : owners[undirected(a, b)]) {
+                if (cand != si && !dead[cand]) { nb = cand; break; }
+            }
+            if (nb == SIZE_MAX) { ++report.leftBehind; continue; }
+
+            // Split the neighbour at m, keeping its winding: the edge a-b
+            // appears in it in some direction, and the two pieces must
+            // traverse it the same way round.
+            const auto& n = tris[nb];
+            int e = -1;
+            for (int i = 0; i < 3; ++i) {
+                const Vert x = n[i], y = n[(i + 1) % 3];
+                if ((x == a && y == b) || (x == b && y == a)) { e = i; break; }
+            }
+            if (e < 0) { ++report.leftBehind; continue; }
+            const Vert x = n[e], y = n[(e + 1) % 3], apex = n[(e + 2) % 3];
+
+            dead[si] = 1;
+            dead[nb] = 1;
+            added.push_back({x, m, apex});
+            added.push_back({m, y, apex});
+            ++report.removed;
+            ++report.restitched;
+        }
+
+        std::vector<std::array<Vert, 3>> next;
+        next.reserve(tris.size() + added.size());
+        for (size_t i = 0; i < tris.size(); ++i) if (!dead[i]) next.push_back(tris[i]);
+        for (const auto& f : added) next.push_back(f);
+        if (next.size() == tris.size() && added.empty()) break;
+        tris.swap(next);
+    }
+
+    manifold::MeshGL out = mesh;
+    out.triVerts.clear();
+    out.triVerts.reserve(tris.size() * 3);
+    for (const auto& f : tris) {
+        out.triVerts.push_back(f[0]);
+        out.triVerts.push_back(f[1]);
+        out.triVerts.push_back(f[2]);
+    }
+    // These describe the old triangle list; a stale one is worse than none.
+    out.runIndex.clear();
+    out.runOriginalID.clear();
+    out.faceID.clear();
+    out.runTransform.clear();
+    return out;
+}
+
 }  // namespace oscadeval

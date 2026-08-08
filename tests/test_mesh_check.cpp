@@ -249,3 +249,75 @@ TEST(MeshRepair, ReportsWhatItDid) {
     repairMesh(m, r);
     EXPECT_NE(r.summary().find("hole filled"), std::string::npos) << r.summary();
 }
+
+// -- sliver stripping -----------------------------------------------------
+
+// The cube whose top face is fanned through a point on its diagonal, from
+// the check tests above: manifold, with one zero-area face.
+namespace {
+manifold::MeshGL cubeWithSliver() {
+    return build(
+        {0, 0, 0,  1, 0, 0,  1, 1, 0,  0, 1, 0,
+         0, 0, 1,  1, 0, 1,  1, 1, 1,  0, 1, 1,
+         0.5f, 0.5f, 1},
+        {
+            0, 2, 1,  0, 3, 2,
+            4, 5, 8,  5, 6, 8,  4, 8, 6,
+            4, 6, 7,
+            0, 1, 5,  0, 5, 4,
+            1, 2, 6,  1, 6, 5,
+            2, 3, 7,  2, 7, 6,
+            3, 0, 4,  3, 4, 7,
+        });
+}
+
+double signedVolume(const manifold::MeshGL& m) {
+    double vol = 0;
+    for (size_t t = 0; t + 2 < m.triVerts.size(); t += 3) {
+        const float* a = &m.vertProperties[m.triVerts[t] * 3];
+        const float* b = &m.vertProperties[m.triVerts[t + 1] * 3];
+        const float* c = &m.vertProperties[m.triVerts[t + 2] * 3];
+        vol += (a[0] * (b[1] * c[2] - b[2] * c[1])
+                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6.0;
+    }
+    return vol;
+}
+}  // namespace
+
+TEST(SliverStrip, RemovesTheSliverAndRestitchesTheTJoint) {
+    const manifold::MeshGL m = cubeWithSliver();
+    ASSERT_EQ(checkMesh(m).degenerateFaces, 1u);
+    ASSERT_TRUE(checkMesh(m).manifold());
+
+    SliverStripReport r;
+    const manifold::MeshGL out = stripSlivers(m, r);
+    EXPECT_EQ(r.removed, 1u) << "sliver not removed";
+    EXPECT_EQ(r.restitched, 1u) << "neighbour not split";
+
+    const MeshDiagnosis d = checkMesh(out);
+    EXPECT_EQ(d.degenerateFaces, 0u) << d.summary();
+    // The point of restitching: simply deleting the face would leave the
+    // middle vertex sitting on the neighbour's edge, and three holes.
+    EXPECT_EQ(d.boundaryEdges, 0u) << "deleting alone left holes: " << d.summary();
+    EXPECT_TRUE(d.manifold()) << d.summary();
+}
+
+TEST(SliverStrip, MovesNoGeometry) {
+    // A retriangulation, not a repair: the solid must be identical.
+    const manifold::MeshGL m = cubeWithSliver();
+    SliverStripReport r;
+    const manifold::MeshGL out = stripSlivers(m, r);
+    EXPECT_NEAR(signedVolume(out), signedVolume(m), 1e-9);
+    // Two faces out -- the sliver and the neighbour it was stuck to -- and
+    // the neighbour's two halves in. The count is unchanged.
+    EXPECT_EQ(out.triVerts.size() / 3, m.triVerts.size() / 3);
+}
+
+TEST(SliverStrip, LeavesACleanMeshUntouched) {
+    SliverStripReport r;
+    const manifold::MeshGL out = stripSlivers(tetra(), r);
+    EXPECT_EQ(r.removed, 0u);
+    EXPECT_EQ(r.passes, 0u) << "walked a mesh with nothing to do";
+    EXPECT_EQ(out.triVerts, tetra().triVerts);
+}
