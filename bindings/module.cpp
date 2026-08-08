@@ -247,6 +247,24 @@ nb::list csgTreeToPy(const std::vector<std::unique_ptr<oscadeval::CSGNode>>& tre
 // Exposed so a front end that writes its own files -- BelfrySCAD's GUI has
 // its own exporters -- can run the same check the CLI does rather than a
 // second, drifting implementation.
+// Exposed for the export path: strip zero-area faces and repair the
+// T-joints their removal exposes. Returns (verts, tris, report).
+nb::tuple stripSliversPy(const std::vector<float>& verts, const std::vector<uint32_t>& tris) {
+    manifold::MeshGL m;
+    m.numProp = 3;
+    m.vertProperties = verts;
+    m.triVerts = tris;
+    oscadeval::SliverStripReport r;
+    manifold::MeshGL out = oscadeval::stripSlivers(m, r);
+    nb::dict rep;
+    rep["removed"] = r.removed;
+    rep["restitched"] = r.restitched;
+    rep["needles"] = r.needles;
+    rep["left_behind"] = r.leftBehind;
+    rep["passes"] = r.passes;
+    return nb::make_tuple(out.vertProperties, out.triVerts, rep);
+}
+
 nb::dict checkMeshPy(const std::vector<float>& verts, const std::vector<uint32_t>& tris) {
     manifold::MeshGL m;
     m.numProp = 3;
@@ -708,6 +726,9 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).");
     m.def("parse_decls", &parseDecls, nb::arg("path"),
           "Parse a .scad file; return top-level declaration (namespace, name, start, end, line, column, origin) tuples.");
+    m.def("strip_slivers", &stripSliversPy, nb::arg("verts"), nb::arg("tris"),
+          "Remove zero-area faces and repair the T-joints their removal "
+          "exposes. Returns (verts, tris, report).");
     m.def("check_mesh", &checkMeshPy, nb::arg("verts"), nb::arg("tris"),
           "Diagnose a triangle mesh against the manifoldness conditions. "
           "verts is a flat [x,y,z,...] list, tris a flat index list. Returns "

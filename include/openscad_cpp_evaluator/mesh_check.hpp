@@ -63,10 +63,11 @@ struct MeshRepairReport {
     size_t filledTriangles = 0;
     size_t splitVertices = 0;
     size_t unfilledHoles = 0;      // boundary loops it could not close
+    size_t strippedSlivers = 0;    // zero-area faces removed and restitched
 
     bool didAnything() const {
         return weldedVertices || droppedDegenerate || droppedDuplicate || reversedFaces
-               || filledHoles || splitVertices;
+               || filledHoles || splitVertices || strippedSlivers;
     }
     // "welded 12 vertices, filled 1 hole (4 triangles)" -- empty if nothing.
     std::string summary() const;
@@ -81,5 +82,27 @@ struct MeshRepairReport {
 // Returns the repaired mesh. A mesh it cannot close is still returned,
 // improved as far as it got, with the remainder reported in `report`.
 manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& report);
+
+struct SliverStripReport {
+    size_t removed = 0;        // zero-area faces taken out
+    size_t restitched = 0;     // neighbours split to close the gap they left
+    // Faces with two corners at one position. These need no restitching:
+    // their two long edges run between the same two points, so the faces on
+    // either side already meet once the needle is gone.
+    size_t needles = 0;
+    size_t leftBehind = 0;     // slivers whose neighbour could not be found
+    size_t passes = 0;         // removing one can expose another
+};
+
+// Remove zero-area faces and repair the T-joints their removal exposes.
+//
+// A sliver's three vertices are collinear, so one lies between the other
+// two. Dropping the face leaves that middle vertex sitting on the interior
+// of the neighbour's edge -- a T-joint -- and the two sides no longer share
+// an edge, which reads as a hole. Splitting the neighbour at the middle
+// vertex restores the match without moving any geometry.
+//
+// The mesh is returned unchanged if it has no slivers.
+manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& report);
 
 }  // namespace oscadeval
