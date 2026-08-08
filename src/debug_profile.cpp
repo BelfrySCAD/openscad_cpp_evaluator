@@ -9,9 +9,31 @@ namespace {
 // call), if any. See Evaluator::lastChildrenPositions()'s own doc comment
 // for what this feeds. Mirrors the reference's own
 // Evaluator._child_statement_positions.
-std::optional<std::vector<std::pair<std::string, int>>> childStatementPositions(const oscad::ASTNode& node) {
+// Where a debugger's "step into child" should aim from `node`.
+//
+// Normally the node's own children -- `framed(20) leaf(3);` aims at
+// `leaf(3)`. But a `children()` call has no children of its own: it
+// forwards the enclosing invocation's, which live on the context. Without
+// that case, stepping to a child from the one statement whose entire job
+// is to run the children found nothing to aim at, and the step silently
+// degraded into a continue -- running to the next breakpoint or off the
+// end of the script.
+std::optional<std::vector<std::pair<std::string, int>>> childStatementPositions(const oscad::ASTNode& node,
+                                                                                 const EvalContext& ctx) {
     if (node.kind() != oscad::NodeKind::ModularCall) return std::nullopt;
     const auto& call = static_cast<const oscad::ModularCall&>(node);
+    if (call.name && call.name->name == "children") {
+        if (!ctx.childrenNodes || ctx.childrenNodes->empty()) return std::nullopt;
+        std::vector<std::pair<std::string, int>> forwarded;
+        for (const oscad::ASTNode* c : *ctx.childrenNodes) {
+            if (c) forwarded.emplace_back(c->position().origin, c->position().line);
+        }
+        if (forwarded.empty()) return std::nullopt;
+        // Every forwarded child, even when an index argument (children(0),
+        // children([1:2])) will run only some: a position that is never
+        // reached can never be stopped at, so the extra targets are inert.
+        return forwarded;
+    }
     std::vector<std::pair<std::string, int>> positions;
     for (const auto& c : call.children) {
         if (c->kind() == oscad::NodeKind::Assignment || c->kind() == oscad::NodeKind::ModuleDeclaration ||
@@ -121,7 +143,7 @@ void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool fo
     }
     const int depth = static_cast<int>(callStack_.size());
     const DebugFramesFn getFrame = [this, &ctx]() { return buildDebugFrames(&ctx); };
-    lastChildrenPositions_ = childStatementPositions(node);
+    lastChildrenPositions_ = childStatementPositions(node, ctx);
 
     DebugAction action = debugHooks_.debugHook(pos.line, depth, forced, exprLevel, pos.origin, callStack_, getFrame);
     for (auto& [k, v] : action.mods) ctx.let_->set(k, v);
