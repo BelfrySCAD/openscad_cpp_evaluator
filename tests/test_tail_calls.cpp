@@ -283,9 +283,12 @@ TEST(TailCalls, DebugHookFiresPerHopInsideATailChain) {
     // abandoning TCO whenever a debugger is attached.
     EXPECT_GT(calls, 1000);
     // All statement-level stops on line 1 (the whole function declaration):
-    // 501 ternary stops (n = 500..0), 500 recursive call-site stops, and the
-    // single body-entry stop.
-    EXPECT_EQ(bodyEntry, 501 + 500 + 1);
+    // 501 ternary stops (n = 500..0) and the single body-entry stop. The
+    // 500 recursive call-site stops still fire -- they are counted in
+    // `calls` above -- but as expression-level, since a call inside a
+    // larger expression is not a statement of its own (see
+    // DebugHooksParity.UserFunctionCallSiteStopsBeforeDescendingIntoTheCallee).
+    EXPECT_EQ(bodyEntry, 501 + 1);
 }
 
 TEST(TailCalls, DeepNonTailRecursionHitsAControlledErrorInsteadOfCrashingInterpreted) {

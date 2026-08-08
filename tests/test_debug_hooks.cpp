@@ -595,17 +595,32 @@ TEST(DebugHooksParity, ListCompCForFiresEveryInitAndIncrSeparately) {
     EXPECT_EQ(stops.size(), 14u);           // + 3 condition checks + 2 body expressions
 }
 
-// (13) User function / function-literal call sites: a statement-level stop
-// in the CALLER's context, before the callee's own body-entry stop.
+// (13) User function / function-literal call sites: a stop in the CALLER's
+// context, before the callee's own body-entry stop.
+//
+// DELIBERATE DIVERGENCE from the reference, which reports this stop as
+// statement-level. A call is not a statement of its own: when one sits
+// inside an assignment, both checkpoints land on the same line at the same
+// depth, so every consumer that treats statement-level stops as breakpoint
+// hits fires twice per execution -- BelfrySCAD's debugger stuttered on
+// Continue and reported the same loop iteration twice. Consumers cannot
+// collapse it themselves: fast-continue skips the checkpoints in between,
+// so a duplicate is indistinguishable from a genuine second visit.
+//
+// The stop itself is kept -- stepping into a call still needs it -- it is
+// simply labelled for what it is.
 TEST(DebugHooksParity, UserFunctionCallSiteStopsBeforeDescendingIntoTheCallee) {
-    // line 2 twice (assignment, then call site), then line 1 (body entry).
+    // line 2 (assignment), the call site as expression-level, then line 1
+    // (body entry).
     EXPECT_EQ(recordStops("function double(x) = x * 2;\na = double(5);\n"),
-              (std::vector<Stop>{{2, false, false}, {2, false, false}, {1, false, false}}));
+              (std::vector<Stop>{{2, false, false}, {2, true, false}, {1, false, false}}));
+    // The line a breakpoint would be set on is reached once, not twice.
+    EXPECT_EQ(stmtStops(recordStops("function double(x) = x * 2;\na = double(5);\n")).size(), 2u);
 }
 
 TEST(DebugHooksParity, FunctionLiteralCallSiteAlsoStops) {
     EXPECT_EQ(recordStops("f = function(x) x * 2;\na = f(5);\n"),
-              (std::vector<Stop>{{1, false, false}, {2, false, false}, {2, false, false}, {1, false, false}}));
+              (std::vector<Stop>{{1, false, false}, {2, false, false}, {2, true, false}, {1, false, false}}));
 }
 
 TEST(DebugHooksParity, BuiltinFunctionCallGetsNoCallSiteStop) {
