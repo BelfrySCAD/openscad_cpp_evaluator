@@ -74,9 +74,21 @@ std::vector<DebugFrame> Evaluator::buildDebugFrames(const EvalContext* ctx) cons
     return frames;
 }
 
-void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced, bool exprLevel) {
+void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced, bool exprLevel,
+                            bool callSite) {
     if (!debugHooks_.debugHook) return;
     const oscad::Position& pos = node.position();
+    const size_t stmtDepth = callStack_.size();
+    if (lastStmtByDepth_.size() <= stmtDepth) lastStmtByDepth_.resize(stmtDepth + 1, {-1, std::string{}});
+    if (callSite && !forced && lastStmtByDepth_[stmtDepth] == std::make_pair(pos.line, pos.origin)) {
+        // The statement this call belongs to already stopped on this exact
+        // line, at this depth. See checkDebug's declaration for why this
+        // one is dropped.
+        return;
+    }
+    if (!exprLevel && !callSite) {
+        lastStmtByDepth_[stmtDepth] = {pos.line, pos.origin};
+    }
     // Fast-continue's hook-skippable mode (setFastContinueBreakpoints' own
     // doc comment): a plain "Continue" with no step pending needs the debug
     // hook called ONLY for a line that actually has a breakpoint -- every

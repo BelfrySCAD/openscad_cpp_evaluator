@@ -425,6 +425,13 @@ public:
         fastContinueHookSkippable_ = hookSkippable;
     }
 
+    // The statement checkpoint currently in progress at each call depth,
+    // for the call-site collapse described on checkDebug. Per depth, not a
+    // single slot: `a = [f(1), f(2), f(3)];` runs each callee's own body
+    // checkpoints in between, and those must not be mistaken for the
+    // caller having moved on to a new statement.
+    std::vector<std::pair<int, std::string>> lastStmtByDepth_;
+
     // The other half of hook-skippable mode's safety net. checkDebug()'s
     // whole premise (see its own doc comment, debug_profile.cpp) is that it
     // can skip calling into Python for a line with no breakpoint -- but the
@@ -475,7 +482,18 @@ public:
     // (function body entry), and builtins/control.cpp's
     // resolveBreakpoint/resolveIntersectionFor (free functions). Mirrors
     // Evaluator._check_debug, including its parameter defaults.
-    void checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced = false, bool exprLevel = false);
+    // `callSite` marks the stop fired just before descending into a user
+    // function or function literal. It is a real, steppable stop -- a
+    // debugger's Step Over should pause on the call line -- but it is NOT
+    // a second execution of the line it sits on. When it lands on the same
+    // line and depth as the statement checkpoint immediately before it (as
+    // in `x = f(y);`, where the assignment and the call are one line), it
+    // is dropped, so a breakpoint there fires once per execution instead
+    // of twice. A call on its own line, or on a different line from the
+    // enclosing statement, still stops -- which is what keeps stepping
+    // through a list comprehension alternating for-line/call-line.
+    void checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced = false, bool exprLevel = false,
+                    bool callSite = false);
 
     // (origin, line) for each top-level, non-declaration child of the
     // node checkDebug() was just called with -- i.e., if that node is a

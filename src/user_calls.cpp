@@ -551,7 +551,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
                     // statement is not its own statement, and pausing here
                     // as well as at the statement makes a breakpoint on
                     // that line fire twice per execution.
-                    checkDebug(n, ctx, /*forced=*/false, /*exprLevel=*/true); // call-site stop, per hop
+                    checkDebug(n, ctx, /*forced=*/false, /*exprLevel=*/false, /*callSite=*/true); // call-site stop, per hop
                     const bool hasChunk = useBytecodeVm() && lookupOrCompileChunk(decl) != nullptr;
                     std::optional<TailStep> step = tryTailStepFor(leftId->name, decl, decl.parameters, *decl.expr,
                                                                    hasChunk, n.arguments, ctx, n.position());
@@ -574,7 +574,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
             if (const auto* closurePtr = std::get_if<ClosurePtr>(&funcVal); closurePtr && *closurePtr) {
                 const Closure& closure = **closurePtr;
                 const oscad::FunctionLiteral& funcNode = *closure.node;
-                checkDebug(n, ctx, /*forced=*/false, /*exprLevel=*/true); // call-site stop, function-literal callee
+                checkDebug(n, ctx, /*forced=*/false, /*exprLevel=*/false, /*callSite=*/true); // call-site stop, function-literal callee
                 const bool hasChunk = useBytecodeVm() && lookupCompiledLiteralChunk(funcNode) != nullptr;
                 std::optional<TailStep> step =
                     tryTailStepFor("<function literal>", funcNode, funcNode.parameters, *funcNode.body, hasChunk,
@@ -890,7 +890,7 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
             // evalUserFunctionCore). Builtins deliberately get none --
             // mirrors _eval_function_call, where only the user-function and
             // function-literal branches call _check_debug.
-            checkDebug(node, ctx, /*forced=*/false, /*exprLevel=*/true);
+            checkDebug(node, ctx, /*forced=*/false, /*exprLevel=*/false, /*callSite=*/true);
             return evalUserFunction(leftId->name, static_cast<const oscad::FunctionDeclaration&>(*decl), node.arguments,
                                      ctx, &node);
         }
@@ -903,7 +903,7 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
     // unknown callee gets exactly one warning below, not two.
     Value funcVal = leftId ? evalIdentifier(leftId->name, &leftId->position(), ctx, false) : evalExpr(*node.left, ctx);
     if (const auto* closurePtr = std::get_if<ClosurePtr>(&funcVal); closurePtr && *closurePtr) {
-        checkDebug(node, ctx, /*forced=*/false, /*exprLevel=*/true); // same call-site stop, function-literal callee
+        checkDebug(node, ctx, /*forced=*/false, /*exprLevel=*/false, /*callSite=*/true); // same call-site stop, function-literal callee
         return evalFunctionLiteral(**closurePtr, node.arguments, ctx, &node);
     }
 
