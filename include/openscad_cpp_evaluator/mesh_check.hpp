@@ -85,6 +85,10 @@ manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& repo
 struct SliverStripReport {
     size_t removed = 0;        // zero-area faces taken out
     size_t restitched = 0;     // neighbours split to close the gap they left
+    // Faces with two corners at one position. These need no restitching:
+    // their two long edges run between the same two points, so the faces on
+    // either side already meet once the needle is gone.
+    size_t needles = 0;
     size_t leftBehind = 0;     // slivers whose neighbour could not be found
     size_t passes = 0;         // removing one can expose another
 };

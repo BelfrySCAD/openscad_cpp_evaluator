@@ -432,6 +432,29 @@ manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& repo
 
 namespace {
 
+// Which two corners of a zero-area face sit at the same position, if any.
+// Such a face is a needle rather than a T-joint: its two long edges run
+// between the same two points, so once it is gone the faces on either side
+// already meet along one edge and nothing needs splitting. The coincident
+// pair is merged so that is true by index as well as by position.
+bool coincidentPair(const manifold::MeshGL& m, const std::array<Vert, 3>& f,
+                    Vert& keep, Vert& drop) {
+    for (int i = 0; i < 3; ++i) {
+        const Vert a = f[i], b = f[(i + 1) % 3];
+        if (a == b) { keep = a; drop = b; return true; }
+        double p[3], q[3];
+        pos(m, a, p); pos(m, b, q);
+        if (llround(p[0] * 1e6) == llround(q[0] * 1e6)
+            && llround(p[1] * 1e6) == llround(q[1] * 1e6)
+            && llround(p[2] * 1e6) == llround(q[2] * 1e6)) {
+            keep = std::min(a, b);
+            drop = std::max(a, b);
+            return keep != drop;
+        }
+    }
+    return false;
+}
+
 // Index of the vertex opposite the longest edge -- for three collinear
 // points that is the one in the middle.
 int middleOfCollinear(const manifold::MeshGL& m, const std::array<Vert, 3>& f) {
@@ -488,20 +511,55 @@ manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& r
             }
         }
 
+        std::vector<char> isSliver(tris.size(), 0);
+        for (size_t i : slivers) isSliver[i] = 1;
+
         std::vector<char> dead(tris.size(), 0);
         std::vector<std::array<Vert, 3>> added;
+        std::map<Vert, Vert> merge;      // needle corners to fold together
         for (size_t si : slivers) {
             if (dead[si]) continue;
             const auto f = tris[si];
+
+            // A needle: two corners at one point. Nothing to restitch --
+            // the faces on either side already share an edge positionally,
+            // and merging the pair makes them share it by index too.
+            Vert keep = 0, drop = 0;
+            if (coincidentPair(mesh, f, keep, drop)) {
+                dead[si] = 1;
+                if (keep != drop) merge[drop] = keep;
+                ++report.removed;
+                ++report.needles;
+                continue;
+            }
+
             const int mid = middleOfCollinear(mesh, f);
             const Vert m = f[mid], a = f[(mid + 1) % 3], b = f[(mid + 2) % 3];
 
             // The neighbour across the long edge a-b, which is the one the
             // middle vertex now sits inside.
-            size_t nb = SIZE_MAX;
+            // Prefer a neighbour that is not itself a sliver. Two slivers
+            // sharing their long edge are each other's only candidate, and
+            // splitting one into the other just moves the problem around --
+            // a level-4 Menger sponge has exactly one such pair, and it was
+            // what stopped the last two from ever clearing.
+            size_t nb = SIZE_MAX, fallback = SIZE_MAX;
             for (size_t cand : owners[undirected(a, b)]) {
-                if (cand != si && !dead[cand]) { nb = cand; break; }
+                if (cand == si || dead[cand]) continue;
+                if (isSliver[cand]) {
+                    if (fallback == SIZE_MAX) fallback = cand;
+                    continue;
+                }
+                nb = cand;
+                break;
             }
+            // A non-sliver neighbour is preferred but not required. Two
+            // slivers sharing their long edge are each other's only
+            // candidate -- a level-4 Menger sponge has one such pair, and
+            // refusing to split into a sliver leaves them forever. Splitting
+            // into one still makes progress, because the halves are smaller
+            // and the next pass reconsiders them.
+            if (nb == SIZE_MAX) nb = fallback;
             if (nb == SIZE_MAX) { ++report.leftBehind; continue; }
 
             // Split the neighbour at m, keeping its winding: the edge a-b
@@ -526,8 +584,22 @@ manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& r
 
         std::vector<std::array<Vert, 3>> next;
         next.reserve(tris.size() + added.size());
-        for (size_t i = 0; i < tris.size(); ++i) if (!dead[i]) next.push_back(tris[i]);
-        for (const auto& f : added) next.push_back(f);
+        auto resolve = [&](Vert v) {
+            for (int hop = 0; hop < 8; ++hop) {      // chains are short
+                auto it = merge.find(v);
+                if (it == merge.end()) break;
+                v = it->second;
+            }
+            return v;
+        };
+        for (size_t i = 0; i < tris.size(); ++i) {
+            if (dead[i]) continue;
+            const auto& f = tris[i];
+            next.push_back({resolve(f[0]), resolve(f[1]), resolve(f[2])});
+        }
+        for (const auto& f : added) {
+            next.push_back({resolve(f[0]), resolve(f[1]), resolve(f[2])});
+        }
         if (next.size() == tris.size() && added.empty()) break;
         tris.swap(next);
     }

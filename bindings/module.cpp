@@ -259,6 +259,7 @@ nb::tuple stripSliversPy(const std::vector<float>& verts, const std::vector<uint
     nb::dict rep;
     rep["removed"] = r.removed;
     rep["restitched"] = r.restitched;
+    rep["needles"] = r.needles;
     rep["left_behind"] = r.leftBehind;
     rep["passes"] = r.passes;
     return nb::make_tuple(out.vertProperties, out.triVerts, rep);

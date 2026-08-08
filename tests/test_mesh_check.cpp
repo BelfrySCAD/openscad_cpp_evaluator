@@ -321,3 +321,26 @@ TEST(SliverStrip, LeavesACleanMeshUntouched) {
     EXPECT_EQ(r.passes, 0u) << "walked a mesh with nothing to do";
     EXPECT_EQ(out.triVerts, tetra().triVerts);
 }
+
+// A zero-area face with two corners at one point is a needle, not a
+// T-joint: its two long edges run between the same pair of points, so the
+// faces on either side already meet once it is gone. Splitting a neighbour
+// for it would be wrong -- there is no middle vertex to split at.
+TEST(SliverStrip, ANeedleIsRemovedWithoutSplittingAnything) {
+    manifold::MeshGL m = tetra();
+    // Vertex 4 sits exactly on vertex 1, and the needle {0,1,4} has two
+    // corners at that one point.
+    m.vertProperties.insert(m.vertProperties.end(), {1, 0, 0});
+    m.triVerts.insert(m.triVerts.end(), {0u, 1u, 4u});
+    ASSERT_GT(checkMesh(m).degenerateFaces, 0u);
+
+    SliverStripReport r;
+    const manifold::MeshGL out = stripSlivers(m, r);
+    EXPECT_EQ(r.needles, 1u) << "not recognised as a needle: " << r.removed;
+    EXPECT_EQ(r.restitched, 0u) << "split a neighbour it did not need to";
+
+    const MeshDiagnosis d = checkMesh(out);
+    EXPECT_EQ(d.degenerateFaces, 0u) << d.summary();
+    EXPECT_EQ(d.boundaryEdges, 0u) << "removal left holes: " << d.summary();
+    EXPECT_TRUE(d.manifold()) << d.summary();
+}
