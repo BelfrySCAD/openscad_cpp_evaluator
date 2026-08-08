@@ -34,9 +34,13 @@ struct MeshDiagnosis {
     size_t unweldedVertices = 0;
 
     bool watertight() const { return boundaryEdges == 0; }
+    // Topology only. Zero-area faces are deliberately not part of this: a
+    // mesh full of slivers can be a perfectly good closed manifold, and CSG
+    // routinely emits them -- a level-4 Menger sponge has 14. They are worth
+    // reporting, because some slicers drop them and are then left with real
+    // holes, but calling such a mesh "not manifold" is simply wrong.
     bool manifold() const {
-        return boundaryEdges == 0 && nonManifoldEdges == 0 && pinchedVertices == 0
-               && degenerateFaces == 0;
+        return boundaryEdges == 0 && nonManifoldEdges == 0 && pinchedVertices == 0;
     }
     bool orientable() const { return inconsistentEdges == 0; }
     bool ok() const { return manifold() && orientable(); }

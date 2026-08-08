@@ -97,6 +97,47 @@ TEST(MeshCheck, DegenerateAndDuplicateFacesAreReportedSeparately) {
     EXPECT_EQ(d.duplicateFaces, 1u) << d.summary();
 }
 
+// A sliver is still a face. Dropping zero-area triangles before building
+// the edge map leaves their edges with one face each, which reads as a hole
+// that is not there -- a level-4 Menger sponge is manifold with every face
+// present and reported 722 boundary edges without them.
+TEST(MeshCheck, AZeroAreaFaceIsReportedWithoutInventingHoles) {
+    // A closed cube whose top face is fanned through Q, a point sitting
+    // exactly on the diagonal 4-6. That makes face {4,8,6} zero-area while
+    // every edge it owns is still shared with a real neighbour -- which is
+    // the shape CSG actually produces. Drop the sliver and edges 4-8, 8-6
+    // and 4-6 each lose a face, so three holes appear that were never there.
+    manifold::MeshGL m = build(
+        {0, 0, 0,  1, 0, 0,  1, 1, 0,  0, 1, 0,
+         0, 0, 1,  1, 0, 1,  1, 1, 1,  0, 1, 1,
+         0.5f, 0.5f, 1},                      // 8: on the diagonal 4-6
+        {
+            0, 2, 1,  0, 3, 2,                // bottom
+            4, 5, 8,  5, 6, 8,  4, 8, 6,      // top, fanned; {4,8,6} is the sliver
+            4, 6, 7,
+            0, 1, 5,  0, 5, 4,                // sides
+            1, 2, 6,  1, 6, 5,
+            2, 3, 7,  2, 7, 6,
+            3, 0, 4,  3, 4, 7,
+        });
+    const MeshDiagnosis d = checkMesh(m);
+    EXPECT_EQ(d.degenerateFaces, 1u) << "fixture has no sliver: " << d.summary();
+    EXPECT_EQ(d.boundaryEdges, 0u)
+        << "dropping the sliver invented holes: " << d.summary();
+    EXPECT_TRUE(d.watertight()) << d.summary();
+}
+
+// A face naming the same vertex twice is different: its self-edge cannot be
+// matched by anything, so it does have to leave the topology.
+TEST(MeshCheck, AFaceWithARepeatedVertexIsExcludedFromTheTopology) {
+    manifold::MeshGL m = tetra();
+    m.triVerts.insert(m.triVerts.end(), {0u, 1u, 1u});
+    const MeshDiagnosis d = checkMesh(m);
+    EXPECT_EQ(d.degenerateFaces, 1u) << d.summary();
+    EXPECT_EQ(d.boundaryEdges, 0u) << "its self-edge leaked in: " << d.summary();
+    EXPECT_TRUE(d.watertight()) << d.summary();
+}
+
 TEST(MeshCheck, CoincidentButDistinctVerticesAreReported) {
     manifold::MeshGL m = tetra();
     m.vertProperties.insert(m.vertProperties.end(), {0, 0, 0});   // copy of vertex 0

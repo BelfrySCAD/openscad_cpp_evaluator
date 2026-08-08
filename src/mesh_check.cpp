@@ -29,6 +29,14 @@ void pos(const manifold::MeshGL& m, Vert v, double out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = m.vertProperties[v * stride + i];
 }
 
+// A face naming the same vertex twice. Its "edges" include a self-edge, so
+// it cannot take part in the topology at all.
+bool repeatsAVertex(const manifold::MeshGL& m, size_t t) {
+    Vert v[3];
+    triVerts(m, t, v);
+    return v[0] == v[1] || v[1] == v[2] || v[0] == v[2];
+}
+
 bool degenerate(const manifold::MeshGL& m, size_t t) {
     Vert v[3];
     triVerts(m, t, v);
@@ -136,10 +144,16 @@ MeshDiagnosis checkMesh(const manifold::MeshGL& mesh) {
     std::set<std::array<Vert, 3>> seenFaces;
 
     for (size_t t = 0; t < tris; ++t) {
-        if (degenerate(mesh, t)) {
-            ++d.degenerateFaces;
-            continue;               // its edges are meaningless
-        }
+        if (degenerate(mesh, t)) ++d.degenerateFaces;
+        // Counted, but NOT removed from the topology. A zero-area triangle
+        // is still a face with three edges, and dropping it leaves those
+        // edges with one face each -- which then reads as a hole that is
+        // not there. A level-4 Menger sponge is manifold with every face
+        // present and reported 722 boundary edges without them.
+        //
+        // A face naming the same vertex twice is different: its self-edge
+        // cannot be matched by anything, so it genuinely has to go.
+        if (repeatsAVertex(mesh, t)) continue;
         Vert v[3];
         triVerts(mesh, t, v);
 
