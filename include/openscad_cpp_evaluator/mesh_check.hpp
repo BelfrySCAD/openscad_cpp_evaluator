@@ -63,10 +63,11 @@ struct MeshRepairReport {
     size_t filledTriangles = 0;
     size_t splitVertices = 0;
     size_t unfilledHoles = 0;      // boundary loops it could not close
+    size_t strippedSlivers = 0;    // zero-area faces removed and restitched
 
     bool didAnything() const {
         return weldedVertices || droppedDegenerate || droppedDuplicate || reversedFaces
-               || filledHoles || splitVertices;
+               || filledHoles || splitVertices || strippedSlivers;
     }
     // "welded 12 vertices, filled 1 hole (4 triangles)" -- empty if nothing.
     std::string summary() const;

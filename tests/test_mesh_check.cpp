@@ -344,3 +344,35 @@ TEST(SliverStrip, ANeedleIsRemovedWithoutSplittingAnything) {
     EXPECT_EQ(d.boundaryEdges, 0u) << "removal left holes: " << d.summary();
     EXPECT_TRUE(d.manifold()) << d.summary();
 }
+
+// import(repair=true) goes through repairMesh, so it has to deal with
+// slivers too -- an imported STL is exactly where they turn up.
+TEST(MeshRepair, StripsSliversAndRestitchesThem) {
+    const manifold::MeshGL m = cubeWithSliver();
+    ASSERT_EQ(checkMesh(m).degenerateFaces, 1u);
+
+    MeshRepairReport r;
+    const manifold::MeshGL out = repairMesh(m, r);
+    const MeshDiagnosis d = checkMesh(out);
+    EXPECT_EQ(d.degenerateFaces, 0u) << "sliver survived repair: " << d.summary();
+    EXPECT_EQ(d.boundaryEdges, 0u) << "removal left holes: " << d.summary();
+    EXPECT_TRUE(d.manifold()) << d.summary();
+}
+
+// A needle needs no restitching, and welding alone already handles it:
+// collapsing the coincident pair turns the face into one naming a vertex
+// twice, which repair drops. Worth pinning, because it is the reason
+// repair coped with needles before it knew about slivers at all.
+TEST(MeshRepair, WeldingAloneDisposesOfANeedle) {
+    manifold::MeshGL m = tetra();
+    m.vertProperties.insert(m.vertProperties.end(), {1, 0, 0});   // == vertex 1
+    m.triVerts.insert(m.triVerts.end(), {0u, 1u, 4u});
+
+    MeshRepairReport r;
+    const manifold::MeshGL out = repairMesh(m, r);
+    EXPECT_GT(r.weldedVertices, 0u) << r.summary();
+    EXPECT_GT(r.droppedDegenerate, 0u) << r.summary();
+    const MeshDiagnosis d = checkMesh(out);
+    EXPECT_EQ(d.degenerateFaces, 0u) << d.summary();
+    EXPECT_TRUE(d.manifold()) << d.summary();
+}

@@ -204,6 +204,8 @@ std::string MeshRepairReport::summary() const {
                         + (filledHoles == 1 ? " hole filled (" : " holes filled (")
                         + std::to_string(filledTriangles) + " triangles)");
     }
+    add(strippedSlivers, strippedSlivers == 1 ? "zero-area face stripped"
+                                              : "zero-area faces stripped");
     add(unfilledHoles, unfilledHoles == 1 ? "hole left open" : "holes left open");
     std::string out;
     for (size_t i = 0; i < parts.size(); ++i) {
@@ -426,6 +428,15 @@ manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& repo
     out.runTransform.clear();
     out.mergeFromVert.clear();
     out.mergeToVert.clear();
+
+    // Zero-area faces last. Welding already disposes of needles -- it
+    // collapses the coincident pair, leaving a face that names a vertex
+    // twice, which step 2 drops -- but a sliver whose three corners are
+    // distinct and collinear survives all of the above untouched, and an
+    // imported STL is exactly where those turn up.
+    SliverStripReport strip;
+    out = stripSlivers(out, strip);
+    report.strippedSlivers = strip.removed;
     return out;
 }
 
