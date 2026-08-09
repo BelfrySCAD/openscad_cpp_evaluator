@@ -641,6 +641,46 @@ TEST(DebugHooksParity, CallSiteOnItsOwnLineStillStops) {
     EXPECT_EQ(line4, 2);
 }
 
+// Step-into-child aims at the children a `children()` call forwards, not
+// at its own (it has none). Without this, the one statement whose entire
+// job is to run the children offered a debugger nothing to aim at, and the
+// step degraded into a continue -- running off the end of the script.
+TEST(DebugHooksChildren, ChildrenCallForwardsItsCallersChildrenAsStepTargets) {
+    // Line 5 is the child; line 2 is the `children();` that forwards it.
+    const char* src = "module framed(gap) {\n"
+                      "    children();\n"
+                      "}\n"
+                      "framed(20)\n"
+                      "    leaf();\n"
+                      "module leaf() { cube(1); }\n";
+    std::vector<std::pair<int, std::vector<std::pair<std::string, int>>>> seen;
+    DebugHooks hooks;
+    Evaluator* evp = nullptr;
+    hooks.debugHook = [&](int line, int, bool, bool exprLevel, const std::string&,
+                           const std::vector<CallStackFrame>&, const DebugFramesFn&) {
+        if (!exprLevel && evp && evp->lastChildrenPositions())
+            seen.emplace_back(line, *evp->lastChildrenPositions());
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    evp = &ev;
+    auto ast = parseSrc(src);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.evaluate(ast, ctx);
+
+    // At `children();` on line 2, the target is the forwarded child on
+    // line 5 -- not nothing, and not the children() call's own position.
+    bool found = false;
+    for (const auto& [line, positions] : seen) {
+        if (line != 2) continue;
+        found = true;
+        ASSERT_EQ(positions.size(), 1u);
+        EXPECT_EQ(positions.front().second, 5);
+    }
+    EXPECT_TRUE(found) << "no statement-level stop at the children() call";
+}
+
 TEST(DebugHooksParity, BuiltinFunctionCallGetsNoCallSiteStop) {
     // Only the assignment is statement-level; the 3 expr-level stops are
     // the argument list literal's own elements, not a call-site stop.
