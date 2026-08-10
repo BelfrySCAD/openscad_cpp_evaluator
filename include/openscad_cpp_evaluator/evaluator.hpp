@@ -223,6 +223,10 @@ public:
     // evaluate()/resolveTree()+generateTree() complete. Mirrors the
     // reference's Evaluator.id_to_node/id_to_color (also plain public
     // attributes there).
+    // Give cached bodies fresh originalIDs so a second call site reusing
+    // them is not confused with the first. See its definition.
+    void restampCachedIds(std::vector<ColoredBody>& bodies);
+
     std::unordered_map<uint32_t, const oscad::ASTNode*> idToNode;
     std::unordered_map<uint32_t, std::optional<std::array<float, 4>>> idToColor;
 

@@ -5,7 +5,10 @@
 #include "test_helpers.hpp"
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <iterator>
 #include <numbers>
+#include <set>
 
 using namespace oscadeval;
 using namespace oscadeval::test;
@@ -154,6 +157,54 @@ TEST(ManifoldCache, UncacheableNodeAlwaysRegeneratesNeverHitsOrPopulatesCache) {
     // Tainted -> never a cache hit, so real generate work (and thus
     // tagGenerated()) runs again on the second evaluate too.
     EXPECT_FALSE(second.ev.idToNode.empty());
+}
+
+// A cache hit must not hand back the originalIDs of whichever call site
+// first produced the geometry. Those IDs are provenance, and sharing them
+// made two identical shapes one thing to a UI: selecting either picked
+// both. Common in CAD, where arrays of identical parts are the norm.
+TEST(ManifoldCache, IdenticalShapesAtDifferentCallSitesGetDistinctOriginalIds) {
+    auto cache = std::make_shared<ManifoldCache>();
+    Evaluated e = evalSrcWithCache(
+        "translate([0,0,0]) cylinder(h=20,r=4,$fn=32);\n"
+        "translate([25,0,0]) cylinder(h=20,r=4,$fn=32);\n", cache);
+    ASSERT_EQ(e.bodies.size(), 2u);
+
+    // Held in locals: GetMeshGL() returns by value, so taking begin() and
+    // end() from two separate calls walks between unrelated buffers.
+    const manifold::MeshGL meshA = e.bodies[0].body->GetMeshGL();
+    const manifold::MeshGL meshB = e.bodies[1].body->GetMeshGL();
+    const std::set<uint32_t> first(meshA.runOriginalID.begin(), meshA.runOriginalID.end());
+    const std::set<uint32_t> second(meshB.runOriginalID.begin(), meshB.runOriginalID.end());
+    ASSERT_FALSE(first.empty());
+    ASSERT_FALSE(second.empty());
+    std::vector<uint32_t> shared;
+    std::set_intersection(first.begin(), first.end(), second.begin(), second.end(),
+                           std::back_inserter(shared));
+    EXPECT_TRUE(shared.empty()) << "the two cylinders share an originalID";
+
+    // Both still resolve to a node, so re-stamping does not lose the
+    // mapping selection needs.
+    for (uint32_t id : first) EXPECT_EQ(e.ev.idToNode.count(id), 1u);
+    for (uint32_t id : second) EXPECT_EQ(e.ev.idToNode.count(id), 1u);
+}
+
+// Re-stamping is per run, not per body, so a cached subtree made of
+// several parts stays selectable part by part rather than collapsing into
+// one -- which is what Manifold's own AsOriginal() would have done.
+TEST(ManifoldCache, ACachedMultiPartSubtreeKeepsOneIdPerPart) {
+    auto cache = std::make_shared<ManifoldCache>();
+    Evaluated e = evalSrcWithCache(
+        "module pair() { cube(2); translate([5,0,0]) sphere(1,$fn=8); }\n"
+        "pair();\n"
+        "translate([0,20,0]) pair();\n", cache);
+    ASSERT_EQ(e.bodies.size(), 4u);
+    std::set<uint32_t> all;
+    for (const ColoredBody& b : e.bodies) {
+        const manifold::MeshGL mesh = b.body->GetMeshGL();
+        for (uint32_t id : mesh.runOriginalID) all.insert(id);
+    }
+    EXPECT_EQ(all.size(), 4u) << "parts of the reused subtree share IDs";
 }
 
 TEST(ManifoldCache, OutputIsIdenticalCacheOnVsCacheOffAcrossBuiltinCategories) {
