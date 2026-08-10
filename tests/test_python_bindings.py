@@ -223,13 +223,16 @@ def test_role_defaults_to_normal_and_reflects_modifiers():
     # Found in the same pass as tri_colors: bodyToDict() never exposed
     # ColoredBody.role either, crashing the renderer on any real render
     # (it reads cb.role for every body, not just modified ones).
+    # Without a `!` anywhere, every role passes through.
+    path = _write("cube(1);\n#sphere(1);\n%cylinder(h=1,r=1);\n")
+    bodies, _ = Evaluator().evaluate(path)
+    assert sorted(b.role for b in bodies) == ["background", "highlight", "normal"]
+
+    # With one, its subtree IS the model: the siblings go, highlighted ones
+    # included (see rerootAtShowOnly in csg_resolve.cpp).
     path = _write("cube(1);\n#sphere(1);\n%cylinder(h=1,r=1);\n!cube(2);\n")
-    ev = Evaluator()
-    bodies, _ = ev.evaluate(path)
-    roles = sorted(b.role for b in bodies)
-    # show_only (!) present anywhere -> only show_only + highlight bodies
-    # survive evaluate()'s own filter (see anyShowOnly in csg_resolve.cpp).
-    assert roles == ["highlight", "show_only"]
+    bodies, _ = Evaluator().evaluate(path)
+    assert [b.role for b in bodies] == ["show_only"]
 
 
 # -- parse_ast: AST snapshot ---------------------------------------------
