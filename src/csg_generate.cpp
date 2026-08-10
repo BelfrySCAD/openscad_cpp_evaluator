@@ -48,6 +48,7 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
         std::optional<std::vector<ColoredBody>> cached = key ? manifoldCache_->get(*key) : std::nullopt;
         if (cached) {
             node.bodies = std::move(*cached);
+            restampCachedIds(node.bodies);
         } else {
             // Recurse into children first (bottom-up) -- populates each
             // child's own .bodies in place so flattenCsgTree/a GenerateFn
@@ -102,6 +103,37 @@ std::vector<ColoredBody> Evaluator::generatePartialTree() {
     for (const std::vector<std::unique_ptr<CSGNode>>& level : treeStack_)
         for (const std::unique_ptr<CSGNode>& node : level) flat.push_back(node.get());
     return generateTreeImpl(flat);
+}
+
+void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies) {
+    // A cache hit hands back the geometry AND the originalIDs of whichever
+    // call site first produced it. Those IDs are provenance -- "which node
+    // made this" -- not content, so two identical shapes at two call sites
+    // came back sharing one identity and selecting either picked both.
+    //
+    // Each distinct run gets a fresh ID, one per run rather than one per
+    // body, so a cached subtree made of several parts stays selectable
+    // part by part. Each new ID inherits the old one's node and color, so
+    // the parts keep pointing at the AST nodes that really produced them.
+    for (ColoredBody& cb : bodies) {
+        if (!cb.body || cb.body->IsEmpty()) continue;
+        manifold::MeshGL mesh = cb.body->GetMeshGL();
+        if (mesh.runOriginalID.empty()) continue;
+        std::unordered_map<uint32_t, uint32_t> remap;
+        for (uint32_t& id : mesh.runOriginalID) {
+            auto found = remap.find(id);
+            if (found == remap.end()) {
+                const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
+                auto node = idToNode.find(id);
+                if (node != idToNode.end()) idToNode[fresh] = node->second;
+                auto color = idToColor.find(id);
+                if (color != idToColor.end()) idToColor[fresh] = color->second;
+                found = remap.emplace(id, fresh).first;
+            }
+            id = found->second;
+        }
+        cb.body = manifold::Manifold(mesh);
+    }
 }
 
 ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue) {
