@@ -268,6 +268,40 @@ Value matmul(const Value& a, const Value& b) {
     return makeList(std::move(out));
 }
 
+std::string unescapeStringLiteral(const std::string& raw) {
+    // Most strings carry no escape at all, and this runs on every
+    // evaluation of a literal on the tree-walking path -- so don't build a
+    // second copy of the string unless there is something to change.
+    const size_t first = raw.find('\\');
+    if (first == std::string::npos) return raw;
+
+    std::string out;
+    out.reserve(raw.size());
+    out.append(raw, 0, first);
+    for (size_t i = first; i < raw.size(); ++i) {
+        if (raw[i] != '\\' || i + 1 >= raw.size()) {
+            out.push_back(raw[i]);  // a trailing lone backslash stands for itself
+            continue;
+        }
+        const char next = raw[i + 1];
+        switch (next) {
+            case 'n': out.push_back('\n'); ++i; break;
+            case 't': out.push_back('\t'); ++i; break;
+            case 'r': out.push_back('\r'); ++i; break;
+            case '\n': ++i; break;  // line continuation: contributes nothing
+            case '\r':
+                // Only a CRLF pair is a line continuation; a lone CR is an
+                // ordinary escaped character like any other.
+                if (i + 2 < raw.size() && raw[i + 2] == '\n') { i += 2; break; }
+                out.push_back('\r');
+                ++i;
+                break;
+            default: out.push_back(next); ++i; break;  // \\ and \" land here too
+        }
+    }
+    return out;
+}
+
 std::string formatNumber(double v) {
     if (std::isnan(v)) return "nan";
     if (std::isinf(v)) return v > 0 ? "inf" : "-inf";

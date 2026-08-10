@@ -181,6 +181,26 @@ Value matmul(const Value& a, const Value& b);
 // script's output is shown to land on one.
 std::string formatNumber(double v);
 
+// Resolve the escape sequences in a string literal's source text.
+//
+// The parser stores a StringLiteral's text exactly as written, backslashes
+// and all, so that a literal still reproduces the source it came from and
+// pretty-printing round-trips. Cooking is therefore this side's job, and
+// until this existed every escape reached scripts intact: "a\nb" was four
+// characters, a backslash and an 'n' among them, rather than three.
+//
+//   \\ \" \n \t \r    the character they name
+//   \<newline>        nothing at all -- a line continuation, so the string
+//                     carries on with no break in it. A CRLF goes whole:
+//                     leaving the CR behind, as the reference
+//                     implementation does, puts a stray control character
+//                     into the value of any script written on Windows.
+//   \<anything else>  that character, with the backslash dropped
+//
+// A trailing lone backslash is kept as itself. It can only occur in an
+// unterminated literal, which is a parse error long before this runs.
+std::string unescapeStringLiteral(const std::string& raw);
+
 // echo()/str()/assert-message display format: "undef" | "true"/"false" |
 // "[start : step : end]" (range) | formatNumber() (number) | "[e1, e2, ...]"
 // (list, recursive) | "object(k1 = v1, ...)" ("object()" if empty) |

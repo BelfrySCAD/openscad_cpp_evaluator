@@ -38,7 +38,7 @@ const char* kMinimalDxfSquare =
 TEST(DxfImport, ClosedLwpolylineProducesExpectedBoundingBox) {
     const auto path = tempPath("square.dxf");
     writeFile(path, kMinimalDxfSquare);
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6); // 4x3 square
@@ -49,7 +49,7 @@ TEST(DxfImport, ExpressionContextReturnsRegion) {
     const auto path = tempPath("square_expr.dxf");
     writeFile(path, kMinimalDxfSquare);
     Evaluator ev;
-    Value v = asExpr("import(\"" + path.string() + "\")", ev);
+    Value v = asExpr("import(\"" + path.generic_string() + "\")", ev);
     const auto& contours = std::get<ListPtr>(v)->items;
     ASSERT_EQ(contours.size(), 1u);
     const auto& pts = std::get<ListPtr>(contours[0])->items;
@@ -68,7 +68,7 @@ TEST(DxfImport, LayerFilterExcludesOtherLayers) {
         "0\nENDSEC\n0\nEOF\n";
     const auto path = tempPath("layered.dxf");
     writeFile(path, dxf);
-    Evaluated e = evalSrc("import(file=\"" + path.string() + "\", layer=\"keep\");");
+    Evaluated e = evalSrc("import(file=\"" + path.generic_string() + "\", layer=\"keep\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 1.0, 1e-6);
@@ -90,7 +90,7 @@ TEST(DxfImport, ClosedPolylineVertexEntityProducesExpectedArea) {
         "0\nENDSEC\n0\nEOF\n";
     const auto path = tempPath("polyline.dxf");
     writeFile(path, dxf);
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
@@ -111,7 +111,7 @@ TEST(DxfImport, OpenPolylineIsIgnored) {
     const auto path = tempPath("open_polyline.dxf");
     writeFile(path, dxf);
     Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.string() + "\");");
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -131,7 +131,7 @@ TEST(DxfImport, UnrecognizedEntityIsSkipped) {
         "0\nENDSEC\n0\nEOF\n";
     const auto path = tempPath("unrecognized.dxf");
     writeFile(path, dxf);
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
@@ -143,7 +143,7 @@ TEST(DxfImport, NoClosedContoursErrors) {
     const auto path = tempPath("empty.dxf");
     writeFile(path, dxf);
     Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.string() + "\");");
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -155,7 +155,7 @@ TEST(DxfImport, NoClosedContoursErrors) {
 TEST(SvgImport, RectProducesExpectedArea) {
     const auto path = tempPath("rect.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="4" height="3"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
@@ -167,7 +167,7 @@ TEST(SvgImport, PathWithGroupTransformIsTranslatedAndYFlipped) {
     writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg">
         <g transform="translate(10,0)"><path d="M0,0 L4,0 L4,3 L0,3 Z"/></g>
     </svg>)svg");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     manifold::Rect bounds = e.bodies[0].section->Bounds();
@@ -183,7 +183,7 @@ TEST(SvgImport, PathWithGroupTransformIsTranslatedAndYFlipped) {
 TEST(SvgImport, CircleApproximatesAnalyticArea) {
     const auto path = tempPath("circle.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><circle cx="0" cy="0" r="5"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265 * 25.0, 1.0); // 32-segment approximation
     std::filesystem::remove(path);
@@ -192,7 +192,7 @@ TEST(SvgImport, CircleApproximatesAnalyticArea) {
 TEST(SvgImport, CubicBezierPathIsWatertight) {
     const auto path = tempPath("bezier.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 C2,5 8,5 10,0 L10,-5 L0,-5 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_GT(e.bodies[0].section->Area(), 0.0);
@@ -203,7 +203,7 @@ TEST(SvgImport, NoShapesErrors) {
     const auto path = tempPath("noshapes.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><defs><rect x="0" y="0" width="1" height="1"/></defs></svg>)");
     Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.string() + "\");");
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -220,7 +220,7 @@ TEST(SvgImport, EntityReferencesInAttributeValueDecodedWithoutCorruptingParse) {
     // area would come out wrong (or parsing would throw).
     const auto path = tempPath("entities.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><rect id="a&amp;b&lt;c&gt;d&quot;e&apos;f" x="0" y="0" width="4" height="3"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
@@ -241,7 +241,7 @@ TEST(SvgImport, CommentCdataPrologAndDoctypeAreSkipped) {
 <rect x="0" y="0" width="4" height="3"/>
 </svg>
 )");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
@@ -253,7 +253,7 @@ TEST(SvgImport, TransformMatrixIsApplied) {
     writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg">
         <g transform="matrix(2,0,0,2,5,0)"><rect x="0" y="0" width="4" height="3"/></g>
     </svg>)svg");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 48.0, 1e-6); // 2x scale in both axes -> 4x area
     manifold::Rect bounds = e.bodies[0].section->Bounds();
@@ -267,7 +267,7 @@ TEST(SvgImport, TransformScaleWithSeparateXyIsApplied) {
     writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg">
         <g transform="scale(2,3)"><rect x="0" y="0" width="4" height="3"/></g>
     </svg>)svg");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 72.0, 1e-6); // 2x * 3x -> 6x area
     std::filesystem::remove(path);
@@ -278,7 +278,7 @@ TEST(SvgImport, TransformRotateAboutOriginIsApplied) {
     writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg">
         <g transform="rotate(90)"><rect x="0" y="0" width="4" height="3"/></g>
     </svg>)svg");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6); // rotation preserves area
     manifold::Rect bounds = e.bodies[0].section->Bounds();
@@ -294,7 +294,7 @@ TEST(SvgImport, TransformRotateAboutOriginIsApplied) {
 TEST(SvgImport, HorizontalAndVerticalLineCommands) {
     const auto path = tempPath("hv.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 H4 V3 H0 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
     std::filesystem::remove(path);
@@ -303,7 +303,7 @@ TEST(SvgImport, HorizontalAndVerticalLineCommands) {
 TEST(SvgImport, SmoothCubicCommandFollowsCubic) {
     const auto path = tempPath("smoothcubic.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 C1,4 3,4 4,0 S7,-4 8,0 L8,-6 L0,-6 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_GT(e.bodies[0].section->Area(), 0.0);
@@ -313,7 +313,7 @@ TEST(SvgImport, SmoothCubicCommandFollowsCubic) {
 TEST(SvgImport, SmoothQuadraticCommandFollowsQuadratic) {
     const auto path = tempPath("smoothquad.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 Q2,4 4,0 T8,0 L8,-4 L0,-4 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_GT(e.bodies[0].section->Area(), 0.0);
@@ -323,7 +323,7 @@ TEST(SvgImport, SmoothQuadraticCommandFollowsQuadratic) {
 TEST(SvgImport, EllipticalArcCommand) {
     const auto path = tempPath("arc.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 A5,5 0 0,1 10,0 L10,-10 L0,-10 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_GT(e.bodies[0].section->Area(), 0.0);
@@ -333,7 +333,7 @@ TEST(SvgImport, EllipticalArcCommand) {
 TEST(SvgImport, PolygonPointsAttribute) {
     const auto path = tempPath("polygon.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><polygon points="0,0 4,0 4,3 0,3"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
     std::filesystem::remove(path);
@@ -342,7 +342,7 @@ TEST(SvgImport, PolygonPointsAttribute) {
 TEST(SvgImport, PolylinePointsAttribute) {
     const auto path = tempPath("polyline.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><polyline points="0,0 4,0 4,3 0,3"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
     std::filesystem::remove(path);
@@ -351,7 +351,7 @@ TEST(SvgImport, PolylinePointsAttribute) {
 TEST(SvgImport, StrayCharacterInPointsListIsSkipped) {
     const auto path = tempPath("straypoints.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><polygon points="0,0 x 4,0 4,3 0,3"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
     std::filesystem::remove(path);
@@ -360,7 +360,7 @@ TEST(SvgImport, StrayCharacterInPointsListIsSkipped) {
 TEST(SvgImport, StrayCharacterInPathDataIsSkipped) {
     const auto path = tempPath("straypath.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 L4,0 @ L4,3 L0,3 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
     std::filesystem::remove(path);
@@ -374,7 +374,7 @@ TEST(SvgImport, TransformNumberWithExponentIsParsed) {
     writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg">
         <g transform="translate(1e1,0)"><rect x="0" y="0" width="4" height="3"/></g>
     </svg>)svg");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     manifold::Rect bounds = e.bodies[0].section->Bounds();
     EXPECT_NEAR(bounds.min.x, 10.0, 1e-6);
@@ -386,7 +386,7 @@ TEST(SvgImport, PathNumberWithExponentIsParsed) {
     // path `d` attribute rather than a transform argument list.
     const auto path = tempPath("exponent_path.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 L4e0,0 L4,3 L0,3 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
     std::filesystem::remove(path);
@@ -400,7 +400,7 @@ TEST(SvgImport, EllipticalArcWithOutOfRangeRadiiIsScaledUp) {
     // never hit this path.
     const auto path = tempPath("arc_scaled.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 A1,1 0 0,1 10,0 L10,-10 L0,-10 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_GT(e.bodies[0].section->Area(), 0.0);
@@ -413,7 +413,7 @@ TEST(SvgImport, MultipleSubpathsInOnePathProduceMultipleContours) {
     // starting a new one, distinct from an explicit `Z`.
     const auto path = tempPath("multisubpath.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 L4,0 L4,3 L0,3 Z M10,0 L14,0 L14,3 L10,3 Z"/></svg>)");
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
     EXPECT_NEAR(e.bodies[0].section->Area(), 24.0, 1e-6); // two disjoint 4x3 squares

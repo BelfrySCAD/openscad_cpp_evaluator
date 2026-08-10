@@ -1044,7 +1044,7 @@ TEST(BytecodeCompiler, ImportCompilesAsTailPositionBody) {
         std::ofstream out(path);
         out << R"({"a": 1, "b": 2})";
     }
-    EXPECT_EQ(runCapturingEcho("function f() = import(\"" + path.string() + "\");\necho(f());"),
+    EXPECT_EQ(runCapturingEcho("function f() = import(\"" + path.generic_string() + "\");\necho(f());"),
               "ECHO: object(a = 1, b = 2)");
     std::filesystem::remove(path);
 }
@@ -1073,7 +1073,7 @@ TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnEchoAssertImportObjectCases) {
     const std::string script = "function withEcho(x) = echo(\"trace\", x) x + 1;\n"
                                 "function withAssert(x) = assert(x >= 0, \"must be non-negative\") x * 2;\n"
                                 "function withImport() = import(\"" +
-                                path.string() +
+                                path.generic_string() +
                                 "\");\n"
                                 "existing = object(m = 1);\n"
                                 "function withObject() = object(n = 2, existing, m = 3);\n"

@@ -40,7 +40,7 @@ Value asExpr(const std::string& code, Evaluator& ev) {
 TEST(ImportModuleContext, StlRoundTripPreservesVolume) {
     const auto path = tempPath("cube.stl");
     writeCubeAs(path, &writeStl);
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
     EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
@@ -50,7 +50,7 @@ TEST(ImportModuleContext, StlRoundTripPreservesVolume) {
 TEST(ImportModuleContext, ObjRoundTripPreservesVolume) {
     const auto path = tempPath("cube.obj");
     writeCubeAs(path, &writeObj);
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
     EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
@@ -60,7 +60,7 @@ TEST(ImportModuleContext, ObjRoundTripPreservesVolume) {
 TEST(ImportModuleContext, OffRoundTripPreservesVolume) {
     const auto path = tempPath("cube.off");
     writeCubeAs(path, &writeOff);
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
     EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
@@ -70,7 +70,7 @@ TEST(ImportModuleContext, OffRoundTripPreservesVolume) {
 TEST(ImportModuleContext, ThreeMfRoundTripPreservesVolume) {
     const auto path = tempPath("cube.3mf");
     writeCubeAs(path, &writeThreeMf);
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
     EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
@@ -100,7 +100,7 @@ TEST(ImportModuleContext, JsonExtensionErrorsAsGeometryStatement) {
         out << R"({"a": 1})";
     }
     Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.string() + "\");");
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -118,7 +118,7 @@ TEST(ImportModuleContext, MalformedMeshFileErrors) {
         out << "this is not a valid STL file at all";
     }
     Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.string() + "\");");
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -136,7 +136,7 @@ TEST(ImportModuleContext, NonManifoldMeshWarns) {
         out << "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
     }
     std::string lastWarning;
-    Evaluated e = evalSrc("import(\"" + path.string() + "\");", [&](const std::string& msg) { lastWarning = msg; });
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");", [&](const std::string& msg) { lastWarning = msg; });
     EXPECT_NE(lastWarning.find("import: mesh is not a closed solid"), std::string::npos);
     // The triangle is now handed back for display rather than dropped: a
     // file that warns once and then shows nothing gives no way to see what
@@ -158,7 +158,7 @@ TEST(ImportModuleContext, EmptyMeshHasNoTrianglesErrors) {
         std::ofstream out(path);
         out << "OFF\n0 0 0\n";
     }
-    EXPECT_THROW(evalSrc("import(\"" + path.string() + "\");"), EvalError);
+    EXPECT_THROW(evalSrc("import(\"" + path.generic_string() + "\");"), EvalError);
     std::filesystem::remove(path);
 }
 
@@ -168,7 +168,7 @@ TEST(ImportExpressionContext, StlReturnsVnfShape) {
     const auto path = tempPath("cube_vnf.stl");
     writeCubeAs(path, &writeStl);
     Evaluator ev;
-    Value v = asExpr("import(\"" + path.string() + "\")", ev);
+    Value v = asExpr("import(\"" + path.generic_string() + "\")", ev);
     const auto& outer = std::get<ListPtr>(v)->items;
     ASSERT_EQ(outer.size(), 2u);
     const auto& verts = std::get<ListPtr>(outer[0])->items;
@@ -185,7 +185,7 @@ TEST(ImportExpressionContext, JsonReturnsNativeValues) {
         out << R"({"name": "x", "n": 3, "nested": {"a": 1, "b": 2}, "list": [1, 2, 3]})";
     }
     Evaluator ev;
-    Value v = asExpr("import(\"" + path.string() + "\")", ev);
+    Value v = asExpr("import(\"" + path.generic_string() + "\")", ev);
     const auto& obj = std::get<ObjectPtr>(v)->items;
     ASSERT_EQ(obj.size(), 4u);
     EXPECT_EQ(obj[0].first, "name");
@@ -211,7 +211,7 @@ TEST(ImportExpressionContext, JsonNullValueBecomesUndef) {
         out << R"({"x": null})";
     }
     Evaluator ev;
-    Value v = asExpr("import(\"" + path.string() + "\")", ev);
+    Value v = asExpr("import(\"" + path.generic_string() + "\")", ev);
     const auto& obj = std::get<ObjectPtr>(v)->items;
     ASSERT_EQ(obj.size(), 1u);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(obj[0].second));
@@ -227,7 +227,7 @@ TEST(ImportExpressionContext, DxfReturnsRegionContours) {
                "0\nENDSEC\n0\nEOF\n";
     }
     Evaluator ev;
-    Value v = asExpr("import(\"" + path.string() + "\")", ev);
+    Value v = asExpr("import(\"" + path.generic_string() + "\")", ev);
     const auto& contours = std::get<ListPtr>(v)->items;
     ASSERT_EQ(contours.size(), 1u);
     std::filesystem::remove(path);
@@ -250,7 +250,7 @@ TEST(ImportExpressionContext, MalformedMeshFileErrors) {
         out << "not a valid STL file";
     }
     Evaluator ev;
-    EXPECT_THROW(asExpr("import(\"" + path.string() + "\")", ev), EvalError);
+    EXPECT_THROW(asExpr("import(\"" + path.generic_string() + "\")", ev), EvalError);
     std::filesystem::remove(path);
 }
 
