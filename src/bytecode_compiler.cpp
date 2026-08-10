@@ -324,7 +324,10 @@ public:
                 out.push_back({Op::PushBool, static_cast<const oscad::BooleanLiteral&>(node).val ? 1 : 0, 0, nullptr});
                 return;
             case NodeKind::StringLiteral:
-                out.push_back({Op::PushConst, internConst(Value{static_cast<const oscad::StringLiteral&>(node).val}), 0,
+                out.push_back({Op::PushConst,
+                                internConst(Value{unescapeStringLiteral(
+                                    static_cast<const oscad::StringLiteral&>(node).val)}),
+                                0,
                                 nullptr});
                 return;
             case NodeKind::UndefinedLiteral:

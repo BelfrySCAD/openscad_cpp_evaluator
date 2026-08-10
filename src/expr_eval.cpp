@@ -396,7 +396,7 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
         case NodeKind::BooleanLiteral:
             return Value{static_cast<const oscad::BooleanLiteral&>(node).val};
         case NodeKind::StringLiteral:
-            return Value{static_cast<const oscad::StringLiteral&>(node).val};
+            return Value{unescapeStringLiteral(static_cast<const oscad::StringLiteral&>(node).val)};
         case NodeKind::UndefinedLiteral:
             return Value{};
         case NodeKind::CommentedExpr:

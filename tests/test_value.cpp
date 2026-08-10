@@ -1,5 +1,7 @@
 #include "openscad_cpp_evaluator/value.hpp"
 
+#include "test_helpers.hpp"
+
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
@@ -433,4 +435,64 @@ TEST(ExpandIterable, ZeroStepRangeIsNaturallyEmptyNotTooMany) {
     auto items = expandIterable(Value{OscRange{0, 0, 10}}, [&](size_t) { warned = true; });
     EXPECT_FALSE(warned);
     EXPECT_EQ(items.size(), 0u);
+}
+
+// -- String literal escapes ----------------------------------------------
+
+// The parser hands back a literal's source text with its backslashes
+// intact, so that a StringLiteral still reproduces the source and
+// pretty-printing round-trips. Nothing resolved them, so every escape
+// reached scripts raw: "a\nb" was four characters, a backslash and an 'n'
+// among them.
+TEST(StringEscapes, EachSequenceResolvesToTheCharacterItNames) {
+    struct Case { const char* raw; const char* want; const char* what; };
+    const Case cases[] = {
+        {R"(a\\b)",  "a\\b",  "backslash"},
+        {R"(a\nb)",  "a\nb",  "newline"},
+        {R"(a\tb)",  "a\tb",  "tab"},
+        {R"(a\rb)",  "a\rb",  "carriage return"},
+        {R"(a\"b)",  "a\"b",  "quote"},
+        {R"(a\qb)",  "aqb",   "unknown escape keeps the character, drops the backslash"},
+        {"plain",    "plain", "no escape at all"},
+        {"",         "",      "empty"},
+        {R"(\\)",    "\\",    "nothing but an escape"},
+        {"a\\",      "a\\",   "trailing lone backslash stands for itself"},
+    };
+    for (const Case& c : cases)
+        EXPECT_EQ(unescapeStringLiteral(c.raw), c.want) << c.what;
+}
+
+// A backslash escaping the end of a line continues the string with no
+// break in it -- the newline contributes nothing.
+TEST(StringEscapes, BackslashNewlineContributesNothing) {
+    EXPECT_EQ(unescapeStringLiteral("a \\\nb"), "a b") << "LF";
+    EXPECT_EQ(unescapeStringLiteral("a \\\r\nb"), "a b") << "CRLF goes whole";
+    // Deliberately unlike the reference implementation, which drops only
+    // the LF and leaves the CR in the value -- a stray control character
+    // in any string continued in a file written on Windows.
+    EXPECT_EQ(unescapeStringLiteral("a \\\rb"), "a \rb")
+        << "a lone CR is an ordinary escaped character, not a line ending";
+}
+
+// Both evaluation paths build the Value, and only one of them was reached
+// by a first attempt at this.
+TEST(StringEscapes, BothEvaluationPathsCookTheLiteral) {
+    // Tree-walking path: a literal at top level.
+    std::vector<std::string> echoed;
+    auto sink = [&echoed](const std::string& m) { echoed.push_back(m); };
+    oscadeval::test::evaluateSrc("echo(len(\"a\\nb\"));", sink);
+    ASSERT_EQ(echoed.size(), 1u);
+    EXPECT_EQ(echoed[0], "ECHO: 3") << "tree-walking path";
+
+    // Compiled path: inside a function body, which is what gets compiled
+    // to bytecode.
+    echoed.clear();
+    oscadeval::test::evaluateSrc("function f() = len(\"a\\nb\");\necho(f());", sink);
+    ASSERT_EQ(echoed.size(), 1u);
+    EXPECT_EQ(echoed[0], "ECHO: 3") << "compiled path";
+
+    echoed.clear();
+    oscadeval::test::evaluateSrc("function g() = len(\"a \\\nb\");\necho(g());", sink);
+    ASSERT_EQ(echoed.size(), 1u);
+    EXPECT_EQ(echoed[0], "ECHO: 3") << "line continuation, compiled path";
 }
