@@ -225,7 +225,8 @@ public:
     // attributes there).
     // Give cached bodies fresh originalIDs so a second call site reusing
     // them is not confused with the first. See its definition.
-    void restampCachedIds(std::vector<ColoredBody>& bodies);
+    void restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
+                          const oscad::ASTNode* producer);
 
     std::unordered_map<uint32_t, const oscad::ASTNode*> idToNode;
     std::unordered_map<uint32_t, std::optional<std::array<float, 4>>> idToColor;
@@ -1701,6 +1702,13 @@ private:
     EchoFn echoFn_;
     std::shared_ptr<FontProvider> fontProvider_; // null until first fontProvider() call if not injected
     std::shared_ptr<ManifoldCache> manifoldCache_; // opt-in, see the constructor's own doc comment
+
+    // Cache key -> the AST node whose generation filled that entry, for
+    // this render only (cleared alongside idToNode, whose pointers share
+    // the same lifetime). restampCachedIds() uses it to tell a cached ID
+    // that stands for the reused node itself from one that stands for a
+    // node deeper inside it; see there.
+    std::unordered_map<std::string, const oscad::ASTNode*> cacheProducer_;
     std::uint64_t randsCallCount_ = 0; // see noteRandsCall()
 
     // -- Debugging (Phase 9) --------------------------------------------
