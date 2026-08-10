@@ -124,18 +124,46 @@ TEST(ManifoldCacheUncacheable, RandsBeforeGeometryInModuleBodyTaintsSplicedSibli
 // -- cache reuse -----------------------------------------------------------
 
 TEST(ManifoldCache, CacheHitSkipsRegeneratingTheSubtree) {
+    // Read through the children: a hit serves the whole subtree at once, so
+    // the child is never generated and its own .bodies stays empty while
+    // the parent's is populated. (idToNode is no longer a proxy for this --
+    // restampCachedIds() populates it on a hit too, on purpose, or nothing
+    // served from cache would be selectable.)
+    const char* src = "translate([1,0,0]) cube(5, center=true);";
     auto cache = std::make_shared<ManifoldCache>();
-    Evaluated first = evalSrcWithCache("cube(5, center=true);", cache);
-    ASSERT_FALSE(first.ev.idToNode.empty()); // real generate work happened, tagGenerated() ran
 
-    Evaluated second = evalSrcWithCache("cube(5, center=true);", cache);
-    // A cache hit means generateCube() (and thus tagGenerated()) never ran
-    // for the second Evaluator's own node -- its idToNode stays empty even
-    // though its bodies are populated (served from the cache).
-    EXPECT_TRUE(second.ev.idToNode.empty());
+    Evaluated first = evalSrcWithCache(src, cache);
+    ASSERT_EQ(first.tree.size(), 1u);
+    ASSERT_EQ(first.tree[0]->children.size(), 1u);
+    EXPECT_FALSE(first.tree[0]->children[0]->bodies.empty()) << "the cube really was generated";
+
+    Evaluated second = evalSrcWithCache(src, cache);
+    ASSERT_EQ(second.tree.size(), 1u);
+    ASSERT_EQ(second.tree[0]->children.size(), 1u);
+    EXPECT_TRUE(second.tree[0]->children[0]->bodies.empty())
+        << "a cache hit regenerated the subtree it was supposed to replace";
+
     ASSERT_EQ(second.bodies.size(), 1u);
     ASSERT_TRUE(second.bodies[0].body.has_value());
     EXPECT_NEAR(second.bodies[0].body->Volume(), 125.0, 1e-9);
+}
+
+// Geometry served from the cache must still map back to source. Before
+// this, a re-render of an unchanged file was all cache hits against a
+// fresh Evaluator, so no ID carried a node and nothing in the viewport
+// could be picked at all.
+TEST(ManifoldCache, GeometryServedFromAnEarlierEvaluateStillMapsToItsSource) {
+    auto cache = std::make_shared<ManifoldCache>();
+    evalSrcWithCache("cube(5, center=true);", cache);
+
+    Evaluated second = evalSrcWithCache("cube(5, center=true);", cache);
+    ASSERT_EQ(second.bodies.size(), 1u);
+    const manifold::MeshGL mesh = second.bodies[0].body->GetMeshGL();
+    ASSERT_FALSE(mesh.runOriginalID.empty());
+    for (uint32_t id : mesh.runOriginalID) {
+        ASSERT_EQ(second.ev.idToNode.count(id), 1u) << "cached geometry has no source node";
+        EXPECT_NE(second.ev.idToNode.at(id), nullptr);
+    }
 }
 
 TEST(ManifoldCache, DifferentParamsAreNotServedEachOthersCachedResult) {
@@ -187,6 +215,40 @@ TEST(ManifoldCache, IdenticalShapesAtDifferentCallSitesGetDistinctOriginalIds) {
     // mapping selection needs.
     for (uint32_t id : first) EXPECT_EQ(e.ev.idToNode.count(id), 1u);
     for (uint32_t id : second) EXPECT_EQ(e.ev.idToNode.count(id), 1u);
+
+    // ...and to *different* nodes. Distinct IDs alone only separated them
+    // in the viewport: inheriting the first call site's node left the
+    // editor highlighting one line whichever cylinder was picked.
+    for (uint32_t a : first)
+        for (uint32_t b : second)
+            EXPECT_NE(e.ev.idToNode.at(a), e.ev.idToNode.at(b))
+                << "both cylinders point at one source node";
+}
+
+// The other half of that rule. A cached ID standing for something *inside*
+// the reused node keeps its own node: both calls of a module really do
+// come from the one body that spells the parts out. Re-pointing those at
+// the call site would collapse every part of the call onto a single line
+// -- the same defect as above, one level down.
+TEST(ManifoldCache, PartsOfAReusedModuleKeepTheirOwnSourceNodes) {
+    auto cache = std::make_shared<ManifoldCache>();
+    Evaluated e = evalSrcWithCache(
+        "module pair() { cube(2); translate([5,0,0]) sphere(1,$fn=8); }\n"
+        "pair();\n"
+        "translate([0,20,0]) pair();\n", cache);
+    ASSERT_EQ(e.bodies.size(), 4u); // cube, sphere, cube, sphere
+
+    std::vector<const oscad::ASTNode*> nodes;
+    for (const ColoredBody& b : e.bodies) {
+        const manifold::MeshGL mesh = b.body->GetMeshGL();
+        ASSERT_EQ(mesh.runOriginalID.size(), 1u);
+        const uint32_t id = mesh.runOriginalID[0];
+        ASSERT_EQ(e.ev.idToNode.count(id), 1u);
+        nodes.push_back(e.ev.idToNode.at(id));
+    }
+    EXPECT_NE(nodes[0], nodes[1]) << "cube and sphere are not the same source";
+    EXPECT_EQ(nodes[0], nodes[2]) << "the second call's cube lost the cube() that wrote it";
+    EXPECT_EQ(nodes[1], nodes[3]) << "the second call's sphere lost the sphere() that wrote it";
 }
 
 // Re-stamping is per run, not per body, so a cached subtree made of

@@ -48,7 +48,11 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
         std::optional<std::vector<ColoredBody>> cached = key ? manifoldCache_->get(*key) : std::nullopt;
         if (cached) {
             node.bodies = std::move(*cached);
-            restampCachedIds(node.bodies);
+            if (node.node) {
+                auto producer = cacheProducer_.find(*key);
+                restampCachedIds(node.bodies, *node.node,
+                                 producer == cacheProducer_.end() ? nullptr : producer->second);
+            }
         } else {
             // Recurse into children first (bottom-up) -- populates each
             // child's own .bodies in place so flattenCsgTree/a GenerateFn
@@ -76,7 +80,10 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 // Mirrors generate_tree()'s own fallback.
                 node.bodies = flattenCsgTree(node.children);
             }
-            if (key) manifoldCache_->put(*key, node.bodies);
+            if (key) {
+                manifoldCache_->put(*key, node.bodies);
+                cacheProducer_[*key] = node.node;
+            }
         }
         for (const ColoredBody& b : node.bodies) topLevelBodies.push_back(b);
     }
@@ -105,7 +112,8 @@ std::vector<ColoredBody> Evaluator::generatePartialTree() {
     return generateTreeImpl(flat);
 }
 
-void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies) {
+void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
+                                 const oscad::ASTNode* producer) {
     // A cache hit hands back the geometry AND the originalIDs of whichever
     // call site first produced it. Those IDs are provenance -- "which node
     // made this" -- not content, so two identical shapes at two call sites
@@ -113,8 +121,25 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies) {
     //
     // Each distinct run gets a fresh ID, one per run rather than one per
     // body, so a cached subtree made of several parts stays selectable
-    // part by part. Each new ID inherits the old one's node and color, so
-    // the parts keep pointing at the AST nodes that really produced them.
+    // part by part. Which node a fresh ID points at depends on what the old
+    // one stood for:
+    //
+    //   - the reused node itself (`producer`): two separate pieces of
+    //     source wrote the same shape, so this copy belongs to the node
+    //     reusing it, not the one that happened to be generated first.
+    //   - something deeper inside it -- the cube and sphere inside a module
+    //     called twice: both calls really do come from that one line of the
+    //     module body, so the old node is the honest answer and re-pointing
+    //     it at the call site would collapse every part of the call onto a
+    //     single line.
+    //
+    // Across renders the old IDs predate this render's idToNode, so nothing
+    // is known about their structure and everything falls to `node`.
+    //
+    // ponytail: two subtrees identical down to their transforms still
+    // share one attribution, since only the inner node is a cache hit and
+    // its producer check keeps the first copy's descendants. They occupy
+    // the same space, so there is nothing to select apart.
     for (ColoredBody& cb : bodies) {
         if (!cb.body || cb.body->IsEmpty()) continue;
         manifold::MeshGL mesh = cb.body->GetMeshGL();
@@ -124,8 +149,9 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies) {
             auto found = remap.find(id);
             if (found == remap.end()) {
                 const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
-                auto node = idToNode.find(id);
-                if (node != idToNode.end()) idToNode[fresh] = node->second;
+                auto old = idToNode.find(id);
+                idToNode[fresh] =
+                    (old != idToNode.end() && old->second != producer) ? old->second : &node;
                 auto color = idToColor.find(id);
                 if (color != idToColor.end()) idToColor[fresh] = color->second;
                 found = remap.emplace(id, fresh).first;

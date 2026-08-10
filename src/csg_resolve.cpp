@@ -205,6 +205,7 @@ template <typename NodeList>
 std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTreeImpl(const NodeList& nodes, EvalContext& ctx) {
     idToNode.clear();
     idToColor.clear();
+    cacheProducer_.clear(); // holds AST pointers, same lifetime as idToNode's
     treeStack_.clear();
     treeStack_.emplace_back();
     rootCtx_ = &ctx;
