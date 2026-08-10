@@ -46,7 +46,7 @@ TEST(Surface, DatFileHeightsMatchExactVertexPositions) {
     // reference on this shape (12 triangles, bbox [0,0,0]-[2,2,5]).
     const auto path = tempPath("terrain.dat");
     writeDat(path, {{0, 0, 0}, {0, 5, 0}, {0, 0, 0}});
-    Evaluated e = evalSrc("surface(file=\"" + path.string() + "\", center=false);");
+    Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\", center=false);");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
@@ -60,7 +60,7 @@ TEST(Surface, DatFileHeightsMatchExactVertexPositions) {
 TEST(Surface, CenterTrueOffsetsXyAroundOrigin) {
     const auto path = tempPath("terrain_center.dat");
     writeDat(path, {{1, 1, 1}, {1, 1, 1}, {1, 1, 1}});
-    Evaluated e = evalSrc("surface(file=\"" + path.string() + "\", center=true);");
+    Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\", center=true);");
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
     EXPECT_NEAR(bbox.min.x, -1.0, 1e-9); // (cols-1)/2 = 1
     EXPECT_NEAR(bbox.max.x, 1.0, 1e-9);
@@ -70,7 +70,7 @@ TEST(Surface, CenterTrueOffsetsXyAroundOrigin) {
 TEST(Surface, FlatGridVolumeMatchesFootprintTimesHeight) {
     const auto path = tempPath("flat.dat");
     writeDat(path, {{3, 3, 3}, {3, 3, 3}, {3, 3, 3}});
-    Evaluated e = evalSrc("surface(file=\"" + path.string() + "\");");
+    Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].body.has_value());
     EXPECT_NEAR(e.bodies[0].body->Volume(), 2.0 * 2.0 * 3.0, 1e-6); // (cols-1)*(rows-1)*height
     std::filesystem::remove(path);
@@ -80,7 +80,7 @@ TEST(Surface, EmptyFileErrors) {
     const auto path = tempPath("empty.dat");
     writeDat(path, {});
     Evaluator ev;
-    auto ast = parseSrc("surface(file=\"" + path.string() + "\");");
+    auto ast = parseSrc("surface(file=\"" + path.generic_string() + "\");");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -92,7 +92,7 @@ TEST(Surface, EmptyFileErrors) {
 TEST(Surface, UniformGrayImageVolumeMatchesLuminanceFormula) {
     const auto path = tempPath("flat.png");
     writeGrayscalePng(path, 3, 3, std::vector<unsigned char>(9, 128));
-    Evaluated e = evalSrc("surface(file=\"" + path.string() + "\");");
+    Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].body.has_value());
     // gray=128 (r=g=b, so the weighted luminance formula reduces to the
     // input value exactly) -> height = 128/255*100.
@@ -104,8 +104,8 @@ TEST(Surface, UniformGrayImageVolumeMatchesLuminanceFormula) {
 TEST(Surface, InvertFlipsTheHeightMapping) {
     const auto path = tempPath("flat2.png");
     writeGrayscalePng(path, 3, 3, std::vector<unsigned char>(9, 200));
-    Evaluated normal = evalSrc("surface(file=\"" + path.string() + "\", invert=false);");
-    Evaluated inverted = evalSrc("surface(file=\"" + path.string() + "\", invert=true);");
+    Evaluated normal = evalSrc("surface(file=\"" + path.generic_string() + "\", invert=false);");
+    Evaluated inverted = evalSrc("surface(file=\"" + path.generic_string() + "\", invert=true);");
     const double heightNormal = 200.0 / 255.0 * 100.0;
     const double heightInverted = (255.0 - 200.0) / 255.0 * 100.0;
     EXPECT_NEAR(normal.bodies[0].body->Volume(), 2.0 * 2.0 * heightNormal, heightNormal * 2e-3);
@@ -121,7 +121,7 @@ TEST(Surface, ImageRowOrderMatchesBottomRowIsYZero) {
     const auto path = tempPath("rowcheck.png");
     std::vector<unsigned char> px = {0, 0, 255, 255}; // row0: black,black ; row1: white,white
     writeGrayscalePng(path, 2, 2, px);
-    Evaluated e = evalSrc("surface(file=\"" + path.string() + "\");");
+    Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].body.has_value());
     // Slice a thin box at low Y (y in [0,0.5]) and confirm it reaches the
     // white row's full height (100), not the black row's height (0).
