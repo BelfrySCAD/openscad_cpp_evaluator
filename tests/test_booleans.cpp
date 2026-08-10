@@ -177,15 +177,50 @@ TEST(Modifiers, BackgroundIsExcludedFromBooleanMergeButStillReturned) {
     EXPECT_TRUE(hasBackground);
 }
 
-TEST(Modifiers, TopLevelShowOnlyFiltersOutEverythingElse) {
+TEST(Modifiers, TopLevelShowOnlyLeavesNothingButItsOwnSubtree) {
     Evaluated e = evaluateSrc("!cube(1); cube(2); #cube(3);");
-    // evaluate()'s top-level filter: any show_only body present -> keep
-    // only show_only + highlight bodies. cube(2) (role=normal) is dropped;
-    // cube(1) (show_only) and cube(3) (highlight) survive.
-    ASSERT_EQ(e.bodies.size(), 2u);
-    for (const ColoredBody& b : e.bodies) {
-        EXPECT_TRUE(b.role == BodyRole::ShowOnly || b.role == BodyRole::Highlight);
-    }
+    // `!` makes its subtree the whole model, so both siblings go -- the
+    // highlighted one included. This test previously expected cube(3) to
+    // survive on the strength of its role; the reference implementation
+    // renders only cube(1) here (checked against 2021.01).
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(e.bodies[0].role, BodyRole::ShowOnly);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-9);
+}
+
+// The reason a body-role filter could not do this: by the time a body is
+// tagged, every operation wrapped around it has already been applied.
+TEST(Modifiers, ShowOnlyDiscardsTheOperationsWrappedAroundIt) {
+    Evaluated moved = evaluateSrc("translate([50,0,0]) !cube(5);");
+    ASSERT_EQ(moved.bodies.size(), 1u);
+    const manifold::Box box = moved.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(box.min.x, 0.0, 1e-9) << "the translate is an ancestor, so it does not apply";
+    EXPECT_NEAR(box.max.x, 5.0, 1e-9);
+}
+
+// The case that prompted this: an extrude is an ancestor like any other,
+// so what is left is the 2D circle rather than the cylinder.
+TEST(Modifiers, ShowOnlyInsideAnExtrudeLeavesTheProfile) {
+    Evaluated e = evaluateSrc("linear_extrude(height=10) !circle(10);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    // What survives is 2D: a section, not a solid. Extruding it is what
+    // the discarded ancestor would have done.
+    ASSERT_TRUE(e.bodies[0].section.has_value()) << "extruded into a solid";
+    const manifold::Rect bounds = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(bounds.max.x, 10.0, 0.1);
+    EXPECT_NEAR(bounds.min.x, -10.0, 0.1);
+}
+
+TEST(Modifiers, MoreThanOneShowOnlyTakesTheFirstAndWarns) {
+    std::vector<std::string> echoed;
+    Evaluated e = evaluateSrc("translate([50,0,0]) !cube(5);\n!sphere(3);",
+                              [&echoed](const std::string& m) { echoed.push_back(m); });
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box box = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(box.max.x, 5.0, 1e-9) << "the cube, not the sphere";
+    EXPECT_TRUE(std::any_of(echoed.begin(), echoed.end(), [](const std::string& m) {
+        return m.find("More than one Root Modifier") != std::string::npos;
+    })) << "no warning in: " << (echoed.empty() ? "(nothing)" : echoed.front());
 }
 
 TEST(Modifiers, NoShowOnlyMeansAllRolesPassThrough) {

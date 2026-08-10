@@ -1,3 +1,4 @@
+#include <functional>
 #include "openscad_cpp_evaluator/dispatch.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
@@ -255,6 +256,7 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     using Clock = std::chrono::steady_clock;
     const Clock::time_point resolveStart = profiling_ ? Clock::now() : Clock::time_point{};
     std::vector<std::unique_ptr<CSGNode>> tree = resolveTreeImpl(nodes, ctx);
+    rerootAtShowOnly(tree);
     const Clock::time_point resolveEnd = profiling_ ? Clock::now() : Clock::time_point{};
     std::vector<ColoredBody> result = generateTree(tree);
     const Clock::time_point generateEnd = profiling_ ? Clock::now() : Clock::time_point{};
@@ -287,6 +289,44 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
         return filtered;
     }
     return result;
+}
+
+
+// `!` does not merely tag what it marks -- it makes that subtree the whole
+// model. Everything else goes: siblings, and every operation wrapped around
+// it. `translate([50,0,0]) !cube(5);` puts a cube at the origin, and
+// `linear_extrude(height=10) !circle(10);` leaves a 2D circle rather than a
+// cylinder, because the extrude is an ancestor and ancestors are discarded.
+//
+// Tagging the bodies and filtering them at the end -- which is what this
+// did before -- cannot express that: by the time a body carries the tag,
+// every ancestor has already been applied to it.
+void Evaluator::rerootAtShowOnly(std::vector<std::unique_ptr<CSGNode>>& tree) {
+    std::vector<std::unique_ptr<CSGNode>*> found;
+    // Pre-order, so `found.front()` is the first one in the source.
+    std::function<void(std::vector<std::unique_ptr<CSGNode>>&)> walk =
+        [&](std::vector<std::unique_ptr<CSGNode>>& nodes) {
+            for (std::unique_ptr<CSGNode>& n : nodes) {
+                if (!n) continue;
+                if (n->kind == "show_only") found.push_back(&n);
+                walk(n->children);
+            }
+        };
+    walk(tree);
+    if (found.empty()) return;
+
+    if (found.size() > 1) {
+        // Same rule as the reference: warn, and take the first.
+        const CSGNode& second = **found[1];
+        warn("More than one Root Modifier (!)",
+             second.node ? &second.node->position() : nullptr);
+    }
+
+    // Moved out before the rest of the tree is dropped -- its owner is
+    // somewhere inside what is about to be destroyed.
+    std::unique_ptr<CSGNode> chosen = std::move(*found.front());
+    tree.clear();
+    tree.push_back(std::move(chosen));
 }
 
 std::vector<ColoredBody> Evaluator::evaluate(const std::vector<std::unique_ptr<oscad::ASTNode>>& nodes, EvalContext& ctx,

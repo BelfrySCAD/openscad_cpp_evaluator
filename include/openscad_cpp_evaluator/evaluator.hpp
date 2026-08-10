@@ -330,6 +330,11 @@ public:
     // free function, same reasoning as tagGenerated()/builtinChildren().
     void warn(const std::string& message, const oscad::Position* position);
 
+    // Apply `!`: replace the whole tree with the first show_only
+    // subtree, discarding its ancestors and every sibling. See its
+    // definition for why this cannot be done by tagging bodies.
+    void rerootAtShowOnly(std::vector<std::unique_ptr<CSGNode>>& tree);
+
     // parent_module(idx) support: walks the live module-call stack
     // (innermost last) and returns the name `idx` levels up from the
     // current module, or undef if out of range. Public because

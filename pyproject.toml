@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "openscad_cpp_evaluator"
-version = "0.28.0"
+version = "0.28.1"
 description = "C++ OpenSCAD evaluator with Python bindings"
 readme = "README.md"
 requires-python = ">=3.12"
