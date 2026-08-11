@@ -378,3 +378,65 @@ TEST(Minkowski2D, ThreeDStillWorksAndStillWins) {
     ASSERT_EQ(a.bodies.size(), 1u);
     EXPECT_GT(a.bodies[0].body->Volume(), 30.0 * 20.0 * 6.0);
 }
+
+// The edge sweep is only valid when the shape being swept is convex and
+// contains the origin, and when a third operand is folded rather than
+// unioned in. Each of these fails, by a measurable amount, if the
+// corresponding step is skipped -- so each is here on its own.
+
+TEST(Minkowski2D, SweepsAConcaveSweeperByItsConvexPieces) {
+    // Hulling the sweeper instead of decomposing it computes A (+) hull(B)
+    // and comes out at 5092 against the reference's 4992.
+    Evaluated e = evaluateSrc(R"(
+        linear_extrude(4) minkowski() {
+            polygon([[0,0],[40,0],[40,25],[22,25],[22,12],[0,12]]);
+            polygon([[0,0],[8,0],[8,8],[5,8],[5,3],[0,3]]);
+        }
+    )");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 4992.0, 5.0);
+}
+
+TEST(Minkowski2D, ASweeperAwayFromTheOriginStillLandsInTheRightPlace) {
+    // The identity unions A itself, which only holds when the sweeper
+    // contains the origin. Without shifting it there and back, the result
+    // keeps an untranslated copy of A and starts at x=0 instead of x=16.
+    Evaluated e = evaluateSrc(R"(
+        linear_extrude(4) minkowski() {
+            polygon([[0,0],[40,0],[40,25],[22,25],[22,12],[0,12]]);
+            translate([20,0]) circle(4, $fn=24);
+        }
+    )");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box box = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(box.min.x, 16.0, 0.2);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 5120.47, 5.0);
+}
+
+TEST(Minkowski2D, ThreeOperandsAreSummedInTurnNotUnioned) {
+    // A (+) B (+) C, not A (+) (B union C) -- which would give 3711.
+    Evaluated e = evaluateSrc(
+        "linear_extrude(4) minkowski() { square([30,20], center=true);"
+        " circle(3, $fn=16); square([6,2], center=true); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 4670.21, 5.0);
+    const manifold::Box box = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(box.max.x - box.min.x, 42.0, 0.2);
+}
+
+TEST(Minkowski2D, AShapeWithAHoleHasBothItsContoursSwept) {
+    // Only the boundary of the shape being swept along is walked, so a
+    // hole is not a special case -- it is another contour.
+    Evaluated e = evaluateSrc(R"(
+        linear_extrude(3) minkowski() {
+            difference() { square([40,30], center=true); circle(8, $fn=24); }
+            circle(2, $fn=16);
+        }
+    )");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 4141.98, 5.0);
+    // The hole shrinks by the sweep rather than filling in.
+    const manifold::Manifold probe =
+        manifold::Manifold::Cube({1.0, 1.0, 6.0}).Translate({-0.5, -0.5, -1.0});
+    EXPECT_TRUE((*e.bodies[0].body ^ probe).IsEmpty()) << "the hole was filled in";
+}

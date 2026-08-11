@@ -124,28 +124,58 @@ std::vector<manifold::SimplePolygon> convexPieces(const manifold::CrossSection& 
 
 // The 2D Minkowski sum of two shapes.
 //
-// Manifold has no 2D Minkowski of its own, so: cut both into convex
-// pieces, take the convex hull of every pairwise sum of points, and union
-// the lot. Correct because the sum of two convex sets is the hull of
-// their pairwise sums, and Minkowski distributes over union.
+// Manifold has no 2D Minkowski, so this is the boundary-sweep identity:
+// for B convex and containing the origin,
 //
-// ponytail: pieces multiply, so two 64-segment circles are 62 x 62 hulls.
-// Convex shapes stay whole, which is the case that actually turns up
-// (sweeping a circle), and the reference is no quicker at this.
+//     A (+) B  =  A  union  (boundary of A (+) B)
+//
+// and the boundary is a chain of segments, each of which sums with a
+// convex B to the hull of B at its two ends. So sweeping B along every
+// edge of A and unioning A itself is the whole answer -- A is never cut
+// up, however concave it is or however many holes it has. Only B is,
+// and only because the per-segment hull needs it convex.
+//
+// The two conditions on B are met rather than assumed: it is decomposed
+// into convex pieces (Minkowski distributes over union, so the pieces'
+// sums are unioned), and each piece is shifted onto the origin with the
+// shift undone afterwards, since A (+) B = ((A (+) (B - c)) + c).
+//
+// ponytail: one hull per edge of A per convex piece of B. A piece count
+// of one is the case that turns up -- a circle swept over something --
+// and then it is simply one hull per edge.
 manifold::CrossSection minkowski2d(const manifold::CrossSection& a, const manifold::CrossSection& b) {
-    const std::vector<manifold::SimplePolygon> pa = convexPieces(a);
-    const std::vector<manifold::SimplePolygon> pb = convexPieces(b);
+    const manifold::Polygons outline = a.ToPolygons();
     std::vector<manifold::CrossSection> parts;
-    parts.reserve(pa.size() * pb.size());
-    for (const manifold::SimplePolygon& x : pa) {
-        for (const manifold::SimplePolygon& y : pb) {
-            manifold::SimplePolygon sum;
-            sum.reserve(x.size() * y.size());
-            for (const manifold::vec2& p : x)
-                for (const manifold::vec2& q : y) sum.push_back({p.x + q.x, p.y + q.y});
-            if (sum.size() >= 3) parts.push_back(manifold::CrossSection::Hull(sum));
+
+    for (const manifold::SimplePolygon& piece : convexPieces(b)) {
+        if (piece.size() < 3) continue;
+        // Bring the piece onto the origin; the sum is shifted back after.
+        manifold::vec2 shift = piece[0];
+        manifold::SimplePolygon centred;
+        centred.reserve(piece.size());
+        for (const manifold::vec2& q : piece) centred.push_back({q.x - shift.x, q.y - shift.y});
+
+        std::vector<manifold::CrossSection> swept;
+        // A itself: only sound because `centred` contains the origin.
+        swept.push_back(a);
+        for (const manifold::SimplePolygon& ring : outline) {
+            for (size_t i = 0; i < ring.size(); ++i) {
+                const manifold::vec2& v0 = ring[i];
+                const manifold::vec2& v1 = ring[(i + 1) % ring.size()];
+                manifold::SimplePolygon ends;
+                ends.reserve(centred.size() * 2);
+                for (const manifold::vec2& q : centred) {
+                    ends.push_back({v0.x + q.x, v0.y + q.y});
+                    ends.push_back({v1.x + q.x, v1.y + q.y});
+                }
+                swept.push_back(manifold::CrossSection::Hull(ends));
+            }
         }
+        manifold::CrossSection sum =
+            manifold::CrossSection::BatchBoolean(swept, manifold::OpType::Add);
+        parts.push_back(sum.Translate(shift));
     }
+
     if (parts.empty()) return manifold::CrossSection();
     return manifold::CrossSection::BatchBoolean(parts, manifold::OpType::Add);
 }
