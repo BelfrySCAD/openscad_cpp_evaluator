@@ -317,3 +317,64 @@ TEST(PolyhedronFaces, ADegenerateFaceDoesNotThrowOrHang) {
     )");
     EXPECT_EQ(e.bodies.size(), 1u);
 }
+
+// -- 2D minkowski ---------------------------------------------------------
+
+// minkowski() used to drop 2D sections on the floor, silently: this
+// produced no geometry at all where the reference produces the rounded
+// square asked for. Manifold has no 2D Minkowski, so it is built from
+// convex pieces and hulls -- see minkowski2d().
+TEST(Minkowski2D, RoundsAConvexOutline) {
+    Evaluated e = evaluateSrc(
+        "linear_extrude(6) minkowski() { square([30,20], center=true); circle(4, $fn=24); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    // A 30x20 rectangle grown by 4: the rectangle, four 4-wide sides, and
+    // the corners adding up to one circle. Times 6 high.
+    const double expected = (30.0 * 20.0 + 2 * 4 * (30 + 20) + M_PI * 16.0) * 6.0;
+    EXPECT_NEAR(e.bodies[0].body->Volume(), expected, expected * 0.01);
+    const manifold::Box box = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(box.max.x - box.min.x, 38.0, 0.01);
+    EXPECT_NEAR(box.max.y - box.min.y, 28.0, 0.01);
+}
+
+// The case a hull cannot fake: a concave outline has to stay concave.
+TEST(Minkowski2D, KeepsAConcaveOutlineConcave) {
+    Evaluated e = evaluateSrc(R"(
+        linear_extrude(4) minkowski() {
+            polygon([[0,0],[40,0],[40,25],[22,25],[22,12],[0,12]]);
+            circle(3, $fn=16);
+        }
+    )");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box box = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(box.max.x - box.min.x, 46.0, 0.2);
+    EXPECT_NEAR(box.max.y - box.min.y, 31.0, 0.2);
+    // The notch has to still be a notch. A volume bound is too blunt to
+    // say so -- hulling the pieces rather than unioning them lands within
+    // 1% of the right answer here -- so probe the hole itself: the L is
+    // missing the region x 0..22, y 12..25, and rounding by 3 does not
+    // reach anywhere near the middle of it.
+    // The probe has to sit inside what a hull WOULD cover and outside the
+    // real shape, or it proves nothing: the hull runs from (0,12) to
+    // (22,25), and the rounded L stops at y=15 for any x below 22.
+    const manifold::Manifold probe =
+        manifold::Manifold::Cube({1.0, 1.0, 8.0}).Translate({17.0, 17.0, -2.0});
+    EXPECT_TRUE((*e.bodies[0].body ^ probe).IsEmpty()) << "the notch was filled in";
+    // ...while somewhere solid is genuinely solid.
+    const manifold::Manifold inside =
+        manifold::Manifold::Cube({2.0, 2.0, 8.0}).Translate({30.0, 5.0, -2.0});
+    EXPECT_FALSE((*e.bodies[0].body ^ inside).IsEmpty());
+}
+
+TEST(Minkowski2D, OneSectionIsHandedBackUnchanged) {
+    Evaluated e = evaluateSrc("linear_extrude(3) minkowski() { square([10,10]); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 300.0, 1e-6);
+}
+
+TEST(Minkowski2D, ThreeDStillWorksAndStillWins) {
+    Evaluated a = evaluateSrc("minkowski() { cube([30,20,6], center=true); sphere(3, $fn=12); }");
+    ASSERT_EQ(a.bodies.size(), 1u);
+    EXPECT_GT(a.bodies[0].body->Volume(), 30.0 * 20.0 * 6.0);
+}
