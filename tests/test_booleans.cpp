@@ -227,3 +227,93 @@ TEST(Modifiers, NoShowOnlyMeansAllRolesPassThrough) {
     Evaluated e = evaluateSrc("%cube(1); cube(2);");
     EXPECT_EQ(e.bodies.size(), 2u);
 }
+
+// -- polyhedron face triangulation ---------------------------------------
+
+// An L-shaped prism: its top and bottom are 6-gons with one reflex corner.
+// Fan-triangulating a concave face lays triangles outside the polygon and
+// winds some of them inside out, so the solid comes out the wrong size --
+// which is how BOSL2's nurbs_sheet() end caps ended up covering 281% of
+// their own area with 15 of 32 triangles reversed.
+// A U: vertex 0 cannot see the far arm, so a fan anchored there lays
+// triangles across the notch, outside the solid. (An L is not enough on
+// its own -- it happens to be star-shaped from its first vertex, so even
+// a fan triangulates it correctly, which is why the volume check below
+// needs this shape too.)
+static const char* kUPrism = R"(
+pts = [[0,0],[3,0],[3,3],[2,3],[2,1],[1,1],[1,3],[0,3]];
+polyhedron(
+  points = concat([for (p=pts) [p[0],p[1],0]], [for (p=pts) [p[0],p[1],1]]),
+  faces = concat(
+    [[for (i=[0:len(pts)-1]) i]],
+    [[for (i=[len(pts)-1:-1:0]) i+len(pts)]],
+    [for (i=[0:len(pts)-1]) [i, i+len(pts), (i+1)%len(pts)+len(pts), (i+1)%len(pts)]]
+  )
+);
+)";
+
+static const char* kLPrism = R"(
+polyhedron(
+    points = [
+        [0,0,0], [2,0,0], [2,1,0], [1,1,0], [1,2,0], [0,2,0],
+        [0,0,1], [2,0,1], [2,1,1], [1,1,1], [1,2,1], [0,2,1]
+    ],
+    faces = [
+        [0,1,2,3,4,5],
+        [11,10,9,8,7,6],
+        [0,6,7,1], [1,7,8,2], [2,8,9,3],
+        [3,9,10,4], [4,10,11,5], [5,11,6,0]
+    ]
+);
+)";
+
+TEST(PolyhedronFaces, AConcaveFaceGivesTheRightVolume) {
+    Evaluated e = evaluateSrc(kLPrism);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    // The L is 3 square units, extruded 1 high.
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 3.0, 1e-9);
+}
+
+TEST(PolyhedronFaces, AConcaveFaceGivesTheRightSurfaceArea) {
+    Evaluated e = evaluateSrc(kLPrism);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    // 2 x 3 for the ends, plus a perimeter of 8 x height 1.
+    EXPECT_NEAR(e.bodies[0].body->SurfaceArea(), 14.0, 1e-9);
+}
+
+TEST(PolyhedronFaces, EachFaceBecomesExactlyNMinusTwoTriangles) {
+    Evaluated e = evaluateSrc(kLPrism);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    // Two 6-gons (4 each) and six quads (2 each).
+    const manifold::MeshGL mesh = e.bodies[0].body->GetMeshGL();
+    EXPECT_EQ(mesh.triVerts.size() / 3, 4u + 4u + 6u * 2u);
+}
+
+// A convex face has to keep working, and a triangle must not be disturbed.
+TEST(PolyhedronFaces, AFaceWithAnUnseeableCornerGivesTheRightVolume) {
+    Evaluated e = evaluateSrc(kUPrism);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    // 3x3 less the 1x2 notch, one unit high.
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 7.0, 1e-9);
+    // Two ends of 7, plus a 16-long perimeter one unit high.
+    EXPECT_NEAR(e.bodies[0].body->SurfaceArea(), 30.0, 1e-9);
+}
+
+TEST(PolyhedronFaces, AConvexFaceIsUnchanged) {
+    Evaluated e = evaluateSrc("cube(2);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-9);
+    EXPECT_NEAR(e.bodies[0].body->SurfaceArea(), 24.0, 1e-9);
+}
+
+TEST(PolyhedronFaces, ADegenerateFaceDoesNotThrowOrHang) {
+    // All points collinear: no plane to project onto. It must fall through
+    // rather than spin in the ear-clipping loop.
+    Evaluated e = evaluateSrc(R"(
+        polyhedron(points=[[0,0,0],[1,0,0],[2,0,0],[0,0,1]],
+                   faces=[[0,1,2],[0,2,3],[0,3,1],[1,3,2]]);
+    )");
+    EXPECT_EQ(e.bodies.size(), 1u);
+}
