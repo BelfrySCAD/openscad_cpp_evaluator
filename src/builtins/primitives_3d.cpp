@@ -239,6 +239,164 @@ std::vector<ColoredBody> generateCylinder(Evaluator& ev, const CSGParams& params
 // otherwise produce a NotManifold body). Mirrors
 // _resolve_polyhedron/_generate_polyhedron.
 
+
+namespace {
+
+// Triangulate one polyhedron face.
+//
+// A fan -- (v0, vi, vi+1) for every i -- is only correct for a polygon
+// that is both convex and planar, and BOSL2's vnf_polyhedron() routinely
+// hands over neither. The end caps of a nurbs_sheet() are 34-gons that
+// are concave and 3.5 units out of plane; fanning one produced 32
+// triangles covering 281% of the cap's true area with 15 of them wound
+// inside out, which inflated the finished solid by 12% of its surface
+// area and 5% of its volume.
+//
+// Ear clipping in the face's own best-fit plane instead. Newell's method
+// gives a normal that stays meaningful when the points are not coplanar,
+// which is what makes projecting them usable at all here.
+//
+// ponytail: O(n^2). Faces are a handful of points in nearly every model
+// and 34 in the one that prompted this; revisit if a model ever arrives
+// with thousand-sided faces.
+void triangulateFace(const std::vector<std::array<double, 3>>& verts, const std::vector<size_t>& loop,
+                      std::vector<uint32_t>& out) {
+    const size_t n = loop.size();
+    if (n < 3) return;
+
+    // Winding is reversed on the way out throughout: OpenSCAD's faces are
+    // clockwise seen from outside, Manifold wants counter-clockwise.
+    auto emit = [&out](size_t a, size_t b, size_t c) {
+        if (a == b || b == c || a == c) return;
+        out.push_back(static_cast<uint32_t>(a));
+        out.push_back(static_cast<uint32_t>(c));
+        out.push_back(static_cast<uint32_t>(b));
+    };
+    if (n == 3) {
+        emit(loop[0], loop[1], loop[2]);
+        return;
+    }
+
+    std::array<double, 3> nrm = {0.0, 0.0, 0.0};
+    for (size_t i = 0; i < n; ++i) {
+        const std::array<double, 3>& a = verts[loop[i]];
+        const std::array<double, 3>& b = verts[loop[(i + 1) % n]];
+        nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    const double len = std::sqrt(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]);
+    if (!(len > 1e-12)) {
+        // Every point collinear, or the loop encloses no area: a fan is as
+        // good as anything and cannot make it worse.
+        for (size_t i = 1; i + 1 < n; ++i) emit(loop[0], loop[i], loop[i + 1]);
+        return;
+    }
+    for (double& c : nrm) c /= len;
+
+    // Any two axes spanning the plane will do; take the world axis least
+    // aligned with the normal so the projection never collapses.
+    const size_t drop = (std::abs(nrm[0]) > std::abs(nrm[1]))
+                            ? ((std::abs(nrm[0]) > std::abs(nrm[2])) ? 0 : 2)
+                            : ((std::abs(nrm[1]) > std::abs(nrm[2])) ? 1 : 2);
+    std::array<double, 3> axis = {0.0, 0.0, 0.0};
+    axis[(drop + 1) % 3] = 1.0;
+    std::array<double, 3> u = {axis[1] * nrm[2] - axis[2] * nrm[1], axis[2] * nrm[0] - axis[0] * nrm[2],
+                                axis[0] * nrm[1] - axis[1] * nrm[0]};
+    const double ulen = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (!(ulen > 1e-12)) {
+        for (size_t i = 1; i + 1 < n; ++i) emit(loop[0], loop[i], loop[i + 1]);
+        return;
+    }
+    for (double& c : u) c /= ulen;
+    const std::array<double, 3> w = {nrm[1] * u[2] - nrm[2] * u[1], nrm[2] * u[0] - nrm[0] * u[2],
+                                      nrm[0] * u[1] - nrm[1] * u[0]};
+
+    std::vector<std::array<double, 2>> flat(n);
+    for (size_t i = 0; i < n; ++i) {
+        const std::array<double, 3>& p = verts[loop[i]];
+        flat[i] = {p[0] * u[0] + p[1] * u[1] + p[2] * u[2], p[0] * w[0] + p[1] * w[1] + p[2] * w[2]};
+    }
+
+    auto cross2 = [](const std::array<double, 2>& a, const std::array<double, 2>& b,
+                     const std::array<double, 2>& c) {
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    };
+    double twiceArea = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const std::array<double, 2>& a = flat[i];
+        const std::array<double, 2>& b = flat[(i + 1) % n];
+        twiceArea += a[0] * b[1] - b[0] * a[1];
+    }
+
+    std::vector<size_t> idx(n);
+    for (size_t i = 0; i < n; ++i) idx[i] = i;
+    if (twiceArea < 0.0) std::reverse(idx.begin(), idx.end());   // work counter-clockwise
+
+    auto inside = [&](const std::array<double, 2>& a, const std::array<double, 2>& b,
+                      const std::array<double, 2>& c, const std::array<double, 2>& p) {
+        // Strictly inside, so a vertex sitting exactly on an edge does not
+        // veto an otherwise good ear.
+        const double d1 = cross2(a, b, p), d2 = cross2(b, c, p), d3 = cross2(c, a, p);
+        return d1 > 1e-12 && d2 > 1e-12 && d3 > 1e-12;
+    };
+
+    // Take the best-shaped ear available rather than the first one found.
+    // Any valid ear gives a correct triangulation, but on a face that is
+    // not flat the choice decides how the surface folds: first-found
+    // clipping strung long thin triangles across the curved end caps and
+    // came out 29% larger in area than the reference's tessellation of the
+    // same polygon. Preferring fat ears tracks the surface instead.
+    auto squareness = [&](size_t a, size_t b, size_t c) {
+        // Twice the area over the sum of the squared sides -- highest for
+        // an equilateral triangle, near zero for a sliver.
+        const std::array<double, 3>& p = verts[loop[a]];
+        const std::array<double, 3>& q = verts[loop[b]];
+        const std::array<double, 3>& r = verts[loop[c]];
+        const std::array<double, 3> e1 = {q[0] - p[0], q[1] - p[1], q[2] - p[2]};
+        const std::array<double, 3> e2 = {r[0] - p[0], r[1] - p[1], r[2] - p[2]};
+        const std::array<double, 3> e3 = {r[0] - q[0], r[1] - q[1], r[2] - q[2]};
+        const std::array<double, 3> x = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                          e1[0] * e2[1] - e1[1] * e2[0]};
+        const double area = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+        const double sides = e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2] +
+                              e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2] +
+                              e3[0] * e3[0] + e3[1] * e3[1] + e3[2] * e3[2];
+        return sides > 1e-18 ? area / sides : 0.0;
+    };
+
+    size_t guard = 0;
+    while (idx.size() > 3 && guard++ < n * n) {
+        size_t bestAt = idx.size();
+        double bestScore = -1.0;
+        for (size_t i = 0; i < idx.size(); ++i) {
+            const size_t pi = idx[(i + idx.size() - 1) % idx.size()];
+            const size_t ci = idx[i];
+            const size_t ni = idx[(i + 1) % idx.size()];
+            if (cross2(flat[pi], flat[ci], flat[ni]) <= 1e-12) continue;   // reflex, not an ear
+            bool empty = true;
+            for (size_t other : idx) {
+                if (other == pi || other == ci || other == ni) continue;
+                if (inside(flat[pi], flat[ci], flat[ni], flat[other])) { empty = false; break; }
+            }
+            if (!empty) continue;
+            const double score = squareness(pi, ci, ni);
+            if (score > bestScore) { bestScore = score; bestAt = i; }
+        }
+        if (bestAt == idx.size()) break;   // self-intersecting or otherwise unclippable
+        const size_t pi = idx[(bestAt + idx.size() - 1) % idx.size()];
+        const size_t ci = idx[bestAt];
+        const size_t ni = idx[(bestAt + 1) % idx.size()];
+        emit(loop[pi], loop[ci], loop[ni]);
+        idx.erase(idx.begin() + static_cast<long>(bestAt));
+    }
+    // Whatever is left: three points, or a remainder no ear could be found
+    // in. A fan over the remainder is the best available answer.
+    for (size_t i = 1; i + 1 < idx.size(); ++i) emit(loop[idx[0]], loop[idx[i]], loop[idx[i + 1]]);
+}
+
+} // namespace
+
 CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     Value pointsArg = getArg(args, 0, "points", Value{});
@@ -292,14 +450,7 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
             const size_t idx = static_cast<size_t>(toDoubleLenient(idxVal));
             remapped.push_back(idx < remap.size() ? remap[idx] : 0);
         }
-        for (size_t i = 1; i + 1 < remapped.size(); ++i) {
-            const size_t a = remapped[0], b = remapped[i + 1], c = remapped[i];
-            if (a != b && b != c && a != c) {
-                tris.push_back(static_cast<uint32_t>(a));
-                tris.push_back(static_cast<uint32_t>(b));
-                tris.push_back(static_cast<uint32_t>(c));
-            }
-        }
+        triangulateFace(uniqueVerts, remapped, tris);
     }
 
     std::vector<Value> vertsValues;
