@@ -39,7 +39,10 @@ void writeObj(const std::string& path, const std::vector<ColoredBody>& bodies);
 void writeOff(const std::string& path, const std::vector<ColoredBody>& bodies);
 
 // 3MF: one mesh object + a base-color colorgroup per body (skipping empty
-// bodies), written as a stored (uncompressed) ZIP -- see zip_stored.hpp.
+// bodies), written as a DEFLATE-compressed ZIP (writeDeflateZip, see
+// zip_stored.hpp) -- the XML is highly compressible, so storing it would
+// make the file several times larger for nothing. An entry that does not
+// actually shrink is stored raw, as any ZIP writer would.
 // Mirrors export.py's write_3mf's XML shape exactly (core + material
 // namespaces, %.6g vertex formatting); throws std::runtime_error if there's
 // no geometry to export.
