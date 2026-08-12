@@ -77,6 +77,40 @@ TEST(ImportModuleContext, ThreeMfRoundTripPreservesVolume) {
     std::filesystem::remove(path);
 }
 
+// The .3mf writeThreeMf() produces is DEFLATE-compressed, not stored. The
+// round-trip test above passes either way -- the reader accepts both
+// methods -- so without this a regression to STORED would show up only as
+// files several times bigger than they need to be.
+TEST(ImportModuleContext, ThreeMfIsDeflateCompressed) {
+    const auto path = tempPath("cube_compressed.3mf");
+    writeCubeAs(path, &writeThreeMf);
+
+    std::ifstream in(path, std::ios::binary);
+    ASSERT_TRUE(in);
+    std::vector<uint8_t> buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+
+    bool sawModel = false;
+    for (size_t i = 0; i + 46 <= buf.size(); ++i) {
+        if (!(buf[i] == 0x50 && buf[i + 1] == 0x4B && buf[i + 2] == 0x01 && buf[i + 3] == 0x02)) continue;
+        const uint16_t method = static_cast<uint16_t>(buf[i + 10] | (buf[i + 11] << 8));
+        const uint32_t compressedSize =
+            static_cast<uint32_t>(buf[i + 20] | (buf[i + 21] << 8) | (buf[i + 22] << 16) | (buf[i + 23] << 24));
+        const uint32_t rawSize =
+            static_cast<uint32_t>(buf[i + 24] | (buf[i + 25] << 8) | (buf[i + 26] << 16) | (buf[i + 27] << 24));
+        const uint16_t nameLen = static_cast<uint16_t>(buf[i + 28] | (buf[i + 29] << 8));
+        if (i + 46 + nameLen > buf.size()) continue;
+        const std::string name(reinterpret_cast<const char*>(&buf[i + 46]), nameLen);
+        if (name.find("3dmodel.model") == std::string::npos) continue;
+        sawModel = true;
+        EXPECT_EQ(method, 8) << "3dmodel.model stored uncompressed";
+        EXPECT_LT(compressedSize, rawSize) << "compressed " << compressedSize << " vs raw " << rawSize;
+    }
+    EXPECT_TRUE(sawModel) << "no 3dmodel.model entry in the archive";
+
+    std::filesystem::remove(path);
+}
+
 TEST(ImportModuleContext, UnsupportedExtensionErrors) {
     Evaluator ev;
     auto ast = parseSrc("import(\"nope.xyz\");");

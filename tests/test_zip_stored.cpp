@@ -1,6 +1,12 @@
 // Direct tests for zip_stored.hpp -- writeStoredZip()'s own STORED-entry
 // round trip, plus reading a DEFLATE-compressed (method 8) entry, which is
 // what most third-party ZIP/3MF writers actually emit.
+//
+// Also what writeDeflateZip() and writeThreeMf() put in the archive. That
+// went untested: the round-trip tests pass either way, since the reader
+// handles both methods, so a silent regression to STORED would only show
+// up as files several times larger. The method byte is read out of the
+// central directory here so it cannot regress unnoticed.
 
 #include "openscad_cpp_evaluator/zip_stored.hpp"
 
@@ -167,5 +173,83 @@ TEST(ZipStored, UnsupportedCompressionMethodThrows) {
     // Method 12 (BZIP2) -- real but genuinely unsupported here.
     writeSingleEntryZip(path.string(), "hello.txt", /*method=*/12, /*crc=*/0, /*uncompressedSize=*/0, {});
     EXPECT_THROW(readStoredZipEntry(path.string(), "hello.txt"), std::runtime_error);
+    std::filesystem::remove(path);
+}
+
+
+// --- what we WRITE, not just what we can read -------------------------
+
+namespace {
+
+// The compression method of the first central-directory entry whose name
+// ends with `suffix`. Read from the central directory rather than the local
+// header, since that is the authoritative copy.
+uint16_t centralDirMethodBySuffix(const std::string& path, const std::string& suffix) {
+    std::ifstream in(path, std::ios::binary);
+    EXPECT_TRUE(in) << "cannot open " << path;
+    std::vector<uint8_t> buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Walk central-directory headers by signature; these archives are small
+    // and have no ZIP comment, so a forward scan is enough.
+    for (size_t i = 0; i + 46 <= buf.size(); ++i) {
+        if (!(buf[i] == 0x50 && buf[i + 1] == 0x4B && buf[i + 2] == 0x01 && buf[i + 3] == 0x02)) continue;
+        const uint16_t method = static_cast<uint16_t>(buf[i + 10] | (buf[i + 11] << 8));
+        const uint16_t nameLen = static_cast<uint16_t>(buf[i + 28] | (buf[i + 29] << 8));
+        if (i + 46 + nameLen > buf.size()) continue;
+        const std::string name(reinterpret_cast<const char*>(&buf[i + 46]), nameLen);
+        if (name.size() >= suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+            return method;
+    }
+    ADD_FAILURE() << "no central-directory entry ending in " << suffix;
+    return 0xFFFF;
+}
+
+// Compressible: long runs, which is what 3MF's indented XML looks like.
+std::vector<uint8_t> compressibleBytes(size_t n) {
+    std::vector<uint8_t> out;
+    out.reserve(n);
+    const std::string unit = "\t\t\t\t\t<vertex x=\"0\" y=\"0\" z=\"0\" />\n";
+    while (out.size() < n) out.insert(out.end(), unit.begin(), unit.end());
+    out.resize(n);
+    return out;
+}
+
+}  // namespace
+
+TEST(ZipStored, DeflateZipReallyWritesMethod8) {
+    const auto path = tempPath("deflate_method.zip");
+    const auto data = compressibleBytes(64 * 1024);
+    writeDeflateZip(path.string(), {ZipEntry{"3D/3dmodel.model", data}});
+    EXPECT_EQ(centralDirMethodBySuffix(path.string(), "3dmodel.model"), 8);
+    // And it still reads back byte for byte.
+    EXPECT_EQ(readStoredZipEntry(path.string(), "3D/3dmodel.model"), data);
+    std::filesystem::remove(path);
+}
+
+TEST(ZipStored, DeflateZipActuallyShrinksCompressibleData) {
+    const auto path = tempPath("deflate_size.zip");
+    const auto data = compressibleBytes(256 * 1024);
+    writeDeflateZip(path.string(), {ZipEntry{"3D/3dmodel.model", data}});
+    const auto onDisk = std::filesystem::file_size(path);
+    // Highly repetitive input; anything near its original size means the
+    // compressor did not run.
+    EXPECT_LT(onDisk, data.size() / 4) << "archive " << onDisk << " for " << data.size() << " bytes of input";
+    std::filesystem::remove(path);
+}
+
+TEST(ZipStored, DeflateZipStoresDataThatWouldNotShrink) {
+    const auto path = tempPath("deflate_tiny.zip");
+    const std::vector<uint8_t> tiny{'x'};
+    writeDeflateZip(path.string(), {ZipEntry{"a.txt", tiny}});
+    EXPECT_EQ(centralDirMethodBySuffix(path.string(), "a.txt"), 0);
+    EXPECT_EQ(readStoredZipEntry(path.string(), "a.txt"), tiny);
+    std::filesystem::remove(path);
+}
+
+TEST(ZipStored, StoredZipWritesMethod0) {
+    // The control for the tests above: same call shape, opposite method.
+    const auto path = tempPath("stored_method.zip");
+    const auto data = compressibleBytes(64 * 1024);
+    writeStoredZip(path.string(), {ZipEntry{"3D/3dmodel.model", data}});
+    EXPECT_EQ(centralDirMethodBySuffix(path.string(), "3dmodel.model"), 0);
     std::filesystem::remove(path);
 }
