@@ -57,7 +57,27 @@ jobs:
           CIBW_SKIP: "*-musllinux*"
           # cibuildwheel builds win32 in addition to win_amd64 by default;
           # this project only targets 64-bit Windows.
-          CIBW_ARCHS_WINDOWS: AMD64
+          # ARM64 is cross-compiled here on the x86_64 runner rather than
+          # built on a windows-11-arm one, because bison and flex are host
+          # build tools: they generate C++ that MSVC then cross-compiles for
+          # ARM64. MSYS2 -- which is where this build gets a bison new enough
+          # for the grammar (3.8+, winflexbison3 ships 3.7.4) -- has no native
+          # ARM64 build at all, so building on an ARM runner would have to
+          # emulate it. cibuildwheel skips CIBW_TEST_COMMAND for the
+          # cross-compiled wheel, since an x86_64 host cannot run it.
+          CIBW_ARCHS_WINDOWS: "AMD64 ARM64"
+          # delvewheel vendors the MSVC runtime into the wheel, but on an
+          # x86_64 host it can only find the x86_64 copy -- repairing the
+          # cross-built ARM64 wheel died with "Unable to find library:
+          # msvcp140.dll". The ARM64 wheel therefore leaves the runtime to
+          # the system, which is what every Python extension on Windows
+          # already assumes (CPython itself needs the redistributable).
+          # AMD64 keeps vendoring it, unchanged.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            cmd /c "echo {wheel} | findstr /C:win_arm64 >nul &&
+            (delvewheel repair --exclude msvcp140.dll --exclude vcruntime140.dll
+            --exclude vcruntime140_1.dll -w {dest_dir} {wheel}) ||
+            (delvewheel repair -w {dest_dir} {wheel})"
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           # manylinux_2_28 (AlmaLinux 8) uses dnf, not apt -- but its default
