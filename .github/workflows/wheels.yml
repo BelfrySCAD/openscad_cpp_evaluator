@@ -66,6 +66,18 @@ jobs:
           # emulate it. cibuildwheel skips CIBW_TEST_COMMAND for the
           # cross-compiled wheel, since an x86_64 host cannot run it.
           CIBW_ARCHS_WINDOWS: "AMD64 ARM64"
+          # delvewheel vendors the MSVC runtime into the wheel, but on an
+          # x86_64 host it can only find the x86_64 copy -- repairing the
+          # cross-built ARM64 wheel died with "Unable to find library:
+          # msvcp140.dll". The ARM64 wheel therefore leaves the runtime to
+          # the system, which is what every Python extension on Windows
+          # already assumes (CPython itself needs the redistributable).
+          # AMD64 keeps vendoring it, unchanged.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            cmd /c "echo {wheel} | findstr /C:win_arm64 >nul &&
+            (delvewheel repair --exclude msvcp140.dll --exclude vcruntime140.dll
+            --exclude vcruntime140_1.dll -w {dest_dir} {wheel}) ||
+            (delvewheel repair -w {dest_dir} {wheel})"
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           # manylinux_2_28 (AlmaLinux 8) uses dnf, not apt -- but its default
