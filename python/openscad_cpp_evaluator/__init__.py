@@ -19,6 +19,7 @@ __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
     "FastContinueSignal", "parse_ast", "parse_ast_string", "check_mesh", "strip_slivers",
+    "export_model", "export_extensions",
 ]
 
 
@@ -288,6 +289,36 @@ def strip_slivers(verts, tris):
     return _ext.strip_slivers([float(v) for v in verts], [int(t) for t in tris])
 
 
+def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
+                 strip_slivers: bool = True) -> list:
+    """Write `geometry` to `path`. Returns the warnings to surface.
+
+    `geometry` is the handle an Evaluator stashes on itself as
+    `.geometry` -- the evaluated bodies, still on the C++ side. Export has
+    to do real CSG (the implicit top-level union, the per-colour volume
+    claim, the connected-component split), and going through the flattened
+    arrays the renderer gets would mean rebuilding every Manifold first:
+    ~146ms on a 224k-triangle model, and Manifold's own provenance lost
+    along the way.
+
+    Format comes from the extension unless `format` overrides it. Warnings
+    -- open shells, mesh problems, slivers removed -- are returned rather
+    than logged so each front end can present them its own way. Nothing
+    here refuses to write: a deliberately open surface is a legitimate
+    export. Raises EvalError when there is no geometry, the format is
+    unknown, or the file cannot be opened.
+    """
+    try:
+        return list(_ext.export_model(path, geometry, format, ascii_stl, strip_slivers))
+    except Exception as e:
+        raise EvalError(str(e)) from e
+
+
+def export_extensions() -> list:
+    """The file extensions export_model understands, dot-prefixed."""
+    return [".3mf", ".stl", ".obj", ".off", ".ply", ".wrl", ".x3d"]
+
+
 def check_mesh(verts, tris) -> dict:
     """Diagnose a triangle mesh against the manifoldness conditions.
 
@@ -448,9 +479,21 @@ class Evaluator:
                     self._manifold_cache, self._return_hook, self._fast_continue_signal)
                 self.csg_tree = []
                 self.profile_result = None
+                # The debugger path has no geometry handle: debug_evaluate
+                # returns bodies for display only, and a paused session is
+                # not something to export from.
+                self.geometry = None
             else:
-                body_dicts, echoes, id_spans, csg_tree, profile_result, dyn, dyn_explicit = _ext.evaluate(
+                (body_dicts, echoes, id_spans, csg_tree, profile_result, dyn,
+                 dyn_explicit, geometry) = _ext.evaluate(
                     source_path, vp, self._manifold_cache, self._profile)
+                # The evaluated bodies, still on the C++ side. Stashed like
+                # csg_tree/profile_result rather than returned, so
+                # evaluate()'s own 2-tuple result is unchanged -- callers
+                # that only render never need to know this exists. Hand it
+                # to export_model(); see its docstring for why export does
+                # not just rebuild from the arrays the renderer gets.
+                self.geometry = geometry
                 if self._echo_fn:
                     for line in echoes:
                         self._echo_fn(line)

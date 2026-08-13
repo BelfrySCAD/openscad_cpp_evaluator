@@ -22,6 +22,7 @@
 #include "openscad_cpp_evaluator/eval_context.hpp"
 #include "openscad_cpp_evaluator/eval_use.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/export.hpp"
 #include "openscad_cpp_evaluator/mesh_check.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
 #include "openscad_cpp_evaluator/profile.hpp"
@@ -340,6 +341,36 @@ std::pair<nb::dict, nb::object> dynStateToPy(const oscadeval::EvalContext& ctx) 
 // message as a Python exception on ParseError/EvalError (nanobind maps
 // std::exception -> RuntimeError, whose str() is the already-formatted
 // "ERROR:..."/caret diagnostic; the facade re-raises as EvalError).
+// The evaluated bodies, kept on the C++ side.
+//
+// bodyToDict flattens every Manifold into numpy arrays for the renderer,
+// which is all the renderer needs -- but export has to do real CSG (the
+// union, the per-colour claim, decompose), and rebuilding Manifolds from
+// those arrays to do it costs ~146ms on a 224k-triangle model and throws
+// away Manifold's own provenance. Handing back an opaque handle instead
+// means geometry never round-trips through Python at all.
+struct Geometry {
+    std::vector<oscadeval::ColoredBody> bodies;
+};
+
+// exportModel, with the path/format/warnings marshalling. Releases the GIL:
+// a large export is seconds of Manifold work with no Python involved.
+nb::list exportModelPy(const std::string& path, const Geometry& geom, const std::string& format, bool asciiStl,
+                        bool stripSlivers) {
+    std::vector<std::string> warnings;
+    {
+        nb::gil_scoped_release rel;
+        oscadeval::ExportOptions opts;
+        opts.format = format;
+        opts.asciiStl = asciiStl;
+        opts.stripSlivers = stripSlivers;
+        warnings = oscadeval::exportModel(path, geom.bodies, opts);
+    }
+    nb::list out;
+    for (const std::string& w : warnings) out.append(w);
+    return out;
+}
+
 nb::object evaluate(const std::string& path, nb::dict viewportParams,
                      std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
@@ -370,8 +401,10 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
 
     nb::list echoList;
     for (const std::string& s : echoes) echoList.append(s);
-    return nb::make_tuple(bodiesToList(bodies), echoList, idSpansToDict(idSpans), csgTreeToPy(csgTree),
-                           profileResultToPy(profileResult), dyn, dynExplicit);
+    auto geom = std::make_shared<Geometry>();
+    geom->bodies = std::move(bodies);
+    return nb::make_tuple(bodiesToList(geom->bodies), echoList, idSpansToDict(idSpans), csgTreeToPy(csgTree),
+                           profileResultToPy(profileResult), dyn, dynExplicit, geom);
 }
 
 // ------------------------------------------------------------------------
@@ -720,6 +753,19 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
     nb::class_<FastContinueSignal>(m, "FastContinueSignal")
         .def(nb::init<>())
         .def("request", &FastContinueSignal::request);
+
+    nb::class_<Geometry>(m, "Geometry",
+                          "Opaque handle to the evaluated bodies, kept on the C++ side so export never has to "
+                          "rebuild Manifolds from the renderer's flattened arrays. Hand it to export_model().")
+        .def("__len__", [](const Geometry& g) { return g.bodies.size(); })
+        .def("is_empty", [](const Geometry& g) { return g.bodies.empty(); });
+
+    m.def("export_model", &exportModelPy, nb::arg("path"), nb::arg("geometry"), nb::arg("format") = std::string(),
+          nb::arg("ascii_stl") = false, nb::arg("strip_slivers") = true,
+          "Write `geometry` to `path`, format taken from the extension unless `format` says otherwise. "
+          "Returns the warnings to surface (open shells, mesh problems, slivers removed) rather than "
+          "logging them. Raises RuntimeError when there is no geometry, the format is unknown, or the "
+          "file cannot be opened.");
 
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
           nb::arg("profile") = false,

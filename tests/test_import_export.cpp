@@ -20,9 +20,13 @@ std::filesystem::path tempPath(const std::string& name) {
 // A unit cube (size 2, centered -> volume 8) exported to `path` in every
 // format under test, via the real evaluator pipeline (not a hand-built
 // mesh) so export.cpp itself is exercised too.
-void writeCubeAs(const std::filesystem::path& path, void (*writer)(const std::string&, const std::vector<ColoredBody>&)) {
+void writeCubeAs(const std::filesystem::path& path, const std::string& format = "") {
+    // Through exportModel rather than a writer directly: that is the entry
+    // point every front end uses, so it is the one worth exercising.
     Evaluated e = evalSrc("cube(2, center=true);");
-    writer(path.string(), e.bodies);
+    ExportOptions opts;
+    opts.format = format;
+    exportModel(path.string(), e.bodies, opts);
 }
 
 Value asExpr(const std::string& code, Evaluator& ev) {
@@ -39,7 +43,7 @@ Value asExpr(const std::string& code, Evaluator& ev) {
 
 TEST(ImportModuleContext, StlRoundTripPreservesVolume) {
     const auto path = tempPath("cube.stl");
-    writeCubeAs(path, &writeStl);
+    writeCubeAs(path);
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
@@ -49,7 +53,7 @@ TEST(ImportModuleContext, StlRoundTripPreservesVolume) {
 
 TEST(ImportModuleContext, ObjRoundTripPreservesVolume) {
     const auto path = tempPath("cube.obj");
-    writeCubeAs(path, &writeObj);
+    writeCubeAs(path);
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
@@ -59,7 +63,7 @@ TEST(ImportModuleContext, ObjRoundTripPreservesVolume) {
 
 TEST(ImportModuleContext, OffRoundTripPreservesVolume) {
     const auto path = tempPath("cube.off");
-    writeCubeAs(path, &writeOff);
+    writeCubeAs(path);
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
@@ -69,7 +73,7 @@ TEST(ImportModuleContext, OffRoundTripPreservesVolume) {
 
 TEST(ImportModuleContext, ThreeMfRoundTripPreservesVolume) {
     const auto path = tempPath("cube.3mf");
-    writeCubeAs(path, &writeThreeMf);
+    writeCubeAs(path);
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].body.has_value());
@@ -83,7 +87,7 @@ TEST(ImportModuleContext, ThreeMfRoundTripPreservesVolume) {
 // files several times bigger than they need to be.
 TEST(ImportModuleContext, ThreeMfIsDeflateCompressed) {
     const auto path = tempPath("cube_compressed.3mf");
-    writeCubeAs(path, &writeThreeMf);
+    writeCubeAs(path);
 
     std::ifstream in(path, std::ios::binary);
     ASSERT_TRUE(in);
@@ -200,7 +204,7 @@ TEST(ImportModuleContext, EmptyMeshHasNoTrianglesErrors) {
 
 TEST(ImportExpressionContext, StlReturnsVnfShape) {
     const auto path = tempPath("cube_vnf.stl");
-    writeCubeAs(path, &writeStl);
+    writeCubeAs(path);
     Evaluator ev;
     Value v = asExpr("import(\"" + path.generic_string() + "\")", ev);
     const auto& outer = std::get<ListPtr>(v)->items;
