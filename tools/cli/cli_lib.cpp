@@ -31,6 +31,9 @@ std::string formatForPath(const std::string& explicitFormat, const std::string& 
     if (ext == ".obj") return "obj";
     if (ext == ".off") return "off";
     if (ext == ".3mf") return "3mf";
+    if (ext == ".ply") return "ply";
+    if (ext == ".wrl") return "wrl";
+    if (ext == ".x3d") return "x3d";
     return "";
 }
 
@@ -211,6 +214,7 @@ std::vector<DeclInfo> collectDeclarations(const std::vector<const oscad::ASTNode
 int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream& out, std::ostream& err) {
     std::string inputPath;
     std::string outputPath;
+    bool asciiStl = false;
     std::string format;
     std::string profilePath;
     std::string profileFormat = "text";
@@ -222,6 +226,8 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
         const std::string& arg = args[i];
         if (arg == "-o" && i + 1 < args.size()) {
             outputPath = args[++i];
+        } else if (arg == "--ascii-stl") {
+            asciiStl = true;
         } else if (arg == "--format" && i + 1 < args.size()) {
             format = args[++i];
         } else if (arg == "--profile" && i + 1 < args.size()) {
@@ -241,7 +247,7 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
         }
     }
     if (inputPath.empty() || outputPath.empty()) {
-        err << "usage: openscad-cpp-evaluator <input.scad> -o <output.{stl,obj,off,3mf}> [--format stl|obj|off|3mf] "
+        err << "usage: openscad-cpp-evaluator <input.scad> -o <output.{stl,obj,off,3mf,ply,wrl,x3d}> [--format stl|obj|off|3mf|ply|wrl|x3d] [--ascii-stl] "
                "[--profile FILENAME [--profile-format text|csv] [--profile-sort self|cumulative|calls|name] "
                "[--profile-min-self SECONDS] [--profile-min-calls N]] [--debug]\n";
         return 1;
@@ -376,21 +382,16 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
                 profileFile << formatProfileReport(inputPath, *evaluator.profileResult, profileOpts);
             }
 
-            // Checked before writing, warned rather than refused: a
-            // deliberately open surface is a legitimate export, and
-            // blocking a save would be worse than saying so.
-            for (const std::string& problem : checkExportBodies(bodies)) {
+            // exportModel owns the split, the repair policy and the
+            // per-format dispatch; the warnings come back rather than being
+            // logged so each front end presents them its own way. Warned
+            // rather than refused: a deliberately open surface is a
+            // legitimate export, and blocking a save would be worse.
+            ExportOptions opts;
+            opts.format = fmt;
+            opts.asciiStl = asciiStl;
+            for (const std::string& problem : exportModel(outputPath, bodies, opts)) {
                 err << "WARNING: export: " << problem << "\n";
-            }
-
-            if (fmt == "stl") {
-                writeStl(outputPath, bodies);
-            } else if (fmt == "obj") {
-                writeObj(outputPath, bodies);
-            } else if (fmt == "off") {
-                writeOff(outputPath, bodies);
-            } else {
-                writeThreeMf(outputPath, bodies);
             }
             out << "Exported to " << outputPath << "\n";
             return 0;

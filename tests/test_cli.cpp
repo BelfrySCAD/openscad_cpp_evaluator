@@ -72,12 +72,81 @@ TEST(CliExportFormats, StlExport) {
 }
 
 TEST(CliExportFormats, ObjExport) {
-    auto src = writeScript("cube.scad", kCubeScript);
+    // Distinct script name: these tests delete their own input, and
+    // ctest -j runs them concurrently in one directory.
+    auto src = writeScript("cube_obj.scad", kCubeScript);
     auto out = src.parent_path() / "cube_out.obj";
     std::filesystem::remove(out);
     std::ostringstream stdout_, stderr_;
     EXPECT_EQ(runCli({src.string(), "-o", out.string()}, std::cin, stdout_, stderr_), 0);
-    EXPECT_TRUE(readFile(out).rfind("v ", 0) == 0);
+    // OBJ now carries the object split, so the file opens with its mtllib
+    // and an `o` group rather than going straight to vertices, and a
+    // companion .mtl is written alongside for the colours.
+    const std::string obj = readFile(out);
+    EXPECT_TRUE(obj.rfind("mtllib ", 0) == 0) << obj.substr(0, 40);
+    EXPECT_NE(obj.find("\no object_1\n"), std::string::npos);
+    EXPECT_NE(obj.find("\nv "), std::string::npos);
+    EXPECT_NE(obj.find("\nf "), std::string::npos);
+    auto mtl = src.parent_path() / "cube_out.mtl";
+    EXPECT_TRUE(std::filesystem::exists(mtl));
+    std::filesystem::remove(mtl);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliExportFormats, PlyExport) {
+    // Distinct script name: these tests delete their own input, and
+    // ctest -j runs them concurrently in one directory.
+    auto src = writeScript("cube_ply.scad", kCubeScript);
+    auto out = src.parent_path() / "cube_out.ply";
+    std::filesystem::remove(out);
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string()}, std::cin, stdout_, stderr_), 0);
+    EXPECT_TRUE(readFile(out).rfind("ply\nformat binary_little_endian 1.0\n", 0) == 0);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliExportFormats, VrmlExport) {
+    // Distinct script name: these tests delete their own input, and
+    // ctest -j runs them concurrently in one directory.
+    auto src = writeScript("cube_wrl.scad", kCubeScript);
+    auto out = src.parent_path() / "cube_out.wrl";
+    std::filesystem::remove(out);
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string()}, std::cin, stdout_, stderr_), 0);
+    const std::string wrl = readFile(out);
+    // The version the full-colour front ends name.
+    EXPECT_TRUE(wrl.rfind("#VRML V2.0 utf8\n", 0) == 0);
+    EXPECT_NE(wrl.find("IndexedFaceSet"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliExportFormats, X3dExport) {
+    // Distinct script name: these tests delete their own input, and
+    // ctest -j runs them concurrently in one directory.
+    auto src = writeScript("cube_x3d.scad", kCubeScript);
+    auto out = src.parent_path() / "cube_out.x3d";
+    std::filesystem::remove(out);
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string()}, std::cin, stdout_, stderr_), 0);
+    const std::string x3d = readFile(out);
+    EXPECT_NE(x3d.find("<X3D profile=\"Interchange\" version=\"3.3\">"), std::string::npos);
+    EXPECT_NE(x3d.find("<IndexedFaceSet"), std::string::npos);
+    std::filesystem::remove(src);
+    std::filesystem::remove(out);
+}
+
+TEST(CliExportFormats, AsciiStlExport) {
+    // Distinct script name: these tests delete their own input, and
+    // ctest -j runs them concurrently in one directory.
+    auto src = writeScript("cube_astl.scad", kCubeScript);
+    auto out = src.parent_path() / "cube_ascii.stl";
+    std::filesystem::remove(out);
+    std::ostringstream stdout_, stderr_;
+    EXPECT_EQ(runCli({src.string(), "-o", out.string(), "--ascii-stl"}, std::cin, stdout_, stderr_), 0);
+    EXPECT_TRUE(readFile(out).rfind("solid OpenSCAD_Model\n", 0) == 0);
     std::filesystem::remove(src);
     std::filesystem::remove(out);
 }
