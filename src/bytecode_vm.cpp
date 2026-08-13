@@ -40,18 +40,25 @@ CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& 
 // LIST is `paramNames` (in declared order -- a FunctionDeclaration's
 // parameters or a FunctionLiteral's). Shared by CallFn/CallFnTail (a
 // site.decl callee) and CallDynamic/CallDynamicTail (a closure callee).
-BoundArgs buildBoundArgs(const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount,
+BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount,
                           const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& paramNames) {
     BoundArgs bound;
     bound.reserve(argCount);
     size_t positionalIdx = 0;
     const size_t nparams = paramNames.size();
+    const oscad::Position* pos = site.callNode ? &site.callNode->position() : nullptr;
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
-            bound.set(*site.argNames[i], std::move(args[i]));
+            const std::string& name = *site.argNames[i];
+            if (!isConfigVariable(name) && !declaresParam(paramNames, name)) {
+                warnUnexpectedNamedArg(ev, name, pos);
+            }
+            bound.set(name, std::move(args[i]));
         } else {
             if (positionalIdx < nparams) {
                 bound.set(paramNames[positionalIdx]->name->name, std::move(args[i]));
+            } else if (positionalIdx == nparams) {
+                warnTooManyPositionalArgs(ev, pos);
             }
             ++positionalIdx;
         }
@@ -126,6 +133,9 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
             if (!matched && !name.empty() && name[0] == '$') {
                 ctx.dyn->set(name, v);
             }
+            if (!matched && !isConfigVariable(name)) {
+                warnUnexpectedNamedArg(ev, name, &argPtr->position());
+            }
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
             Value v = ev.evalExpr(*a.expr, callerCtx);
@@ -137,6 +147,8 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
                     frame.slots[static_cast<size_t>(p.slot)] = std::move(v);
                 }
                 frame.bound[positionalIdx] = true;
+            } else if (positionalIdx == nparams) {
+                warnTooManyPositionalArgs(ev, &argPtr->position());
             }
             ++positionalIdx;
         }
@@ -770,7 +782,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         f.stack.push_back(evalBuiltinFunction(ev, site.calleeName, callArgs, *site.callNode));
                         ++f.pc;
                     } else {
-                        BoundArgs bound = buildBoundArgs(site, args, argCount, site.decl->parameters);
+                        BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
                         if (calleeChunk) {
                             const oscad::Scope* fnScope = site.decl->scope() ? site.decl->scope() : ctx.scope;
@@ -801,7 +813,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
                         const Closure& closure = **closurePtr;
                         const oscad::FunctionLiteral& funcNode = *closure.node;
-                        BoundArgs bound = buildBoundArgs(site, args, argCount, funcNode.parameters);
+                        BoundArgs bound = buildBoundArgs(ev, site, args, argCount, funcNode.parameters);
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupCompiledLiteralChunk(funcNode) : nullptr;
                         if (calleeChunk) {
                             const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
@@ -827,7 +839,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         args[argCount - 1 - i] = std::move(f.stack.back());
                         f.stack.pop_back();
                     }
-                    BoundArgs bound = buildBoundArgs(site, args, argCount, site.decl->parameters);
+                    BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
                     // Tail-hop-in-place requires f.hopEligible -- a frame
                     // that's call-boundary-free (statement expression,
                     // assignment block, parameter default) has no
@@ -894,7 +906,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
                         const Closure& closure = **closurePtr;
                         const oscad::FunctionLiteral& funcNode = *closure.node;
-                        BoundArgs bound = buildBoundArgs(site, args, argCount, funcNode.parameters);
+                        BoundArgs bound = buildBoundArgs(ev, site, args, argCount, funcNode.parameters);
                         const bool thisFrameBracketed = f.hopEligible;
                         std::optional<EvalContext> hopCtx = thisFrameBracketed
                                                                  ? ev.isolatedCallCtxFor(funcNode, ctx, capturedLetTrail(closure))
@@ -1055,6 +1067,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     // uncacheable/ManifoldCache taint tracking for a
                     // rands() call embedded in the wrapper's own args).
                     const std::uint64_t randsBefore = ev.randsCallCount();
+                    warnUnexpectedBuiltinArgs(ev, *site.node);
                     CSGParams params;
                     CallArgs deferredArgs; // Roof only -- see PendingBuiltinWrap's own doc comment
                     switch (site.kind) {
@@ -1183,6 +1196,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     // rands-in-args taint reasoning as Op::PushBuiltinWrap.
                     const std::uint64_t randsBefore = ev.randsCallCount();
                     if (site.hasArgs) {
+                        warnUnexpectedBuiltinArgs(ev, *site.node);
                         // union/difference/intersection take no positional
                         // arguments in real OpenSCAD -- `args` is discarded,
                         // exactly mirroring resolveCsg's own `(void)args;`

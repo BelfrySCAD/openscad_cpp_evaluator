@@ -35,6 +35,7 @@ add_executable(oscad_eval_tests
   test_debug_hooks.cpp
   test_multi_color_merge.cpp
   test_viewport_params.cpp
+  test_unexpected_args.cpp
   test_cli.cpp
 )
 target_link_libraries(oscad_eval_tests PRIVATE openscad_cpp_evaluator oscad_cli_lib GTest::gtest_main)

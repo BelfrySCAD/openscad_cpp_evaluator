@@ -94,6 +94,7 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     CSGParams params;
     try {
         if (hasResolveFn) {
+            warnUnexpectedBuiltinArgs(*this, node);
             params = it->second(*this, node, ctx);
         } else if (!isBuiltin) {
             evalUserModule(static_cast<const oscad::ModuleDeclaration&>(*userModuleDecl), node, ctx);

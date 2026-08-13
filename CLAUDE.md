@@ -424,7 +424,29 @@ grep for `ponytail:`.
   give sibling statements in the same block correct assignment visibility (see the header comment
   before reworking this; it's not an arbitrary choice).
 - `include/openscad_cpp_evaluator/eval_error.hpp`, `src/eval_error.cpp` — `EvalError` and the
-  exact ERROR/TRACE string formatting real OpenSCAD produces.
+  exact ERROR/TRACE string formatting real OpenSCAD produces. Also the **unexpected-argument
+  warnings** (`warnUnexpectedNamedArg`/`warnTooManyPositionalArgs`/`warnUnexpectedArgs`), the port
+  of real OpenSCAD's `Parameters.cc` `parse_without_defaults`: `variable X not specified as
+  parameter` for a named argument the callee doesn't declare, and `Too many unnamed arguments
+  supplied` once per call for positional arguments past the last parameter. `$`-prefixed names
+  other than `$children` are exempt (`isConfigVariable`, mirroring
+  `ContextFrame::is_config_variable` — a `$`-name is a dynamic-scope override, never a parameter).
+  The check has to be repeated at **every** argument-binding path, since there are five and none of
+  them share a choke point: `bindArgs` (interpreter, `user_calls.cpp`),
+  `buildBoundArgs`/`bindAstArgsIntoFrame` (bytecode VM, `bytecode_vm.cpp`), `evalModularCall`
+  (builtin modules, `csg_resolve.cpp`) and the VM's own `Op::PushBuiltinWrap`/`Op::PushCsgWrap`
+  handlers — the transform/color/hull/minkowski/render/extrude/projection/offset/roof/CSG family
+  bypasses `evalModularCall` entirely once compiled, which is exactly the gap
+  `tests/test_unexpected_args.cpp` runs every case twice (VM off and on) to catch. Builtin
+  parameter names live in `builtinParamNames` (`registry.cpp`): each list is the union of real
+  OpenSCAD's own `Parameters::parse` declaration and any extra name this port reads via `getArg`,
+  so the port never warns about an argument it goes on to honour — **add to it whenever a builtin
+  gains a parameter**, or that parameter starts warning. Builtin *functions* deliberately have no
+  entries beyond `textmetrics`/`fontmetrics`: upstream reads their arguments positionally without
+  `Parameters::parse`, so `sin(bogus=30)` warns about nothing there (verified against 2022.08.22)
+  and warning here would be a divergence. Not ported: the reference's `argument X supplied more
+  than once` / `argument X overrides positional argument`, separate conditions this port's simpler
+  positional-matching rule doesn't track.
 - `include/openscad_cpp_evaluator/evaluator.hpp`, `src/expr_eval.cpp`, `src/stmt_eval.cpp`,
   `src/user_calls.cpp` — the `Evaluator` class. Expression/statement dispatch is a `switch` on
   `NodeKind` (matches `openscad_cpp_parser`'s own dispatch convention, not a visitor).

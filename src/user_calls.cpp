@@ -191,11 +191,18 @@ BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::Parameter
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-            result.set(a.name->name, evalExprMaybeCompiled(*a.expr, ctx));
+            const std::string& name = a.name->name;
+            if (!isConfigVariable(name) && !declaresParam(params, name)) {
+                warnUnexpectedNamedArg(*this, name, &argPtr->position());
+            }
+            result.set(name, evalExprMaybeCompiled(*a.expr, ctx));
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
             if (positionalIdx < nparams) {
                 result.set(params[positionalIdx]->name->name, evalExprMaybeCompiled(*a.expr, ctx));
+            } else if (positionalIdx == nparams) {
+                // Once per call, like the reference's warned_for_extra_arguments.
+                warnTooManyPositionalArgs(*this, &argPtr->position());
             }
             ++positionalIdx;
         }

@@ -2,12 +2,15 @@
 
 #include "openscad_cpp_parser/position.hpp"
 
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace oscad {
 class ASTNode;
+class Argument;
+class ParameterDeclaration;
 } // namespace oscad
 
 namespace oscadeval {
@@ -128,5 +131,37 @@ std::string formatError(const std::string& msg, const oscad::Position* nodePosit
 // Deliberately richer than real OpenSCAD, which prints neither.
 std::string formatWarning(const std::string& msg, const oscad::Position* nodePosition,
                            const std::vector<CallStackFrame>& callStack);
+
+// -- Unexpected-argument warnings -----------------------------------------
+//
+// Real OpenSCAD (Parameters.cc's parse_without_defaults) warns for a named
+// argument the callee doesn't declare, and once per call for positional
+// arguments past the last parameter. Both are silently dropped otherwise,
+// which makes a typo'd argument name invisible -- the call still runs, the
+// parameter just keeps its default. Wording is verbatim from the reference
+// (2022.08.22, which quotes neither name nor message).
+//
+// NOT covered here (separate reference warnings, separate conditions):
+// "argument X supplied more than once" and "argument X overrides positional
+// argument".
+class Evaluator;
+
+// ContextFrame::is_config_variable: a $-prefixed name other than $children
+// is a dynamic-scope override, never a declared parameter, so it is exempt.
+bool isConfigVariable(const std::string& name);
+
+// Linear scan -- ponytail: parameter lists are single-digit in practice, so
+// a per-call set/map would cost more than it saves.
+bool declaresParam(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, const std::string& name);
+
+void warnUnexpectedNamedArg(Evaluator& ev, const std::string& name, const oscad::Position* pos);
+void warnTooManyPositionalArgs(Evaluator& ev, const oscad::Position* pos);
+
+// Both warnings at once for a callee whose parameter names are a fixed list
+// rather than a declaration -- i.e. a builtin (see builtinParamNames,
+// dispatch.hpp). Reports against each argument's own position, which is the
+// call's own line in every case that isn't a multi-line argument list.
+void warnUnexpectedArgs(Evaluator& ev, const std::vector<std::string>& params,
+                         const std::vector<std::unique_ptr<oscad::Argument>>& arguments);
 
 } // namespace oscadeval
