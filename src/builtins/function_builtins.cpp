@@ -1,5 +1,6 @@
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 
+#include "openscad_cpp_evaluator/dispatch.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/segments.hpp"
 #include "openscad_cpp_evaluator/text_metrics.hpp"
@@ -508,6 +509,18 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
     // Not one of the names this function handles (e.g. "object", routed
     // elsewhere before reaching here) -- mirrors the old chain's fallthrough.
     if (idIt == ids.end()) return Value{};
+
+    // Only textmetrics/fontmetrics have an entry -- every other builtin
+    // function reads its arguments positionally upstream and warns about
+    // nothing. See builtinParamNames (registry.cpp).
+    if (const std::vector<std::string>* declared = builtinParamNames(name)) {
+        for (const auto& [argName, _] : args.named) {
+            if (!isConfigVariable(argName) &&
+                std::find(declared->begin(), declared->end(), argName) == declared->end()) {
+                warnUnexpectedNamedArg(ev, argName, &node.position());
+            }
+        }
+    }
 
     if (const auto arityIt = scalarNumericArity().find(name); arityIt != scalarNumericArity().end()) {
         const std::vector<Value> positional = allPositional(args);

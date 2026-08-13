@@ -2,6 +2,8 @@
 
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
+#include <algorithm>
+
 namespace oscadeval {
 
 void Evaluator::error(const std::string& msg, const oscad::ASTNode& node, const std::string& innermostFrame) {
@@ -120,6 +122,41 @@ std::string formatWarning(const std::string& msg, const oscad::Position* nodePos
         full += "\n" + line;
     }
     return full;
+}
+
+bool isConfigVariable(const std::string& name) {
+    return !name.empty() && name[0] == '$' && name != "$children";
+}
+
+bool declaresParam(const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params, const std::string& name) {
+    for (const auto& p : params) {
+        if (p->name->name == name) return true;
+    }
+    return false;
+}
+
+void warnUnexpectedNamedArg(Evaluator& ev, const std::string& name, const oscad::Position* pos) {
+    ev.warn("variable " + name + " not specified as parameter", pos);
+}
+
+void warnTooManyPositionalArgs(Evaluator& ev, const oscad::Position* pos) {
+    ev.warn("Too many unnamed arguments supplied", pos);
+}
+
+void warnUnexpectedArgs(Evaluator& ev, const std::vector<std::string>& params,
+                         const std::vector<std::unique_ptr<oscad::Argument>>& arguments) {
+    size_t positionalIdx = 0;
+    for (const auto& argPtr : arguments) {
+        if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
+            const std::string& name = static_cast<const oscad::NamedArgument&>(*argPtr).name->name;
+            if (!isConfigVariable(name) &&
+                std::find(params.begin(), params.end(), name) == params.end()) {
+                warnUnexpectedNamedArg(ev, name, &argPtr->position());
+            }
+        } else if (positionalIdx++ == params.size()) {
+            warnTooManyPositionalArgs(ev, &argPtr->position());
+        }
+    }
 }
 
 } // namespace oscadeval

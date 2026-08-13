@@ -54,6 +54,25 @@ using GenerateFn = std::vector<ColoredBody> (*)(Evaluator&, const CSGParams&, co
 const std::unordered_map<std::string_view, ResolveFn>& resolveDispatch();
 const std::unordered_map<std::string_view, GenerateFn>& generateDispatch();
 
+// Every parameter name a builtin accepts, for the unexpected-argument
+// warning (see eval_error.hpp). Returns nullptr for a name with no entry,
+// which suppresses the check rather than warning about everything.
+//
+// Each list is the UNION of real OpenSCAD's own Parameters::parse
+// declaration for that builtin (2022.08.22 -- the authority on what warns
+// upstream) and any extra name this port itself reads via getArg, so this
+// port never warns about an argument it goes on to honour.
+const std::vector<std::string>* builtinParamNames(const std::string& name);
+
+// builtinParamNames + warnUnexpectedArgs for one builtin module call. Must
+// be invoked from EVERY path a builtin call can take: evalModularCall
+// (interpreter, and Op::NativeStatement) plus the bytecode VM's own
+// Op::PushBuiltinWrap/Op::PushCsgWrap handlers, which bypass
+// evalModularCall entirely for the transform/color/hull/extrude/CSG family.
+// Silently does nothing for a node that isn't a ModularCall (a `#`/`%`/`!`
+// modifier shares BuiltinWrapSite but carries no arguments).
+void warnUnexpectedBuiltinArgs(Evaluator& ev, const oscad::ASTNode& callNode);
+
 // Concatenates every top-level node's already-generated `.bodies` (does NOT
 // recurse into `.children` -- a parent's `.bodies` is already the fully
 // combined result of its children). Mirrors the reference's
