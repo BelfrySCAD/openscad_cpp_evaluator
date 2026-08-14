@@ -71,19 +71,21 @@ std::vector<ColoredBody> generateSurface(Evaluator& ev, const CSGParams& params,
     const auto top = [&](std::size_t r, std::size_t c) { return static_cast<uint32_t>(r * cols + c); };
     const auto bot = [&](std::size_t r, std::size_t c) { return static_cast<uint32_t>(n + r * cols + c); };
 
-    manifold::MeshGL mesh;
+    // MeshGL64 -- see generatePolyhedron for why float truncation here
+    // manufactures degenerate coincidences for later booleans.
+    manifold::MeshGL64 mesh;
     mesh.numProp = 3;
     for (std::size_t r = 0; r < rows; ++r) {
         for (std::size_t c = 0; c < cols; ++c) {
-            mesh.vertProperties.push_back(static_cast<float>(static_cast<double>(c) + xOff));
-            mesh.vertProperties.push_back(static_cast<float>(static_cast<double>(r) + yOff));
-            mesh.vertProperties.push_back(static_cast<float>(heights[r][c]));
+            mesh.vertProperties.push_back(static_cast<double>(c) + xOff);
+            mesh.vertProperties.push_back(static_cast<double>(r) + yOff);
+            mesh.vertProperties.push_back(heights[r][c]);
         }
     }
     for (std::size_t r = 0; r < rows; ++r) {
         for (std::size_t c = 0; c < cols; ++c) {
-            mesh.vertProperties.push_back(static_cast<float>(static_cast<double>(c) + xOff));
-            mesh.vertProperties.push_back(static_cast<float>(static_cast<double>(r) + yOff));
+            mesh.vertProperties.push_back(static_cast<double>(c) + xOff);
+            mesh.vertProperties.push_back(static_cast<double>(r) + yOff);
             mesh.vertProperties.push_back(0.0f);
         }
     }

@@ -394,12 +394,18 @@ manifold::Manifold voronoiRoof(const manifold::CrossSection& cs, double fa, doub
         }
     }
 
-    manifold::MeshGL mesh;
+    // MeshGL64, not MeshGL: MeshGL is MeshGLP<float>, so building through
+    // it truncates these coordinates to ~7 significant digits on the way
+    // into Manifold. That does not merely lose precision -- it snaps
+    // nearly-distinct coordinates onto exactly-equal ones, manufacturing
+    // the degenerate coincidences that make a later boolean leave a
+    // zero-thickness membrane behind. See generatePolyhedron.
+    manifold::MeshGL64 mesh;
     mesh.numProp = 3;
     for (const auto& v : verts) {
-        mesh.vertProperties.push_back(static_cast<float>(v[0]));
-        mesh.vertProperties.push_back(static_cast<float>(v[1]));
-        mesh.vertProperties.push_back(static_cast<float>(v[2]));
+        mesh.vertProperties.push_back(v[0]);
+        mesh.vertProperties.push_back(v[1]);
+        mesh.vertProperties.push_back(v[2]);
     }
     for (const auto& t : tris) {
         mesh.triVerts.push_back(t[0]);

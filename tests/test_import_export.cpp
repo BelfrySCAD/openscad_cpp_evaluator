@@ -308,3 +308,48 @@ TEST(ObjectBuiltin, PositionalMergesExistingObject) {
     const auto& items = std::get<ObjectPtr>(v)->items;
     ASSERT_EQ(items.size(), 3u);
 }
+
+// -- mesh-built geometry keeps full precision ----------------------------
+//
+// polyhedron()/sphere()/roof()/surface()/import() build their Manifold from
+// a mesh, and MeshGL is MeshGLP<float>. Going through it truncated script
+// doubles to ~7 significant digits, which does not merely lose precision:
+// it snaps nearly-distinct coordinates onto exactly-equal ones and
+// manufactures degenerate coincidences that make a later boolean leave a
+// zero-thickness membrane behind, sealing a hole that should go through.
+//
+// Found via a real user model (a coin-cell dispenser using BOSL2's
+// rounded/teardrop cyl(), which builds through polyhedron()): the bore came
+// out capped, the export was a valid closed solid a slicer would happily
+// print solid, and every mesh integrity check passed -- watertight,
+// manifold, orientable, no duplicate or degenerate faces. Only the genus
+// gave it away. A plain cylinder() never showed it, because that is a
+// Manifold primitive built in double precision all along.
+// A whole-model reproduction needs BOSL2 (its rounded/teardrop cyl() is what
+// builds through polyhedron() in the wild), which this suite cannot depend
+// on -- and a hand-written box does NOT reproduce it: Manifold handles
+// exactly-coincident PLANAR faces fine, as checked directly. The end-to-end
+// case lives in BelfrySCAD's scratch/coplanar_cut_repro.scad. What is
+// guarded here is the cause rather than one of its symptoms: that
+// mesh-built geometry keeps the precision it was given.
+TEST(MeshPrecision, PolyhedronKeepsCoordinatesFloatWouldRound) {
+    // 0.1 + 0.2 style values a float cannot hold: at float32 these two
+    // vertices would land on the same coordinate and the solid would
+    // degenerate. In doubles they stay apart.
+    Evaluated e = evalSrc(R"(
+        polyhedron(
+            points = [[0,0,0],[10.000000123,0,0],[10.000000123,10,0],[0,10,0],
+                      [0,0,10],[10.000000123,0,10],[10.000000123,10,10],[0,10,10]],
+            faces  = [[1,2,3,0],[7,6,5,4],[4,5,1,0],
+                      [5,6,2,1],[6,7,3,2],[7,4,0,3]]);
+    )");
+    ASSERT_FALSE(e.bodies.empty());
+    const manifold::MeshGL64 mesh = e.bodies.front().body->GetMeshGL64();
+    double maxX = 0.0;
+    for (size_t i = 0; i < mesh.vertProperties.size(); i += mesh.numProp) {
+        maxX = std::max(maxX, mesh.vertProperties[i]);
+    }
+    // float32 would round this to 10.0 exactly; double keeps the tail.
+    EXPECT_GT(maxX, 10.0);
+    EXPECT_NEAR(maxX, 10.000000123, 1e-9);
+}
