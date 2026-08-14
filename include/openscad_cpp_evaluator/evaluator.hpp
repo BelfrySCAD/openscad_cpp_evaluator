@@ -63,7 +63,7 @@ public:
     // `fontProvider`: injection seam for text()/textmetrics()/fontmetrics()
     // (see font_provider.hpp). Left null (the common case for this repo's
     // own tests/CLI, and for any host that hasn't wired in its own) lazily
-    // constructs the built-in StbFontProvider default on first use, not in
+    // constructs the built-in FreetypeFontProvider on first use, not in
     // the constructor -- avoids paying for font-file parsing on every
     // Evaluator even when a script never calls text()/textmetrics().
     // `manifoldCache`: opt-in content-hash cache (see manifold_cache.hpp)

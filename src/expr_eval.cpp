@@ -2,7 +2,7 @@
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/eval_error.hpp"
-#include "openscad_cpp_evaluator/stb_font_provider.hpp"
+#include "openscad_cpp_evaluator/freetype_font_provider.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -90,7 +90,7 @@ Evaluator::Evaluator(EchoFn echoFn, std::shared_ptr<FontProvider> fontProvider, 
       debugHooks_(std::move(debugHooks)), profiling_(profiling) {}
 
 FontProvider& Evaluator::fontProvider() {
-    if (!fontProvider_) fontProvider_ = std::make_shared<StbFontProvider>();
+    if (!fontProvider_) fontProvider_ = std::make_shared<FreetypeFontProvider>();
     return *fontProvider_;
 }
 
