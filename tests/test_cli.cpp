@@ -11,6 +11,12 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 #include <gtest/gtest.h>
 #include <sstream>
 
@@ -33,8 +39,45 @@ const char* kAmbiguousNameScript = "function fib(n) = n < 2 ? n : fib(n-1) + fib
                                     "}\n"
                                     "thing(1);\n";
 
+// One directory per process, created once.
+//
+// These tests write a script, run the CLI on it, and delete both it and
+// their output again -- and they collide heavily on names: three share
+// "m.scad" as input and twenty-four write "m_out.stl". Sharing one temp
+// directory meant that under `ctest -j` a test would delete the script
+// another was still reading (runCli then returns 1) or remove an output
+// another had just written (exists(out) then fails). It looked like shared
+// state in the debug REPL; it was only the filenames.
+//
+// The process id is what makes this work. ctest runs each discovered test
+// as its OWN process, so a static counter or a hash of the script name is
+// identical in every one of them -- an earlier attempt keyed on exactly
+// that and changed nothing, because every process produced the same
+// directory name. Names stay as they were, which matters: some tests
+// assert on the filename the debugger prints ("m.scad:1").
+const std::filesystem::path& testScratchDir() {
+    // Removed on the way out. The tests delete their own scripts and
+    // outputs, but the directory itself would otherwise pile up -- one per
+    // test process per run, which is 1,482 of them a suite.
+    struct Scratch {
+        std::filesystem::path path;
+        Scratch() {
+            path = std::filesystem::temp_directory_path() /
+                   ("oscad_cli_test_" +
+                    std::to_string(static_cast<unsigned long long>(::getpid())));
+            std::filesystem::create_directories(path);
+        }
+        ~Scratch() {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec); // best effort
+        }
+    };
+    static const Scratch scratch;
+    return scratch.path;
+}
+
 std::filesystem::path writeScript(const std::string& name, const std::string& text) {
-    const std::filesystem::path p = std::filesystem::temp_directory_path() / ("oscad_cli_test_" + name);
+    const std::filesystem::path p = testScratchDir() / name;
     std::ofstream out(p);
     out << text;
     return p;
