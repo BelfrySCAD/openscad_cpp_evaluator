@@ -51,7 +51,16 @@ struct MeshDiagnosis {
 
 // Diagnose `mesh` against all four conditions. Read-only; nothing is
 // modified and no exception is thrown for a broken mesh.
-MeshDiagnosis checkMesh(const manifold::MeshGL& mesh);
+// Templated on the mesh type so callers can hand over MeshGL64 and keep
+// their coordinates. This is not cosmetic: the welding below keys on a
+// fixed 1e-6 grid, and float32's step exceeds that beyond coordinate
+// magnitude ~17 -- so on any real model a float mesh is coarser than the
+// tolerance these functions claim to work at, and genuinely distinct
+// vertices collapse onto one key. Instantiated for MeshGL and MeshGL64.
+template <typename M>
+MeshDiagnosis checkMesh(const M& mesh);
+extern template MeshDiagnosis checkMesh<manifold::MeshGL>(const manifold::MeshGL&);
+extern template MeshDiagnosis checkMesh<manifold::MeshGL64>(const manifold::MeshGL64&);
 
 // What repairMesh did, for reporting. Not a diagnosis: these are actions.
 struct MeshRepairReport {
@@ -81,7 +90,10 @@ struct MeshRepairReport {
 //
 // Returns the repaired mesh. A mesh it cannot close is still returned,
 // improved as far as it got, with the remainder reported in `report`.
-manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& report);
+template <typename M>
+M repairMesh(const M& mesh, MeshRepairReport& report);
+extern template manifold::MeshGL repairMesh<manifold::MeshGL>(const manifold::MeshGL&, MeshRepairReport&);
+extern template manifold::MeshGL64 repairMesh<manifold::MeshGL64>(const manifold::MeshGL64&, MeshRepairReport&);
 
 struct SliverStripReport {
     size_t removed = 0;        // zero-area faces taken out
@@ -103,6 +115,9 @@ struct SliverStripReport {
 // vertex restores the match without moving any geometry.
 //
 // The mesh is returned unchanged if it has no slivers.
-manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& report);
+template <typename M>
+M stripSlivers(const M& mesh, SliverStripReport& report);
+extern template manifold::MeshGL stripSlivers<manifold::MeshGL>(const manifold::MeshGL&, SliverStripReport&);
+extern template manifold::MeshGL64 stripSlivers<manifold::MeshGL64>(const manifold::MeshGL64&, SliverStripReport&);
 
 }  // namespace oscadeval

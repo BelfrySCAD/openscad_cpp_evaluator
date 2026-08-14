@@ -282,22 +282,18 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     }
     for (const Value& t : tris) mesh64.triVerts.push_back(static_cast<uint64_t>(std::get<double>(t)));
 
-    // checkMesh/repairMesh/tagDisplayOnly all work on MeshGL, and the
-    // repair path rewrites vertices, so it stays on floats: repair only
-    // runs on a mesh already known to be broken, where the topology surgery
-    // matters far more than the last few digits. Duplicating the repair
-    // code for both precisions would be a poor trade for that.
-    manifold::MeshGL mesh;
-    mesh.numProp = 3;
-    mesh.vertProperties.assign(mesh64.vertProperties.begin(), mesh64.vertProperties.end());
-    mesh.triVerts.assign(mesh64.triVerts.begin(), mesh64.triVerts.end());
+    // checkMesh/repairMesh work at this precision too, which matters here:
+    // they weld on a fixed 1e-6 grid, and float32's step is coarser than
+    // that beyond coordinate magnitude ~17, so a float mesh would have them
+    // merging vertices that are genuinely distinct on any real model.
+    manifold::MeshGL64& mesh = mesh64;
 
     const auto repairIt = params.find("repair");
     const bool repair = repairIt != params.end() && truthy(repairIt->second);
     if (repair) {
         const MeshDiagnosis before = checkMesh(mesh);
         MeshRepairReport rep;
-        manifold::MeshGL fixed = repairMesh(mesh, rep);
+        manifold::MeshGL64 fixed = repairMesh(mesh, rep);
         const MeshDiagnosis after = checkMesh(fixed);
         if (rep.didAnything()) {
             ev.warn("import: repaired the mesh -- " + rep.summary(), &node.position());
@@ -312,9 +308,7 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         mesh = std::move(fixed);
     }
 
-    // Only the untouched mesh still has its full precision; a repaired one
-    // has been through the float path, so build from whichever is current.
-    manifold::Manifold body = repair ? manifold::Manifold(mesh) : manifold::Manifold(mesh64);
+    manifold::Manifold body(mesh);
     if (body.Status() != manifold::Manifold::Error::NoError) {
         // Same treatment as an open polyhedron() (see generatePolyhedron):
         // keep the triangles so the file can still be LOOKED at. Previously
@@ -328,7 +322,14 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
                     "); drawing it as a surface, but it cannot take part in any CSG "
                     "operation" + (repair ? "" : ". Try import(..., repair=true)"),
                 &node.position());
-        return {ev.tagDisplayOnly(std::move(mesh), node, params.at("color"))};
+        // tagDisplayOnly carries a raw triangle soup for the renderer to
+        // draw, and the renderer is float either way, so narrowing here
+        // costs nothing this mesh will ever be measured on.
+        manifold::MeshGL soup;
+        soup.numProp = 3;
+        soup.vertProperties.assign(mesh.vertProperties.begin(), mesh.vertProperties.end());
+        soup.triVerts.assign(mesh.triVerts.begin(), mesh.triVerts.end());
+        return {ev.tagDisplayOnly(std::move(soup), node, params.at("color"))};
     }
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }

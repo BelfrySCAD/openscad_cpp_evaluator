@@ -15,29 +15,34 @@ using Edge = std::pair<Vert, Vert>;
 
 Edge undirected(Vert a, Vert b) { return {std::min(a, b), std::max(a, b)}; }
 
-size_t triCount(const manifold::MeshGL& m) { return m.triVerts.size() / 3; }
+template <typename M>
+size_t triCount(const M& m) { return m.triVerts.size() / 3; }
 
-void triVerts(const manifold::MeshGL& m, size_t t, Vert out[3]) {
+template <typename M>
+void triVerts(const M& m, size_t t, Vert out[3]) {
     out[0] = m.triVerts[t * 3];
     out[1] = m.triVerts[t * 3 + 1];
     out[2] = m.triVerts[t * 3 + 2];
 }
 
 // Position of vertex v, whatever the stride happens to be.
-void pos(const manifold::MeshGL& m, Vert v, double out[3]) {
+template <typename M>
+void pos(const M& m, Vert v, double out[3]) {
     const size_t stride = m.numProp ? m.numProp : 3;
     for (int i = 0; i < 3; ++i) out[i] = m.vertProperties[v * stride + i];
 }
 
 // A face naming the same vertex twice. Its "edges" include a self-edge, so
 // it cannot take part in the topology at all.
-bool repeatsAVertex(const manifold::MeshGL& m, size_t t) {
+template <typename M>
+bool repeatsAVertex(const M& m, size_t t) {
     Vert v[3];
     triVerts(m, t, v);
     return v[0] == v[1] || v[1] == v[2] || v[0] == v[2];
 }
 
-bool degenerate(const manifold::MeshGL& m, size_t t) {
+template <typename M>
+bool degenerate(const M& m, size_t t) {
     Vert v[3];
     triVerts(m, t, v);
     if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) return true;
@@ -52,7 +57,8 @@ bool degenerate(const manifold::MeshGL& m, size_t t) {
 
 // Vertices that share a position but not an index. Keyed on rounded
 // coordinates, matching the welding polyhedron() already does.
-size_t countUnwelded(const manifold::MeshGL& m) {
+template <typename M>
+size_t countUnwelded(const M& m) {
     const size_t stride = m.numProp ? m.numProp : 3;
     const size_t n = stride ? m.vertProperties.size() / stride : 0;
     std::map<std::tuple<long long, long long, long long>, size_t> seen;
@@ -69,7 +75,8 @@ size_t countUnwelded(const manifold::MeshGL& m) {
 // The faces around `v`, as (prev, next) pairs on the opposite edge. The link
 // is one cycle when following those pairs from any starting corner visits
 // all of them; more than one walk means the surface pinches at v.
-size_t countPinched(const manifold::MeshGL& m,
+template <typename M>
+size_t countPinched(const M& m,
                     const std::vector<std::vector<size_t>>& vertTris) {
     size_t pinched = 0;
     for (Vert v = 0; v < vertTris.size(); ++v) {
@@ -130,7 +137,8 @@ std::string MeshDiagnosis::summary() const {
     return out;
 }
 
-MeshDiagnosis checkMesh(const manifold::MeshGL& mesh) {
+template <typename M>
+MeshDiagnosis checkMesh(const M& mesh) {
     MeshDiagnosis d;
     const size_t tris = triCount(mesh);
     const size_t stride = mesh.numProp ? mesh.numProp : 3;
@@ -220,7 +228,8 @@ namespace {
 // Merge vertices that share a position. Everything downstream depends on
 // this: unwelded duplicates split one shared edge into two boundary edges,
 // so a mesh that is really closed reads as full of holes until it is done.
-std::vector<Vert> weldMap(const manifold::MeshGL& m, size_t& welded) {
+template <typename M>
+std::vector<Vert> weldMap(const M& m, size_t& welded) {
     const size_t stride = m.numProp ? m.numProp : 3;
     const size_t n = stride ? m.vertProperties.size() / stride : 0;
     std::map<std::tuple<long long, long long, long long>, Vert> first;
@@ -275,9 +284,10 @@ std::vector<std::vector<Vert>> boundaryLoops(const std::vector<std::array<Vert, 
 
 }  // namespace
 
-manifold::MeshGL repairMesh(const manifold::MeshGL& mesh, MeshRepairReport& report) {
+template <typename M>
+M repairMesh(const M& mesh, MeshRepairReport& report) {
     report = MeshRepairReport{};
-    manifold::MeshGL out = mesh;
+    M out = mesh;
 
     // 1. Weld. Must come first -- it decides which edges are shared, and
     //    every later step reads the edge map.
@@ -448,7 +458,8 @@ namespace {
 // between the same two points, so once it is gone the faces on either side
 // already meet along one edge and nothing needs splitting. The coincident
 // pair is merged so that is true by index as well as by position.
-bool coincidentPair(const manifold::MeshGL& m, const std::array<Vert, 3>& f,
+template <typename M>
+bool coincidentPair(const M& m, const std::array<Vert, 3>& f,
                     Vert& keep, Vert& drop) {
     for (int i = 0; i < 3; ++i) {
         const Vert a = f[i], b = f[(i + 1) % 3];
@@ -468,7 +479,8 @@ bool coincidentPair(const manifold::MeshGL& m, const std::array<Vert, 3>& f,
 
 // Index of the vertex opposite the longest edge -- for three collinear
 // points that is the one in the middle.
-int middleOfCollinear(const manifold::MeshGL& m, const std::array<Vert, 3>& f) {
+template <typename M>
+int middleOfCollinear(const M& m, const std::array<Vert, 3>& f) {
     double p[3][3];
     for (int i = 0; i < 3; ++i) pos(m, f[i], p[i]);
     auto d2 = [&](int a, int b) {
@@ -484,7 +496,8 @@ int middleOfCollinear(const manifold::MeshGL& m, const std::array<Vert, 3>& f) {
 
 }  // namespace
 
-manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& report) {
+template <typename M>
+M stripSlivers(const M& mesh, SliverStripReport& report) {
     report = SliverStripReport{};
     std::vector<std::array<Vert, 3>> tris;
     tris.reserve(triCount(mesh));
@@ -615,7 +628,7 @@ manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& r
         tris.swap(next);
     }
 
-    manifold::MeshGL out = mesh;
+    M out = mesh;
     out.triVerts.clear();
     out.triVerts.reserve(tris.size() * 3);
     for (const auto& f : tris) {
@@ -630,5 +643,17 @@ manifold::MeshGL stripSlivers(const manifold::MeshGL& mesh, SliverStripReport& r
     out.runTransform.clear();
     return out;
 }
+
+
+// Instantiated for both precisions: MeshGL for the paths that are float by
+// nature (STL, the renderer), MeshGL64 wherever the caller still has its
+// real coordinates. Keeping the definitions in this file, rather than the
+// header, keeps compile times where they were.
+template MeshDiagnosis checkMesh<manifold::MeshGL>(const manifold::MeshGL&);
+template MeshDiagnosis checkMesh<manifold::MeshGL64>(const manifold::MeshGL64&);
+template manifold::MeshGL repairMesh<manifold::MeshGL>(const manifold::MeshGL&, MeshRepairReport&);
+template manifold::MeshGL64 repairMesh<manifold::MeshGL64>(const manifold::MeshGL64&, MeshRepairReport&);
+template manifold::MeshGL stripSlivers<manifold::MeshGL>(const manifold::MeshGL&, SliverStripReport&);
+template manifold::MeshGL64 stripSlivers<manifold::MeshGL64>(const manifold::MeshGL64&, SliverStripReport&);
 
 }  // namespace oscadeval
