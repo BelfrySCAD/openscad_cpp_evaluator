@@ -267,12 +267,30 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     const auto& tris = std::get<ListPtr>(params.at("tris"))->items;
     if (tris.empty()) ev.error("import: mesh has no triangles", node);
 
+    // Kept at full precision for the Manifold that CSG will actually use --
+    // MeshGL is MeshGLP<float>, and truncating there does not merely lose
+    // digits, it snaps nearly-distinct coordinates onto exactly-equal ones
+    // and manufactures the degenerate coincidences that make a later
+    // boolean leave a zero-thickness membrane behind (see
+    // generatePolyhedron). STL carries only float32 to begin with, but
+    // OBJ/OFF/3MF are text and can hold more, and this is the same
+    // import() either way.
+    manifold::MeshGL64 mesh64;
+    mesh64.numProp = 3;
+    for (const Value& v : std::get<ListPtr>(params.at("verts"))->items) {
+        mesh64.vertProperties.push_back(std::get<double>(v));
+    }
+    for (const Value& t : tris) mesh64.triVerts.push_back(static_cast<uint64_t>(std::get<double>(t)));
+
+    // checkMesh/repairMesh/tagDisplayOnly all work on MeshGL, and the
+    // repair path rewrites vertices, so it stays on floats: repair only
+    // runs on a mesh already known to be broken, where the topology surgery
+    // matters far more than the last few digits. Duplicating the repair
+    // code for both precisions would be a poor trade for that.
     manifold::MeshGL mesh;
     mesh.numProp = 3;
-    for (const Value& v : std::get<ListPtr>(params.at("verts"))->items) {
-        mesh.vertProperties.push_back(static_cast<float>(std::get<double>(v)));
-    }
-    for (const Value& t : tris) mesh.triVerts.push_back(static_cast<uint32_t>(std::get<double>(t)));
+    mesh.vertProperties.assign(mesh64.vertProperties.begin(), mesh64.vertProperties.end());
+    mesh.triVerts.assign(mesh64.triVerts.begin(), mesh64.triVerts.end());
 
     const auto repairIt = params.find("repair");
     const bool repair = repairIt != params.end() && truthy(repairIt->second);
@@ -294,7 +312,9 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         mesh = std::move(fixed);
     }
 
-    manifold::Manifold body(mesh);
+    // Only the untouched mesh still has its full precision; a repaired one
+    // has been through the float path, so build from whichever is current.
+    manifold::Manifold body = repair ? manifold::Manifold(mesh) : manifold::Manifold(mesh64);
     if (body.Status() != manifold::Manifold::Error::NoError) {
         // Same treatment as an open polyhedron() (see generatePolyhedron):
         // keep the triangles so the file can still be LOOKED at. Previously
