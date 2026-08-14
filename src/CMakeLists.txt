@@ -21,7 +21,8 @@ add_library(openscad_cpp_evaluator STATIC
   import/surface_load.cpp
   import/dxf_import.cpp
   import/svg_import.cpp
-  text/stb_font_provider.cpp
+  text/freetype_font_provider.cpp
+  text/font_match.cpp
   text/text_metrics.cpp
   debug/debug_repl.cpp
   builtins/text.cpp
@@ -51,7 +52,7 @@ target_include_directories(openscad_cpp_evaluator PRIVATE ${stb_SOURCE_DIR} ${CM
 add_dependencies(openscad_cpp_evaluator generate_bundled_font)
 
 target_link_libraries(openscad_cpp_evaluator PUBLIC openscad_cpp_parser manifold Boost::polygon)
-target_link_libraries(openscad_cpp_evaluator PRIVATE linenoise)
+target_link_libraries(openscad_cpp_evaluator PRIVATE linenoise freetype harfbuzz)
 target_compile_options(openscad_cpp_evaluator PRIVATE
   $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra>
 )

@@ -12,14 +12,26 @@ OpenSCAD AST and produces Manifold CSG geometry. This port builds on two depende
   tag, not vendored) — wired in as of Phase 2
 - Boost.Polygon (`boostorg/polygon` + `boostorg/config`, fetched individually — not the full Boost
   superproject) for `roof()`'s Voronoi-diagram construction — wired in as of Phase 6, see below
-- `nothings/stb` (`stb_image.h`, `stb_truetype.h`; header-only, no build step) for `surface()`'s
-  PNG loader and the built-in `FontProvider` default's TTF parsing/outline extraction — wired in as
-  of Phase 7
+- `nothings/stb` (`stb_image.h`; header-only, no build step) for `surface()`'s PNG loader — wired
+  in as of Phase 7
+- FreeType (`VER-2-14-3`) and HarfBuzz (`14.3.1`), both via `FetchContent` — the font backend:
+  HarfBuzz shapes, FreeType supplies outlines and face metrics. Deliberately NOT fontconfig, the
+  third leg of real OpenSCAD's font stack: it is meson-only (no CMake build at all), needs expat,
+  and wants a runtime `fonts.conf` plus a cache directory, none of which survives contact with six
+  cibuildwheel targets. `src/text/font_match.cpp` reimplements the part of it that `font=` actually
+  uses — spec syntax and directory scanning — so name matching behaves identically everywhere
+  rather than only where a fontconfig build exists. The two libraries are also kept independent of
+  *each other* (`HB_HAVE_FREETYPE=OFF`): HarfBuzz reads the font through its own hb-ot tables
+  reader, so no `find_package(Freetype)` has to resolve against a FetchContent target that is
+  installed nowhere. Both address glyphs by the same font-internal index and both work in font
+  units (`hb_font_set_scale` to unitsPerEm on one side, `FT_LOAD_NO_SCALE` on the other), so the
+  split costs nothing to bridge.
 
 The full design and phase-by-phase build order live in the plan this repo is being built from:
 `/Users/gminette/.claude/plans/please-plan-out-a-twinkly-anchor.md`. Read it before starting a new
 phase — it has the rationale for every non-obvious choice (value model, `EvalContext` lifetime,
-the `FontProvider` callback abstraction for Qt-hosted cross-platform font support, why Manifold's
+the `FontProvider` abstraction (whose built-in backend has since become
+FreeType/HarfBuzz rather than the stb_truetype single-font default the plan describes), why Manifold's
 own vendored `linalg.h` types and not GLM/Eigen, etc.) and the exit criterion each phase needs to
 hit before the next one starts. §6a was corrected during Phase 2 after checking Manifold's real
 source (it no longer uses GLM) — a live example of why the plan says to verify API assumptions
@@ -43,7 +55,7 @@ CSG-tree shape like union/difference/intersection, role-split via the shared `sp
 `POLYLINE`) and SVG (`path`/`polygon`/`polyline`/`rect`/`circle`/`ellipse`, nested
 `transform=`, all path commands including elliptical arcs) 2D contour import in both module
 (Region geometry) and expression (Region value) contexts, and the `FontProvider` abstraction
-(`font_provider.hpp`) + built-in `StbFontProvider` default + `text()`/`textmetrics()`/
+(`font_provider.hpp`) + built-in FreeType/HarfBuzz backend + `text()`/`textmetrics()`/
 `fontmetrics()`; and (Phase 8) `ManifoldCache` — an opt-in, thread-safe content-hash cache of
 already-generated CSGNode subtrees (`manifold_cache.hpp`/`.cpp`), plus `rands()`-taint tracking
 (`Evaluator::noteRandsCall()`/`CSGNode::uncacheable`) so a subtree whose resolved content isn't a
@@ -215,31 +227,45 @@ top-level 2D primitive/projection() script had been silently unexportable via th
 Fixed by porting `toRenderableBodies()` (`colored_body.hpp`/`.cpp`) and calling it from the CLI right
 before export, matching the reference's own call site exactly.
 
-**Font support, Phase 7**: mirrors the plan's §6 design exactly — a `FontProvider` abstract
-interface (`font_provider.hpp`: `resolveFont`/`metrics`/`glyphMetrics`/`glyphOutline`) rather than
-hard-depending on the Python reference's `fc-match` shell-out (Linux-only, unusable inside a
-cross-platform Qt host app). `Evaluator`'s constructor takes an optional
-`shared_ptr<FontProvider>`; if unset, `Evaluator::fontProvider()` lazily constructs the built-in
-`StbFontProvider` default on first use (not eagerly in the constructor, so a script that never
-calls `text()`/`textmetrics()`/`fontmetrics()` never pays for font-file parsing).
-`StbFontProvider::resolveFont()` always returns the one bundled font (`resources/fonts/
-LiberationSans-Regular.ttf`, the *exact same* font file as the Python reference's own bundled
-default, copied over so cross-checks are apples-to-apples) regardless of the requested spec — no
-system font matching, matching the plan's documented limitation for the built-in default; a real Qt
-host app supplies its own `FontProvider` (`QFontDatabase`/`QRawFont`-backed) instead of this class
-for actual system-font resolution. `text_metrics.hpp`/`.cpp` holds the shared, backend-agnostic
-layout math (`measureText`/`textAlignOffset`, mirroring `_measure_text`/`_text_align_offset`
-exactly) used by both `text()` (`builtins/text.cpp`) and `textmetrics()`/`fontmetrics()`
-(`function_builtins.cpp`) — cross-checked bit-for-bit against the Python reference's fonttools-based
-metrics on the bundled font (identical `advance`/`ascent`/`descent`/family name values) and against
-its glyph-outline mesh output (identical triangle count and bounding box for `text()`).
+**Font support**: a `FontProvider` abstract interface (`font_provider.hpp`: `resolveFont`/
+`metrics`/`shapeText`/`glyphInkBounds`/`glyphOutline`) with `FreetypeFontProvider` as the built-in
+implementation everything here actually uses. `Evaluator`'s constructor takes an optional
+`shared_ptr<FontProvider>`; if unset, `Evaluator::fontProvider()` constructs the built-in one
+lazily on first use (not eagerly in the constructor, so a script that never calls `text()`/
+`textmetrics()`/`fontmetrics()` never pays for font parsing). Laziness runs one level deeper too:
+the system font directories are only scanned once a `font=` spec actually names a family, so the
+common case — the default font, or a family already resolved once — never walks the filesystem.
 
-**Known gap carried from Phase 7**: `StbFontProvider::resolveFont()` ignores its `spec` argument
-entirely (always the one bundled font) — this is the documented, intentional shape of the *built-in
-default* (see above), not a bug; a script that requests a specific system font (`font="Times New
-Roman:style=Bold"`) silently gets Liberation Sans instead under this default provider. No upgrade
-path needed in this repo: the fix is a Qt host application supplying its own `FontProvider`, which
-is exactly what the injection seam exists for.
+The interface is shaped around shaping: `shapeText()` takes a whole string, because kerning,
+ligatures, mark positioning and bidi reordering are properties of the run and not of any character
+in it, and returns positioned *glyph indices* rather than codepoints (the mapping is neither 1:1
+nor stable across fonts). `direction`/`language`/`script` are honoured rather than merely accepted;
+whichever is left empty is filled in by `hb_buffer_guess_segment_properties`, the same job real
+OpenSCAD's `detect_properties()`/`detect_script()` does by hand.
+
+`resolveFont()` never fails. An unmatched family falls back to the bundled Liberation Sans
+(`resources/fonts/`, embedded into the binary by `cmake/embed_font.cmake`, byte-identical to the
+Python reference's own bundled font), which is both the default and the last-resort fallback — so
+`text()` draws something even on a machine with no fonts installed at all. That mirrors
+fontconfig's own never-fails matching, and so real OpenSCAD's: a missing font silently becomes the
+nearest available one rather than an error.
+
+`font_match.cpp` is the part of fontconfig that `font=` actually needs, reimplemented: comma-
+separated family lists, `:style=Bold Italic` (and bare `:Bold`), other properties ignored rather
+than rejected, generic `sans-serif`/`serif`/`monospace` aliases expanded to concrete families, and
+a recursive scan of the platform font directories plus `OPENSCAD_FONT_PATH` (the same environment
+variable real OpenSCAD reads). Family match is case-insensitive and required; style is a
+*preference* — exact, then substring, then Regular, then the family's first face — because
+dropping to Regular beats falling through to an unrelated family, which is what fontconfig does
+too.
+
+`text_metrics.hpp`/`.cpp` holds the shared layout math (`measureText`/`textAlignOffset`) used by
+both `text()` (`builtins/text.cpp`) and `textmetrics()`/`fontmetrics()` (`function_builtins.cpp`).
+Sharing it is the point: the numbers a script positions against cannot disagree with what it
+draws. The `size * (100/72) / unitsPerEm` scale factor reproduces real OpenSCAD's own long-standing
+`text()` size bug (its issue #4304 — `FT_Set_Char_Size` given 100 dpi where 72 is correct, making
+glyphs ~1.39x nominal) deliberately: a decade of models are drawn to it, and OpenSCAD itself chose
+to keep it and add an `em=` parameter rather than fix it.
 
 **Debugger/profiler, Phase 9 (the last phase)**: `checkDebug()` fires at **full parity with the
 reference's `_check_debug` call sites** — the statement checkpoint in `evalChildren`'s `runAll`,
@@ -633,30 +659,39 @@ grep for `ponytail:`.
   OpenSCAD up) at the point-transform step, `applyMat()` (named to avoid colliding with
   `std::apply` in an ADL lookup that broke the build once — see its own comment).
 - `include/openscad_cpp_evaluator/font_provider.hpp` — the `FontProvider` abstract interface
-  (`resolveFont`/`metrics`/`glyphMetrics`/`glyphOutline`), the injection seam that keeps
-  `text()`/`textmetrics()`/`fontmetrics()` decoupled from any specific font backend (the plan's §6
-  design — avoids hard-depending on the Python reference's Linux-only `fc-match` shell-out, since
-  this library is meant to be embedded in a cross-platform Qt GUI app). `Evaluator`'s constructor
-  takes an optional injected `shared_ptr<FontProvider>`; `Evaluator::fontProvider()` lazily
-  constructs the built-in default (below) on first use otherwise.
-- `include/openscad_cpp_evaluator/stb_font_provider.hpp`, `src/text/stb_font_provider.cpp` — the
-  built-in `FontProvider` default: `stb_truetype.h` over the one bundled font
-  (`resources/fonts/LiberationSans-Regular.ttf`, byte-identical to the Python reference's own
-  bundled font). `resolveFont()` ignores its `spec` argument entirely and always returns that one
-  font (see the "known gap" note above) — a real Qt host app supplies its own `QFontDatabase`/
-  `QRawFont`-backed `FontProvider` instead of this class for real system-font matching.
+  (`resolveFont`/`metrics`/`shapeText`/`glyphInkBounds`/`glyphOutline`), the seam that keeps
+  `text()`/`textmetrics()`/`fontmetrics()` decoupled from any specific font backend. `Evaluator`'s
+  constructor takes an optional injected `shared_ptr<FontProvider>`; `Evaluator::fontProvider()`
+  lazily constructs the built-in one (below) on first use otherwise. The seam stays because a host
+  that already owns a font stack (a Qt app with `QRawFont`) may prefer to answer these five
+  questions itself rather than run a second font engine in the same process.
+- `include/openscad_cpp_evaluator/freetype_font_provider.hpp`,
+  `src/text/freetype_font_provider.cpp` — the built-in implementation. HarfBuzz shapes
+  (`hb_blob_create_from_file_or_fail` → `hb_face_create` → `hb_font_create` +
+  `hb_ot_font_set_funcs`, scaled to unitsPerEm so positions come back in font units); FreeType
+  supplies outlines (`FT_LOAD_NO_SCALE` + `FT_Outline_Decompose`, curves flattened uniformly in
+  `t` — the same approximation real OpenSCAD's `DrawingCallback` makes) and face metrics
+  (`lineGap` derived as `height - (ascender - descender)`, since FreeType reports the summed line
+  height). Faces are cached per resolved spec; handle 0 is always the bundled font.
+- `include/openscad_cpp_evaluator/font_match.hpp`, `src/text/font_match.cpp` — the fontconfig
+  replacement: `parseFontSpec()` (family list + `:style=`), `expandGenericFamily()`
+  (sans-serif/serif/monospace → concrete families), `systemFontDirs()`/`findFontFiles()` (platform
+  font directories + `OPENSCAD_FONT_PATH`, `.ttf`/`.otf`/`.ttc`/`.otc`, permission errors skipped
+  rather than thrown — a font directory with odd permissions must not take down a render), and
+  `matchFace()` (case-insensitive family match required, style preferred). All pure functions over
+  plain data, so their tests need no system fonts.
 - `include/openscad_cpp_evaluator/text_metrics.hpp`, `src/text/text_metrics.cpp` — the
   backend-agnostic text-layout math shared by `text()` and `textmetrics()`/`fontmetrics()`:
-  `measureText()` (left-to-right glyph layout, ink-bbox/advance aggregation — mirrors
-  `_measure_text` exactly, including the "unmapped codepoint skipped entirely, mapped-but-inkless
-  codepoint still advances" distinction) and `textAlignOffset()` (halign/valign →
-  translation offset, mirrors `_text_align_offset`). `utf8DecodeAll()` here decodes a UTF-8 byte
-  string to full Unicode scalar values for per-codepoint `FontProvider` calls.
-- `src/builtins/text.cpp` — `text()` itself: resolves layout via `text_metrics.hpp` at resolve
-  time (so `resolveText`'s params carry only plain data — per-glyph codepoint+pen-x, scale, segment
-  count, alignment offset — no `FontProvider`/`EvalContext` reference crossing into generate),
-  then at generate time calls `FontProvider::glyphOutline()` per glyph, unions the resulting
-  `CrossSection`s, and applies the alignment offset.
+  `measureText()` (shapes the run, then aggregates ink-bbox/advance over the positioned glyphs —
+  an inkless glyph like a space still advances the pen while contributing nothing to the ink box)
+  and `textAlignOffset()` (halign/valign → translation offset).
+- `src/builtins/text.cpp` — `text()` itself: resolves the font and lays the run out via
+  `text_metrics.hpp` at resolve time (so `resolveText`'s params carry only plain data — per-glyph
+  index + pen x/y, scale, segment count, alignment offset — no `FontProvider`/`EvalContext`
+  reference crossing into generate), then at generate time calls `FontProvider::glyphOutline()`
+  per glyph, builds each `CrossSection` with the `NonZero` fill rule (what turns a counter wound
+  against its outer contour into a hole rather than a second filled blob), unions them, and
+  applies the alignment offset.
 - `include/openscad_cpp_evaluator/debug_hooks.hpp`, `include/openscad_cpp_evaluator/profile.hpp`,
   `src/debug_profile.cpp` — the debugging/profiling injection seam. `DebugHookFn`/`ErrorBreakFn`/
   `ReturnHookFn` (bundled into one `DebugHooks` constructor parameter) mirror the reference's

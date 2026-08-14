@@ -320,10 +320,13 @@ Value objectOf(std::vector<std::pair<std::string, Value>> items) {
     return Value{std::make_shared<const ValueObject>(ValueObject{std::move(items)})};
 }
 
-// textmetrics(text=, size=10, halign=, valign=, spacing=, font=) -- measures
-// `text` against the FontProvider-resolved font (same resolution text()
-// uses) and returns an OscObject with position/size/ascent/descent/offset/
-// advance, matching real OpenSCAD's key order. Mirrors _builtin_textmetrics.
+// textmetrics(text=, size=10, font=, direction=, language=, script=,
+// halign=, valign=, spacing=) -- measures `text` against the
+// FontProvider-resolved font, laid out by exactly the same shaping call
+// text() makes, and returns an OscObject with position/size/ascent/
+// descent/offset/advance in real OpenSCAD's key order. Going through the
+// same measureText() the geometry goes through is the point: the numbers
+// a script positions against cannot disagree with what it draws.
 Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
     const std::string text = asStringOr(getArg(args, 0, "text", Value{std::string("")}), "");
     const double size = toDoubleLenient(getArg(args, 1, "size", Value{10.0}));
@@ -331,10 +334,14 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
     const std::string valign = asStringOr(getArg(args, std::nullopt, "valign", Value{std::string("baseline")}), "baseline");
     const double spacing = toDoubleLenient(getArg(args, std::nullopt, "spacing", Value{1.0}));
     const std::string fontSpec = asStringOr(getArg(args, std::nullopt, "font", Value{std::string("")}), "");
+    ShapeOptions shape;
+    shape.direction = asStringOr(getArg(args, std::nullopt, "direction", Value{std::string("")}), "");
+    shape.language = asStringOr(getArg(args, std::nullopt, "language", Value{std::string("")}), "");
+    shape.script = asStringOr(getArg(args, std::nullopt, "script", Value{std::string("")}), "");
 
     FontProvider& fp = ev.fontProvider();
     const FontHandle handle = fp.resolveFont(fontSpec);
-    const TextMeasurement m = measureText(fp, handle, text, size, spacing);
+    const TextMeasurement m = measureText(fp, handle, text, size, spacing, shape);
     const auto [offsetX, offsetY] = textAlignOffset(halign, valign, m);
 
     return objectOf({
@@ -343,7 +350,7 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
         {"ascent", Value{m.ascent}},
         {"descent", Value{m.descent}},
         {"offset", numList({offsetX, offsetY})},
-        {"advance", numList({m.advanceX, 0.0})},
+        {"advance", numList({m.advanceX, m.advanceY})},
     });
 }
 

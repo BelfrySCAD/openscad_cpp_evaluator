@@ -129,12 +129,65 @@ FetchContent_Declare(boost_config GIT_REPOSITORY https://github.com/boostorg/con
 FetchContent_Declare(boost_polygon GIT_REPOSITORY https://github.com/boostorg/polygon.git GIT_TAG boost-1.86.0 GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(boost_config boost_polygon)
 
-# nothings/stb: single-header stb_image.h (surface()'s PNG loader) and
-# stb_truetype.h (the built-in FontProvider's TTF parser/rasterizer, Phase
-# 7) -- no build system of its own, just headers, so this only needs an
-# include path, not add_subdirectory/MakeAvailable's target machinery.
+# nothings/stb: single-header stb_image.h, surface()'s PNG loader -- no
+# build system of its own, just headers, so this only needs an include
+# path, not add_subdirectory/MakeAvailable's target machinery. (It used to
+# supply stb_truetype.h for the font backend too; FreeType/HarfBuzz below
+# replaced that.)
 FetchContent_Declare(stb GIT_REPOSITORY https://github.com/nothings/stb.git GIT_TAG master GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(stb)
+
+# FreeType (glyph outlines + face metrics) and HarfBuzz (shaping), the two
+# halves of the font backend. Both build with plain CMake, which is why
+# they can be FetchContent deps like everything else here -- fontconfig,
+# the third leg of real OpenSCAD's font stack, is meson-only and is
+# deliberately NOT used; font_match.cpp implements its spec syntax and
+# directory scanning directly so that name matching behaves identically on
+# all six wheel targets rather than only where a fontconfig build exists.
+#
+# The two are kept independent of each other on purpose: HB_HAVE_FREETYPE
+# is OFF, so HarfBuzz reads the font through its own hb-ot tables reader
+# rather than through FreeType, and no find_package(Freetype) has to
+# resolve against a FetchContent target that isn't installed anywhere.
+# Both sides address glyphs by the same font-internal glyph index, so the
+# split costs nothing: HarfBuzz shapes text into positioned glyph indices,
+# FreeType turns each index into an outline. Everything crosses that
+# boundary in font units (hb_font_set_scale to unitsPerEm on one side,
+# FT_LOAD_NO_SCALE on the other), so there is no scale mismatch to
+# reconcile either.
+#
+# FreeType's optional dependencies are all disabled: zlib/bzip2/brotli
+# decompress rare embedded-table formats, PNG is for colour bitmap emoji
+# strikes, and HarfBuzz there is only for autohinting quality -- none of
+# which matter when the only thing being asked for is a scalable outline.
+# Leaving them on would make the wheel build depend on whatever those
+# libraries happen to be on six different build images.
+set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  freetype
+  GIT_REPOSITORY https://github.com/freetype/freetype.git
+  GIT_TAG VER-2-14-3
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(freetype)
+
+set(HB_HAVE_FREETYPE OFF CACHE BOOL "" FORCE)
+set(HB_HAVE_GLIB OFF CACHE BOOL "" FORCE)
+set(HB_HAVE_ICU OFF CACHE BOOL "" FORCE)
+set(HB_BUILD_SUBSET OFF CACHE BOOL "" FORCE)
+set(HB_BUILD_UTILS OFF CACHE BOOL "" FORCE)
+set(HB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  harfbuzz
+  GIT_REPOSITORY https://github.com/harfbuzz/harfbuzz.git
+  GIT_TAG 14.3.1
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(harfbuzz)
 
 # yhirose/cpp-linenoise: header-only, BSD-2-Clause C++ port of antirez/
 # linenoise with native Windows console support (no ANSI emulation layer,
@@ -149,7 +202,7 @@ FetchContent_MakeAvailable(cpp_linenoise)
 
 # Embeds the bundled default font's (resources/fonts/) raw bytes into a
 # generated header (kBundledFontData/kBundledFontDataSize), so
-# StbFontProvider's default constructor needs no runtime file path at all --
+# FreetypeFontProvider needs no runtime file path for its default font --
 # a real installed/packaged build (e.g. the PyPI wheel) has no guarantee the
 # source tree's resources/fonts/ is present or at any predictable path
 # alongside the installed shared library.

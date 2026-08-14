@@ -1,4 +1,5 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/font_match.hpp"
 
 #include "test_helpers.hpp"
 
@@ -149,4 +150,122 @@ TEST(Fontmetrics, NominalAscentIsPositive) {
     Value v = asExpr("fontmetrics(size=10)", ev);
     Value nominal = objGet(v, "nominal");
     EXPECT_GT(asNum(objGet(nominal, "ascent")), 0.0);
+}
+
+TEST(Fontmetrics, UnmatchedFontFallsBackToTheBundledOne) {
+    // fontconfig-style matching never fails -- an unavailable font
+    // silently becomes the nearest available one, which for this provider
+    // is always the bundled font. A model asking for a font the machine
+    // doesn't have must still render, not error.
+    Evaluator ev;
+    Value v = asExpr("fontmetrics(size=10, font=\"No Such Font Exists Anywhere\")", ev);
+    EXPECT_EQ(std::get<std::string>(objGet(objGet(v, "font"), "family")), "Liberation Sans");
+}
+
+// -- shaping ---------------------------------------------------------------
+
+TEST(TextShaping, KerningPullsAPairTighterThanItsGlyphsMeasuredApart) {
+    // The whole reason layout goes through a shaper: "AV" is a kern pair
+    // in Liberation Sans, so shaping the run must produce a shorter
+    // advance than adding up the two glyphs' own advance widths. Measuring
+    // per character, as a naive layout does, cannot see this.
+    Evaluator ev;
+    const auto advanceOf = [&](const std::string& s) {
+        Value v = asExpr("textmetrics(text=\"" + s + "\", size=10)", ev);
+        return asNum(std::get<ListPtr>(objGet(v, "advance"))->items[0]);
+    };
+    const double apart = advanceOf("A") + advanceOf("V");
+    const double shaped = advanceOf("AV");
+    EXPECT_LT(shaped, apart);
+    // A kern, not a collapse: the pair is still nearly as wide as its parts.
+    EXPECT_GT(shaped, apart * 0.9);
+}
+
+TEST(TextShaping, DirectionAndScriptAreAcceptedAndMeasured) {
+    // Explicit direction/script are passed to the shaper rather than
+    // ignored. Whether the bundled font covers the script doesn't matter
+    // here -- what matters is that the options reach it and a run comes
+    // back measurable.
+    Evaluator ev;
+    Value v = asExpr("textmetrics(text=\"abc\", size=10, direction=\"rtl\", script=\"Latn\", language=\"en\")", ev);
+    EXPECT_GT(asNum(std::get<ListPtr>(objGet(v, "advance"))->items[0]), 0.0);
+}
+
+TEST(TextShaping, TrailingSpaceAdvancesThePenWithoutGrowingTheInkBox) {
+    Evaluator ev;
+    Value bare = asExpr("textmetrics(text=\"Hi\", size=10)", ev);
+    Value spaced = asExpr("textmetrics(text=\"Hi \", size=10)", ev);
+    const auto width = [&](const Value& v) { return asNum(std::get<ListPtr>(objGet(v, "size"))->items[0]); };
+    const auto advance = [&](const Value& v) { return asNum(std::get<ListPtr>(objGet(v, "advance"))->items[0]); };
+    EXPECT_NEAR(width(spaced), width(bare), 1e-9);
+    EXPECT_GT(advance(spaced), advance(bare));
+}
+
+TEST(Text, CounterOfAnOIsAHoleNotAFilledBlob) {
+    // Glyph contours are wound so that inner contours run opposite the
+    // outer one; building the CrossSection with the NonZero fill rule is
+    // what turns that into a hole. If the rule or the winding were wrong,
+    // the 'o' would come out solid and its area would match its bounds.
+    Evaluated e = evalSrc("text(\"o\", size=20, $fn=32);");
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    const manifold::Rect b = e.bodies[0].section->Bounds();
+    const double boxArea = (b.max.x - b.min.x) * (b.max.y - b.min.y);
+    EXPECT_GT(e.bodies[0].section->Area(), 0.0);
+    EXPECT_LT(e.bodies[0].section->Area(), boxArea * 0.75);
+}
+
+// -- font matching (pure, no system fonts involved) ------------------------
+
+TEST(FontMatch, ParsesFamilyListAndStyle) {
+    const FontSpec s = parseFontSpec("Helvetica, Arial ,sans-serif:style=Bold Italic");
+    ASSERT_EQ(s.families.size(), 3u);
+    EXPECT_EQ(s.families[0], "Helvetica");
+    EXPECT_EQ(s.families[1], "Arial");
+    EXPECT_EQ(s.families[2], "sans-serif");
+    EXPECT_EQ(s.style, "Bold Italic");
+}
+
+TEST(FontMatch, ParsesBareStyleAndIgnoresOtherProperties) {
+    EXPECT_EQ(parseFontSpec("Courier New:Bold").style, "Bold");
+    EXPECT_EQ(parseFontSpec("Courier New:size=12:style=Oblique").style, "Oblique");
+    EXPECT_TRUE(parseFontSpec("Courier New:weight=200").style.empty());
+}
+
+TEST(FontMatch, EmptySpecHasNoFamilyToMatch) {
+    EXPECT_TRUE(parseFontSpec("").families.empty());
+    EXPECT_TRUE(parseFontSpec(":style=Bold").families.empty());
+}
+
+TEST(FontMatch, GenericFamiliesExpandToConcreteOnes) {
+    EXPECT_FALSE(expandGenericFamily("sans-serif").empty());
+    EXPECT_EQ(expandGenericFamily("monospace")[0], "Liberation Mono");
+    EXPECT_TRUE(expandGenericFamily("Liberation Sans").empty());
+}
+
+TEST(FontMatch, PrefersExactStyleThenSubstringThenRegular) {
+    const std::vector<FontFace> faces = {
+        {"/f/sans.ttf", 0, "Test Sans", "Regular"},
+        {"/f/sans.ttf", 1, "Test Sans", "Bold"},
+        {"/f/sans.ttf", 2, "Test Sans", "Bold Italic"},
+    };
+    EXPECT_EQ(matchFace(parseFontSpec("Test Sans:style=Bold"), faces)->faceIndex, 1);
+    EXPECT_EQ(matchFace(parseFontSpec("Test Sans:style=Italic"), faces)->faceIndex, 2);
+    EXPECT_EQ(matchFace(parseFontSpec("Test Sans"), faces)->faceIndex, 0);
+}
+
+TEST(FontMatch, FamilyMatchIsCaseInsensitiveAndFallsThroughTheList) {
+    const std::vector<FontFace> faces = {{"/f/a.ttf", 0, "Test Sans", "Regular"}};
+    EXPECT_TRUE(matchFace(parseFontSpec("TEST SANS"), faces).has_value());
+    EXPECT_TRUE(matchFace(parseFontSpec("Missing One,Test Sans"), faces).has_value());
+    EXPECT_FALSE(matchFace(parseFontSpec("Missing One"), faces).has_value());
+}
+
+TEST(FontMatch, StyleIsAPreferenceNotAFilter) {
+    // A family that exists but not in the requested style still matches --
+    // dropping to Regular beats falling through to a different family
+    // entirely, which is how fontconfig behaves too.
+    const std::vector<FontFace> faces = {{"/f/a.ttf", 0, "Test Sans", "Regular"}};
+    const std::optional<FontFace> hit = matchFace(parseFontSpec("Test Sans:style=Black"), faces);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->style, "Regular");
 }

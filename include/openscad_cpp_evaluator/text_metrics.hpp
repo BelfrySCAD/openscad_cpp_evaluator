@@ -8,29 +8,33 @@
 
 namespace oscadeval {
 
-// Decodes a UTF-8 byte string into full Unicode scalar values. A malformed
-// lead byte falls back to its raw byte value rather than throwing --
-// matches this codebase's existing chr()/ord() leniency
-// (function_builtins.cpp).
-std::vector<char32_t> utf8DecodeAll(const std::string& s);
-
-// Left-to-right layout of `text`'s ink-bbox/advance metrics, in OpenSCAD
-// units scaled for `size`. `glyphs`: (codepoint, pen-x already scaled) for
-// each *mapped* codepoint -- used by text() to actually place outlines. A
-// codepoint the font doesn't map at all is skipped entirely (no entry, no
-// advance); a mapped-but-inkless codepoint (space) still advances and gets
-// a glyphs entry, just doesn't affect ascent/descent/inkMinX/inkMaxX.
-// Mirrors _measure_text.
+// Layout of `text`'s ink-bbox/advance metrics, in OpenSCAD units scaled
+// for `size`. `glyphs` is what text() places: each shaped glyph with its
+// pen position, already scaled. An inkless glyph (a space) still advances
+// the pen and still gets a glyphs entry -- it just contributes nothing to
+// ascent/descent/inkMinX/inkMaxX.
+//
+// The run comes from the shaper, so kerning and ligatures are already
+// applied and `spacing` scales the shaped advances rather than raw
+// per-character widths.
 struct TextMeasurement {
-    double ascent = 0, descent = 0, inkMinX = 0, inkMaxX = 0, advanceX = 0;
-    std::vector<std::pair<char32_t, double>> glyphs;
+    struct Placed {
+        GlyphId glyph = 0;
+        double x = 0, y = 0;
+    };
+
+    double ascent = 0, descent = 0, inkMinX = 0, inkMaxX = 0;
+    double advanceX = 0, advanceY = 0;
+    std::vector<Placed> glyphs;
 };
 
-TextMeasurement measureText(FontProvider& fp, FontHandle handle, const std::string& text, double size, double spacing);
+TextMeasurement measureText(FontProvider& fp, FontHandle handle, const std::string& text, double size,
+                            double spacing, const ShapeOptions& opts = {});
 
-// (offsetX, offsetY) translation for halign/valign, given a TextMeasurement.
-// Shared by textmetrics() (reports it) and text() (applies it). Mirrors
-// _text_align_offset.
-std::pair<double, double> textAlignOffset(const std::string& halign, const std::string& valign, const TextMeasurement& m);
+// (offsetX, offsetY) translation for halign/valign, given a
+// TextMeasurement. Shared by textmetrics() (reports it) and text()
+// (applies it).
+std::pair<double, double> textAlignOffset(const std::string& halign, const std::string& valign,
+                                          const TextMeasurement& m);
 
 } // namespace oscadeval
