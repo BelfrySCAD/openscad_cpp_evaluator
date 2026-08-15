@@ -279,6 +279,62 @@ TEST(ListComprehension, ForIfElseMapsBothBranches) {
     EXPECT_EQ(std::get<std::string>(items[1]), "odd");
 }
 
+// The two tests above assert only the resulting LIST, which an eager
+// implementation -- one that evaluated an `if` body whose condition failed,
+// or both sides of an `if`/`else` -- would still get right. So they cannot
+// fail if evalListElement's ListCompIf/ListCompIfElse cases (or their
+// compiled counterparts in compileListElement) lose their laziness, the way
+// `&&`/`||` demonstrably once did (see expr_eval.cpp's LogicalAndOp comment).
+// These four watch for a marker echo() from the branch that must never run.
+namespace {
+
+// Every echo() the script emits, newline-joined -- the surrounding tests'
+// own `captured = msg` lambdas keep only the last one, which is no use when
+// the point of the test is exactly how MANY echoes happened.
+std::string echoesFrom(const std::string& code) {
+    std::string captured;
+    runScript(code, [&](const std::string& msg) {
+        if (!captured.empty()) captured += "\n";
+        captured += msg;
+    });
+    return captured;
+}
+
+} // namespace
+
+TEST(ListComprehension, ForIfSkipsBodyWhenConditionFailsInterpreted) {
+    ScopedVm vm(false);
+    EXPECT_EQ(echoesFrom("function mark(i) = echo(str(\"BODY\", i)) i;\n"
+                         "x = [for (i = [0:2]) if (i == 1) mark(i)];"),
+              "ECHO: \"BODY1\"");
+}
+
+TEST(ListComprehension, ForIfSkipsBodyWhenConditionFailsCompiled) {
+    ScopedVm vm(true);
+    EXPECT_EQ(echoesFrom("function mark(i) = echo(str(\"BODY\", i)) i;\n"
+                         "function mk() = [for (i = [0:2]) if (i == 1) mark(i)];\n"
+                         "x = mk();"),
+              "ECHO: \"BODY1\"");
+}
+
+TEST(ListComprehension, ForIfElseEvaluatesOnlyTheChosenBranchInterpreted) {
+    ScopedVm vm(false);
+    // One echo per iteration, not two: i=0 takes `yes`, i=1 takes `no`.
+    EXPECT_EQ(echoesFrom("function yes() = echo(\"TRUE-BRANCH\") 1;\n"
+                         "function no() = echo(\"FALSE-BRANCH\") 2;\n"
+                         "x = [for (i = [0:1]) if (i == 0) yes() else no()];"),
+              "ECHO: \"TRUE-BRANCH\"\nECHO: \"FALSE-BRANCH\"");
+}
+
+TEST(ListComprehension, ForIfElseEvaluatesOnlyTheChosenBranchCompiled) {
+    ScopedVm vm(true);
+    EXPECT_EQ(echoesFrom("function yes() = echo(\"TRUE-BRANCH\") 1;\n"
+                         "function no() = echo(\"FALSE-BRANCH\") 2;\n"
+                         "function mk() = [for (i = [0:1]) if (i == 0) yes() else no()];\n"
+                         "x = mk();"),
+              "ECHO: \"TRUE-BRANCH\"\nECHO: \"FALSE-BRANCH\"");
+}
+
 TEST(ListComprehension, EachFlattensNestedLists) {
     RunResult r = runScript("x = [each [1,2], each [3,4]];");
     auto items = std::get<ListPtr>(varValue(r, "x"))->items;
