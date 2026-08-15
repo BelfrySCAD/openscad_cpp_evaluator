@@ -369,7 +369,28 @@ TEST(StringListBuiltins, FunctionValuedObjectMemberIsCallable) {
 
 TEST(StringListBuiltins, VersionBuiltins) {
     Evaluator ev;
-    EXPECT_DOUBLE_EQ(asNum(evalSrc("version_num()", ev)), 20250101.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("version_num()", ev)), 20260101.0);
+}
+
+// version_num() also takes the optional vector the reference's own
+// builtin_version_num does -- it folds whatever y/m/d it is handed, not just
+// this build's release.
+TEST(StringListBuiltins, VersionNumFoldsAGivenVersionVector) {
+    Evaluator ev;
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("version_num([2019, 5, 0])", ev)), 20190500.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("version_num([2021, 1, 0])", ev)), 20210100.0);
+    // A 2-element vector defaults the day to 0 (getVec3's own defaultval).
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("version_num([2019, 5])", ev)), 20190500.0);
+}
+
+TEST(StringListBuiltins, VersionNumRejectsAnythingButA2Or3NumberVector) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("version_num(5)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("version_num(undef)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("version_num([2019])", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("version_num([2019, 5, 0, 7])", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("version_num([\"a\", \"b\"])", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("version_num([\"a\", \"b\", \"c\"])", ev)));
 }
 
 TEST(StringListBuiltins, VersionReturnsThreeElementList) {
@@ -377,6 +398,12 @@ TEST(StringListBuiltins, VersionReturnsThreeElementList) {
     Value v = evalSrc("version()", ev);
     const auto& items = asList(v);
     ASSERT_EQ(items.size(), 3u);
+    // Pinned to the same release version_num() reports above -- the reference
+    // derives one from the other (y * 10000 + m * 100 + d, see
+    // builtin_version_num), so the two must not drift apart here either.
+    EXPECT_DOUBLE_EQ(asNum(items[0]), 2026.0);
+    EXPECT_DOUBLE_EQ(asNum(items[1]), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(items[2]), 1.0);
 }
 
 TEST(StringListBuiltins, IsFunctionAndIsObject) {

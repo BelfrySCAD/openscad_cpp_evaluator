@@ -691,8 +691,29 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
             }
             return Value{false};
         }
-        case BuiltinFnId::Version: return numList({2025.0, 1.0, 1.0});
-        case BuiltinFnId::VersionNum: return Value{20250101.0};
+        // The OpenSCAD release we track. version_num() is that same
+        // year/month/day folded as y * 10000 + m * 100 + d, exactly like the
+        // reference's own builtin_version_num (builtin_functions.cc).
+        case BuiltinFnId::Version: return numList({2026.0, 1.0, 1.0});
+        case BuiltinFnId::VersionNum: {
+            // The optional vector argument the reference also accepts: with
+            // no argument this is our own version() folded; with one, it is
+            // whatever [y, m] / [y, m, d] the caller passed, so
+            // version_num([2019, 5, 0]) == 20190500 regardless of what
+            // release we report. A 2-element vector defaults the day to 0
+            // (getVec3's own defaultval), and anything else -- a non-list, a
+            // wrong length, a non-numeric element -- is undef.
+            //
+            // One deliberate divergence: the reference's size-2 path ignores
+            // getVec2's own failure and folds uninitialized doubles for e.g.
+            // version_num(["a", "b"]). That is undef here rather than
+            // whatever happened to be on the stack.
+            const Value* arg = args.findPositional(0);
+            if (!arg) return Value{20260101.0};
+            const auto v = allNumericList(*arg);
+            if (!v || (v->size() != 2 && v->size() != 3)) return Value{};
+            return Value{(*v)[0] * 10000.0 + (*v)[1] * 100.0 + (v->size() == 3 ? (*v)[2] : 0.0)};
+        }
         case BuiltinFnId::ParentModule:
             return ev.parentModuleName(static_cast<int>(toDoubleLenient(getArg(args, 0, "index", Value{0.0}))));
     }
