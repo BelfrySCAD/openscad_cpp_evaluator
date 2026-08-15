@@ -99,6 +99,35 @@ TEST(BytecodeCompiler, TernaryAndShortCircuitLogicalOps) {
     EXPECT_EQ(runCapturingEcho("function safe(x) = is_undef(x) || x > 0;\necho(safe(undef));"), "ECHO: true");
 }
 
+// TernaryAndShortCircuitLogicalOps above only asserts the RESULT, which an
+// eager compiler computes just as correctly -- so it cannot actually fail if
+// someone drops the JumpIfFalse/JumpIfTrue the compiler emits around the
+// right operand / untaken branch. test_expr_eval.cpp's own
+// RightSideNotEvaluatedWhenShortCircuited and OnlyChosenBranchEvaluates
+// cover that for the AST interpreter only. These two do it for the compiled
+// path, watching for a marker echo() from the side that must never run.
+TEST(BytecodeCompiler, ShortCircuitDoesNotEvaluateRightOperandCompiled) {
+    ScopedVm vm(true);
+    const std::string defs = "function rhs() = echo(\"RHS RAN\") true;\n";
+    // Left operand already decides it -- rhs() must stay unevaluated.
+    EXPECT_EQ(runCapturingEcho(defs + "function f() = true || rhs();\necho(f());"), "ECHO: true");
+    EXPECT_EQ(runCapturingEcho(defs + "function f() = false && rhs();\necho(f());"), "ECHO: false");
+    // ...and the mirror image: it must still run when the left operand doesn't.
+    EXPECT_EQ(runCapturingEcho(defs + "function f() = false || rhs();\necho(f());"),
+              "ECHO: \"RHS RAN\"\nECHO: true");
+    EXPECT_EQ(runCapturingEcho(defs + "function f() = true && rhs();\necho(f());"),
+              "ECHO: \"RHS RAN\"\nECHO: true");
+}
+
+TEST(BytecodeCompiler, TernaryOnlyEvaluatesChosenBranchCompiled) {
+    ScopedVm vm(true);
+    const std::string defs = "function yes() = echo(\"TRUE-BRANCH\") 1;\n"
+                             "function no() = echo(\"FALSE-BRANCH\") 2;\n"
+                             "function pick(c) = c ? yes() : no();\n";
+    EXPECT_EQ(runCapturingEcho(defs + "echo(pick(true));"), "ECHO: \"TRUE-BRANCH\"\nECHO: 1");
+    EXPECT_EQ(runCapturingEcho(defs + "echo(pick(false));"), "ECHO: \"FALSE-BRANCH\"\nECHO: 2");
+}
+
 TEST(BytecodeCompiler, PlainListLiteralCompiles) {
     ScopedVm vm(true);
     EXPECT_EQ(runCapturingEcho("function mk(x) = [x, x * 2, x * 3];\necho(mk(2));"), "ECHO: [2, 4, 6]");
