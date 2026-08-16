@@ -192,13 +192,13 @@ TEST(Echo, FormatsRangeValue) {
 TEST(Echo, FormatsNonEmptyObjectValue) {
     std::string captured;
     runScript("echo(object(a=1, b=2));", [&](const std::string& msg) { captured = msg; });
-    EXPECT_EQ(captured, "ECHO: object(a = 1, b = 2)");
+    EXPECT_EQ(captured, "ECHO: { a = 1; b = 2; }");
 }
 
 TEST(Echo, FormatsEmptyObjectValue) {
     std::string captured;
     runScript("echo(object());", [&](const std::string& msg) { captured = msg; });
-    EXPECT_EQ(captured, "ECHO: object()");
+    EXPECT_EQ(captured, "ECHO: { }");
 }
 
 TEST(Echo, FormatsFunctionLiteralValue) {

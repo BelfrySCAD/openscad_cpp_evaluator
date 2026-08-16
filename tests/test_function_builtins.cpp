@@ -243,13 +243,36 @@ TEST(StringListBuiltins, SearchOutOfRangeIndexColMatchesNothing) {
 }
 
 TEST(StringListBuiltins, SearchStringMatchSearchesEachCharacter) {
-    // findAll's "matchArg is itself a string" branch.
-    Evaluator ev;
-    Value v = evalSrc("search(\"ac\", [\"a\", \"b\", \"c\", \"a\"])", ev);
-    const auto& items = asList(v);
+    // A string needle searched in a VECTOR requires every entry to itself be
+    // a vector longer than index_col -- a bare string entry is "invalid" and
+    // aborts the whole call with an empty result plus one warning. This test
+    // used to assert [0, 2] for the bare-string table, which real OpenSCAD
+    // has never returned (checked against 2026.02.01).
+    std::string lastWarning;
+    Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
+    Value bare = evalSrc("search(\"ac\", [\"a\", \"b\", \"c\", \"a\"])", ev);
+    EXPECT_TRUE(asList(bare).empty());
+    EXPECT_NE(lastWarning.find("Invalid entry in search vector at index 0"), std::string::npos);
+    EXPECT_NE(lastWarning.find("required number of values in the entry: 1"), std::string::npos);
+
+    // Wrapped one level, the same search does match, per character.
+    Value wrapped = evalSrc("search(\"ac\", [[\"a\"], [\"b\"], [\"c\"], [\"a\"]])", ev);
+    const auto& items = asList(wrapped);
     ASSERT_EQ(items.size(), 2u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 0.0); // first 'a'
     EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0); // 'c'
+}
+
+TEST(StringListBuiltins, SearchDispatchesOnWhatIsSearchedFor) {
+    // Only number/string/vector needles are handled; everything else is
+    // undef. And the haystack is never type-checked -- a non-vector is an
+    // empty table, so searching in undef finds nothing rather than failing.
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("search(undef, \"abc\")", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("search(true, \"abc\")", ev)));
+    EXPECT_TRUE(asList(evalSrc("search(\"a\", undef)", ev)).empty());
+    EXPECT_TRUE(asList(evalSrc("search(5, undef)", ev)).empty());
+    EXPECT_TRUE(asList(evalSrc("search(5, 42)", ev)).empty());
 }
 
 TEST(StringListBuiltins, SearchListMatchSearchesEachElement) {
@@ -349,7 +372,7 @@ TEST(StringListBuiltins, ObjectPlusObjectIsUndef) {
 
 TEST(StringListBuiltins, StrFormatsNestedObject) {
     Evaluator ev;
-    EXPECT_EQ(asStr(evalSrc("str(object(a=1, nested=object(x=10,y=20)))", ev)), "object(a = 1, nested = object(x = 10, y = 20))");
+    EXPECT_EQ(asStr(evalSrc("str(object(a=1, nested=object(x=10,y=20)))", ev)), "{ a = 1; nested = { x = 10; y = 20; }; }");
 }
 
 TEST(StringListBuiltins, ForLoopOverObjectIteratesKeysInInsertionOrder) {
@@ -497,4 +520,127 @@ TEST(FunctionBuiltinPrecedence, BuiltinWinsOverSameNamedUserFunction) {
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     Value v = ev.evalExpr(*assign->expr, ctx);
     EXPECT_DOUBLE_EQ(asNum(v), 3.0); // builtin abs(), not the user's abs()
+}
+
+// -- Builtin argument diagnostics (reference parity) ---------------------
+//
+// Real OpenSCAD warns in two fixed shapes before returning undef, and we
+// used to emit neither -- the undef came out silently, so a misspelled
+// variable reaching abs()/ord()/len() said nothing at all. Every message
+// below was read off OpenSCAD 2026.02.01.
+
+namespace {
+
+std::vector<std::string> builtinWarnings(const std::string& code) {
+    std::vector<std::string> out;
+    Evaluator ev([&](const std::string& msg) {
+        const size_t at = msg.find(" in file ");
+        out.push_back(at == std::string::npos ? msg : msg.substr(0, at));
+    });
+    evalSrc(code, ev);
+    return out;
+}
+
+} // namespace
+
+TEST(BuiltinArgDiagnostics, ConversionWarningNamesArgumentExpectedAndFound) {
+    EXPECT_EQ(builtinWarnings("ord(undef)"),
+              (std::vector<std::string>{
+                  "WARNING: ord() parameter could not be converted: argument 0: expected string, found "
+                  "undefined (undef)"}));
+    EXPECT_EQ(builtinWarnings("abs(\"a\")"),
+              (std::vector<std::string>{
+                  "WARNING: abs() parameter could not be converted: argument 0: expected number, found "
+                  "string (\"a\")"}));
+    EXPECT_EQ(builtinWarnings("atan2(1, true)"),
+              (std::vector<std::string>{
+                  "WARNING: atan2() parameter could not be converted: argument 1: expected number, found "
+                  "bool (true)"}));
+    // len() takes a vector happily but still calls the expected type "string".
+    EXPECT_EQ(builtinWarnings("len(5)"),
+              (std::vector<std::string>{
+                  "WARNING: len() parameter could not be converted: argument 0: expected string, found "
+                  "number (5)"}));
+    EXPECT_EQ(builtinWarnings("norm(undef)"),
+              (std::vector<std::string>{
+                  "WARNING: norm() parameter could not be converted: argument 0: expected vector, found "
+                  "undefined (undef)"}));
+    EXPECT_TRUE(builtinWarnings("abs(-1)").empty());
+    EXPECT_TRUE(builtinWarnings("len([1,2])").empty());
+}
+
+TEST(BuiltinArgDiagnostics, ArityWarningUsesEachBuiltinsOwnWording) {
+    EXPECT_EQ(builtinWarnings("abs()"),
+              (std::vector<std::string>{
+                  "WARNING: abs() number of parameters does not match: expected 1, found 0"}));
+    EXPECT_EQ(builtinWarnings("abs(1, 2)"),
+              (std::vector<std::string>{
+                  "WARNING: abs() number of parameters does not match: expected 1, found 2"}));
+    EXPECT_EQ(builtinWarnings("rands(0, 1)"),
+              (std::vector<std::string>{
+                  "WARNING: rands() number of parameters does not match: expected 3 or 4, found 2"}));
+    EXPECT_EQ(builtinWarnings("search(1)"),
+              (std::vector<std::string>{"WARNING: search() number of parameters does not match: expected "
+                                        "between 2 and 4, found 1"}));
+    EXPECT_EQ(builtinWarnings("is_num(1, 2)"),
+              (std::vector<std::string>{
+                  "WARNING: is_num() number of parameters does not match: expected 1, found 2"}));
+    // ...and the value is undef, not the answer for the first argument.
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("abs(1, 2)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("is_num(1, 2)", ev)));
+}
+
+TEST(BuiltinArgDiagnostics, MaxMinDistinguishVectorElementFromArgument) {
+    EXPECT_EQ(builtinWarnings("max([1, undef])"),
+              (std::vector<std::string>{"WARNING: max() parameter could not be converted: vector element "
+                                        "1: expected number, found undefined (undef)"}));
+    EXPECT_EQ(builtinWarnings("min(1, \"a\")"),
+              (std::vector<std::string>{"WARNING: min() parameter could not be converted: argument 1: "
+                                        "expected number, found string (\"a\")"}));
+    EXPECT_EQ(builtinWarnings("max()"),
+              (std::vector<std::string>{
+                  "WARNING: max() number of parameters does not match: expected at least 1, found 0"}));
+    // An empty vector gets its own arity wording rather than a conversion error.
+    EXPECT_EQ(builtinWarnings("max([])"),
+              (std::vector<std::string>{"WARNING: max() number of parameters does not match: expected at "
+                                        "least 1 vector element, found 0"}));
+}
+
+TEST(BuiltinArgDiagnostics, NormAndCrossHaveTheirOwnMessages) {
+    // A non-numeric ELEMENT is terser than the usual conversion complaint.
+    EXPECT_EQ(builtinWarnings("norm([1, undef])"),
+              (std::vector<std::string>{"WARNING: Incorrect arguments to norm()"}));
+    EXPECT_EQ(builtinWarnings("cross([1,2],[1,2,3])"),
+              (std::vector<std::string>{"WARNING: Invalid vector size of parameter for cross()"}));
+    EXPECT_EQ(builtinWarnings("cross([1,2,3,4],[1,2,3,4])"),
+              (std::vector<std::string>{"WARNING: Invalid vector size of parameter for cross()"}));
+    // Size is checked before element values.
+    EXPECT_EQ(builtinWarnings("cross([1,undef,3],[1,2,3])"),
+              (std::vector<std::string>{"WARNING: Invalid value in parameter vector for cross()"}));
+    EXPECT_TRUE(builtinWarnings("cross([1,2],[3,4])").empty());
+}
+
+TEST(BuiltinArgDiagnostics, HasKeyRejectsANonStringKeyAsUndef) {
+    // This answered `false` before, which reads as "the key isn't there"
+    // rather than "that isn't a key".
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("has_key(object(a=1), undef)", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("has_key(undef, \"a\")", ev)));
+    EXPECT_TRUE(asBool(evalSrc("has_key(object(a=1), \"a\")", ev)));
+    EXPECT_FALSE(asBool(evalSrc("has_key(object(a=1), \"b\")", ev)));
+}
+
+TEST(StringListBuiltins, ChrIsVariadicAndRangeChecked) {
+    Evaluator ev;
+    EXPECT_EQ(asStr(evalSrc("chr(65, 66)", ev)), "AB"); // every argument contributes
+    EXPECT_EQ(asStr(evalSrc("chr([65, 66])", ev)), "AB");
+    EXPECT_EQ(asStr(evalSrc("chr([65:66])", ev)), "AB");
+    // Out-of-range codepoints contribute nothing rather than emitting raw
+    // invalid UTF-8, which used to escape and break the caller's decoding.
+    EXPECT_EQ(asStr(evalSrc("chr(-1)", ev)), "");
+    EXPECT_EQ(asStr(evalSrc("chr(0)", ev)), "");
+    EXPECT_EQ(asStr(evalSrc("chr(1e9)", ev)), "");
+    EXPECT_EQ(asStr(evalSrc("chr(55296)", ev)), ""); // 0xD800, a surrogate
+    EXPECT_EQ(asStr(evalSrc("chr(1114112)", ev)), ""); // 0x110000, one past the top
 }

@@ -180,7 +180,8 @@ TEST(BytecodeCompiler, SiblingParameterDefaultCannotSeeOtherParametersRealValue)
     // isolation this is undef, not whatever `a` was actually bound to
     // (`undef + 1` -> undef, matching AdditionOp's non-numeric fallback).
     EXPECT_EQ(runCapturingEcho("function foo(a, b = a + 1) = b;\necho(foo(41));"),
-              "WARNING: Ignoring unknown variable 'a' in file <string>, line 1\nECHO: undef");
+              "WARNING: Ignoring unknown variable 'a' in file <string>, line 1\n"
+              "WARNING: undefined operation (undefined + number) in file <string>, line 1\nECHO: undef");
 }
 
 TEST(BytecodeCompiler, SequentialLetReassignmentSeesPriorValue) {
@@ -1074,7 +1075,7 @@ TEST(BytecodeCompiler, ImportCompilesAsTailPositionBody) {
         out << R"({"a": 1, "b": 2})";
     }
     EXPECT_EQ(runCapturingEcho("function f() = import(\"" + path.generic_string() + "\");\necho(f());"),
-              "ECHO: object(a = 1, b = 2)");
+              "ECHO: { a = 1; b = 2; }");
     std::filesystem::remove(path);
 }
 
@@ -1087,10 +1088,10 @@ TEST(BytecodeCompiler, ObjectCompilesWithExactCallSiteInterleavedOrder) {
     EXPECT_EQ(runCapturingEcho("existing = object(b = 2);\n"
                                 "function f() = object(a = 1, existing, c = 3, a = 4);\n"
                                 "echo(f());"),
-              "ECHO: object(a = 4, b = 2, c = 3)");
+              "ECHO: { a = 4; b = 2; c = 3; }");
     // Positional list-of-pairs spread.
     EXPECT_EQ(runCapturingEcho("function g() = object(a = 1, [[\"b\", 2]], a = 3);\necho(g());"),
-              "ECHO: object(a = 3, b = 2)");
+              "ECHO: { a = 3; b = 2; }");
 }
 
 TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnEchoAssertImportObjectCases) {

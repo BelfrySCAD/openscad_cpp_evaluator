@@ -147,6 +147,12 @@ bool oscComparable(const Value& a, const Value& b);
 Value scale(double scalarValue, const Value& value);
 Value divScale(const Value& value, double divisor);
 
+// `number / vector`, the mirror of divScale's `vector / number` -- the
+// reference divides the scalar by each element in turn (Value.cc's
+// `operator/` NUMBER/VECTOR branch, `*this / vecval`), recursing into
+// nested lists the same way. `5 / [1, 2]` is `[5, 2.5]`, not undef.
+Value divInto(double numerator, const Value& value);
+
 // Elementwise `+`/`-` between two lists (zip semantics: truncates to the
 // shorter length when lengths differ), or the scalar/mismatched-type
 // fallback (numeric + numeric, everything else -> undef). `vecAdd` rejects
@@ -167,7 +173,14 @@ Value vecSub(const Value& a, const Value& b);
 // a Python bool silently). This divergence is undocumented/untested
 // behavior in the reference implementation -- revisit only if a real
 // script's `*` on a bool-containing vector is shown to need it.
-Value matmul(const Value& a, const Value& b);
+//
+// `error`, when non-null, receives the reference's own diagnostic text for
+// whichever undefined case was hit (multiply_visitor / multvecvec /
+// multmatvec / multvecmat in the reference's Value.cc) -- "vector*vector
+// requires matching lengths (2 != 3)", "Matrix must be rectangular. Problem
+// at row 1", and so on. applyBinaryOp warns with it; a caller that only
+// wants the value can leave it null. It is only written on an undef result.
+Value matmul(const Value& a, const Value& b, std::string* error = nullptr);
 
 // OpenSCAD's echo()/str() number formatting: at most 6 significant digits,
 // fixed-point for exponents in [-5, 5], scientific notation with no leading

@@ -100,14 +100,23 @@ TEST(ExprEvalArithmetic, DivisionByZeroIsIeee754) {
     EXPECT_TRUE(std::isinf(asNum(negInf)) && asNum(negInf) < 0);
 }
 
-TEST(ExprEvalArithmetic, ModuloTakesDivisorSign) {
+TEST(ExprEvalArithmetic, ModuloTakesDividendSign) {
+    // C's fmod, so the result carries the LEFT operand's sign -- NOT a
+    // floored/Python modulo, which this used to (wrongly) assert. Checked
+    // against OpenSCAD 2026.02.01: -7 % 3 is -1 there, 7 % -3 is 1.
     Evaluator ev;
-    EXPECT_DOUBLE_EQ(asNum(evalSrc("-1 % 3", ev)), 2.0); // Python-style, not C++ fmod's -1
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("-1 % 3", ev)), -1.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("-7 % 3", ev)), -1.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("7 % -3", ev)), 1.0);
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("7.5 % 2", ev)), 1.5);
 }
 
-TEST(ExprEvalArithmetic, ExponentZeroToNegativeIsUndef) {
+TEST(ExprEvalArithmetic, ExponentZeroToNegativeIsInf) {
+    // pow() straight through, no zero special-case -- the reference has no
+    // ZeroDivisionError to translate here (verified: OpenSCAD 2026.02.01
+    // echoes inf).
     Evaluator ev;
-    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("0 ^ -1", ev)));
+    EXPECT_TRUE(std::isinf(asNum(evalSrc("0 ^ -1", ev))));
 }
 
 TEST(ExprEvalArithmetic, BoolOperandsAreUndef) {
@@ -236,9 +245,11 @@ TEST(ExprEvalArithmetic, DivisionListByListIsUndef) {
     EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("[1,2] / [3,4]", ev)));
 }
 
-TEST(ExprEvalArithmetic, ModuloByZeroIsUndef) {
+TEST(ExprEvalArithmetic, ModuloByZeroIsNan) {
+    // fmod(x, 0) is nan, and the reference passes it through unchanged --
+    // it is NOT undef (verified against OpenSCAD 2026.02.01).
     Evaluator ev;
-    EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("5 % 0", ev)));
+    EXPECT_TRUE(std::isnan(asNum(evalSrc("5 % 0", ev))));
 }
 
 TEST(ExprEvalArithmetic, ExponentNumeric) {
@@ -555,4 +566,94 @@ TEST(ExprEvalAssertExpression, NonStringMessageUsesFmtValue) {
     } catch (const EvalError& e) {
         EXPECT_NE(std::string(e.what()).find("failed: \"42\""), std::string::npos);
     }
+}
+
+// -- Arithmetic diagnostics (reference parity) ---------------------------
+//
+// Every expectation below was read off OpenSCAD 2026.02.01, not inferred:
+// the rule is "warn exactly when the top-level result is undef, never
+// otherwise", checked over all 392 ordered type pairs for + - * / % ^ plus
+// unary minus. Before this the arithmetic operators warned about nothing at
+// all, for any bad type -- `ord(undef)`'s missing warning was one symptom of
+// the same hole.
+
+namespace {
+
+// Warnings carry a " in file <string>, line N" suffix; the messages are what
+// these tests are about, so strip it.
+std::vector<std::string> warningsFrom(const std::string& code) {
+    std::vector<std::string> out;
+    Evaluator ev([&](const std::string& msg) {
+        const size_t at = msg.find(" in file ");
+        out.push_back(at == std::string::npos ? msg : msg.substr(0, at));
+    });
+    evalSrc(code, ev);
+    return out;
+}
+
+} // namespace
+
+TEST(ExprEvalArithmeticWarnings, UndefinedOperationNamesBothOperandTypes) {
+    EXPECT_EQ(warningsFrom("undef + 1"),
+              (std::vector<std::string>{"WARNING: undefined operation (undefined + number)"}));
+    EXPECT_EQ(warningsFrom("\"a\" - [1]"),
+              (std::vector<std::string>{"WARNING: undefined operation (string - vector)"}));
+    EXPECT_EQ(warningsFrom("true % 2"),
+              (std::vector<std::string>{"WARNING: undefined operation (bool % number)"}));
+    EXPECT_EQ(warningsFrom("[1] ^ 2"),
+              (std::vector<std::string>{"WARNING: undefined operation (vector ^ number)"}));
+    EXPECT_EQ(warningsFrom("-\"a\""),
+              (std::vector<std::string>{"WARNING: undefined operation (-string)"}));
+    // Range and function are named too -- oscTypeName used to call both
+    // "undefined", inventing a phantom undef operand in the message.
+    EXPECT_EQ(warningsFrom("[1] + [0:2]"),
+              (std::vector<std::string>{"WARNING: undefined operation (vector + range)"}));
+    EXPECT_EQ(warningsFrom("1 * (function(x) x)"),
+              (std::vector<std::string>{"WARNING: undefined operation (number * function)"}));
+}
+
+TEST(ExprEvalArithmeticWarnings, SuccessfulOperationsStaySilent) {
+    EXPECT_TRUE(warningsFrom("1 + 2").empty());
+    EXPECT_TRUE(warningsFrom("[1,2] + [3,4,5]").empty()); // zips to the shorter length
+    EXPECT_TRUE(warningsFrom("5 / 0").empty());           // inf, not an error
+    EXPECT_TRUE(warningsFrom("5 % 0").empty());           // nan, not an error
+    // An undef left INSIDE a list is not a top-level undef, so no warning --
+    // matching the reference, which only reports on the returned value.
+    EXPECT_TRUE(warningsFrom("[1,\"a\"] * 2").empty());
+}
+
+TEST(ExprEvalArithmeticWarnings, MultiplicationHasItsOwnVectorDiagnostics) {
+    EXPECT_EQ(warningsFrom("[] * []"),
+              (std::vector<std::string>{"WARNING: Multiplication is undefined on empty vectors"}));
+    EXPECT_EQ(warningsFrom("[1,2] * [1,2,3]"),
+              (std::vector<std::string>{"WARNING: vector*vector requires matching lengths (2 != 3)"}));
+    EXPECT_EQ(warningsFrom("[1,2,3] * [[1,2],[3,4]]"),
+              (std::vector<std::string>{
+                  "WARNING: vector*matrix requires vector length to match matrix row count (3 != 2)"}));
+    EXPECT_EQ(warningsFrom("[[1,2],[3,4]] * [1,2,3]"),
+              (std::vector<std::string>{
+                  "WARNING: matrix*vector requires matrix column count to match vector length (2 != 3)"}));
+    EXPECT_EQ(warningsFrom("[[1,2,3]] * [[1,2],[3,4]]"),
+              (std::vector<std::string>{"WARNING: matrix*matrix requires left operand column count to "
+                                        "match right operand row count (3 != 2)"}));
+    EXPECT_EQ(warningsFrom("[[1,2],[3,\"a\"]] * [1,2]"),
+              (std::vector<std::string>{
+                  "WARNING: Matrix must contain only numbers. Problem at row 1, col 1"}));
+    // The dot-product element mismatch reports ELEMENT types, not operand types.
+    EXPECT_EQ(warningsFrom("[1,\"a\"] * [1,2]"),
+              (std::vector<std::string>{"WARNING: undefined operation (string * number)"}));
+}
+
+TEST(ExprEvalArithmetic, NumberDividedByVectorIsElementwise) {
+    // The reference's NUMBER/VECTOR branch, which we simply did not have --
+    // 5 / [1,2] was undef here and [5, 2.5] there.
+    Evaluator ev;
+    Value v = evalSrc("5 / [1,2]", ev);
+    const auto& items = std::get<ListPtr>(v)->items;
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_DOUBLE_EQ(std::get<double>(items[0]), 5.0);
+    EXPECT_DOUBLE_EQ(std::get<double>(items[1]), 2.5);
+    // Division by a zero element follows IEEE, same as the scalar form.
+    Value inf = evalSrc("5 / [1,0]", ev);
+    EXPECT_TRUE(std::isinf(std::get<double>(std::get<ListPtr>(inf)->items[1])));
 }
