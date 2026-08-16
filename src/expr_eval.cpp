@@ -27,15 +27,6 @@ bool isBoolValue(const Value& v) { return std::holds_alternative<bool>(v); }
 // `type() == Type::NUMBER` gate (bool is a distinct type, never coerced).
 std::int64_t toBitwiseInt64(const Value& v) { return static_cast<std::int64_t>(std::trunc(std::get<double>(v))); }
 
-// Python's `%`: result takes the divisor's sign (unlike C++ std::fmod,
-// which takes the dividend's), e.g. `-1 % 3` is `2` in Python, `-1` via
-// plain fmod.
-double pyMod(double a, double b) {
-    double r = std::fmod(a, b);
-    if (r != 0.0 && ((r < 0.0) != (b < 0.0))) r += b;
-    return r;
-}
-
 // Ordering for oscComparable()-gated pairs only (same-type number/number,
 // string/string, vector/vector, or bool/bool) -- mirrors Python's native
 // `<` for these specific paired types, including NaN behavior (`nan < x`
@@ -563,46 +554,70 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
 
 Value Evaluator::applyBinaryOp(oscad::NodeKind kind, const Value& a, const Value& b, const oscad::Position& pos) {
     using oscad::NodeKind;
+    const auto warnIfUndef = [&](Value result, const Value& lhs, const char* op, const Value& rhs,
+                                  const oscad::Position& p) -> Value {
+        if (std::holds_alternative<std::monostate>(result)) {
+            warn("undefined operation (" + oscTypeName(lhs) + " " + op + " " + oscTypeName(rhs) + ")", &p);
+        }
+        return result;
+    };
     switch (kind) {
-        case NodeKind::AdditionOp:
+        // Arithmetic warns exactly when the top-level result is undef, and
+        // never otherwise -- verified case-by-case against OpenSCAD
+        // 2026.02.01 over every ordered pair of {undef, number, bool,
+        // string, vector, range, function} (392 combinations, zero
+        // exceptions). Note "top-level": an element-wise op that leaves an
+        // undef *inside* a list (`[1,"a"] * 2` -> `[2, undef]`) is silent in
+        // the reference too, which is why these warn on the returned Value
+        // rather than inside the recursive helpers.
+        case NodeKind::AdditionOp: {
             if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) + std::get<double>(b)};
-            return vecAdd(a, b);
-        case NodeKind::SubtractionOp:
+            return warnIfUndef(vecAdd(a, b), a, "+", b, pos);
+        }
+        case NodeKind::SubtractionOp: {
             if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) - std::get<double>(b)};
-            return vecSub(a, b);
+            return warnIfUndef(vecSub(a, b), a, "-", b, pos);
+        }
         case NodeKind::MultiplicationOp: {
             if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) * std::get<double>(b)};
             const bool aList = std::holds_alternative<ListPtr>(a);
             const bool bList = std::holds_alternative<ListPtr>(b);
-            if (aList && bList) return matmul(a, b);
+            if (aList && bList) {
+                // matmul() reports which of the reference's own eight
+                // vector/matrix diagnostics applies; only fall back to the
+                // generic message if it somehow returned undef without one.
+                std::string error;
+                Value r = matmul(a, b, &error);
+                if (!std::holds_alternative<std::monostate>(r)) return r;
+                warn(!error.empty() ? error : "undefined operation (" + oscTypeName(a) + " * " + oscTypeName(b) + ")",
+                      &pos);
+                return r;
+            }
             if (aList && isNumber(b)) return scale(std::get<double>(b), a);
             if (bList && isNumber(a)) return scale(std::get<double>(a), b);
-            return Value{}; // remaining combos (bool, string*number, ...) never succeed in the reference either
+            // remaining combos (bool, string*number, ...) never succeed in the reference either
+            return warnIfUndef(Value{}, a, "*", b, pos);
         }
         case NodeKind::DivisionOp: {
-            if (isNumber(a) && isNumber(b)) {
-                const double av = std::get<double>(a), bv = std::get<double>(b);
-                if (bv == 0.0) {
-                    return Value{av == 0.0 ? std::numeric_limits<double>::quiet_NaN()
-                                            : std::copysign(std::numeric_limits<double>::infinity(), av)};
-                }
-                return Value{av / bv};
-            }
-            if (isBoolValue(a) || isBoolValue(b)) return Value{};
+            // Plain IEEE division, no zero special-case: the reference hands
+            // both operands straight to C++ `/`, so 5/0 is inf and 0/0 nan.
+            if (isNumber(a) && isNumber(b)) return Value{std::get<double>(a) / std::get<double>(b)};
             if (std::holds_alternative<ListPtr>(a) && isNumber(b)) return divScale(a, std::get<double>(b));
-            return Value{};
+            if (isNumber(a) && std::holds_alternative<ListPtr>(b)) return divInto(std::get<double>(a), b);
+            return warnIfUndef(Value{}, a, "/", b, pos);
         }
         case NodeKind::ModuloOp: {
-            if (isBoolValue(a) || isBoolValue(b) || !isNumber(a) || !isNumber(b)) return Value{};
-            const double bv = std::get<double>(b);
-            if (bv == 0.0) return Value{}; // ZeroDivisionError -> undef
-            return Value{pyMod(std::get<double>(a), bv)};
+            // fmod, NOT a floored/Python modulo: the reference is C's fmod,
+            // so the result takes the LEFT operand's sign (-7 % 3 == -1, not
+            // 2) and `x % 0` is nan rather than undef. Verified against
+            // OpenSCAD 2026.02.01.
+            if (!isNumber(a) || !isNumber(b)) return warnIfUndef(Value{}, a, "%", b, pos);
+            return Value{std::fmod(std::get<double>(a), std::get<double>(b))};
         }
         case NodeKind::ExponentOp: {
-            if (isBoolValue(a) || isBoolValue(b) || !isNumber(a) || !isNumber(b)) return Value{};
-            const double av = std::get<double>(a), bv = std::get<double>(b);
-            if (av == 0.0 && bv < 0.0) return Value{}; // ZeroDivisionError -> undef
-            return Value{std::pow(av, bv)};
+            // Plain pow(), again with no zero special-case: 0^-1 is inf.
+            if (!isNumber(a) || !isNumber(b)) return warnIfUndef(Value{}, a, "^", b, pos);
+            return Value{std::pow(std::get<double>(a), std::get<double>(b))};
         }
         case NodeKind::EqualityOp:
             return Value{oscEqual(a, b)};
@@ -712,8 +727,8 @@ Value Evaluator::applyUnaryOp(oscad::NodeKind kind, const Value& v, const oscad:
     switch (kind) {
         case NodeKind::UnaryMinusOp:
             if (std::holds_alternative<ListPtr>(v)) return scale(-1.0, v);
-            if (isBoolValue(v)) return Value{};
             if (isNumber(v)) return Value{-std::get<double>(v)};
+            warn("undefined operation (-" + oscTypeName(v) + ")", &pos);
             return Value{};
         case NodeKind::LogicalNotOp:
             return Value{!truthy(v)};

@@ -31,7 +31,7 @@ TEST(OscTypeName, CoversEveryDistinguishedAlternative) {
     EXPECT_EQ(oscTypeName(Value{std::string("x")}), "string");
     EXPECT_EQ(oscTypeName(list({})), "vector");
     EXPECT_EQ(oscTypeName(Value{std::make_shared<const ValueObject>()}), "object");
-    EXPECT_EQ(oscTypeName(Value{OscRange{0, 1, 5}}), "undefined");
+    EXPECT_EQ(oscTypeName(Value{OscRange{0, 1, 5}}), "range");
 }
 
 // -- oscEqual -------------------------------------------------------------
@@ -265,8 +265,8 @@ TEST(FmtValue, List) {
 
 TEST(FmtValue, Object) {
     auto obj = std::make_shared<const ValueObject>(ValueObject{{{"a", num(1)}, {"b", num(2)}}});
-    EXPECT_EQ(fmtValue(Value{obj}), "object(a = 1, b = 2)");
-    EXPECT_EQ(fmtValue(Value{std::make_shared<const ValueObject>()}), "object()");
+    EXPECT_EQ(fmtValue(Value{obj}), "{ a = 1; b = 2; }");
+    EXPECT_EQ(fmtValue(Value{std::make_shared<const ValueObject>()}), "{ }");
 }
 
 // -- toDoubleLenient --------------------------------------------------------

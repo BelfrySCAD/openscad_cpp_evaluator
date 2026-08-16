@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numbers>
 #include <random>
@@ -186,97 +187,130 @@ Value builtinRands(double minv, double maxv, double nArg, const Value& seedArg) 
     return numList(out);
 }
 
-Value builtinSearch(const CallArgs& args) {
+// Ported branch-for-branch from the reference's builtin_search plus its
+// three static search() overloads (builtin_functions.cc). The dispatch is on
+// what is being searched FOR -- number, string, or vector; every other type
+// (undef, bool, range, function, object) falls off the end into a bare
+// undef. What is being searched IN is never type-checked at all: the
+// reference just calls .toVector() on it, which yields an EMPTY vector for
+// any non-vector, so searching in undef/a number/a bool finds nothing rather
+// than failing. Only the string-in-string form treats a string haystack as
+// a sequence of characters -- a `search(["a"], "abc")` vector needle sees
+// that same string as an empty table, not as characters.
+Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* pos) {
     const Value matchArg = getArg(args, 0, "match", Value{});
-    const Value vectorArg = getArg(args, 1, "vector", Value{});
-    // A string "vector" haystack is searched character-by-character, same
-    // as the reference (Python strings are natively iterable/indexable by
-    // character, so `for i, item in enumerate(vector)` just works there
-    // with no special case at all -- C++ needs this explicit adaptation
-    // since std::string isn't a Value list). Materialized into a real
-    // vector of length-1 string Values rather than special-casing every
-    // access below, so findAll/the match-dispatch code stays oblivious to
-    // which kind of haystack it's searching.
-    std::vector<Value> stringHaystack;
-    const std::vector<Value>* vecItems = nullptr;
-    if (const ListPtr* vecPtr = std::get_if<ListPtr>(&vectorArg); vecPtr && *vecPtr) {
-        vecItems = &(*vecPtr)->items;
-    } else if (const std::string* vecStr = std::get_if<std::string>(&vectorArg)) {
-        stringHaystack.reserve(vecStr->size());
-        for (char c : *vecStr) stringHaystack.push_back(Value{std::string(1, c)});
-        vecItems = &stringHaystack;
-    } else {
-        return Value{};
-    }
-    const auto& vec = *vecItems;
-    const int numReturns = static_cast<int>(toDoubleLenient(getArg(args, 2, "num_returns", Value{1.0})));
-    const int col = static_cast<int>(toDoubleLenient(getArg(args, 3, "index_col", Value{0.0})));
+    const Value tableArg = getArg(args, 1, "vector", Value{});
+    const double nrRaw = toDoubleLenient(getArg(args, 2, "num_returns", Value{1.0}));
+    const double icRaw = toDoubleLenient(getArg(args, 3, "index_col", Value{0.0}));
+    // Both are `unsigned int` in the reference, so a negative argument wraps
+    // to a huge positive rather than meaning "unlimited"/"column 0".
+    const unsigned numReturns = static_cast<unsigned>(static_cast<long long>(nrRaw));
+    const unsigned indexCol = static_cast<unsigned>(static_cast<long long>(icRaw));
 
-    const auto findAll = [&](const Value& val) {
-        const bool valIsList = std::holds_alternative<ListPtr>(val);
-        std::vector<int> results;
-        for (size_t i = 0; i < vec.size(); ++i) {
-            Value target;
-            if (valIsList) {
-                target = vec[i];
-            } else if (const ListPtr* itemList = std::get_if<ListPtr>(&vec[i]); itemList && *itemList) {
-                // ponytail: an out-of-range index_col silently matches
-                // nothing for that row rather than aborting the whole
-                // search() call (the reference raises and the outer
-                // try/except turns the whole call into undef) -- a narrow
-                // divergence on a malformed-argument edge case.
-                target = (col >= 0 && static_cast<size_t>(col) < (*itemList)->items.size()) ? (*itemList)->items[static_cast<size_t>(col)]
-                                                                                              : Value{};
-            } else {
-                target = vec[i];
+    static const std::vector<Value> kNoItems;
+    const ListPtr* tablePtr = std::get_if<ListPtr>(&tableArg);
+    const std::vector<Value>& table = (tablePtr && *tablePtr) ? (*tablePtr)->items : kNoItems;
+
+    const auto itemsOf = [](const Value& v) -> const std::vector<Value>& {
+        const ListPtr* l = std::get_if<ListPtr>(&v);
+        return (l && *l) ? (*l)->items : kNoItems;
+    };
+    // The reference's two-clause hit test, verbatim: the whole entry counts
+    // as a match only at index_col 0, and the indexed sub-element counts
+    // only when the entry really is a long enough vector.
+    const auto hits = [&](const Value& needle, const Value& entry) {
+        if (indexCol == 0 && oscEqual(needle, entry)) return true;
+        const std::vector<Value>& ev2 = itemsOf(entry);
+        return indexCol < ev2.size() && oscEqual(needle, ev2[indexCol]);
+    };
+    const auto num = [](size_t j) { return Value{static_cast<double>(j)}; };
+
+    if (std::holds_alternative<double>(matchArg)) {
+        std::vector<Value> out;
+        unsigned matchCount = 0;
+        for (size_t j = 0; j < table.size(); ++j) {
+            if (!hits(matchArg, table[j])) continue;
+            out.push_back(num(j));
+            if (numReturns != 0 && ++matchCount >= numReturns) break;
+        }
+        return listOf(std::move(out));
+    }
+
+    if (const std::string* needle = std::get_if<std::string>(&matchArg)) {
+        std::vector<Value> out;
+        if (const std::string* hay = std::get_if<std::string>(&tableArg)) {
+            for (size_t i = 0; i < needle->size(); ++i) {
+                unsigned matchCount = 0;
+                std::vector<Value> resultvec;
+                for (size_t j = 0; j < hay->size(); ++j) {
+                    if ((*needle)[i] != (*hay)[j]) continue;
+                    ++matchCount;
+                    if (numReturns == 1) {
+                        out.push_back(num(j));
+                        break;
+                    }
+                    resultvec.push_back(num(j));
+                    if (numReturns > 1 && matchCount >= numReturns) break;
+                }
+                if (numReturns == 0 || numReturns > 1) out.push_back(listOf(std::move(resultvec)));
             }
-            if (oscEqual(target, val)) results.push_back(static_cast<int>(i));
+            return listOf(std::move(out));
         }
-        return results;
-    };
-
-    const auto capped = [](std::vector<int> matches, int limit) {
-        if (limit >= 0 && static_cast<size_t>(limit) < matches.size()) matches.resize(static_cast<size_t>(limit));
-        return matches;
-    };
-    const auto toIdxList = [](const std::vector<int>& idxs) {
-        std::vector<Value> items;
-        items.reserve(idxs.size());
-        for (int i : idxs) items.push_back(Value{static_cast<double>(i)});
-        return listOf(std::move(items));
-    };
-
-    // Per-element result for the string-char and list-element match forms:
-    // num_returns==1 returns a *bare number* on a match, or [] if none --
-    // a genuinely mixed-type result, matching the reference's
-    // _result_for exactly (not the always-a-list shape the scalar top-
-    // level match form uses below).
-    const auto resultForElement = [&](const Value& val) -> Value {
-        const std::vector<int> matches = findAll(val);
-        if (numReturns == 1) return matches.empty() ? toIdxList({}) : Value{static_cast<double>(matches[0])};
-        if (numReturns == 0) return toIdxList(matches);
-        return toIdxList(capped(matches, numReturns));
-    };
-
-    if (const std::string* str = std::get_if<std::string>(&matchArg)) {
-        std::vector<Value> results;
-        for (char c : *str) {
-            const Value r = resultForElement(Value{std::string(1, c)});
-            const bool rIsEmptyList = std::holds_alternative<ListPtr>(r) && std::get<ListPtr>(r) && std::get<ListPtr>(r)->items.empty();
-            if (numReturns != 1 || !rIsEmptyList) results.push_back(r);
+        // String needle, vector table: every entry must itself be a vector
+        // with more than index_col elements. A single bad entry aborts the
+        // WHOLE call with an empty result, not just that row -- which is
+        // why `search("a", ["a","b"])` is [] and not [0].
+        for (size_t i = 0; i < needle->size(); ++i) {
+            unsigned matchCount = 0;
+            std::vector<Value> resultvec;
+            for (size_t j = 0; j < table.size(); ++j) {
+                const std::vector<Value>& entryVec = itemsOf(table[j]);
+                if (entryVec.size() <= indexCol) {
+                    ev.warn("Invalid entry in search vector at index " + std::to_string(j) +
+                                ", required number of values in the entry: " + std::to_string(indexCol + 1) +
+                                ". Invalid entry: " + fmtValue(table[j]),
+                            pos);
+                    return listOf({});
+                }
+                const std::string* entry = std::get_if<std::string>(&entryVec[indexCol]);
+                // A type mismatch just doesn't match, exactly as `==` would.
+                if (!entry || entry->empty() || (*entry)[0] != (*needle)[i]) continue;
+                ++matchCount;
+                if (numReturns == 1) {
+                    out.push_back(num(j));
+                    break;
+                }
+                resultvec.push_back(num(j));
+                if (numReturns > 1 && matchCount >= numReturns) break;
+            }
+            if (numReturns == 0 || numReturns > 1) out.push_back(listOf(std::move(resultvec)));
         }
-        return listOf(std::move(results));
+        return listOf(std::move(out));
     }
-    if (const ListPtr* matchList = std::get_if<ListPtr>(&matchArg); matchList && *matchList) {
-        std::vector<Value> results;
-        results.reserve((*matchList)->items.size());
-        for (const Value& m : (*matchList)->items) results.push_back(resultForElement(m));
-        return listOf(std::move(results));
+
+    if (std::holds_alternative<ListPtr>(matchArg)) {
+        std::vector<Value> out;
+        for (const Value& needle : itemsOf(matchArg)) {
+            unsigned matchCount = 0;
+            std::vector<Value> resultvec;
+            for (size_t j = 0; j < table.size(); ++j) {
+                if (!hits(needle, table[j])) continue;
+                ++matchCount;
+                if (numReturns == 1) {
+                    out.push_back(num(j));
+                    break;
+                }
+                resultvec.push_back(num(j));
+                if (numReturns > 1 && matchCount >= numReturns) break;
+            }
+            if ((numReturns == 1 && matchCount == 0) || numReturns == 0 || numReturns > 1) {
+                out.push_back(listOf(std::move(resultvec)));
+            }
+        }
+        return listOf(std::move(out));
     }
-    const std::vector<int> matches = findAll(matchArg);
-    if (numReturns == 1) return toIdxList(capped(matches, 1));
-    if (numReturns == 0) return toIdxList(matches);
-    return toIdxList(capped(matches, numReturns));
+
+    return Value{};
 }
 
 Value builtinLookup(const CallArgs& args) {
@@ -506,10 +540,174 @@ const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
     return ids;
 }
 
+// -- reference-parity argument diagnostics -------------------------------
+//
+// Real OpenSCAD checks a builtin's arguments before running it and warns in
+// two fixed shapes (Parameters.cc / builtin_functions.cc):
+//
+//   NAME() number of parameters does not match: expected N, found M
+//   NAME() parameter could not be converted: WHERE: expected T, found T (v)
+//
+// and returns undef either way. We used to do neither -- the value came out
+// undef, silently, so `ord(undef)` and `abs("a")` alike said nothing at all.
+// Every spec below (arity text included, since it is free-form per builtin)
+// was read off OpenSCAD 2026.02.01 directly rather than guessed.
+enum : unsigned {
+    TUndef = 1u << 0,
+    TBool = 1u << 1,
+    TNum = 1u << 2,
+    TStr = 1u << 3,
+    TVec = 1u << 4,
+    TRange = 1u << 5,
+    TFunc = 1u << 6,
+    TObj = 1u << 7,
+};
+
+unsigned typeBit(const Value& v) {
+    if (std::holds_alternative<bool>(v)) return TBool;
+    if (std::holds_alternative<double>(v)) return TNum;
+    if (std::holds_alternative<std::string>(v)) return TStr;
+    if (std::holds_alternative<ListPtr>(v)) return TVec;
+    if (std::holds_alternative<OscRange>(v)) return TRange;
+    if (std::holds_alternative<ClosurePtr>(v)) return TFunc;
+    if (std::holds_alternative<ObjectPtr>(v)) return TObj;
+    return TUndef;
+}
+
+struct ArgReq {
+    unsigned allowed;
+    const char* expected; // the word the reference prints, which is not
+                          // always the full allowed set -- len() accepts a
+                          // vector or an object but still says "string".
+};
+
+struct BuiltinCheck {
+    int minArgs;            // -1 disables the arity check entirely
+    int maxArgs;            // -1 = unbounded
+    const char* arityText;  // free-form, e.g. "1", "3 or 4", "between 2 and 4"
+    std::vector<ArgReq> types;
+};
+
+const ArgReq kNum{TNum, "number"};
+const ArgReq kVec{TVec, "vector"};
+
+const std::unordered_map<int, BuiltinCheck>& builtinChecks() {
+    static const auto build = [] {
+        std::unordered_map<int, BuiltinCheck> m;
+        const auto add = [&m](BuiltinFnId id, BuiltinCheck c) { m.emplace(static_cast<int>(id), std::move(c)); };
+        for (BuiltinFnId id : {BuiltinFnId::Abs, BuiltinFnId::Sign, BuiltinFnId::Ceil, BuiltinFnId::Floor,
+                                BuiltinFnId::Round, BuiltinFnId::Sqrt, BuiltinFnId::Ln, BuiltinFnId::Log,
+                                BuiltinFnId::Exp, BuiltinFnId::Sin, BuiltinFnId::Cos, BuiltinFnId::Tan,
+                                BuiltinFnId::Asin, BuiltinFnId::Acos, BuiltinFnId::Atan}) {
+            add(id, {1, 1, "1", {kNum}});
+        }
+        add(BuiltinFnId::Atan2, {2, 2, "2", {kNum, kNum}});
+        add(BuiltinFnId::Pow, {2, 2, "2", {kNum, kNum}});
+        add(BuiltinFnId::Cross, {2, 2, "2", {kVec, kVec}});
+        add(BuiltinFnId::Lookup, {2, 2, "2", {kNum, kVec}});
+        add(BuiltinFnId::Norm, {1, 1, "1", {kVec}});
+        // len() takes a vector or an object happily, and still calls the
+        // expected type "string" when handed anything else.
+        add(BuiltinFnId::Len, {1, 1, "1", {{TStr | TVec | TObj, "string"}}});
+        add(BuiltinFnId::Ord, {1, 1, "1", {{TStr, "string"}}});
+        add(BuiltinFnId::Rands, {3, 4, "3 or 4", {kNum, kNum, kNum, kNum}});
+        add(BuiltinFnId::Search, {2, 4, "between 2 and 4", {}});
+        // parent_module() with no argument defaults to 1 rather than
+        // warning, so only the too-many case is an arity error.
+        add(BuiltinFnId::ParentModule, {0, 1, "1", {kNum}});
+        add(BuiltinFnId::HasKey, {-1, -1, nullptr, {{TObj, "object"}, {TStr, "string"}}});
+        for (BuiltinFnId id : {BuiltinFnId::IsUndef, BuiltinFnId::IsNum, BuiltinFnId::IsBool,
+                                BuiltinFnId::IsString, BuiltinFnId::IsList, BuiltinFnId::IsFunction,
+                                BuiltinFnId::IsObject}) {
+            add(id, {1, 1, "1", {}});
+        }
+        return m;
+    };
+    static const std::unordered_map<int, BuiltinCheck> checks = build();
+    return checks;
+}
+
+void warnArity(Evaluator& ev, const std::string& name, const char* expected, size_t found,
+                const oscad::Position* pos) {
+    ev.warn(name + "() number of parameters does not match: expected " + expected + ", found " +
+                std::to_string(found),
+            pos);
+}
+
+void warnConversion(Evaluator& ev, const std::string& name, const std::string& where, const char* expected,
+                     const Value& found, const oscad::Position* pos) {
+    ev.warn(name + "() parameter could not be converted: " + where + ": expected " + expected + ", found " +
+                oscTypeName(found) + " (" + fmtValue(found) + ")",
+            pos);
+}
+
+// max()/min() are their own shape: either one vector of numbers, or N bare
+// numbers, with a distinct "at least 1 vector element" arity text for the
+// empty-vector case.
+bool checkMinMax(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::Position* pos) {
+    const std::vector<Value> positional = allPositional(args);
+    const size_t count = positional.size() + args.named.size();
+    if (count < 1) {
+        warnArity(ev, name, "at least 1", count, pos);
+        return false;
+    }
+    if (positional.size() == 1 && std::holds_alternative<ListPtr>(positional[0])) {
+        static const std::vector<Value> kEmptyItems;
+        const ListPtr& l = std::get<ListPtr>(positional[0]);
+        const std::vector<Value>& items = l ? l->items : kEmptyItems;
+        if (items.empty()) {
+            warnArity(ev, name, "at least 1 vector element", 0, pos);
+            return false;
+        }
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (!std::holds_alternative<double>(items[i])) {
+                warnConversion(ev, name, "vector element " + std::to_string(i), "number", items[i], pos);
+                return false;
+            }
+        }
+        return true;
+    }
+    for (size_t i = 0; i < positional.size(); ++i) {
+        if (!std::holds_alternative<double>(positional[i])) {
+            warnConversion(ev, name, "argument " + std::to_string(i), "number", positional[i], pos);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Returns false when a diagnostic was emitted and the call must answer undef.
+bool checkBuiltinArgs(Evaluator& ev, const std::string& name, BuiltinFnId id, const CallArgs& args,
+                       const oscad::Position* pos) {
+    if (id == BuiltinFnId::Max || id == BuiltinFnId::Min) return checkMinMax(ev, name, args, pos);
+    const auto& checks = builtinChecks();
+    const auto it = checks.find(static_cast<int>(id));
+    if (it == checks.end()) return true;
+    const BuiltinCheck& c = it->second;
+
+    const std::vector<Value> positional = allPositional(args);
+    const size_t count = positional.size() + args.named.size();
+    if (c.arityText && (static_cast<int>(count) < c.minArgs || (c.maxArgs >= 0 && static_cast<int>(count) > c.maxArgs))) {
+        warnArity(ev, name, c.arityText, count, pos);
+        return false;
+    }
+    // Positional only: a named argument's position in the reference's own
+    // flat argument list can't be reconstructed from our split
+    // positional/named form, and warning on the wrong index would be worse
+    // than staying quiet on a spelling nobody uses for these builtins.
+    for (size_t i = 0; i < c.types.size() && i < positional.size(); ++i) {
+        if (!(typeBit(positional[i]) & c.types[i].allowed)) {
+            warnConversion(ev, name, "argument " + std::to_string(i), c.types[i].expected, positional[i], pos);
+            return false;
+        }
+    }
+    return true;
+}
+
+
 } // namespace
 
 Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::ASTNode& node) {
-    (void)node;
 
     const auto& ids = builtinFnIds();
     const auto idIt = ids.find(name);
@@ -529,17 +727,10 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         }
     }
 
-    if (const auto arityIt = scalarNumericArity().find(name); arityIt != scalarNumericArity().end()) {
-        const std::vector<Value> positional = allPositional(args);
-        if (positional.size() < arityIt->second) return Value{};
-        for (size_t i = 0; i < arityIt->second; ++i) {
-            if (!std::holds_alternative<double>(positional[i])) return Value{};
-        }
-    } else if (numericOnlyNames().count(name)) {
-        for (const Value& v : allPositional(args)) {
-            if (isBoolOrListContainsBool(v)) return Value{};
-        }
-    }
+    // Arity and argument types, with the reference's own two diagnostics.
+    // This replaced a silent version of the same gate (scalarNumericArity /
+    // numericOnlyNames), which returned undef without ever saying why.
+    if (!checkBuiltinArgs(ev, name, idIt->second, args, &node.position())) return Value{};
 
     switch (idIt->second) {
         case BuiltinFnId::TextMetrics: return builtinTextmetrics(ev, args);
@@ -595,13 +786,39 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         case BuiltinFnId::Min: return builtinMinMax(args, false);
         case BuiltinFnId::Pow: return builtinPow(toDoubleLenient(getArg(args, 0, "x", Value{})), toDoubleLenient(getArg(args, 1, "y", Value{})));
         case BuiltinFnId::Norm: {
+            // The vector-ness of the argument is the table's job; a
+            // non-numeric ELEMENT gets this separate, terser message
+            // instead of the usual conversion one.
             const auto v = allNumericList(getArg(args, 0, "v", Value{}));
-            if (!v) return Value{};
+            if (!v) {
+                ev.warn("Incorrect arguments to norm()", &node.position());
+                return Value{};
+            }
             double sum = 0;
             for (double x : *v) sum += x * x;
             return Value{std::sqrt(sum)};
         }
-        case BuiltinFnId::Cross: return builtinCross(getArg(args, 0, "a", Value{}), getArg(args, 1, "b", Value{}));
+        case BuiltinFnId::Cross: {
+            const Value a = getArg(args, 0, "a", Value{});
+            const Value b = getArg(args, 1, "b", Value{});
+            // Two distinct messages, and the size check runs first: a
+            // 4-element operand is a size complaint even when it also holds
+            // a string.
+            const auto sizeOf = [](const Value& v) {
+                const ListPtr* l = std::get_if<ListPtr>(&v);
+                return (l && *l) ? (*l)->items.size() : size_t{0};
+            };
+            const size_t na = sizeOf(a), nb = sizeOf(b);
+            if (na != nb || (na != 2 && na != 3)) {
+                ev.warn("Invalid vector size of parameter for cross()", &node.position());
+                return Value{};
+            }
+            if (!allNumericList(a) || !allNumericList(b)) {
+                ev.warn("Invalid value in parameter vector for cross()", &node.position());
+                return Value{};
+            }
+            return builtinCross(a, b);
+        }
         case BuiltinFnId::Rands: {
             ev.noteRandsCall();
             return builtinRands(toDoubleLenient(getArg(args, 0, "min_value", Value{})), toDoubleLenient(getArg(args, 1, "max_value", Value{})),
@@ -637,19 +854,34 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
             return Value{out};
         }
         case BuiltinFnId::Chr: {
-            const Value x = getArg(args, 0, "x", Value{});
-            const auto valid = [](const Value& c) {
-                const double* d = std::get_if<double>(&c);
-                return d != nullptr && std::isfinite(*d);
-            };
-            if (const ListPtr* l = std::get_if<ListPtr>(&x); l && *l) {
-                std::string out;
-                for (const Value& c : (*l)->items) {
-                    if (valid(c)) out += utf8Encode(static_cast<uint32_t>(std::get<double>(c)));
+            // Variadic, and every argument contributes: chr(65, 66) is "AB".
+            // A number only encodes when it is a codepoint g_unichar_validate
+            // would accept -- strictly positive, below 0x110000, and not a
+            // surrogate. Anything else contributes nothing at all. Without
+            // that range check chr(-1)/chr(1e9) emitted raw invalid UTF-8,
+            // which propagated out and broke the caller's own decoding.
+            const std::function<std::string(const Value&)> encode = [&](const Value& c) -> std::string {
+                if (const double* d = std::get_if<double>(&c)) {
+                    if (!std::isfinite(*d) || *d <= 0) return {};
+                    const auto cp = static_cast<std::uint32_t>(*d);
+                    if (cp == 0 || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return {};
+                    return utf8Encode(cp);
                 }
-                return Value{out};
-            }
-            return Value{valid(x) ? utf8Encode(static_cast<uint32_t>(std::get<double>(x))) : std::string{}};
+                if (const ListPtr* l = std::get_if<ListPtr>(&c); l && *l) {
+                    std::string out;
+                    for (const Value& item : (*l)->items) out += encode(item);
+                    return out;
+                }
+                if (const OscRange* r = std::get_if<OscRange>(&c)) {
+                    std::string out;
+                    for (const Value& item : expandIterable(Value{*r})) out += encode(item);
+                    return out;
+                }
+                return {};
+            };
+            std::string out;
+            for (const Value& a : allPositional(args)) out += encode(a);
+            return Value{out};
         }
         case BuiltinFnId::Ord: {
             const Value s = getArg(args, 0, "s", Value{});
@@ -677,15 +909,18 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
             const Value x = getArg(args, 0, "x", Value{});
             return Value{std::holds_alternative<ObjectPtr>(x) && std::get<ObjectPtr>(x) != nullptr};
         }
-        case BuiltinFnId::Search: return builtinSearch(args);
+        case BuiltinFnId::Search: return builtinSearch(args, ev, &node.position());
         case BuiltinFnId::Lookup: return builtinLookup(args);
         case BuiltinFnId::HasKey: {
             const Value objArg = getArg(args, 0, "object", Value{});
             const ObjectPtr* obj = std::get_if<ObjectPtr>(&objArg);
             if (!obj || !*obj) return Value{};
             const Value keyArg = getArg(args, 1, "key", Value{});
+            // A non-string key is an argument-conversion failure in the
+            // reference (expected string), so it is undef -- not the "no,
+            // that key isn't present" false this used to answer.
             const std::string* key = std::get_if<std::string>(&keyArg);
-            if (!key) return Value{false};
+            if (!key) return Value{};
             for (const auto& [k, v] : (*obj)->items) {
                 if (k == *key) return Value{true};
             }
@@ -714,8 +949,20 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
             if (!v || (v->size() != 2 && v->size() != 3)) return Value{};
             return Value{(*v)[0] * 10000.0 + (*v)[1] * 100.0 + (v->size() == 3 ? (*v)[2] : 0.0)};
         }
-        case BuiltinFnId::ParentModule:
-            return ev.parentModuleName(static_cast<int>(toDoubleLenient(getArg(args, 0, "index", Value{0.0}))));
+        case BuiltinFnId::ParentModule: {
+            // Defaults to 1, not 0, when called with no argument at all --
+            // and an index past the end of the stack is a warning, not a
+            // silent undef.
+            const Value* given = args.findPositional(0);
+            const int index = given ? static_cast<int>(toDoubleLenient(*given)) : 1;
+            Value r = ev.parentModuleName(index);
+            if (std::holds_alternative<std::monostate>(r)) {
+                ev.warn("Parent module index (" + std::to_string(index) +
+                            ") greater than the number of modules on the stack",
+                        &node.position());
+            }
+            return r;
+        }
     }
     return Value{}; // unreachable: every BuiltinFnId has a case above
 }
