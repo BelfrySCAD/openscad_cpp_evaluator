@@ -561,6 +561,22 @@ grep for `ponytail:`.
   color instead of preserving each part's own, matching real OpenSCAD's actual behavior once fixed
   (cross-checked triangle-color-count-and-values against the Python reference directly, not just
   “does it run”).
+- `src/csg_generate.cpp` — `Evaluator::applyDimensionRules`, run centrally just before every node's
+  `GenerateFn` (and once more over the top-level list, which is an implicit union). Mirrors the
+  reference's `isValidDim` + `collectChildren2D`/`collectChildren3D`: a node's dimension is fixed by
+  its first non-background, non-empty child, and every child of the other dimension is dropped with
+  `Mixing 2D and 3D objects is not supported` followed by `Ignoring {N}D child object for {M}D
+  operation`. `linear_extrude`/`rotate_extrude`/`offset` are always-2D and `projection` always-3D, so
+  they skip the "mixing" line and emit only the second; `roof()` emits neither, matching the
+  reference. Background (`%`) children are exempt.
+
+  Doing this centrally is also what keeps `generateCsg` safe: it builds ONE result and switches on
+  whether it holds a `body` or a `section`, so a group that changed dimension part-way dereferenced
+  the empty optional -- `union() { cube(1); square(4); }` took the process down with "mutex lock
+  failed: Invalid argument". Filtering before dispatch means no `GenerateFn` ever sees a mixed group.
+  All 25 module/shape combinations were diffed against OpenSCAD 2026.02.01 warning for warning, with
+  the surviving geometry compared by STL volume.
+
 - `src/builtins/topology.cpp` — `hull()`/`minkowski()`/`fill()`. All three splice their children transparently in
   the CSG tree exactly like union/difference/intersection (resolve just evaluates them for the
   side effect); `hull()` picks an all-3D (`Manifold::Hull`) or all-2D (`CrossSection::Hull`) hull of

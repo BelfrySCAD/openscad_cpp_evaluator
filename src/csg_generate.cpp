@@ -62,6 +62,8 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             for (const std::unique_ptr<CSGNode>& c : node.children) childPtrs.push_back(c.get());
             generateTreeImpl(childPtrs);
 
+            applyDimensionRules(node);
+
             auto it = dispatch.find(node.kind);
             if (node.isBuiltin && it != dispatch.end()) {
                 // Resolve captured which user-level call reached this node;
@@ -90,11 +92,115 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
     return topLevelBodies;
 }
 
+
+namespace {
+
+// How a node treats children of the "wrong" dimension. Read off OpenSCAD
+// 2026.02.01 module by module rather than inferred: essentially everything
+// is Group (the reference routes it through applyToChildren, which calls
+// isValidDim and then collectChildren2D/3D), with four exceptions.
+enum class DimRule {
+    Group,   // dimension comes from the first real child; mismatches warn twice
+    Only2D,  // always 2D input; a 3D child is dropped with one warning
+    Only3D,  // always 3D input; a 2D child is dropped with one warning
+    None,    // no dimension diagnostics at all
+};
+
+DimRule dimRuleFor(const std::string& kind) {
+    if (kind == "linear_extrude" || kind == "rotate_extrude" || kind == "offset") return DimRule::Only2D;
+    if (kind == "projection") return DimRule::Only3D;
+    // roof() warns for neither in the reference, so neither do we.
+    if (kind == "roof") return DimRule::None;
+    return DimRule::Group;
+}
+
+bool isEmptyBody(const ColoredBody& b) {
+    if (b.body) return b.body->NumTri() == 0;
+    if (b.section) return b.section->IsEmpty();
+    return true;
+}
+
+// 3 for a solid, 2 for a section, 0 for "no geometry at all" (which never
+// takes part in the dimension decision).
+int dimensionOf(const ColoredBody& b) {
+    if (b.body) return 3;
+    if (b.section) return 2;
+    return 0;
+}
+
+} // namespace
+
+// Drops children of the wrong dimension, with the reference's own two
+// warnings. This is not only about diagnostics: generateCsg builds one
+// result and switches on whether it holds a body or a section, so a group
+// that changed dimension part-way dereferenced the empty optional and took
+// the process down ("mutex lock failed" from the garbage read). Filtering
+// here means no downstream generate ever sees a mixed group.
+//
+// Background (%) children are exempt, matching isValidDim's own
+// isBackground() skip -- a ghost of the other dimension is not an error.
+void Evaluator::applyDimensionRules(CSGNode& node) {
+    const DimRule rule = dimRuleFor(node.kind);
+    if (rule == DimRule::None) return;
+    std::vector<CSGNode*> kids;
+    kids.reserve(node.children.size());
+    for (const std::unique_ptr<CSGNode>& c : node.children) kids.push_back(c.get());
+    applyDimensionRulesTo(kids, static_cast<int>(rule));
+}
+
+// The top level is an implicit union, and the reference treats it as one for
+// this too: `square(4); cube(1);` warns and keeps only the square.
+void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int ruleValue) {
+    const DimRule rule = static_cast<DimRule>(ruleValue);
+    int target = rule == DimRule::Only2D ? 2 : rule == DimRule::Only3D ? 3 : 0;
+    bool warnedMixing = false;
+
+    for (CSGNode* child : children) {
+        if (!child) continue;
+        std::vector<ColoredBody> kept;
+        kept.reserve(child->bodies.size());
+        for (ColoredBody& b : child->bodies) {
+            const int dim = dimensionOf(b);
+            if (b.role == BodyRole::Background || dim == 0 || isEmptyBody(b)) {
+                kept.push_back(std::move(b));
+                continue;
+            }
+            if (target == 0) {
+                target = dim;            // first real child fixes the dimension
+                kept.push_back(std::move(b));
+                continue;
+            }
+            if (dim == target) {
+                kept.push_back(std::move(b));
+                continue;
+            }
+            const oscad::Position* pos = child->node ? &child->node->position() : nullptr;
+            if (rule == DimRule::Group && !warnedMixing) {
+                warn("Mixing 2D and 3D objects is not supported", pos);
+                warnedMixing = true;
+            }
+            warn(std::string("Ignoring ") + (dim == 3 ? "3D" : "2D") + " child object for " +
+                     (target == 3 ? "3D" : "2D") + " operation",
+                 pos);
+            // dropped
+        }
+        child->bodies = std::move(kept);
+    }
+}
+
 std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_ptr<CSGNode>>& tree) {
     std::vector<CSGNode*> ptrs;
     ptrs.reserve(tree.size());
     for (const std::unique_ptr<CSGNode>& n : tree) ptrs.push_back(n.get());
-    return generateTreeImpl(ptrs);
+    std::vector<ColoredBody> bodies = generateTreeImpl(ptrs);
+    // The top level is an implicit union; give it the same Group treatment
+    // every other group node gets, then re-collect what survived.
+    applyDimensionRulesTo(ptrs, static_cast<int>(DimRule::Group));
+    bodies.clear();
+    for (CSGNode* n : ptrs) {
+        for (const ColoredBody& b : n->bodies) bodies.push_back(b);
+    }
+    return bodies;
 }
 
 std::vector<ColoredBody> Evaluator::generatePartialTree() {

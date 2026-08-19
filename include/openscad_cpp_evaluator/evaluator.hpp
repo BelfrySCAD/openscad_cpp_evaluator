@@ -330,6 +330,12 @@ public:
     // free function, same reasoning as tagGenerated()/builtinChildren().
     void warn(const std::string& message, const oscad::Position* position);
 
+    // Applies OpenSCAD's mixed-2D/3D rules to a node's children just
+    // before its GenerateFn runs -- see csg_generate.cpp.
+    void applyDimensionRules(CSGNode& node);
+    // ruleValue is a DimRule; the enum is file-local to csg_generate.cpp.
+    void applyDimensionRulesTo(const std::vector<CSGNode*>& children, int ruleValue);
+
     // Apply `!`: replace the whole tree with the first show_only
     // subtree, discarding its ancestors and every sibling. See its
     // definition for why this cannot be done by tagging bodies.
