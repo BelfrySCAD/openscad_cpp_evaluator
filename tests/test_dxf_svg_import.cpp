@@ -425,6 +425,11 @@ TEST(SvgImport, MultipleSubpathsInOnePathProduceMultipleContours) {
 // Every expectation below was produced by running the identical script and
 // the identical .dxf through OpenSCAD 2026.02.01 -- all sixteen cases,
 // warnings included, came back byte-identical.
+//
+// Paths go into the script via generic_string(), like every other test in
+// this file: a Windows path's backslashes are escape characters inside a
+// .scad string literal, so path.string() mangles the filename and every one
+// of these fails on Windows CI while passing everywhere else.
 
 namespace {
 
@@ -464,7 +469,7 @@ TEST(DxfDim, ReadsEachDimensionType) {
     const auto path = tempPath("dims.dxf");
     writeFile(path, kDimDxf);
     Evaluator ev;
-    const std::string f = "file=\"" + path.string() + "\", layer=\"dims\"";
+    const std::string f = "file=\"" + path.generic_string() + "\", layer=\"dims\"";
     EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"width\")", ev), 25.0, 1e-9);
     EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"height\")", ev), 40.0, 1e-9);
     EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"diag\")", ev), 5.0, 1e-9);   // aligned
@@ -479,7 +484,7 @@ TEST(DxfDim, ScaleAndOriginApply) {
     const auto path = tempPath("dims_scale.dxf");
     writeFile(path, kDimDxf);
     Evaluator ev;
-    const std::string f = "file=\"" + path.string() + "\", layer=\"dims\"";
+    const std::string f = "file=\"" + path.generic_string() + "\", layer=\"dims\"";
     EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"width\", scale=2)", ev), 50.0, 1e-9);
     // origin shifts positions but not the distance between two of them.
     EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"width\", origin=[5,5])", ev), 25.0, 1e-9);
@@ -491,9 +496,9 @@ TEST(DxfDim, NameAndLayerFilter) {
     writeFile(path, kDimDxf);
     Evaluator ev;
     // No name given -> the first dimension on that layer.
-    EXPECT_NEAR(dimOf("dxf_dim(file=\"" + path.string() + "\", layer=\"dims\")", ev), 25.0, 1e-9);
+    EXPECT_NEAR(dimOf("dxf_dim(file=\"" + path.generic_string() + "\", layer=\"dims\")", ev), 25.0, 1e-9);
     // No layer given -> any layer.
-    EXPECT_NEAR(dimOf("dxf_dim(file=\"" + path.string() + "\", name=\"diag\")", ev), 5.0, 1e-9);
+    EXPECT_NEAR(dimOf("dxf_dim(file=\"" + path.generic_string() + "\", name=\"diag\")", ev), 5.0, 1e-9);
     std::filesystem::remove(path);
 }
 
@@ -503,7 +508,7 @@ TEST(DxfDim, MissingDimensionAndMissingFileWarn) {
     std::string last;
     Evaluator ev([&](const std::string& m) { last = m; });
     EXPECT_TRUE(std::holds_alternative<std::monostate>(
-        asExpr("dxf_dim(file=\"" + path.string() + "\", layer=\"dims\", name=\"nope\")", ev)));
+        asExpr("dxf_dim(file=\"" + path.generic_string() + "\", layer=\"dims\", name=\"nope\")", ev)));
     EXPECT_NE(last.find("Can't find dimension 'nope'"), std::string::npos) << last;
 
     EXPECT_TRUE(std::holds_alternative<std::monostate>(
@@ -516,14 +521,14 @@ TEST(DxfCross, FindsTheCrossingPoint) {
     const auto path = tempPath("cross.dxf");
     writeFile(path, kDimDxf);
     Evaluator ev;
-    Value v = asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"cross\")", ev);
+    Value v = asExpr("dxf_cross(file=\"" + path.generic_string() + "\", layer=\"cross\")", ev);
     const auto& xy = std::get<ListPtr>(v)->items;
     ASSERT_EQ(xy.size(), 2u);
     EXPECT_NEAR(std::get<double>(xy[0]), 10.0, 1e-9);
     EXPECT_NEAR(std::get<double>(xy[1]), 20.0, 1e-9);
 
     // origin shifts the answer with the geometry.
-    Value o = asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"cross\", origin=[5,5])", ev);
+    Value o = asExpr("dxf_cross(file=\"" + path.generic_string() + "\", layer=\"cross\", origin=[5,5])", ev);
     const auto& oxy = std::get<ListPtr>(o)->items;
     EXPECT_NEAR(std::get<double>(oxy[0]), 5.0, 1e-9);
     EXPECT_NEAR(std::get<double>(oxy[1]), 15.0, 1e-9);
@@ -536,12 +541,12 @@ TEST(DxfCross, ParallelOrTooFewLinesWarns) {
     std::string last;
     Evaluator ev([&](const std::string& m) { last = m; });
     EXPECT_TRUE(std::holds_alternative<std::monostate>(
-        asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"par\")", ev)));
+        asExpr("dxf_cross(file=\"" + path.generic_string() + "\", layer=\"par\")", ev)));
     EXPECT_NE(last.find("Can't find cross"), std::string::npos) << last;
 
     last.clear();
     EXPECT_TRUE(std::holds_alternative<std::monostate>(
-        asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"dims\")", ev)));
+        asExpr("dxf_cross(file=\"" + path.generic_string() + "\", layer=\"dims\")", ev)));
     EXPECT_NE(last.find("Can't find cross"), std::string::npos) << last;
     std::filesystem::remove(path);
 }
