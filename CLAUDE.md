@@ -512,6 +512,9 @@ grep for `ponytail:`.
   `Evaluator::evaluate()` also takes an optional `viewportParams` map (added after a test-suite
   parity review found it missing entirely): seeds arbitrary `$`-prefixed entries into `ctx.dyn`
   (e.g. `$vpt`/`$vpr`/`$vpd`/`$vpf` from a GUI host's current camera, or `$t` for animation time)
+  — note `EvalContext::makeRoot` also seeds `$preview` to **`false`**, always: there is no preview
+  mode here, and leaving it undef made the common `$preview ? cheap : real` idiom take the cheap
+  branch by accident while warning about an unknown variable
   before evaluation starts, via a direct `ctx.dyn` write that deliberately never touches
   `ctx.dynExplicit` — lets a caller tell "the script itself assigned this `$`-var"
   (`dynExplicit`) apart from "merely present because the caller seeded it" after `evaluate()`
@@ -558,13 +561,19 @@ grep for `ponytail:`.
   color instead of preserving each part's own, matching real OpenSCAD's actual behavior once fixed
   (cross-checked triangle-color-count-and-values against the Python reference directly, not just
   “does it run”).
-- `src/builtins/topology.cpp` — `hull()`/`minkowski()`. Both splice their children transparently in
+- `src/builtins/topology.cpp` — `hull()`/`minkowski()`/`fill()`. All three splice their children transparently in
   the CSG tree exactly like union/difference/intersection (resolve just evaluates them for the
   side effect); `hull()` picks an all-3D (`Manifold::Hull`) or all-2D (`CrossSection::Hull`) hull of
   the *foreground* (role-split) children, falling back to sections only when no child has a body;
   `minkowski()` only ever operates on 3D bodies (a 2D sibling among the foreground children is
   silently ignored, matching the reference exactly — no 2D `minkowski_sum` fallback the way hull
-  has one). Both pass background/highlight/show_only bodies through untouched.
+  has one). All pass background/highlight/show_only bodies through untouched. `fill()` is 2D-only
+  (a 3D foreground child draws the reference's own `fill() not yet implemented for 3D` warning and
+  contributes nothing): it unions the foreground sections, keeps only the outlines with positive
+  signed area — outer boundaries, since Manifold winds a hole clockwise — and re-unions those,
+  which matters because two outers can overlap once the holes between them are gone. Ported from
+  the reference's `applyFill2D`, and checked shape-for-shape against OpenSCAD 2026.02.01 by
+  extruding and comparing STL volumes.
 - `src/builtins/extrude.cpp` — `linear_extrude()`/`rotate_extrude()`/`projection(cut=)`. All three
   union every 2D child into one `CrossSection` via `toCrossSection` first. `rotate_extrude`'s
   segment count can't be resolved until generate time (it depends on the merged children's bounds,

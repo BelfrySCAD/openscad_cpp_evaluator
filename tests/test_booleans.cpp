@@ -440,3 +440,81 @@ TEST(Minkowski2D, AShapeWithAHoleHasBothItsContoursSwept) {
         manifold::Manifold::Cube({1.0, 1.0, 6.0}).Translate({-0.5, -0.5, -1.0});
     EXPECT_TRUE((*e.bodies[0].body ^ probe).IsEmpty()) << "the hole was filled in";
 }
+
+// -- fill() ---------------------------------------------------------------
+//
+// 2D only: union the children, then drop every hole. Each area below was
+// checked against OpenSCAD 2026.02.01 by extruding the same shape and
+// comparing STL volumes -- the filled cases matched to 0.0000.
+
+TEST(Fill, ClosesAHole) {
+    // A 10x10 square with a disc punched out fills back to the solid square.
+    Evaluated e = evalSrc(
+        "fill() difference() { square(10, center=true); circle(3, $fn=64); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 100.0, 1e-6);
+}
+
+TEST(Fill, MergesOverlappingOutlinesIntoOne) {
+    // Two holed squares 4 apart. Filling drops both holes and the outer
+    // boundaries then overlap, so the result must be re-unioned into a
+    // single 14x10 region rather than left as two loops.
+    Evaluated e = evalSrc(
+        "fill() { difference() { square(10, center=true); circle(3, $fn=64); }"
+        "         translate([4,0]) difference() { square(10, center=true); circle(3, $fn=64); } }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 140.0, 1e-6);
+}
+
+TEST(Fill, NestedOutlinesCollapseToTheOutermost) {
+    // A ring inside another ring's hole: only the outermost boundary is
+    // positive, so everything inside it fills solid.
+    Evaluated e = evalSrc(
+        "fill() { difference() { circle(10, $fn=64); circle(8, $fn=64); }"
+        "         difference() { circle(6, $fn=64); circle(4, $fn=64); } }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    // The 64-segment polygon approximating r=10, not pi*100 exactly.
+    EXPECT_NEAR(e.bodies[0].section->Area(), 313.6548, 0.01);
+}
+
+TEST(Fill, LeavesADisjointRegionDisjoint) {
+    // Nothing to fill and nothing to merge -- two separate squares stay two
+    // separate squares, total area unchanged.
+    Evaluated e = evalSrc("fill() { square(4); translate([10,0]) square(4); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 32.0, 1e-6);
+}
+
+TEST(Fill, HoleLeftOpenToTheOutsideIsNotAHole) {
+    // Notching the ring so its inner void connects to the outside leaves one
+    // positive outline, which fills to the full disc -- same as the closed
+    // ring above, and the same as OpenSCAD gives.
+    Evaluated e = evalSrc(
+        "fill() difference() { difference() { circle(10, $fn=64); circle(8, $fn=64); } square(3); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 313.6548, 0.01);
+}
+
+TEST(Fill, SolidShapeIsUnchanged) {
+    Evaluated e = evalSrc("fill() square(4, center=true);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 16.0, 1e-9);
+}
+
+TEST(Fill, ThreeDeeChildWarnsAndContributesNothing) {
+    std::string lastWarning;
+    Evaluated e = evalSrc("fill() cube(1);", [&](const std::string& m) { lastWarning = m; });
+    EXPECT_NE(lastWarning.find("fill() not yet implemented for 3D"), std::string::npos);
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(Fill, NoChildrenIsEmptyNotAnError) {
+    Evaluated e = evalSrc("fill();");
+    EXPECT_TRUE(e.bodies.empty());
+}

@@ -15,6 +15,12 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     ctx.dyn->set("$fs", Value{2.0});
     ctx.dyn->set("$t", Value{0.0});
     ctx.dyn->set("$parent_modules", Value{0.0});
+    // Always false: there is no preview mode here, every render is a full
+    // CSG render. The variable still has to EXIST, though -- a script that
+    // branches on it (the `$preview ? cheap : real` idiom) would otherwise
+    // see undef, take the falsy branch by accident rather than by rule, and
+    // warn about an unknown variable while doing it.
+    ctx.dyn->set("$preview", Value{false});
     ctx.let_ = TrailView<Value>::makeRoot();
     ctx.dynPositions = TrailView<const oscad::Position*>::makeRoot();
     ctx.childrenNodes = std::make_shared<const ChildrenNodeList>();

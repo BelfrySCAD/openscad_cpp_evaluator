@@ -160,6 +160,10 @@ CSGParams resolveHull(Evaluator& ev, const oscad::ModularCall& node, EvalContext
 std::vector<ColoredBody> generateHull(Evaluator& ev, const CSGParams& params,
                                        const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
 
+CSGParams resolveFill(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateFill(Evaluator& ev, const CSGParams& params,
+                                       const std::vector<std::unique_ptr<CSGNode>>& children,
+                                       const oscad::ASTNode& node);
 CSGParams resolveMinkowski(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams& params,
                                             const std::vector<std::unique_ptr<CSGNode>>& children,
