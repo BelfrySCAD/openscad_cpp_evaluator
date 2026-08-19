@@ -165,6 +165,11 @@ std::vector<ColoredBody> generateHull(Evaluator& ev, const CSGParams& params,
 Value builtinDxfDim(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node);
 Value builtinDxfCross(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node);
 
+CSGParams resolveSimplify(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params,
+                                           const std::vector<std::unique_ptr<CSGNode>>& children,
+                                           const oscad::ASTNode& node);
+
 CSGParams resolveMinkowskiDifference(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateMinkowskiDifference(Evaluator& ev, const CSGParams& params,
                                                       const std::vector<std::unique_ptr<CSGNode>>& children,
