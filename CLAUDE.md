@@ -591,7 +591,7 @@ grep for `ponytail:`.
   All 25 module/shape combinations were diffed against OpenSCAD 2026.02.01 warning for warning, with
   the surviving geometry compared by STL volume.
 
-- `src/builtins/topology.cpp` — `hull()`/`minkowski()`/`fill()`. All three splice their children transparently in
+- `src/builtins/topology.cpp` — `hull()`/`minkowski()`/`minkowski_difference()`/`fill()`. All four splice their children transparently in
   the CSG tree exactly like union/difference/intersection (resolve just evaluates them for the
   side effect); `hull()` picks an all-3D (`Manifold::Hull`) or all-2D (`CrossSection::Hull`) hull of
   the *foreground* (role-split) children, falling back to sections only when no child has a body;
@@ -604,6 +604,19 @@ grep for `ponytail:`.
   which matters because two outers can overlap once the holes between them are gone. Ported from
   the reference's `applyFill2D`, and checked shape-for-shape against OpenSCAD 2026.02.01 by
   extruding and comparing STL volumes.
+
+  `minkowski_difference()` is erosion, and a deliberate BelfrySCAD extension: OpenSCAD has no such
+  module and no way to spell the operation in the language, since `minkowski()` only ever sums.
+  Reads the same way — first child is the body, every child after it is a tool eroded away in turn
+  (`Manifold::MinkowskiDifference`). 3D only, matching `minkowski()`'s own 3D-wins dispatch, since
+  Manifold has no CrossSection erosion and 2D already has one in `offset(r=-N)`.
+
+  Worth knowing why this is a module rather than an extension of `offset()`: a *positive* 3D offset
+  is already expressible as `minkowski() { X; sphere(r); }`, so `offset(r=N)` on a solid would have
+  been pure sugar. Erosion is the half that is genuinely unavailable, and naming it after the
+  operation beats borrowing a 2D name for it. Eroding a cube by a cube is exact (no curved tool to
+  tessellate), which is what the tests assert on; a sphere tool lands a little large, and that gap
+  is the sphere's tessellation rather than an error in the erosion.
 - `src/builtins/extrude.cpp` — `linear_extrude()`/`rotate_extrude()`/`projection(cut=)`. All three
   union every 2D child into one `CrossSection` via `toCrossSection` first. `rotate_extrude`'s
   segment count can't be resolved until generate time (it depends on the merged children's bounds,

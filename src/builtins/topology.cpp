@@ -313,4 +313,66 @@ std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams&, cons
     return out;
 }
 
+// minkowski_difference() -- erosion, the operation `minkowski()` has no
+// inverse for. A BelfrySCAD extension: OpenSCAD has no equivalent module and
+// no way to express it in the language, since minkowski() only ever sums.
+// Shrinking a part by a clearance, or hollowing one to a wall thickness,
+// otherwise needs hand-built difference() scaffolding that is not the same
+// operation.
+//
+// Reads like minkowski(): the first child is the body being eroded, and
+// every child after it is a tool eroded away from it in turn. 3D only, same
+// as minkowski()'s own 3D path -- Manifold has no CrossSection erosion, and
+// 2D already has one in offset(r=-N).
+
+CSGParams resolveMinkowskiDifference(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    (void)args;
+    ev.evalChildren(node.children, effCtx);
+    return CSGParams{};
+}
+
+std::vector<ColoredBody> generateMinkowskiDifference(Evaluator& ev, const CSGParams&,
+                                                      const std::vector<std::unique_ptr<CSGNode>>& children,
+                                                      const oscad::ASTNode& node) {
+    const std::vector<ColoredBody> bodies = flattenCsgTree(children);
+    const RoleSplit split = splitByRole(bodies);
+
+    std::vector<const ColoredBody*> bodies3d;
+    for (const ColoredBody& c : split.foreground) {
+        if (c.body) bodies3d.push_back(&c);
+    }
+
+    std::vector<ColoredBody> passthrough;
+    passthrough.insert(passthrough.end(), split.background.begin(), split.background.end());
+    passthrough.insert(passthrough.end(), split.highlight.begin(), split.highlight.end());
+    passthrough.insert(passthrough.end(), split.showOnly.begin(), split.showOnly.end());
+    passthrough.insert(passthrough.end(), split.displayOnly.begin(), split.displayOnly.end());
+
+    if (bodies3d.empty()) return passthrough;
+    if (bodies3d.size() == 1) {
+        // Nothing to erode with, so nothing happens -- the same no-op
+        // minkowski() gives for a single child.
+        std::vector<ColoredBody> result = {*bodies3d.front()};
+        result.insert(result.end(), passthrough.begin(), passthrough.end());
+        return result;
+    }
+
+    manifold::Manifold result = *bodies3d.front()->body;
+    for (size_t i = 1; i < bodies3d.size(); ++i) result = result.MinkowskiDifference(*bodies3d[i]->body);
+    if (result.Status() != manifold::Manifold::Error::NoError) {
+        ev.warn("minkowski_difference: result is not manifold", &node.position());
+    }
+
+    ColoredBody cb;
+    cb.body = std::move(result);
+    cb.color = bodies3d.front()->color;
+    // Per-triangle colour cannot survive an erosion: the surface it was
+    // indexed against is gone.
+    cb.triColors.reset();
+    std::vector<ColoredBody> out = {std::move(cb)};
+    out.insert(out.end(), passthrough.begin(), passthrough.end());
+    return out;
+}
+
 } // namespace oscadeval
