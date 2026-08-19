@@ -561,6 +561,29 @@ grep for `ponytail:`.
   color instead of preserving each part's own, matching real OpenSCAD's actual behavior once fixed
   (cross-checked triangle-color-count-and-values against the Python reference directly, not just
   “does it run”).
+- `src/builtins/primitives_3d.cpp` — `sphere(style=)` is a BelfrySCAD extension naming the
+  tessellation, using BOSL2's five `spheroid()` style names and constructions: `"orig"` (the default,
+  and what OpenSCAD's own sphere() builds — rings offset half a step from the poles, no pole vertex),
+  `"aligned"` (a vertex at each pole, so an `$fn` divisible by 4 also lands vertices exactly on ±X
+  and ±Y), `"stagger"` (aligned with alternate rings rotated half a face), `"octa"` and `"icosa"`.
+  Only `"orig"` renders the same in real OpenSCAD.
+
+  `"octa"` is `Manifold::Sphere`, which already *is* a subdivided octahedron (`Shape::Octahedron`
+  then `Subdivide`). Same 146/288 topology as BOSL2's at `$fn=24`, ~0.05% apart in volume because
+  Manifold distributes the subdivision differently. `"icosa"` samples each icosahedral face against
+  its own corners rather than rotating copies of one sampled face the way BOSL2 does — the sampling
+  is affine in those corners, so it is the same points with far less machinery — and welds the
+  shared edges itself so the mesh reaches Manifold already manifold.
+
+  **BOSL2's VNF winding is the opposite of Manifold's**, so `buildAligned` emits every triangle with
+  its last two indices swapped. Without it the solid is inside-out, which `Manifold::Volume()`
+  reports as a NEGATIVE volume — and which comparing `|volume|` (as an STL-based check naturally
+  does) hides completely. Two of the tests assert a positive volume specifically to catch this.
+
+  Note when checking any of this against BOSL2: **BOSL2 shadows `sphere()`** with its own module, so
+  a file that includes BOSL2 to "compare against the reference" is comparing BOSL2 with itself. Call
+  `spheroid()` from a BOSL2-including file and `sphere()` from one without.
+
 - `src/builtins/dxf_dim.cpp` — `dxf_dim()`/`dxf_cross()`, which read a measurement out of a DXF file
   rather than out of the model. Ported from the reference's `io/dxfdim.cc` plus the DIMENSION/LINE
   half of `io/DxfData.cc`: `dxf_dim()` returns the first matching DIMENSION's value by its type

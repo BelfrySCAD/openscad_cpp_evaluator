@@ -5,10 +5,12 @@
 #include "openscad_cpp_evaluator/segments.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <map>
 #include <numbers>
+#include <set>
 
 namespace oscadeval {
 
@@ -100,6 +102,207 @@ std::vector<ColoredBody> generateCube(Evaluator& ev, const CSGParams& params, co
 // _resolve_sphere/_generate_sphere exactly, including the "stacks =
 // max(2, ceil(n/2))" ring count and the fan-cap winding.
 
+// sphere(r|d, style) -- `style` is a BelfrySCAD extension naming the
+// tessellation, with the same five names and the same constructions as
+// BOSL2's spheroid():
+//
+//   "orig"    stacked rings offset half a step from the poles, no pole
+//             vertex. What OpenSCAD's own sphere() builds, hence the name,
+//             and still the default here.
+//   "aligned" a vertex at each pole and rings on the latitudes between, so
+//             an $fn divisible by 4 puts vertices exactly on +-X and +-Y.
+//   "stagger" "aligned" with alternate rings rotated half a face, giving
+//             triangles that alternate direction rather than stacking.
+//   "octa"    a subdivided octahedron projected onto the sphere.
+//   "icosa"   a subdivided icosahedron projected onto the sphere -- the most
+//             uniform of the five.
+//
+// Only "orig" matches real OpenSCAD; the rest are additions, so a script
+// using them will not render the same shape elsewhere.
+
+namespace {
+
+// BOSL2's spherical_to_xyz(r, theta, phi): theta around Z from +X, phi down
+// from +Z.
+std::array<double, 3> sphericalToXyz(double r, double thetaDeg, double phiDeg) {
+    const double th = thetaDeg * std::numbers::pi / 180.0;
+    const double ph = phiDeg * std::numbers::pi / 180.0;
+    return {r * std::sin(ph) * std::cos(th), r * std::sin(ph) * std::sin(th), r * std::cos(ph)};
+}
+
+struct SphereMesh {
+    std::vector<double> verts;   // flat x,y,z
+    std::vector<int> tris;
+};
+
+void pushVert(SphereMesh& m, const std::array<double, 3>& p) {
+    m.verts.insert(m.verts.end(), {p[0], p[1], p[2]});
+}
+
+// "orig": rings at (i+0.5) steps, no pole vertices, capped by a fan at each
+// end. Unchanged from the original implementation.
+SphereMesh buildOrig(double r, int n, int stacks) {
+    SphereMesh m;
+    const double step = std::numbers::pi / stacks;
+    std::vector<std::vector<int>> rings(static_cast<size_t>(stacks));
+    for (int s = 0; s < stacks; ++s) {
+        const double lat = -std::numbers::pi / 2.0 + (s + 0.5) * step;
+        const double ringR = r * std::cos(lat);
+        const double z = r * std::sin(lat);
+        for (int seg = 0; seg < n; ++seg) {
+            const double angle = 2.0 * std::numbers::pi * seg / n;
+            rings[static_cast<size_t>(s)].push_back(static_cast<int>(m.verts.size() / 3));
+            pushVert(m, {ringR * std::cos(angle), ringR * std::sin(angle), z});
+        }
+    }
+    const auto& bot = rings.front();
+    for (int i = 1; i < n - 1; ++i) m.tris.insert(m.tris.end(), {bot[0], bot[size_t(i) + 1], bot[size_t(i)]});
+    for (int s = 0; s < stacks - 1; ++s) {
+        const auto& lo = rings[size_t(s)];
+        const auto& hi = rings[size_t(s) + 1];
+        for (int seg = 0; seg < n; ++seg) {
+            const int a = lo[size_t(seg)], b = lo[size_t((seg + 1) % n)];
+            const int c = hi[size_t(seg)], d = hi[size_t((seg + 1) % n)];
+            m.tris.insert(m.tris.end(), {a, b, d});
+            m.tris.insert(m.tris.end(), {a, d, c});
+        }
+    }
+    const auto& top = rings.back();
+    for (int i = 1; i < n - 1; ++i) m.tris.insert(m.tris.end(), {top[0], top[size_t(i)], top[size_t(i) + 1]});
+    return m;
+}
+
+// "aligned"/"stagger": pole, vsides-1 rings, pole. Vertex order and face
+// indices follow BOSL2's spheroid() exactly so the two agree triangle for
+// triangle, not merely in shape.
+SphereMesh buildAligned(double r, int hsides, int vsides, bool stagger) {
+    SphereMesh m;
+    pushVert(m, sphericalToXyz(r, 0, 0));                      // north pole, index 0
+    for (int i = 1; i <= vsides - 1; ++i) {
+        const double phi = i * 180.0 / vsides;
+        for (int j = 0; j < hsides; ++j) {
+            const double theta = (j + ((stagger && i % 2 != 0) ? 0.5 : 0.0)) * 360.0 / hsides;
+            pushVert(m, sphericalToXyz(r, theta, phi));
+        }
+    }
+    pushVert(m, sphericalToXyz(r, 0, 180));                    // south pole, last index
+    const int lv = static_cast<int>(m.verts.size() / 3);
+
+    // BOSL2's VNF winding is the opposite of what Manifold wants, so every
+    // triangle below is emitted with its last two indices swapped. Without
+    // that the solid comes out inside-out -- and invisibly so if you only
+    // ever check |volume|, which is how this first went unnoticed.
+    const auto tri = [&m](int a, int b, int c) { m.tris.insert(m.tris.end(), {a, c, b}); };
+
+    for (int i = 0; i < hsides; ++i) {
+        const int b2 = lv - 2 - hsides;
+        tri(i + 1, 0, ((i + 1) % hsides) + 1);
+        tri(lv - 1, b2 + i + 1, b2 + ((i + 1) % hsides) + 1);
+    }
+    for (int i = 0; i <= vsides - 3; ++i) {
+        const int base = 1 + hsides * i;
+        for (int j = 0; j < hsides; ++j) {
+            if (stagger && i % 2 != 0) {
+                tri(base + j, base + hsides + j % hsides, base + hsides + (j + hsides - 1) % hsides);
+                tri(base + j, base + (j + 1) % hsides, base + hsides + j);
+            } else {
+                tri(base + j, base + (j + 1) % hsides, base + hsides + (j + 1) % hsides);
+                tri(base + j, base + hsides + (j + 1) % hsides, base + hsides + j);
+            }
+        }
+    }
+    return m;
+}
+
+// "icosa": subdivide every icosahedral face into a triangular grid and push
+// each sample out to the sphere. BOSL2 subsamples one face and rotates
+// copies onto the rest; sampling each face against its own corners is the
+// same points (the sampling is affine in those corners) with far less
+// machinery. Coincident vertices along shared edges are welded here rather
+// than left for Manifold, so the mesh arrives already manifold.
+SphereMesh buildIcosa(double r, int hsides) {
+    const double phi = (1.0 + std::sqrt(5.0)) / 2.0;
+    std::vector<std::array<double, 3>> ico;
+    for (int i : {-1, 1}) {
+        for (int j : {-1, 1}) {
+            ico.push_back({0.0, double(i), double(j) * phi});
+            ico.push_back({double(i), double(j) * phi, 0.0});
+            ico.push_back({double(j) * phi, 0.0, double(i)});
+        }
+    }
+    // Hull faces by brute force: a triple is a face when every other vertex
+    // lies on one side of its plane. 12 vertices, so 220 triples.
+    std::vector<std::array<int, 3>> faces;
+    const int nv = static_cast<int>(ico.size());
+    for (int a = 0; a < nv; ++a)
+        for (int b = a + 1; b < nv; ++b)
+            for (int c = b + 1; c < nv; ++c) {
+                const std::array<double, 3> u{ico[b][0] - ico[a][0], ico[b][1] - ico[a][1], ico[b][2] - ico[a][2]};
+                const std::array<double, 3> v{ico[c][0] - ico[a][0], ico[c][1] - ico[a][1], ico[c][2] - ico[a][2]};
+                const std::array<double, 3> nrm{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                                                 u[0] * v[1] - u[1] * v[0]};
+                int pos = 0, neg = 0;
+                for (int k = 0; k < nv; ++k) {
+                    if (k == a || k == b || k == c) continue;
+                    const double d = nrm[0] * (ico[k][0] - ico[a][0]) + nrm[1] * (ico[k][1] - ico[a][1]) +
+                                     nrm[2] * (ico[k][2] - ico[a][2]);
+                    if (d > 1e-9) ++pos;
+                    if (d < -1e-9) ++neg;
+                }
+                if (pos && neg) continue;
+                // Orient outward: the normal must point away from the centre.
+                if (neg == 0) faces.push_back({a, c, b});
+                else faces.push_back({a, b, c});
+            }
+
+    const int steps = std::max(1, static_cast<int>(std::lround(std::max(5, hsides) / 5.0)));
+    const int N = steps - 1;   // BOSL2's N; the grid has N+2 rows
+
+    SphereMesh m;
+    std::map<std::array<long long, 3>, int> weld;
+    const auto add = [&](const std::array<double, 3>& p) {
+        const double len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        const std::array<double, 3> u{r * p[0] / len, r * p[1] / len, r * p[2] / len};
+        const std::array<long long, 3> key{std::llround(u[0] * 1e9), std::llround(u[1] * 1e9),
+                                            std::llround(u[2] * 1e9)};
+        auto it = weld.find(key);
+        if (it != weld.end()) return it->second;
+        const int idx = static_cast<int>(m.verts.size() / 3);
+        pushVert(m, u);
+        weld.emplace(key, idx);
+        return idx;
+    };
+
+    for (const std::array<int, 3>& f : faces) {
+        const std::array<double, 3>& p0 = ico[f[0]];
+        const std::array<double, 3>& p1 = ico[f[1]];
+        const std::array<double, 3>& p2 = ico[f[2]];
+        // Row i has N+2-i samples, mirroring _subsample_triangle.
+        std::vector<std::vector<int>> grid;
+        for (int i = 0; i <= N + 1; ++i) {
+            std::vector<int> row;
+            for (int j = 0; j <= N + 1 - i; ++j) {
+                const double a = double(i) / (N + 1), b = double(j) / (N + 1);
+                row.push_back(add({p0[0] + (p1[0] - p0[0]) * a + (p2[0] - p0[0]) * b,
+                                    p0[1] + (p1[1] - p0[1]) * a + (p2[1] - p0[1]) * b,
+                                    p0[2] + (p1[2] - p0[2]) * a + (p2[2] - p0[2]) * b}));
+            }
+            grid.push_back(std::move(row));
+        }
+        for (int i = 0; i <= N; ++i) {
+            for (int j = 0; j <= N - i; ++j) {
+                m.tris.insert(m.tris.end(), {grid[i][j], grid[i + 1][j], grid[i][j + 1]});
+                if (j < N - i) {
+                    m.tris.insert(m.tris.end(), {grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]});
+                }
+            }
+        }
+    }
+    return m;
+}
+
+} // namespace
+
 CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     Value dArg = getArg(args, std::nullopt, "d", Value{});
@@ -111,56 +314,51 @@ CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         r = isUndef(rArg) ? 1.0 : toDoubleLenient(rArg);
     }
 
-    const int n = fnSegmentsFromCtx(effCtx, r); // longitude segments
-    const int stacks = std::max(2, static_cast<int>(std::ceil(n / 2.0)));
-    const double step = std::numbers::pi / stacks;
-
-    std::vector<double> verts; // flat x,y,z,...
-    std::vector<std::vector<int>> rings(static_cast<size_t>(stacks));
-    for (int s = 0; s < stacks; ++s) {
-        const double lat = -std::numbers::pi / 2.0 + (s + 0.5) * step;
-        const double ringR = r * std::cos(lat);
-        const double z = r * std::sin(lat);
-        for (int seg = 0; seg < n; ++seg) {
-            const double angle = 2.0 * std::numbers::pi * seg / n;
-            rings[static_cast<size_t>(s)].push_back(static_cast<int>(verts.size() / 3));
-            verts.push_back(ringR * std::cos(angle));
-            verts.push_back(ringR * std::sin(angle));
-            verts.push_back(z);
+    const Value styleArg = getArg(args, std::nullopt, "style", Value{});
+    std::string style = "orig";
+    if (const std::string* sv = std::get_if<std::string>(&styleArg)) {
+        static const std::set<std::string> known{"orig", "aligned", "stagger", "octa", "icosa"};
+        if (known.count(*sv)) {
+            style = *sv;
+        } else {
+            ev.warn("sphere: unknown style \"" + *sv + "\"; expected one of orig, aligned, stagger, octa, icosa",
+                    &node.position());
         }
+    } else if (!isUndef(styleArg)) {
+        ev.warn("sphere: style must be a string", &node.position());
     }
 
-    std::vector<int> tris;
-    const auto& bot = rings.front();
-    for (int i = 1; i < n - 1; ++i) {
-        tris.insert(tris.end(), {bot[0], bot[static_cast<size_t>(i) + 1], bot[static_cast<size_t>(i)]});
-    }
-    for (int s = 0; s < stacks - 1; ++s) {
-        const auto& lo = rings[static_cast<size_t>(s)];
-        const auto& hi = rings[static_cast<size_t>(s) + 1];
-        for (int seg = 0; seg < n; ++seg) {
-            const int a = lo[static_cast<size_t>(seg)], b = lo[static_cast<size_t>((seg + 1) % n)];
-            const int c = hi[static_cast<size_t>(seg)], d = hi[static_cast<size_t>((seg + 1) % n)];
-            tris.insert(tris.end(), {a, b, d});
-            tris.insert(tris.end(), {a, d, c});
-        }
-    }
-    const auto& top = rings.back();
-    for (int i = 1; i < n - 1; ++i) {
-        tris.insert(tris.end(), {top[0], top[static_cast<size_t>(i)], top[static_cast<size_t>(i) + 1]});
-    }
-
-    std::vector<Value> vertsValues;
-    vertsValues.reserve(verts.size());
-    for (double v : verts) vertsValues.push_back(Value{v});
-    std::vector<Value> trisValues;
-    trisValues.reserve(tris.size());
-    for (int t : tris) trisValues.push_back(Value{static_cast<double>(t)});
+    const int hsides = fnSegmentsFromCtx(effCtx, r);
+    const int vsides = std::max(2, static_cast<int>(std::ceil(hsides / 2.0)));
 
     CSGParams params;
+    params["style"] = Value{style};
+    params["r"] = Value{r};
+    params["segs"] = Value{static_cast<double>(hsides)};
+    params["color"] = colorToValue(effCtx.color);
+
+    if (style == "octa") {
+        // Manifold::Sphere IS a subdivided octahedron (Shape::Octahedron,
+        // then Subdivide), so this needs no mesh of our own -- generate
+        // calls it directly.
+        params["verts"] = Value{std::make_shared<const ValueList>(ValueList{})};
+        params["tris"] = Value{std::make_shared<const ValueList>(ValueList{})};
+        return params;
+    }
+
+    const SphereMesh m = style == "aligned"   ? buildAligned(r, hsides, vsides, false)
+                         : style == "stagger" ? buildAligned(r, hsides, vsides, true)
+                         : style == "icosa"   ? buildIcosa(r, hsides)
+                                              : buildOrig(r, hsides, vsides);
+
+    std::vector<Value> vertsValues;
+    vertsValues.reserve(m.verts.size());
+    for (double v : m.verts) vertsValues.push_back(Value{v});
+    std::vector<Value> trisValues;
+    trisValues.reserve(m.tris.size());
+    for (int t : m.tris) trisValues.push_back(Value{static_cast<double>(t)});
     params["verts"] = Value{std::make_shared<const ValueList>(ValueList{std::move(vertsValues)})};
     params["tris"] = Value{std::make_shared<const ValueList>(ValueList{std::move(trisValues)})};
-    params["color"] = colorToValue(effCtx.color);
     return params;
 }
 
@@ -173,6 +371,11 @@ std::vector<ColoredBody> generateSphere(Evaluator& ev, const CSGParams& params, 
     }
     for (const Value& t : std::get<ListPtr>(params.at("tris"))->items) {
         mesh.triVerts.push_back(static_cast<uint64_t>(std::get<double>(t)));
+    }
+    if (std::get<std::string>(params.at("style")) == "octa") {
+        manifold::Manifold octa = manifold::Manifold::Sphere(
+            std::get<double>(params.at("r")), static_cast<int>(std::get<double>(params.at("segs"))));
+        return {ev.tagGenerated(std::move(octa), node, params.at("color"))};
     }
     manifold::Manifold body(mesh);
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};

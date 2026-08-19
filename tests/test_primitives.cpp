@@ -273,3 +273,129 @@ TEST(Polyhedron, OpenMeshIsExcludedFromCsgButSurvivesIt) {
     EXPECT_EQ(solids, 1);
     EXPECT_EQ(displayOnly, 1);
 }
+
+// -- sphere(style=) -------------------------------------------------------
+//
+// A BelfrySCAD extension naming the tessellation, with BOSL2's five style
+// names and constructions. Every vertex/triangle count below was compared
+// against BOSL2's own spheroid(r=10, style=..., circum=false, $fn=24), and
+// the volumes matched exactly for aligned, stagger and icosa.
+//
+// Note BOSL2 *shadows* sphere() with its own module, so any comparison has
+// to call spheroid() from a BOSL2-including file and sphere() from one
+// without -- including BOSL2 to "check the reference" silently compares
+// BOSL2 against itself, which is how the first run of this looked correct
+// while testing nothing.
+
+namespace {
+
+struct SphereStats {
+    size_t verts = 0;
+    size_t tris = 0;
+    double volume = 0.0;
+};
+
+SphereStats sphereStats(const std::string& code) {
+    Evaluated e = evalSrc(code);
+    EXPECT_EQ(e.bodies.size(), 1u);
+    const manifold::Manifold& m = *e.bodies[0].body;
+    return {static_cast<size_t>(m.NumVert()), static_cast<size_t>(m.NumTri()), m.Volume()};
+}
+
+} // namespace
+
+TEST(SphereStyle, DefaultsToOrigAndIsUnchanged) {
+    const SphereStats def = sphereStats("sphere(r=10, $fn=24);");
+    const SphereStats orig = sphereStats("sphere(r=10, style=\"orig\", $fn=24);");
+    EXPECT_EQ(def.verts, orig.verts);
+    EXPECT_EQ(def.tris, orig.tris);
+    EXPECT_NEAR(def.volume, orig.volume, 1e-9);
+    // The pre-existing OpenSCAD construction: 24 segments x 12 stacks, no
+    // pole vertices.
+    EXPECT_EQ(orig.verts, 288u);
+}
+
+TEST(SphereStyle, AlignedPutsVerticesAtThePoles) {
+    Evaluated e = evalSrc("sphere(r=10, style=\"aligned\", $fn=24);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box bb = e.bodies[0].body->BoundingBox();
+    // A pole vertex reaches the full radius; "orig" stops short of it.
+    EXPECT_NEAR(bb.max.z, 10.0, 1e-9);
+    EXPECT_NEAR(bb.min.z, -10.0, 1e-9);
+    const manifold::Box origBb = evalSrc("sphere(r=10, style=\"orig\", $fn=24);").bodies[0].body->BoundingBox();
+    EXPECT_LT(origBb.max.z, 10.0);
+}
+
+TEST(SphereStyle, AlignedTouchesTheAxesWhenFnIsDivisibleByFour) {
+    // $fn divisible by 4 puts a ring on the equator and a vertex on each of
+    // +-X and +-Y, so the bounding box reaches the full radius on every
+    // axis. That is the whole point of the style.
+    Evaluated e = evalSrc("sphere(r=10, style=\"aligned\", $fn=24);");
+    const manifold::Box bb = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bb.max.x, 10.0, 1e-9);
+    EXPECT_NEAR(bb.max.y, 10.0, 1e-9);
+    // ...whereas "orig" has no vertex on either axis and falls inside.
+    const manifold::Box ob = evalSrc("sphere(r=10, style=\"orig\", $fn=24);").bodies[0].body->BoundingBox();
+    EXPECT_LT(ob.max.x, 10.0);
+}
+
+TEST(SphereStyle, StaggerHasTheSameCountsAsAlignedButDiffers) {
+    const SphereStats a = sphereStats("sphere(r=10, style=\"aligned\", $fn=24);");
+    const SphereStats s = sphereStats("sphere(r=10, style=\"stagger\", $fn=24);");
+    EXPECT_EQ(a.verts, s.verts);   // same lattice size...
+    EXPECT_EQ(a.tris, s.tris);
+    EXPECT_GT(std::fabs(a.volume - s.volume), 1.0);   // ...different shape
+}
+
+TEST(SphereStyle, EveryStyleMatchesBosl2sCounts) {
+    // Compared against BOSL2 spheroid(r=10, style=..., circum=false, $fn=24).
+    EXPECT_EQ(sphereStats("sphere(r=10, style=\"aligned\", $fn=24);").verts, 266u);
+    EXPECT_EQ(sphereStats("sphere(r=10, style=\"aligned\", $fn=24);").tris, 528u);
+    EXPECT_EQ(sphereStats("sphere(r=10, style=\"stagger\", $fn=24);").verts, 266u);
+    EXPECT_EQ(sphereStats("sphere(r=10, style=\"octa\", $fn=24);").verts, 146u);
+    EXPECT_EQ(sphereStats("sphere(r=10, style=\"octa\", $fn=24);").tris, 288u);
+    EXPECT_EQ(sphereStats("sphere(r=10, style=\"icosa\", $fn=24);").verts, 252u);
+    EXPECT_EQ(sphereStats("sphere(r=10, style=\"icosa\", $fn=24);").tris, 500u);
+}
+
+TEST(SphereStyle, EveryStyleMatchesBosl2sVolume) {
+    // aligned/stagger/icosa agree with BOSL2 to the last digit. "octa" comes
+    // from Manifold::Sphere, whose octahedral subdivision distributes its
+    // vertices a little differently than BOSL2's -- same 146/288 topology,
+    // ~0.05% apart in volume.
+    EXPECT_NEAR(sphereStats("sphere(r=10, style=\"aligned\", $fn=24);").volume, 4070.5524, 1e-3);
+    EXPECT_NEAR(sphereStats("sphere(r=10, style=\"stagger\", $fn=24);").volume, 4082.1246, 1e-3);
+    EXPECT_NEAR(sphereStats("sphere(r=10, style=\"icosa\", $fn=24);").volume, 4097.2467, 1e-3);
+    EXPECT_NEAR(sphereStats("sphere(r=10, style=\"octa\", $fn=24);").volume, 4024.3239, 1e-3);
+}
+
+TEST(SphereStyle, EveryStyleIsAClosedSolidUnderTheTrueVolume) {
+    for (const char* st : {"orig", "aligned", "stagger", "octa", "icosa"}) {
+        const SphereStats s = sphereStats(std::string("sphere(r=10, style=\"") + st + "\", $fn=24);");
+        // Positive volume also means the winding is outward: an inverted
+        // solid reports a NEGATIVE volume here, which is how the first cut
+        // of aligned/stagger was caught. Checking |volume| would have missed
+        // it entirely.
+        EXPECT_GT(s.volume, 3900.0) << st;
+        EXPECT_LT(s.volume, 4188.7902) << st;   // strictly inside the true sphere
+        EXPECT_GT(s.tris, 100u) << st;
+    }
+}
+
+TEST(SphereStyle, UnknownStyleWarnsAndFallsBackToOrig) {
+    std::string last;
+    Evaluated e = evalSrc("sphere(r=10, style=\"banana\", $fn=24);",
+                           [&](const std::string& m) { last = m; });
+    EXPECT_NE(last.find("unknown style"), std::string::npos) << last;
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(static_cast<size_t>(e.bodies[0].body->NumVert()), 288u);   // orig
+}
+
+TEST(SphereStyle, StyleRespectsFnAndRadius) {
+    // Denser $fn subdivides further, and the radius scales the result.
+    EXPECT_GT(sphereStats("sphere(r=10, style=\"icosa\", $fn=64);").tris,
+              sphereStats("sphere(r=10, style=\"icosa\", $fn=24);").tris);
+    const double v10 = sphereStats("sphere(r=10, style=\"aligned\", $fn=24);").volume;
+    const double v20 = sphereStats("sphere(r=20, style=\"aligned\", $fn=24);").volume;
+    EXPECT_NEAR(v20 / v10, 8.0, 1e-6);   // volume goes as r^3
+}
