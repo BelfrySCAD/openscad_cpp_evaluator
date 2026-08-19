@@ -92,7 +92,7 @@ const std::vector<std::string>* builtinParamNames(const std::string& name) {
     static const std::unordered_map<std::string, std::vector<std::string>> table = {
         // -- builtin modules ---------------------------------------------
         {"cube", {"size", "center"}},
-        {"sphere", {"r", "d"}},
+        {"sphere", {"r", "d", "style"}},
         {"cylinder", {"h", "r1", "r2", "center", "r", "d", "d1", "d2"}},
         {"polyhedron", {"points", "faces", "convexity", "triangles"}},
         {"square", {"size", "center"}},
