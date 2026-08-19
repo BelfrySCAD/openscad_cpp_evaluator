@@ -183,3 +183,15 @@ TEST(Scoping, ChildrenForwardedThroughIsolatedCallWithSameNamedParamStillSeesAnc
     ASSERT_EQ(echoed.size(), 1u);
     EXPECT_EQ(echoed[0], "ECHO: [1, 2, 3]");
 }
+
+// $preview is always false: there is no preview mode here, every render is a
+// full CSG render. It has to EXIST rather than be undef, though -- the
+// `$preview ? cheap : real` idiom is common, and against undef it would take
+// the cheap branch by accident and warn about an unknown variable doing it.
+TEST(SpecialVariables, PreviewIsAlwaysFalse) {
+    std::vector<std::string> msgs;
+    Evaluated e = evalSrc("echo($preview, is_bool($preview), $preview ? \"p\" : \"r\");",
+                           [&](const std::string& m) { msgs.push_back(m); });
+    ASSERT_EQ(msgs.size(), 1u) << (msgs.empty() ? "" : msgs[0]);
+    EXPECT_EQ(msgs[0], "ECHO: false, true, \"r\"");
+}

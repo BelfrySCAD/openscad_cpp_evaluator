@@ -512,6 +512,9 @@ grep for `ponytail:`.
   `Evaluator::evaluate()` also takes an optional `viewportParams` map (added after a test-suite
   parity review found it missing entirely): seeds arbitrary `$`-prefixed entries into `ctx.dyn`
   (e.g. `$vpt`/`$vpr`/`$vpd`/`$vpf` from a GUI host's current camera, or `$t` for animation time)
+  — note `EvalContext::makeRoot` also seeds `$preview` to **`false`**, always: there is no preview
+  mode here, and leaving it undef made the common `$preview ? cheap : real` idiom take the cheap
+  branch by accident while warning about an unknown variable
   before evaluation starts, via a direct `ctx.dyn` write that deliberately never touches
   `ctx.dynExplicit` — lets a caller tell "the script itself assigned this `$`-var"
   (`dynExplicit`) apart from "merely present because the caller seeded it" after `evaluate()`
@@ -558,13 +561,49 @@ grep for `ponytail:`.
   color instead of preserving each part's own, matching real OpenSCAD's actual behavior once fixed
   (cross-checked triangle-color-count-and-values against the Python reference directly, not just
   “does it run”).
-- `src/builtins/topology.cpp` — `hull()`/`minkowski()`. Both splice their children transparently in
+- `src/builtins/dxf_dim.cpp` — `dxf_dim()`/`dxf_cross()`, which read a measurement out of a DXF file
+  rather than out of the model. Ported from the reference's `io/dxfdim.cc` plus the DIMENSION/LINE
+  half of `io/DxfData.cc`: `dxf_dim()` returns the first matching DIMENSION's value by its type
+  (`70 & 7` — 0 rotated, 1 aligned, 2 angular, 3/4 diameter/radius, 6 ordinate; type 5 is
+  unsupported there too), `dxf_cross()` intersects the first two LINE entities. Note the reference's
+  own coordinate quirk, reproduced here: groups 11/12/16 (and 21/22/26) are scaled but NOT
+  origin-shifted, being extents rather than positions.
+
+  Deliberately its own group-code walk rather than sharing `src/import/dxf_import.cpp`'s: that one
+  produces closed contours, and these need the DIMENSION entities' seven coordinate slots and the
+  raw LINE endpoints, neither of which a contour list keeps. One divergence: `dxf_cross()` takes the
+  first two LINEs, where the reference walks every 2-point path — for a real cross (two strokes
+  meeting in the middle, not at their endpoints) that is the same set.
+
+- `src/csg_generate.cpp` — `Evaluator::applyDimensionRules`, run centrally just before every node's
+  `GenerateFn` (and once more over the top-level list, which is an implicit union). Mirrors the
+  reference's `isValidDim` + `collectChildren2D`/`collectChildren3D`: a node's dimension is fixed by
+  its first non-background, non-empty child, and every child of the other dimension is dropped with
+  `Mixing 2D and 3D objects is not supported` followed by `Ignoring {N}D child object for {M}D
+  operation`. `linear_extrude`/`rotate_extrude`/`offset` are always-2D and `projection` always-3D, so
+  they skip the "mixing" line and emit only the second; `roof()` emits neither, matching the
+  reference. Background (`%`) children are exempt.
+
+  Doing this centrally is also what keeps `generateCsg` safe: it builds ONE result and switches on
+  whether it holds a `body` or a `section`, so a group that changed dimension part-way dereferenced
+  the empty optional -- `union() { cube(1); square(4); }` took the process down with "mutex lock
+  failed: Invalid argument". Filtering before dispatch means no `GenerateFn` ever sees a mixed group.
+  All 25 module/shape combinations were diffed against OpenSCAD 2026.02.01 warning for warning, with
+  the surviving geometry compared by STL volume.
+
+- `src/builtins/topology.cpp` — `hull()`/`minkowski()`/`fill()`. All three splice their children transparently in
   the CSG tree exactly like union/difference/intersection (resolve just evaluates them for the
   side effect); `hull()` picks an all-3D (`Manifold::Hull`) or all-2D (`CrossSection::Hull`) hull of
   the *foreground* (role-split) children, falling back to sections only when no child has a body;
   `minkowski()` only ever operates on 3D bodies (a 2D sibling among the foreground children is
   silently ignored, matching the reference exactly — no 2D `minkowski_sum` fallback the way hull
-  has one). Both pass background/highlight/show_only bodies through untouched.
+  has one). All pass background/highlight/show_only bodies through untouched. `fill()` is 2D-only
+  (a 3D foreground child draws the reference's own `fill() not yet implemented for 3D` warning and
+  contributes nothing): it unions the foreground sections, keeps only the outlines with positive
+  signed area — outer boundaries, since Manifold winds a hole clockwise — and re-unions those,
+  which matters because two outers can overlap once the holes between them are gone. Ported from
+  the reference's `applyFill2D`, and checked shape-for-shape against OpenSCAD 2026.02.01 by
+  extruding and comparing STL volumes.
 - `src/builtins/extrude.cpp` — `linear_extrude()`/`rotate_extrude()`/`projection(cut=)`. All three
   union every 2D child into one `CrossSection` via `toCrossSection` first. `rotate_extrude`'s
   segment count can't be resolved until generate time (it depends on the merged children's bounds,

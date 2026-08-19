@@ -440,3 +440,183 @@ TEST(Minkowski2D, AShapeWithAHoleHasBothItsContoursSwept) {
         manifold::Manifold::Cube({1.0, 1.0, 6.0}).Translate({-0.5, -0.5, -1.0});
     EXPECT_TRUE((*e.bodies[0].body ^ probe).IsEmpty()) << "the hole was filled in";
 }
+
+// -- fill() ---------------------------------------------------------------
+//
+// 2D only: union the children, then drop every hole. Each area below was
+// checked against OpenSCAD 2026.02.01 by extruding the same shape and
+// comparing STL volumes -- the filled cases matched to 0.0000.
+
+TEST(Fill, ClosesAHole) {
+    // A 10x10 square with a disc punched out fills back to the solid square.
+    Evaluated e = evalSrc(
+        "fill() difference() { square(10, center=true); circle(3, $fn=64); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 100.0, 1e-6);
+}
+
+TEST(Fill, MergesOverlappingOutlinesIntoOne) {
+    // Two holed squares 4 apart. Filling drops both holes and the outer
+    // boundaries then overlap, so the result must be re-unioned into a
+    // single 14x10 region rather than left as two loops.
+    Evaluated e = evalSrc(
+        "fill() { difference() { square(10, center=true); circle(3, $fn=64); }"
+        "         translate([4,0]) difference() { square(10, center=true); circle(3, $fn=64); } }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 140.0, 1e-6);
+}
+
+TEST(Fill, NestedOutlinesCollapseToTheOutermost) {
+    // A ring inside another ring's hole: only the outermost boundary is
+    // positive, so everything inside it fills solid.
+    Evaluated e = evalSrc(
+        "fill() { difference() { circle(10, $fn=64); circle(8, $fn=64); }"
+        "         difference() { circle(6, $fn=64); circle(4, $fn=64); } }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    // The 64-segment polygon approximating r=10, not pi*100 exactly.
+    EXPECT_NEAR(e.bodies[0].section->Area(), 313.6548, 0.01);
+}
+
+TEST(Fill, LeavesADisjointRegionDisjoint) {
+    // Nothing to fill and nothing to merge -- two separate squares stay two
+    // separate squares, total area unchanged.
+    Evaluated e = evalSrc("fill() { square(4); translate([10,0]) square(4); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 32.0, 1e-6);
+}
+
+TEST(Fill, HoleLeftOpenToTheOutsideIsNotAHole) {
+    // Notching the ring so its inner void connects to the outside leaves one
+    // positive outline, which fills to the full disc -- same as the closed
+    // ring above, and the same as OpenSCAD gives.
+    Evaluated e = evalSrc(
+        "fill() difference() { difference() { circle(10, $fn=64); circle(8, $fn=64); } square(3); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 313.6548, 0.01);
+}
+
+TEST(Fill, SolidShapeIsUnchanged) {
+    Evaluated e = evalSrc("fill() square(4, center=true);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 16.0, 1e-9);
+}
+
+TEST(Fill, ThreeDeeChildWarnsAndContributesNothing) {
+    std::string lastWarning;
+    Evaluated e = evalSrc("fill() cube(1);", [&](const std::string& m) { lastWarning = m; });
+    EXPECT_NE(lastWarning.find("fill() not yet implemented for 3D"), std::string::npos);
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(Fill, NoChildrenIsEmptyNotAnError) {
+    Evaluated e = evalSrc("fill();");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+// -- Mixed 2D/3D children -------------------------------------------------
+//
+// A node's dimension is fixed by its first real child; children of the other
+// dimension are dropped, with the reference's own two warnings. All 25
+// module/shape combinations were diffed against OpenSCAD 2026.02.01 warning
+// for warning, and the surviving geometry compared by STL volume.
+//
+// This is not only a diagnostics fix. generateCsg builds one result and
+// switches on whether it holds a body or a section, so before this a group
+// that changed dimension part-way dereferenced the empty optional --
+// `union() { cube(1); square(4); }` took the process down with "mutex lock
+// failed: Invalid argument".
+
+namespace {
+std::vector<std::string> dimWarnings(const std::string& code) {
+    std::vector<std::string> out;
+    evalSrc(code, [&](const std::string& m) {
+        if (m.find("Mixing 2D and 3D") != std::string::npos ||
+            m.find("child object for") != std::string::npos) {
+            out.push_back(m.substr(0, m.find(" in file")));
+        }
+    });
+    std::sort(out.begin(), out.end());
+    return out;
+}
+} // namespace
+
+TEST(MixedDimensions, ThreeDeeFirstUnionDoesNotCrash) {
+    // The regression that started this: a body-then-section group.
+    Evaluated e = evalSrc("union() { cube(1); square(4); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-9);
+}
+
+TEST(MixedDimensions, TwoDeeFirstKeepsTheTwoDeeChild) {
+    Evaluated e = evalSrc("union() { square(4); cube(1); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 16.0, 1e-9);
+}
+
+TEST(MixedDimensions, GroupWarnsTwice) {
+    EXPECT_EQ(dimWarnings("union() { square(4); cube(1); }"),
+              (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation",
+                                        "WARNING: Mixing 2D and 3D objects is not supported"}));
+    EXPECT_EQ(dimWarnings("union() { cube(1); square(4); }"),
+              (std::vector<std::string>{"WARNING: Ignoring 2D child object for 3D operation",
+                                        "WARNING: Mixing 2D and 3D objects is not supported"}));
+}
+
+TEST(MixedDimensions, TransformsAndControlFlowAreGroupsToo) {
+    const std::vector<std::string> expected{"WARNING: Ignoring 3D child object for 2D operation",
+                                            "WARNING: Mixing 2D and 3D objects is not supported"};
+    EXPECT_EQ(dimWarnings("translate([0,0,0]) { square(4); cube(1); }"), expected);
+    EXPECT_EQ(dimWarnings("scale(2) { square(4); cube(1); }"), expected);
+    EXPECT_EQ(dimWarnings("color(\"red\") { square(4); cube(1); }"), expected);
+    EXPECT_EQ(dimWarnings("for (i = [0:0]) { square(4); cube(1); }"), expected);
+    EXPECT_EQ(dimWarnings("if (true) { square(4); cube(1); }"), expected);
+    EXPECT_EQ(dimWarnings("hull() { square(4); cube(1); }"), expected);
+}
+
+TEST(MixedDimensions, FixedDimensionOperationsWarnOnlyOnce) {
+    // These are always 2D input, so there is no "mixing" to report -- just
+    // the one dropped child. Same for projection, which is always 3D input.
+    EXPECT_EQ(dimWarnings("linear_extrude(1) { square(4); cube(1); }"),
+              (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation"}));
+    EXPECT_EQ(dimWarnings("offset(1) cube(1);"),
+              (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation"}));
+    EXPECT_EQ(dimWarnings("projection() { square(4); }"),
+              (std::vector<std::string>{"WARNING: Ignoring 2D child object for 3D operation"}));
+}
+
+TEST(MixedDimensions, BackgroundChildIsExempt) {
+    // A % ghost of the other dimension is not an error -- matching
+    // isValidDim's own isBackground() skip.
+    EXPECT_TRUE(dimWarnings("union() { square(4); %cube(1); }").empty());
+}
+
+TEST(MixedDimensions, RoofWarnsForNeither) {
+    // Deliberate: the reference reports nothing here either.
+    EXPECT_TRUE(dimWarnings("roof() { square(4); cube(1); }").empty());
+}
+
+TEST(MixedDimensions, TopLevelIsAGroupAsWell) {
+    // The top level is an implicit union, and gets the same treatment.
+    EXPECT_EQ(dimWarnings("square(4); cube(1);"),
+              (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation",
+                                        "WARNING: Mixing 2D and 3D objects is not supported"}));
+    Evaluated e = evalSrc("square(4); cube(1);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_TRUE(e.bodies[0].section.has_value());
+}
+
+TEST(MixedDimensions, UniformChildrenAreUntouched) {
+    EXPECT_TRUE(dimWarnings("union() { cube(1); cube(2); }").empty());
+    EXPECT_TRUE(dimWarnings("union() { square(1); square(2); }").empty());
+    Evaluated e = evalSrc("union() { cube(1); translate([5,0,0]) cube(1); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 2.0, 1e-9);
+}

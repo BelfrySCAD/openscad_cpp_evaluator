@@ -67,6 +67,76 @@ std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::v
     return result;
 }
 
+// fill() -- 2D only: union the children, then discard every hole, keeping
+// just the outer boundaries. Ported from the reference's applyFill2D: union
+// the children, keep only the *positive* outlines, then re-union those (two
+// outers can overlap once the holes between them are gone, and the result
+// has to come back as one sanitized region rather than a pile of loops).
+//
+// A 3D child gets the reference's own "not yet implemented for 3D" warning
+// and contributes nothing.
+
+CSGParams resolveFill(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    (void)args;
+    ev.evalChildren(node.children, effCtx);
+    return CSGParams{};
+}
+
+namespace {
+
+// Shoelace. Manifold orients an outer contour counter-clockwise (positive
+// area) and a hole clockwise, so the sign is the whole test.
+double signedArea(const manifold::SimplePolygon& poly) {
+    double a = 0.0;
+    for (size_t i = 0, n = poly.size(); i < n; ++i) {
+        const auto& p = poly[i];
+        const auto& q = poly[(i + 1) % n];
+        a += static_cast<double>(p.x) * q.y - static_cast<double>(q.x) * p.y;
+    }
+    return a / 2.0;
+}
+
+} // namespace
+
+std::vector<ColoredBody> generateFill(Evaluator& ev, const CSGParams&,
+                                       const std::vector<std::unique_ptr<CSGNode>>& children,
+                                       const oscad::ASTNode& node) {
+    const std::vector<ColoredBody> bodies = flattenCsgTree(children);
+    if (bodies.empty()) return {};
+    const RoleSplit split = splitByRole(bodies);
+
+    std::optional<ColoredBody> filled;
+    if (!split.foreground.empty()) {
+        for (const ColoredBody& c : split.foreground) {
+            if (c.body) {
+                ev.warn("fill() not yet implemented for 3D", &node.position());
+                break;
+            }
+        }
+        if (const std::optional<manifold::CrossSection> cs = toCrossSection(split.foreground)) {
+            manifold::Polygons outers;
+            for (const manifold::SimplePolygon& loop : cs->ToPolygons()) {
+                if (signedArea(loop) > 0.0) outers.push_back(loop);
+            }
+            if (!outers.empty()) {
+                ColoredBody cb;
+                cb.section = manifold::CrossSection(outers, manifold::CrossSection::FillRule::Positive);
+                cb.color = split.foreground.front().color;
+                filled = std::move(cb);
+            }
+        }
+    }
+
+    std::vector<ColoredBody> result;
+    if (filled) result.push_back(std::move(*filled));
+    result.insert(result.end(), split.background.begin(), split.background.end());
+    result.insert(result.end(), split.highlight.begin(), split.highlight.end());
+    result.insert(result.end(), split.showOnly.begin(), split.showOnly.end());
+    result.insert(result.end(), split.displayOnly.begin(), split.displayOnly.end());
+    return result;
+}
+
 CSGParams resolveMinkowski(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     (void)args;

@@ -29,6 +29,7 @@ add_library(openscad_cpp_evaluator STATIC
   builtins/call_args.cpp
   builtins/segments.cpp
   builtins/registry.cpp
+  builtins/dxf_dim.cpp
   builtins/primitives_2d.cpp
   builtins/primitives_3d.cpp
   builtins/transforms.cpp
