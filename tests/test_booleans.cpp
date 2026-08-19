@@ -620,3 +620,82 @@ TEST(MixedDimensions, UniformChildrenAreUntouched) {
     ASSERT_EQ(e.bodies.size(), 1u);
     EXPECT_NEAR(e.bodies[0].body->Volume(), 2.0, 1e-9);
 }
+
+// -- minkowski_difference() -----------------------------------------------
+//
+// Erosion: the operation minkowski() has no inverse for. A BelfrySCAD
+// extension, because OpenSCAD has no equivalent module and no way to spell
+// it in the language -- minkowski() only ever sums.
+//
+// Eroding a cube by a cube is exact (no curved tool to tessellate), so those
+// expectations are equalities rather than tolerances.
+
+TEST(MinkowskiDifference, ErodesACubeExactly) {
+    // A 10-cube eroded by a 2-cube is an 8-cube: every face moves in by the
+    // tool's half-width.
+    Evaluated e = evalSrc("minkowski_difference() { cube(10, center=true); cube(2, center=true); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 512.0, 1e-6);
+    const manifold::Box bb = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bb.min.x, -4.0, 1e-9);
+    EXPECT_NEAR(bb.max.x, 4.0, 1e-9);
+}
+
+TEST(MinkowskiDifference, ErodesByASphereToWithinTessellation) {
+    // Same 8-cube, but the tool is a polyhedral sphere whose inradius is a
+    // touch under 1, so the result is a touch larger. That gap IS the
+    // tessellation and shrinks with $fn -- it is not an error in the erosion.
+    Evaluated e = evalSrc("minkowski_difference() { cube(10, center=true); sphere(1, $fn=64); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 512.0, 1.0);
+    EXPECT_GT(e.bodies[0].body->Volume(), 512.0);
+}
+
+TEST(MinkowskiDifference, ShrinksANonConvexBodyOnEverySide) {
+    // The case that motivates the module: a plate with holes, shrunk by a
+    // clearance. The bounding box must come in by the tool's radius all
+    // round -- 20x20x4 becomes 18x18x2.
+    Evaluated e = evalSrc(
+        "minkowski_difference() {"
+        "  difference() { cube([20,20,4], center=true);"
+        "                 for (x=[-6,0,6]) translate([x,0,0]) cylinder(h=6,r=2.5,center=true,$fn=24); }"
+        "  sphere(1, $fn=24); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    const manifold::Box bb = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bb.max.x, 9.0, 0.05);
+    EXPECT_NEAR(bb.max.y, 9.0, 0.05);
+    EXPECT_NEAR(bb.max.z, 1.0, 0.05);
+}
+
+TEST(MinkowskiDifference, SingleChildIsANoOp) {
+    // Nothing to erode with, so nothing happens -- the same shape
+    // minkowski() gives a lone child back.
+    Evaluated e = evalSrc("minkowski_difference() { cube(10, center=true); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-9);
+}
+
+TEST(MinkowskiDifference, NoChildrenIsEmpty) {
+    Evaluated e = evalSrc("minkowski_difference();");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(MinkowskiDifference, ErodesSuccessivelyByEveryToolAfterTheFirst) {
+    // Two 2-cube tools take 1 off each side twice: 10 -> 8 -> 6.
+    Evaluated e = evalSrc(
+        "minkowski_difference() { cube(10, center=true); cube(2, center=true); cube(2, center=true); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 216.0, 1e-6);
+}
+
+TEST(MinkowskiDifference, TwoDeeChildrenAreIgnoredLikeMinkowskis) {
+    // 3D only, matching minkowski()'s own 3D-wins dispatch. 2D erosion
+    // already exists as offset(r=-N).
+    Evaluated e = evalSrc("minkowski_difference() { square(10); square(2); }");
+    EXPECT_TRUE(e.bodies.empty());
+}
