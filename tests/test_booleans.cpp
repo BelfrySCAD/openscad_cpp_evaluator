@@ -699,3 +699,97 @@ TEST(MinkowskiDifference, TwoDeeChildrenAreIgnoredLikeMinkowskis) {
     Evaluated e = evalSrc("minkowski_difference() { square(10); square(2); }");
     EXPECT_TRUE(e.bodies.empty());
 }
+
+// -- simplify() -----------------------------------------------------------
+//
+// Mesh decimation within a tolerance. A BelfrySCAD extension: nothing in the
+// OpenSCAD language can reduce a triangle count.
+
+namespace {
+const char* kSimplifyModel =
+    "difference() { sphere(r=20, $fn=64); "
+    "  for (a=[0:60:359]) rotate([0,0,a]) translate([12,0,0]) cylinder(h=60,r=4,center=true,$fn=32); }";
+
+const manifold::Manifold& soleBody(const Evaluated& e) { return *e.bodies[0].body; }
+} // namespace
+
+TEST(Simplify, ReducesTriangleCountWithinTolerance) {
+    Evaluated plain = evalSrc(std::string(kSimplifyModel) + ";");
+    Evaluated cut = evalSrc(std::string("simplify(0.1) ") + kSimplifyModel + ";");
+    ASSERT_EQ(cut.bodies.size(), 1u);
+    EXPECT_LT(soleBody(cut).NumTri(), soleBody(plain).NumTri());
+    // ...without moving the surface much: 0.1 costs well under 1% of volume.
+    EXPECT_NEAR(soleBody(cut).Volume(), soleBody(plain).Volume(),
+                0.01 * soleBody(plain).Volume());
+}
+
+TEST(Simplify, DefaultTolerandeScalesWithTheModel) {
+    // No argument means 0.1% of the bounding-box diagonal. Manifold's own
+    // default of 0 falls back to the mesh epsilon and does nothing at all,
+    // so a bare simplify() must NOT pass zero through -- silently doing
+    // nothing is the worst outcome.
+    Evaluated plain = evalSrc(std::string(kSimplifyModel) + ";");
+    Evaluated def = evalSrc(std::string("simplify() ") + kSimplifyModel + ";");
+    EXPECT_LT(soleBody(def).NumTri(), soleBody(plain).NumTri());
+
+    // Scale-independence is the point: the same model 1000x larger must lose
+    // the same proportion of its triangles, which an absolute default could
+    // never manage.
+    Evaluated big = evalSrc(std::string("scale(1000) simplify() ") + kSimplifyModel + ";");
+    Evaluated bigPlain = evalSrc(std::string("scale(1000) ") + kSimplifyModel + ";");
+    const double ratioSmall = double(soleBody(def).NumTri()) / soleBody(plain).NumTri();
+    const double ratioBig = double(soleBody(big).NumTri()) / soleBody(bigPlain).NumTri();
+    EXPECT_NEAR(ratioSmall, ratioBig, 0.02);
+}
+
+TEST(Simplify, KeepsOriginalIdProvenance) {
+    // Selection and drag-to-edit map an AST node to geometry through the
+    // original-ID runs, so a simplify() in the chain must not drop them.
+    Evaluated plain = evalSrc(std::string(kSimplifyModel) + ";");
+    Evaluated cut = evalSrc(std::string("simplify(0.1) ") + kSimplifyModel + ";");
+    const manifold::MeshGL a = soleBody(plain).GetMeshGL();
+    const manifold::MeshGL b = soleBody(cut).GetMeshGL();
+    // Compare the SHAPE of the provenance, not the ID values: tagGenerated
+    // stamps fresh ids on every evaluation, so the two runs here carry
+    // different numbers for the same parts (1 vs 27 in practice). What must
+    // survive simplification is that the runs are still there and still
+    // distinguish the same number of contributing parts.
+    EXPECT_EQ(a.runOriginalID.size(), b.runOriginalID.size());
+    ASSERT_FALSE(b.runOriginalID.empty());
+    const std::set<uint32_t> idsA(a.runOriginalID.begin(), a.runOriginalID.end());
+    const std::set<uint32_t> idsB(b.runOriginalID.begin(), b.runOriginalID.end());
+    EXPECT_EQ(idsA.size(), idsB.size());
+}
+
+TEST(Simplify, KeepsTopology) {
+    // Six drilled holes must still be six holes -- a decimation that welds
+    // one shut has changed the part, not just its mesh.
+    Evaluated plain = evalSrc(std::string(kSimplifyModel) + ";");
+    Evaluated cut = evalSrc(std::string("simplify(0.1) ") + kSimplifyModel + ";");
+    EXPECT_EQ(soleBody(cut).Genus(), soleBody(plain).Genus());
+}
+
+TEST(Simplify, WorksOnTwoDeeSections) {
+    // The tolerance is in model units here too: on an r=20 circle, 0.1
+    // costs 0.5% of the area and 0.5 costs 2.5%.
+    Evaluated plain = evalSrc("circle(r=20, $fn=256);");
+    Evaluated cut = evalSrc("simplify(0.1) circle(r=20, $fn=256);");
+    ASSERT_TRUE(cut.bodies[0].section.has_value());
+    EXPECT_NEAR(cut.bodies[0].section->Area(), plain.bodies[0].section->Area(),
+                0.01 * plain.bodies[0].section->Area());
+    EXPECT_LT(cut.bodies[0].section->Area(), plain.bodies[0].section->Area());
+}
+
+TEST(Simplify, NegativeToleranceWarnsAndPassesThrough) {
+    std::string last;
+    Evaluated e = evalSrc(std::string("simplify(-1) ") + kSimplifyModel + ";",
+                           [&](const std::string& m) { last = m; });
+    EXPECT_NE(last.find("must not be negative"), std::string::npos) << last;
+    Evaluated plain = evalSrc(std::string(kSimplifyModel) + ";");
+    EXPECT_EQ(soleBody(e).NumTri(), soleBody(plain).NumTri());
+}
+
+TEST(Simplify, NoChildrenIsEmpty) {
+    Evaluated e = evalSrc("simplify();");
+    EXPECT_TRUE(e.bodies.empty());
+}

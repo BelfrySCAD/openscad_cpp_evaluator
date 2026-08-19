@@ -584,6 +584,24 @@ grep for `ponytail:`.
   a file that includes BOSL2 to "compare against the reference" is comparing BOSL2 with itself. Call
   `spheroid()` from a BOSL2-including file and `sphere()` from one without.
 
+- `simplify()` (also `topology.cpp`) — mesh decimation within a tolerance, wrapping
+  `Manifold::Simplify` and `CrossSection::Simplify`, so it works on sections as well as solids.
+  Another BelfrySCAD extension: nothing in the OpenSCAD language can reduce a triangle count, and
+  library-generated or imported geometry is routinely far denser than the model needs.
+
+  **The default tolerance is 0.1% of the body's own bounding-box diagonal**, not zero.
+  `Manifold::Simplify(0)` falls back to the mesh epsilon and changes nothing, so defaulting to zero
+  would make a bare `simplify()` silently do nothing — the worst possible outcome. It has to be
+  scale-relative, too: an absolute default sensible in millimetres is catastrophic in metres.
+  Measured on a drilled sphere (4764 triangles): the default takes it to 3732 for well under 0.1%
+  volume error, an explicit 0.25 halves it for 0.8%.
+
+  Two properties worth keeping, both covered by tests. Provenance survives — the original-ID runs
+  come through simplification intact, so selection and drag-to-edit still work through a
+  `simplify()`. So does topology: a drilled part keeps its genus rather than having holes welded
+  shut. Note the reduction is NOT monotonic in the tolerance (1.0 gave *more* triangles than 0.5 on
+  the test model, since simplification can force re-triangulation), so don't read a jump as a bug.
+
 - `src/builtins/dxf_dim.cpp` — `dxf_dim()`/`dxf_cross()`, which read a measurement out of a DXF file
   rather than out of the model. Ported from the reference's `io/dxfdim.cc` plus the DIMENSION/LINE
   half of `io/DxfData.cc`: `dxf_dim()` returns the first matching DIMENSION's value by its type
