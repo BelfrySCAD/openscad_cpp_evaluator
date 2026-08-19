@@ -1,5 +1,7 @@
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 
+#include "builtins.hpp"   // builtinDxfDim/builtinDxfCross
+
 #include "openscad_cpp_evaluator/dispatch.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/segments.hpp"
@@ -447,7 +449,7 @@ bool isBuiltinFunctionName(const std::string& name) {
         "acos", "atan", "atan2", "max", "min", "pow", "norm", "cross", "rands", "concat", "len", "str",
         "chr", "ord", "is_undef", "is_num", "is_bool", "is_string", "is_list", "is_function", "is_object",
         "search", "lookup", "has_key", "version", "version_num", "parent_module",
-        "object", "textmetrics", "fontmetrics",
+        "object", "textmetrics", "fontmetrics", "dxf_dim", "dxf_cross",
     };
     return names.count(name) > 0;
 }
@@ -514,7 +516,7 @@ enum class BuiltinFnId {
     TextMetrics, FontMetrics, Abs, Sign, Ceil, Floor, Round, Sqrt, Ln, Log, Exp, Sin, Cos, Tan,
     Asin, Acos, Atan, Atan2, Max, Min, Pow, Norm, Cross, Rands, Concat, Len, Str, Chr, Ord,
     IsUndef, IsNum, IsBool, IsString, IsList, IsFunction, IsObject, Search, Lookup, HasKey,
-    Version, VersionNum, ParentModule,
+    Version, VersionNum, ParentModule, DxfDim, DxfCross,
 };
 
 const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
@@ -536,6 +538,7 @@ const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
         {"lookup", BuiltinFnId::Lookup}, {"has_key", BuiltinFnId::HasKey},
         {"version", BuiltinFnId::Version}, {"version_num", BuiltinFnId::VersionNum},
         {"parent_module", BuiltinFnId::ParentModule},
+        {"dxf_dim", BuiltinFnId::DxfDim}, {"dxf_cross", BuiltinFnId::DxfCross},
     };
     return ids;
 }
@@ -949,6 +952,8 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
             if (!v || (v->size() != 2 && v->size() != 3)) return Value{};
             return Value{(*v)[0] * 10000.0 + (*v)[1] * 100.0 + (v->size() == 3 ? (*v)[2] : 0.0)};
         }
+        case BuiltinFnId::DxfDim: return builtinDxfDim(ev, args, node);
+        case BuiltinFnId::DxfCross: return builtinDxfCross(ev, args, node);
         case BuiltinFnId::ParentModule: {
             // Defaults to 1, not 0, when called with no argument at all --
             // and an index past the end of the stack is a warning, not a

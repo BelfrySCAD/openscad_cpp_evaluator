@@ -419,3 +419,129 @@ TEST(SvgImport, MultipleSubpathsInOnePathProduceMultipleContours) {
     EXPECT_NEAR(e.bodies[0].section->Area(), 24.0, 1e-6); // two disjoint 4x3 squares
     std::filesystem::remove(path);
 }
+
+// -- dxf_dim() / dxf_cross() ----------------------------------------------
+//
+// Every expectation below was produced by running the identical script and
+// the identical .dxf through OpenSCAD 2026.02.01 -- all sixteen cases,
+// warnings included, came back byte-identical.
+
+namespace {
+
+// Group-code pairs, one per line, exactly as a DXF stores them.
+const char* kDimDxf =
+    "0\nSECTION\n2\nENTITIES\n"
+    // type 0 (rotated), angle 0, coords[3]->coords[4] spans 25 in x
+    "0\nDIMENSION\n8\ndims\n1\nwidth\n70\n0\n50\n0\n"
+    "10\n0\n20\n0\n13\n0\n23\n0\n14\n25\n24\n0\n"
+    // type 0 at 90 degrees, spanning 40 in y
+    "0\nDIMENSION\n8\ndims\n1\nheight\n70\n0\n50\n90\n"
+    "10\n0\n20\n0\n13\n0\n23\n0\n14\n0\n24\n40\n"
+    // type 1 (aligned): a 3-4-5 triangle
+    "0\nDIMENSION\n8\ndims\n1\ndiag\n70\n1\n13\n0\n23\n0\n14\n3\n24\n4\n"
+    // type 4 (radius): coords[5] - coords[0], a 6-8-10 triangle
+    "0\nDIMENSION\n8\ndims\n1\nrad\n70\n4\n10\n0\n20\n0\n15\n6\n25\n8\n"
+    // type 6 (ordinate), no bit 64 -> the y of coords[3]
+    "0\nDIMENSION\n8\ndims\n1\nord\n70\n6\n13\n7\n23\n9\n"
+    // ...and with bit 64 set -> the x instead
+    "0\nDIMENSION\n8\ndims\n1\nordx\n70\n70\n13\n7\n23\n9\n"
+    // type 2 (angular): a quarter turn
+    "0\nDIMENSION\n8\ndims\n1\nang\n70\n2\n"
+    "10\n1\n20\n0\n15\n0\n25\n0\n13\n0\n23\n0\n14\n0\n24\n1\n"
+    // a cross: two LINEs meeting at (10, 20)
+    "0\nLINE\n8\ncross\n10\n0\n20\n20\n11\n20\n21\n20\n"
+    "0\nLINE\n8\ncross\n10\n10\n20\n0\n11\n10\n21\n40\n"
+    // two parallel LINEs, which have no crossing point
+    "0\nLINE\n8\npar\n10\n0\n20\n0\n11\n10\n21\n0\n"
+    "0\nLINE\n8\npar\n10\n0\n20\n5\n11\n10\n21\n5\n"
+    "0\nENDSEC\n0\nEOF\n";
+
+double dimOf(const std::string& call, Evaluator& ev) { return std::get<double>(asExpr(call, ev)); }
+
+} // namespace
+
+TEST(DxfDim, ReadsEachDimensionType) {
+    const auto path = tempPath("dims.dxf");
+    writeFile(path, kDimDxf);
+    Evaluator ev;
+    const std::string f = "file=\"" + path.string() + "\", layer=\"dims\"";
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"width\")", ev), 25.0, 1e-9);
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"height\")", ev), 40.0, 1e-9);
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"diag\")", ev), 5.0, 1e-9);   // aligned
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"rad\")", ev), 10.0, 1e-9);   // radius
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"ord\")", ev), 9.0, 1e-9);    // ordinate y
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"ordx\")", ev), 7.0, 1e-9);   // ordinate x
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"ang\")", ev), 90.0, 1e-9);   // angular
+    std::filesystem::remove(path);
+}
+
+TEST(DxfDim, ScaleAndOriginApply) {
+    const auto path = tempPath("dims_scale.dxf");
+    writeFile(path, kDimDxf);
+    Evaluator ev;
+    const std::string f = "file=\"" + path.string() + "\", layer=\"dims\"";
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"width\", scale=2)", ev), 50.0, 1e-9);
+    // origin shifts positions but not the distance between two of them.
+    EXPECT_NEAR(dimOf("dxf_dim(" + f + ", name=\"width\", origin=[5,5])", ev), 25.0, 1e-9);
+    std::filesystem::remove(path);
+}
+
+TEST(DxfDim, NameAndLayerFilter) {
+    const auto path = tempPath("dims_filter.dxf");
+    writeFile(path, kDimDxf);
+    Evaluator ev;
+    // No name given -> the first dimension on that layer.
+    EXPECT_NEAR(dimOf("dxf_dim(file=\"" + path.string() + "\", layer=\"dims\")", ev), 25.0, 1e-9);
+    // No layer given -> any layer.
+    EXPECT_NEAR(dimOf("dxf_dim(file=\"" + path.string() + "\", name=\"diag\")", ev), 5.0, 1e-9);
+    std::filesystem::remove(path);
+}
+
+TEST(DxfDim, MissingDimensionAndMissingFileWarn) {
+    const auto path = tempPath("dims_missing.dxf");
+    writeFile(path, kDimDxf);
+    std::string last;
+    Evaluator ev([&](const std::string& m) { last = m; });
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(
+        asExpr("dxf_dim(file=\"" + path.string() + "\", layer=\"dims\", name=\"nope\")", ev)));
+    EXPECT_NE(last.find("Can't find dimension 'nope'"), std::string::npos) << last;
+
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(
+        asExpr("dxf_dim(file=\"definitely_not_here.dxf\", name=\"x\")", ev)));
+    EXPECT_NE(last.find("Can't open DXF file"), std::string::npos) << last;
+    std::filesystem::remove(path);
+}
+
+TEST(DxfCross, FindsTheCrossingPoint) {
+    const auto path = tempPath("cross.dxf");
+    writeFile(path, kDimDxf);
+    Evaluator ev;
+    Value v = asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"cross\")", ev);
+    const auto& xy = std::get<ListPtr>(v)->items;
+    ASSERT_EQ(xy.size(), 2u);
+    EXPECT_NEAR(std::get<double>(xy[0]), 10.0, 1e-9);
+    EXPECT_NEAR(std::get<double>(xy[1]), 20.0, 1e-9);
+
+    // origin shifts the answer with the geometry.
+    Value o = asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"cross\", origin=[5,5])", ev);
+    const auto& oxy = std::get<ListPtr>(o)->items;
+    EXPECT_NEAR(std::get<double>(oxy[0]), 5.0, 1e-9);
+    EXPECT_NEAR(std::get<double>(oxy[1]), 15.0, 1e-9);
+    std::filesystem::remove(path);
+}
+
+TEST(DxfCross, ParallelOrTooFewLinesWarns) {
+    const auto path = tempPath("cross_par.dxf");
+    writeFile(path, kDimDxf);
+    std::string last;
+    Evaluator ev([&](const std::string& m) { last = m; });
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(
+        asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"par\")", ev)));
+    EXPECT_NE(last.find("Can't find cross"), std::string::npos) << last;
+
+    last.clear();
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(
+        asExpr("dxf_cross(file=\"" + path.string() + "\", layer=\"dims\")", ev)));
+    EXPECT_NE(last.find("Can't find cross"), std::string::npos) << last;
+    std::filesystem::remove(path);
+}

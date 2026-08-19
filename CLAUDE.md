@@ -561,6 +561,20 @@ grep for `ponytail:`.
   color instead of preserving each part's own, matching real OpenSCAD's actual behavior once fixed
   (cross-checked triangle-color-count-and-values against the Python reference directly, not just
   “does it run”).
+- `src/builtins/dxf_dim.cpp` — `dxf_dim()`/`dxf_cross()`, which read a measurement out of a DXF file
+  rather than out of the model. Ported from the reference's `io/dxfdim.cc` plus the DIMENSION/LINE
+  half of `io/DxfData.cc`: `dxf_dim()` returns the first matching DIMENSION's value by its type
+  (`70 & 7` — 0 rotated, 1 aligned, 2 angular, 3/4 diameter/radius, 6 ordinate; type 5 is
+  unsupported there too), `dxf_cross()` intersects the first two LINE entities. Note the reference's
+  own coordinate quirk, reproduced here: groups 11/12/16 (and 21/22/26) are scaled but NOT
+  origin-shifted, being extents rather than positions.
+
+  Deliberately its own group-code walk rather than sharing `src/import/dxf_import.cpp`'s: that one
+  produces closed contours, and these need the DIMENSION entities' seven coordinate slots and the
+  raw LINE endpoints, neither of which a contour list keeps. One divergence: `dxf_cross()` takes the
+  first two LINEs, where the reference walks every 2-point path — for a real cross (two strokes
+  meeting in the middle, not at their endpoints) that is the same set.
+
 - `src/csg_generate.cpp` — `Evaluator::applyDimensionRules`, run centrally just before every node's
   `GenerateFn` (and once more over the top-level list, which is an implicit union). Mirrors the
   reference's `isValidDim` + `collectChildren2D`/`collectChildren3D`: a node's dimension is fixed by

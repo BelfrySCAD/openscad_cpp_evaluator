@@ -160,6 +160,11 @@ CSGParams resolveHull(Evaluator& ev, const oscad::ModularCall& node, EvalContext
 std::vector<ColoredBody> generateHull(Evaluator& ev, const CSGParams& params,
                                        const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
 
+// dxf_dim()/dxf_cross() -- read a dimension or a cross's centre out of a
+// DXF file. Functions, not modules; dispatched from evalBuiltinFunction.
+Value builtinDxfDim(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node);
+Value builtinDxfCross(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node);
+
 CSGParams resolveFill(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateFill(Evaluator& ev, const CSGParams& params,
                                        const std::vector<std::unique_ptr<CSGNode>>& children,
