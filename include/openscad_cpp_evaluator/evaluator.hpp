@@ -1130,9 +1130,13 @@ private:
     // Save/restore rather than a plain set/clear, so nesting is correct for
     // free. The interpreter uses an RAII guard; the VM stores the saved
     // value in its bracket (PendingBuiltinWrap::savedMeasuring).
+public:
+    // Public for the same reason treeStack_ is: bytecode_vm.cpp is a separate
+    // translation unit and its Kind::Measure bracket owns this flag's
+    // lifetime across two separate op handlers (Push sets it, Pop restores
+    // it), which no RAII guard can span.
     bool measuring_ = false;
 
-public:
     // Test-only accessors for the invariants above -- a leaked measuring_ or
     // an unbalanced treeStack_ is otherwise silent until something much
     // later goes mysteriously wrong.

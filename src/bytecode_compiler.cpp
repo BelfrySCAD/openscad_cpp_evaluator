@@ -169,6 +169,22 @@ public:
         return std::nullopt;
     }
 
+    // Every local visible right now, as (name, slot), OUTERMOST frame first
+    // so that applying them in order lets an inner binding shadow an outer
+    // one. Used only by Kind::Measure (see compileExpr's RenderExpression
+    // case): a render() expression's children are STATEMENT opcodes, which
+    // resolve names through the EvalContext, but a compiled function keeps
+    // its parameters and lets in frame SLOTS that no EvalContext can see.
+    // Capturing the mapping here is what lets `function f(w) = render() {
+    // cube(w); }.volume;` find `w` at all.
+    std::vector<std::pair<std::string, int>> flatten() const {
+        std::vector<std::pair<std::string, int>> out;
+        for (const auto& frame : frames_) {
+            for (const auto& [name, slot] : frame) out.emplace_back(name, slot);
+        }
+        return out;
+    }
+
 private:
     std::vector<std::unordered_map<std::string, int>> frames_;
 };
@@ -858,6 +874,32 @@ public:
                 OSCAD_COMPILE_BINARY(BitwiseShiftRightOp)
 #undef OSCAD_COMPILE_BINARY
 
+            case NodeKind::RenderExpression: {
+                // The ONLY expression that compiles to STATEMENT opcodes.
+                // Emitted as an ordinary PushBuiltinWrap/PopBuiltinWrap
+                // bracket (Kind::Measure) rather than a new opcode pair,
+                // which is what lets it inherit the whole bracket lifecycle
+                // -- push/pop counting, ctxChain discipline, exception
+                // teardown -- for free.
+                //
+                // emitBuiltinWrap, NOT tryCompileChildrenList: the latter
+                // builds a SEPARATE chunk run in a separate frame, so its
+                // Pop could not push onto THIS frame's operand stack. These
+                // children are statically known, so they compile inline.
+                //
+                // The children are operand-stack-neutral (every
+                // compileOneStatement case is), so the Value the Pop pushes
+                // lands exactly where this expression's own operand belongs.
+                // Op::PopBuiltinWrap asserts that rather than trusting it.
+                auto& n = static_cast<const oscad::RenderExpression&>(node);
+                std::vector<const oscad::ASTNode*> kids;
+                kids.reserve(n.children.size());
+                for (const auto& c : n.children) kids.push_back(c.get());
+                emitBuiltinWrap(CompiledChunk::BuiltinWrapSite::Kind::Measure, "render", n, kids, out,
+                                 /*emitCheckDebug=*/false, scope.flatten());
+                return;
+            }
+
             default:
                 // Safety net for any Expression NodeKind without its own
                 // case above -- falls back to the interpreter for the
@@ -1194,14 +1236,23 @@ public:
     // for real: DebugHooks.FastContinueNotHookSkippableStillFiresEvery-
     // Checkpoint (a translate()-wrapped script) caught the miscount when
     // this was first omitted by analogy to Op::CallModule.
+    // emitCheckDebug=false only for Kind::Measure: a render() EXPRESSION is
+    // part of a statement whose own checkpoint has already fired, and a
+    // CheckDebugStatement emitted here would run BEFORE Push sets
+    // measuring_ -- breaking parity with the interpreter's evalRenderExpr,
+    // which fires no checkpoint of its own either.
     void emitBuiltinWrap(CompiledChunk::BuiltinWrapSite::Kind kind, const std::string& tagName,
                           const oscad::ASTNode& wrapperNode, const std::vector<const oscad::ASTNode*>& children,
-                          std::vector<Instruction>& out) {
-        out.push_back({Op::CheckDebugStatement, internNativeStatement(&wrapperNode), 0, nullptr});
+                          std::vector<Instruction>& out, bool emitCheckDebug = true,
+                          std::vector<std::pair<std::string, int>> capturedLocals = {}) {
+        if (emitCheckDebug) {
+            out.push_back({Op::CheckDebugStatement, internNativeStatement(&wrapperNode), 0, nullptr});
+        }
         CompiledChunk::BuiltinWrapSite site;
         site.kind = kind;
         site.tagName = tagName;
         site.node = &wrapperNode;
+        site.capturedLocals = std::move(capturedLocals);
         chunk_.builtinWrapSites.push_back(std::move(site));
         const int idx = static_cast<int>(chunk_.builtinWrapSites.size()) - 1;
         out.push_back({Op::PushBuiltinWrap, idx, 0, &wrapperNode.position()});

@@ -265,3 +265,122 @@ TEST(RenderExpr, MeasuredSubtreeUsesItsOwnCoordinates) {
     ASSERT_EQ(r.echoes.size(), 1u);
     EXPECT_EQ(r.echoes[0], "ECHO: [[0, 0, 0], [2, 2, 2]]");
 }
+
+// -- Both engines, same answers -------------------------------------------
+//
+// The VM compiles a render expression to a real Kind::Measure bracket
+// (Op::PushBuiltinWrap/PopBuiltinWrap) rather than declining to compile and
+// letting the interpreter take over -- the whole containing declaration
+// would otherwise run interpreted, which is many times slower.
+
+namespace {
+
+class ScopedVm {
+public:
+    explicit ScopedVm(bool enabled) { Evaluator::setBytecodeVmEnabledForTesting(enabled); }
+    ~ScopedVm() { Evaluator::setBytecodeVmEnabledForTesting(std::nullopt); }
+};
+
+std::vector<std::string> echoesUnder(bool vm, const std::string& code) {
+    ScopedVm guard(vm);
+    return runScript(code).echoes;
+}
+
+} // namespace
+
+TEST(RenderExprEngines, InterpreterAndVmAgree) {
+    const char* cases[] = {
+        "o = render() { cube(10); };\necho(o.volume, o.area, o.genus, o.dim, o.boundingbox);",
+        "o = render() { difference() { cube(10); cube(5); } };\necho(o.volume, len(o.vertices), len(o.faces));",
+        "o = render($fn=16) { sphere(10); };\necho(o.volume, len(o.faces));",
+        "o = render() { square([4,3]); };\necho(o.dim, o.area, o.perimeter, o.boundingbox);",
+        "o = render() { };\necho(o.dim, o.boundingbox);",
+        "function f(w) = render() { cube(w); }.volume;\necho(f(2), f(3));",
+        "module m() { o = render() { cube(4); }; echo(o.volume); } m();",
+        "v = [for (i = [1:3]) render() { cube(i); }.volume];\necho(v);",
+        "x = true ? render() { cube(2); }.volume : 0;\necho(x);",
+        "g = function(a) a + render() { cube(a); }.volume;\necho(g(2));",
+        "o = render() { translate([5,0,0]) cube(2); };\necho(o.boundingbox);",
+        "o = render() { render() { cube(3); } };\necho(o.volume);",
+    };
+    for (const char* src : cases) {
+        EXPECT_EQ(echoesUnder(false, src), echoesUnder(true, src)) << "engines diverge for:\n" << src;
+    }
+}
+
+TEST(RenderExprEngines, DrawsNothingUnderEitherEngine) {
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        Evaluated e = evalSrc("function f(w) = render() { cube(w); }.volume;\nx = f(9);\ncube(1);");
+        ASSERT_EQ(drawnBodies(e), 1u) << "vm=" << vm;
+        EXPECT_NEAR(e.bodies.front().body->Volume(), 1.0, 1e-9) << "vm=" << vm;
+    }
+}
+
+TEST(RenderExprEngines, TheDeclarationActuallyCompiles) {
+    // The regression guard for "someone reintroduced a NotCompilable bail".
+    // If compileExpr ever declines a RenderExpression again, these chunks
+    // come back null and the containing declaration runs interpreted.
+    ScopedVm guard(true);
+    Evaluated e = evalSrc("function f(w) = render() { cube(w); }.volume;\n"
+                          "module m() { o = render() { cube(2); }; }\n"
+                          "x = f(3);\nm();");
+    const oscad::FunctionDeclaration* fn = nullptr;
+    const oscad::ModuleDeclaration* mod = nullptr;
+    for (const auto& n : e.ast) {
+        if (auto* d = dynamic_cast<const oscad::FunctionDeclaration*>(n.get())) fn = d;
+        if (auto* d = dynamic_cast<const oscad::ModuleDeclaration*>(n.get())) mod = d;
+    }
+    ASSERT_NE(fn, nullptr);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(e.ev.lookupOrCompileChunk(*fn), nullptr) << "function containing render() fell back to the interpreter";
+    EXPECT_NE(e.ev.lookupOrCompileModuleChunk(*mod), nullptr) << "module containing render() fell back to the interpreter";
+}
+
+TEST(RenderExprEngines, CapturedLocalsReachTheChildren) {
+    // A compiled function keeps parameters and lets in frame SLOTS, which
+    // the children's EvalContext cannot see -- Kind::Measure republishes
+    // them. Without that, every one of these measures an undef-sized shape.
+    ScopedVm guard(true);
+    Measured r = runScript("function f(w) = render() { cube(w); }.volume;\n"
+                            "function g(a, b) = let (s = a * b) render() { cube(s); }.volume;\n"
+                            "echo(f(2), f(3), g(2, 2));");
+    ASSERT_EQ(r.echoes.size(), 1u);
+    EXPECT_EQ(r.echoes[0], "ECHO: 8, 27, 64");
+}
+
+TEST(RenderExprEngines, UnwindsCleanlyUnderTheVm) {
+    // Both nesting orders, plus a throw originating DEEP inside a nested
+    // module frame so teardownVmCallStackDownTo's multi-frame loop runs --
+    // that is the path where a mismatched pop would corrupt treeStack_.
+    ScopedVm guard(true);
+    const char* throwing[] = {
+        "o = render() { assert(false); cube(1); };",
+        "o = render() { translate([1,0,0]) { assert(false); } };",
+        "translate([5,0,0]) { o = render() { assert(false); }; }",
+        "module deep(n) { if (n > 0) deep(n - 1); else assert(false); }\no = render() { deep(20); };",
+        "function f(w) = render() { assert(false); cube(w); }.volume;\nx = f(2);",
+    };
+    for (const char* src : throwing) {
+        EXPECT_THROW(evalSrc(src), std::exception) << src;
+    }
+    // The machine still works, and both invariants are back where they started.
+    Measured after = runScript("o = render() { cube(3); };\necho(o.volume);");
+    ASSERT_EQ(after.echoes.size(), 1u);
+    EXPECT_EQ(after.echoes[0], "ECHO: 27");
+    EXPECT_EQ(after.e.ev.treeStackDepthForTesting(), 0u);
+    EXPECT_FALSE(after.e.ev.measuringForTesting());
+}
+
+TEST(RenderExprEngines, ProvenanceStaysCleanUnderTheVm) {
+    // The RestoreMeasuring guard in Op::PopBuiltinWrap must wrap the
+    // generate, not precede it. Restoring measuring_ early leaves the
+    // provenance guards inert on the VM path ONLY -- no crash, no wrong
+    // geometry, just silently wrong click-to-source. This is the only test
+    // that catches that.
+    ScopedVm guard(true);
+    Evaluated without = evalSrc("sphere(5);");
+    Evaluated with = evalSrc("function f(w) = render() { cube(w); }.volume;\nx = f(9);\nsphere(5);");
+    EXPECT_EQ(with.ev.idToNode.size(), without.ev.idToNode.size());
+    EXPECT_EQ(with.ev.idToColor.size(), without.ev.idToColor.size());
+}

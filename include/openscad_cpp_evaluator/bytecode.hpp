@@ -892,6 +892,13 @@ struct CompiledChunk {
             Color,
             Modifier,
             Passthrough,   // hull()/minkowski()/render() -- empty params, no compute function needed
+            // render() in EXPRESSION position. The only Kind whose Pop
+            // does NOT append a CSGNode to the parent's accumulator: it
+            // discards the subtree and pushes the measurement object() onto
+            // the operand stack instead. Its `node` is a RenderExpression,
+            // not a ModularCall -- warnUnexpectedBuiltinArgs already
+            // self-guards on that (registry.cpp).
+            Measure,
             LinearExtrude,
             RotateExtrude,
             Projection,
@@ -901,6 +908,14 @@ struct CompiledChunk {
         Kind kind;
         std::string tagName; // "translate"/"rotate"/.../"color"/"highlight"/"background"/"show_only"/"hull"/...
         const oscad::ASTNode* node = nullptr;
+        // Kind::Measure only. (name, slot) for every local visible at this
+        // site, so Op::PushBuiltinWrap can publish them into the children's
+        // EvalContext. A render() expression's children are STATEMENT
+        // opcodes and resolve names through the context, but a compiled
+        // FUNCTION keeps its parameters and lets in frame slots instead --
+        // without this, `function f(w) = render() { cube(w); }.volume;`
+        // cannot see `w` and silently builds nothing.
+        std::vector<std::pair<std::string, int>> capturedLocals;
     };
 
     // One Op::PushCsgWrap/PopCsgWrap site pair -- see those ops' own doc
