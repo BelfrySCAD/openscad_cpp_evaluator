@@ -1094,3 +1094,84 @@ than the current pause point). Ported identically (same qualifier syntax, same e
   profiling/debugging's own bookkeeping resets happen at the right point too.
 - `tools/cli/main.cpp` — a 3-line wrapper: builds `args` from `argv`, calls `runCli(args)` with the
   real `std::cin`/`std::cout`/`std::cerr`, returns its exit code.
+
+## `render()` in expression position
+
+`render()` has two jobs, decided by where it is written:
+
+```openscad
+render() cube(1);                       // STATEMENT -- draws, as always
+obj = render() { cube(1); };            // EXPRESSION -- measures, draws NOTHING
+```
+
+The expression form builds its children's geometry, measures it, extracts the
+mesh, and **discards the geometry**. It is the only way OpenSCAD can inspect its
+own geometry — volume, surface area, genus, bounding box, and the mesh itself.
+
+```openscad
+obj = render() difference() { cube(100); sphere(20); };
+echo(obj.volume, obj.genus, obj.boundingbox);
+polyhedron(obj);                        // straight back in
+```
+
+Keys — ordered, and the order is part of the API (`ValueObject` is an ordered
+vector and `oscEqual` is order-sensitive):
+
+| dim | keys |
+|---|---|
+| 3 | `vertices`, `faces`, `volume`, `area`, `genus`, `boundingbox`, `dim`, `vnf` |
+| 2 | `vertices`, `paths`, `area`, `perimeter`, `boundingbox`, `dim` |
+| 0 | the 3D key set, all zero, `boundingbox = undef` |
+
+`vertices`/`faces` are VNF-shaped — `[x,y,z]` points, 0-based N-gon index lists,
+**clockwise seen from outside** — so they feed `polyhedron()` and BOSL2 unchanged.
+`vnf` is the `[vertices, faces]` 2-list BOSL2 functions actually take.
+`polyhedron()` and `polygon()` also accept the object directly, and will accept
+*any* object carrying the right keys, not just one `render()` produced.
+
+### Things that will bite
+
+- **`render` is a reserved keyword.** It cannot be a variable, module, function,
+  argument, or member name. Required: LALR(1) cannot otherwise tell `render(` in
+  expression position from a function call, and bison's shift-over-reduce would
+  silently turn every function call in an expression into a module instantiation.
+- **`obj = render() cube(1);` does not parse.** A bare call's `child_statement`
+  swallows the `;`, leaving the assignment unterminated. Use
+  `render() { cube(1); }` or a form ending in `}`. Inherent to OpenSCAD's grammar.
+- **`genus` is Manifold's, for the whole result.** A cube with a sealed internal
+  cavity reports `-1`, not `0` — its boundary has two components. Correct, but
+  surprising.
+- **Nothing is drawn from any context** — top level, module body, function body,
+  list comprehension, ternary. That is what preserves function purity, and why no
+  context needs a special case.
+
+### Implementation notes
+
+`Evaluator::measureCsgSubtree` (`src/measure_geometry.cpp`) is the *only*
+implementation of "CSG subtree → `object()`"; both engines call it — the
+interpreter from `evalRenderExpr`, the VM from `Op::PopBuiltinWrap`'s
+`Kind::Measure` branch.
+
+`Evaluator::measuring_` is set for the whole generate. It suppresses the four
+writes that exist solely to describe *drawn* geometry — `idToNode`/`idToColor` in
+`tagGenerated` and `tagDisplayOnly`, the `restampCachedIds` call on a cache hit,
+and `cacheProducer_` — because those tables are cleared once per pass, so a leak
+is permanent and surfaces later as wrong click-to-source. It also suppresses
+`checkDebug`, which would otherwise inject stops at the paused statement's own
+`callStack_` depth. The **geometry cache stays on**: `cacheKey` is
+content-addressed, so an entry a measurement stores is genuinely reusable by the
+real render.
+
+Two details in the mesh conversion are load-bearing and silent when wrong: the
+winding is **reversed** on the way out (Manifold's `triVerts` is CCW), and
+vertices are welded by exact position (Manifold splits property-vertices, so
+without the weld the round-tripped `polyhedron()` is an *open* mesh). A reversed
+mesh still builds — `Status() == NoError` — but comes back with **negative
+volume**, so tests assert a positive volume and must never use `abs()`.
+
+On the VM side, `Kind::Measure` captures `(name, slot)` for every visible local
+at compile time and republishes them into the children's `EvalContext` at Push.
+A compiled function keeps its parameters in frame slots, which no `EvalContext`
+can see, and the children are statement opcodes that resolve names through the
+context — without this, `function f(w) = render() { cube(w); }.volume;` finds no
+`w` and silently measures nothing.

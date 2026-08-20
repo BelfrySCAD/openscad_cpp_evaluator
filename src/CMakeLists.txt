@@ -11,6 +11,7 @@ add_library(openscad_cpp_evaluator STATIC
   css_colors.cpp
   csg_resolve.cpp
   csg_generate.cpp
+  measure_geometry.cpp
   manifold_cache.cpp
   debug_profile.cpp
   eval_use.cpp

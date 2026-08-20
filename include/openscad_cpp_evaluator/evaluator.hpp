@@ -217,6 +217,26 @@ public:
     // `_generate_partial_render`.
     std::vector<ColoredBody> generatePartialTree();
 
+    // Consumes a resolved CSG subtree: generates it, applies the top-level
+    // dimension rules, folds the surviving bodies into one, and returns the
+    // render()-expression measurement object(). The subtree is destroyed on
+    // return -- NOTHING is drawn.
+    //
+    // Callers must already have measuring_ set (see its doc comment): the
+    // generate inside would otherwise write provenance for geometry that is
+    // about to be discarded. The flag is the caller's to own because the VM
+    // holds it across two separate op handlers.
+    //
+    // THE only implementation of "CSG subtree -> object()". Both engines call
+    // exactly this -- the interpreter from evalRenderExpr, the VM from
+    // Op::PopBuiltinWrap's Kind::Measure branch.
+    Value measureCsgSubtree(std::vector<std::unique_ptr<CSGNode>> sub, const oscad::ASTNode& node);
+
+    // evalExpr's arm for `render() { ... }` in expression position. Pushes
+    // its own treeStack_ frame, resolves the children into it, then hands
+    // the frame to measureCsgSubtree and discards it.
+    Value evalRenderExpr(const oscad::RenderExpression& node, EvalContext& ctx);
+
     // Provenance tables populated by tagGenerated() during generate --
     // originalID -> the AST node that produced it / that node's own
     // resolved color. Public, read by a caller (CLI, WYSIWYG picking) after
@@ -1083,6 +1103,47 @@ private:
     // while another one is already active), just an on/off switch for
     // whether evalExprMaybeCompiled's cache is safe to touch right now.
     bool inResolvePass_ = false;
+
+    // True only while evalRenderExpr (or the VM's Kind::Measure bracket) is
+    // building geometry for a render() EXPRESSION -- geometry that is
+    // measured and then thrown away, never drawn.
+    //
+    // It suppresses everything that exists solely to describe DRAWN
+    // geometry, and nothing else:
+    //   - idToNode/idToColor writes in tagGenerated/tagDisplayOnly, and the
+    //     restampCachedIds call on a cache hit (which writes them too).
+    //     Those maps are cleared once per pass, at resolveTreeImpl entry, so
+    //     without this a discarded measurement would leave permanent
+    //     provenance entries for triangles no render ever draws.
+    //   - cacheProducer_ writes, which decide click-to-source attribution
+    //     for a LATER cache hit. A discarded node must never become the
+    //     recorded producer of geometry the real render then reuses.
+    //   - checkDebug, so resolving a measured subtree does not inject
+    //     debug stops at the paused statement's own callStack_ depth and
+    //     corrupt lastStmtByDepth_'s duplicate-collapse state.
+    //
+    // The ManifoldCache itself deliberately stays ON: cacheKey is a pure
+    // function of kind/params/children, so an entry stored by a measurement
+    // is genuinely reusable by the real render (and vice versa) -- that is
+    // the point. Only the producer attribution above needed suppressing.
+    //
+    // Save/restore rather than a plain set/clear, so nesting is correct for
+    // free. The interpreter uses an RAII guard; the VM stores the saved
+    // value in its bracket (PendingBuiltinWrap::savedMeasuring).
+public:
+    // Public for the same reason treeStack_ is: bytecode_vm.cpp is a separate
+    // translation unit and its Kind::Measure bracket owns this flag's
+    // lifetime across two separate op handlers (Push sets it, Pop restores
+    // it), which no RAII guard can span.
+    bool measuring_ = false;
+
+    // Test-only accessors for the invariants above -- a leaked measuring_ or
+    // an unbalanced treeStack_ is otherwise silent until something much
+    // later goes mysteriously wrong.
+    bool measuringForTesting() const { return measuring_; }
+    size_t treeStackDepthForTesting() const { return treeStack_.size(); }
+
+private:
 
 public:
     // lookupOrCompileChunk/lookupCompiledLiteralChunk: public (not just

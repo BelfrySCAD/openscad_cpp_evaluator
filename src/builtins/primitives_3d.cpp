@@ -610,6 +610,25 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
     Value facesArg = getArg(args, 1, "faces", Value{});
     if (isUndef(facesArg)) facesArg = getArg(args, 1, "triangles", Value{}); // legacy alias
 
+    // polyhedron(obj) -- an object() with `vertices` and `faces` stands in
+    // for the two lists, so a render() expression round-trips in one call.
+    // Works for ANY such object, not just one this evaluator produced, so a
+    // script can build or transform its own. `points` is accepted as an
+    // alias for `vertices` since that is this argument's own name.
+    if (isObject(pointsArg)) {
+        const Value* verts = objectFieldOrNull(pointsArg, "vertices");
+        if (!verts) verts = objectFieldOrNull(pointsArg, "points");
+        const Value* faces = objectFieldOrNull(pointsArg, "faces");
+        if (!verts) ev.error("polyhedron: object has no 'vertices' (or 'points') key", node);
+        if (!faces) ev.error("polyhedron: object has no 'faces' key", node);
+        // Copy BEFORE assigning: both pointers borrow into pointsArg's own
+        // ObjectPtr, which the first assignment would release.
+        Value newPoints = *verts;
+        Value newFaces = *faces;
+        pointsArg = std::move(newPoints);
+        facesArg = std::move(newFaces);
+    }
+
     const ListPtr* pointsList = std::get_if<ListPtr>(&pointsArg);
     const ListPtr* facesList = std::get_if<ListPtr>(&facesArg);
     if (!pointsList || !*pointsList || !facesList || !*facesList) {

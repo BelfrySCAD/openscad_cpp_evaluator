@@ -1,3 +1,4 @@
+#include <cassert>
 #include "openscad_cpp_evaluator/bytecode_vm.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
@@ -405,13 +406,24 @@ void teardownVmCallStackDownTo(Evaluator& ev, size_t floor) {
         // accumulator (Op::PushBuiltinWrap's own runtime handler, above)
         // that would normally be popped by its matching Op::PopBuiltinWrap;
         // on the exception path that never runs. These are the MOST
-        // RECENTLY pushed treeStack_ entries relative to this frame's own
-        // (below) -- pop them first to respect treeStack_'s own LIFO order.
+        // (below). Note these three loops are COUNTS, not targeted pops:
+        // popping N off the back of treeStack_ removes the top N whichever
+        // group counted them, so the order between the groups is
+        // unobservable and adding a fourth kind cannot break it.
+        // ownsModuleSplice reads last only because it is the deepest.
         // See Op::PopBuiltinWrap's own doc comment (bytecode.hpp) for why
         // this is a real counter, not the single-bool shape
         // ownsModuleSplice, below, gets away with (N of these can be open
         // at once; at most one module-call splice ever can).
         for (size_t i = 0; i < frame->builtinWrapStack.size(); ++i) ev.treeStack_.pop_back();
+        // A Kind::Measure bracket also set ev.measuring_ on the way in, and
+        // its matching Op::PopBuiltinWrap -- which would have restored it --
+        // never ran. front(), not back(): savedMeasuring is recorded by
+        // EVERY kind, so this frame's OUTERMOST still-open bracket holds the
+        // value that was live before any of them opened. Nothing else in a
+        // frame can change the flag (a nested interpreter evalRenderExpr is
+        // scoped; a nested VM frame restores in its own turn of this loop).
+        if (!frame->builtinWrapStack.empty()) ev.measuring_ = frame->builtinWrapStack.front().savedMeasuring;
         frame->builtinWrapStack.clear();
         // Same reasoning, same LIFO-order requirement, for any still-open
         // Op::PushCsgWrap bracket(s) -- see PendingCsgWrap's/Op::PushCsgWrap's
@@ -1102,6 +1114,34 @@ Value driveVm(Evaluator& ev, size_t floor) {
                             f.ctxChain.push_back(std::move(effCtx));
                             break;
                         }
+                        case CompiledChunk::BuiltinWrapSite::Kind::Measure: {
+                            // Arguments resolve purely for the
+                            // $-propagation-into-children side effect, as
+                            // Passthrough does -- differing only in the
+                            // concrete node type they hang off.
+                            auto [args, effCtx] = resolveCallArgs(
+                                ev, static_cast<const oscad::RenderExpression&>(*site.node).arguments, ctx);
+                            (void)args;
+                            // Publish this frame's slot locals into the
+                            // children's context. The children are STATEMENT
+                            // opcodes and resolve names through the
+                            // EvalContext, but a compiled function keeps its
+                            // parameters and lets in slots, which no context
+                            // can see -- so without this,
+                            // `function f(w) = render() { cube(w); }.volume;`
+                            // resolves `w` to undef and silently measures
+                            // nothing. Applied in outermost-first order so an
+                            // inner binding shadows an outer one, and only
+                            // into effCtx's own fresh trail level, so nothing
+                            // leaks back to the caller.
+                            for (const auto& [name, slot] : site.capturedLocals) {
+                                if (static_cast<size_t>(slot) < f.slots.size()) {
+                                    effCtx.let_->set(name, f.slots[static_cast<size_t>(slot)]);
+                                }
+                            }
+                            f.ctxChain.push_back(std::move(effCtx));
+                            break;
+                        }
                         case CompiledChunk::BuiltinWrapSite::Kind::LinearExtrude: {
                             BuiltinWrapParams result = computeLinearExtrudeParams(
                                 ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
@@ -1146,7 +1186,11 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                     }
                     ev.treeStack_.emplace_back();
-                    f.builtinWrapStack.push_back({std::move(params), randsBefore, ins.a, std::move(deferredArgs)});
+                    f.builtinWrapStack.push_back({std::move(params), randsBefore, ins.a, std::move(deferredArgs),
+                                                   ev.measuring_, f.stack.size(), ev.treeStack_.size() - 1});
+                    // AFTER the push, so a throw from the push itself leaves
+                    // the flag untouched rather than stuck on.
+                    if (site.kind == CompiledChunk::BuiltinWrapSite::Kind::Measure) ev.measuring_ = true;
                     ++f.pc;
                     break;
                 }
@@ -1161,6 +1205,41 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     f.builtinWrapStack.pop_back();
                     const CompiledChunk::BuiltinWrapSite& site =
                         f.chunk->builtinWrapSites[static_cast<size_t>(pending.siteIdx)];
+                    if (site.kind == CompiledChunk::BuiltinWrapSite::Kind::Measure) {
+                        // Bookkeeping is already popped above, matching this
+                        // op's own "pop first, THEN do anything that can
+                        // throw" rule: measureCsgSubtree generates real
+                        // Manifold geometry and can throw, and if it does,
+                        // teardownVmCallStackDownTo must not see a bracket
+                        // that is no longer open.
+                        //
+                        // measuring_ must stay TRUE across measureCsgSubtree
+                        // -- that flag is what suppresses the four
+                        // provenance writes in csg_generate.cpp -- so it is
+                        // restored by a guard scoped AROUND the call, not
+                        // before it. Restoring early would leave those
+                        // guards inert on the VM path only: no crash, no
+                        // wrong geometry, just quietly wrong click-to-source.
+                        struct RestoreMeasuring {
+                            Evaluator& ev;
+                            bool prev;
+                            ~RestoreMeasuring() { ev.measuring_ = prev; }
+                        } restoreMeasuring{ev, pending.savedMeasuring};
+
+                        f.ctxChain.pop_back(); // the effCtx pushed at Push
+                        std::vector<std::unique_ptr<CSGNode>> sub = std::move(ev.treeStack_.back());
+                        ev.treeStack_.pop_back();
+                        assert(ev.treeStack_.size() == pending.treeStackDepthAtPush);
+                        // The children are statement opcodes running mid-
+                        // expression; they must be operand-stack-neutral or
+                        // this expression's own result lands in the wrong
+                        // slot. Every compileOneStatement case is, but
+                        // nothing enforces it -- hence the assert.
+                        assert(f.stack.size() == pending.stackDepthAtPush);
+                        f.stack.push_back(ev.measureCsgSubtree(std::move(sub), *site.node));
+                        ++f.pc;
+                        break;
+                    }
                     // Roof's params computation is deferred to here (see
                     // this Kind's own doc comment, bytecode.hpp) -- ctx is
                     // still on top of f.ctxChain, not yet popped below, so

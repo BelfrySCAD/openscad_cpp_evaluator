@@ -98,7 +98,13 @@ std::vector<DebugFrame> Evaluator::buildDebugFrames(const EvalContext* ctx) cons
 
 void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool forced, bool exprLevel,
                             bool callSite) {
-    if (!debugHooks_.debugHook) return;
+    // measuring_: a render() EXPRESSION resolves its children mid-expression,
+    // so every statement inside it would otherwise fire a checkpoint at the
+    // SAME callStack_ depth as the statement the debugger is paused on --
+    // injecting stops the user never wrote and corrupting lastStmtByDepth_'s
+    // duplicate-collapse state below. Rides the existing null-hook
+    // short-circuit so it costs nothing on the normal path.
+    if (measuring_ || !debugHooks_.debugHook) return;
     const oscad::Position& pos = node.position();
     const size_t stmtDepth = callStack_.size();
     if (lastStmtByDepth_.size() <= stmtDepth) lastStmtByDepth_.resize(stmtDepth + 1, {-1, std::string{}});

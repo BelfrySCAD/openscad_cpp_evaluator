@@ -541,6 +541,9 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
                                   n.position());
         }
 
+        case NodeKind::RenderExpression:
+            return evalRenderExpr(static_cast<const oscad::RenderExpression&>(node), ctx);
+
         default:
             throw std::logic_error(std::string("Evaluator::evalExpr: NodeKind '") + oscad::nodeKindName(node.kind()) +
                                     "' not yet implemented (later phase)");

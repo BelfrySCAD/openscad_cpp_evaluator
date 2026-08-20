@@ -38,6 +38,18 @@ struct PendingBuiltinWrap {
     // other kind computes its params at Push time and leaves this default-
     // empty.
     CallArgs deferredArgs;
+
+    // ev.measuring_ as it stood immediately BEFORE this bracket opened.
+    // Recorded for EVERY kind, not just Measure, so the exception teardown
+    // can restore from front() without inspecting kinds -- a non-Measure
+    // entry simply records and restores the same value.
+    bool savedMeasuring = false;
+    // f.stack.size() and ev.treeStack_.size() at Push time. Kind::Measure's
+    // Pop asserts both: it is the first bracket that runs STATEMENT opcodes
+    // with a non-empty operand stack beneath it, and nothing structurally
+    // enforces that those statements are operand-stack-neutral.
+    size_t stackDepthAtPush = 0;
+    size_t treeStackDepthAtPush = 0;
 };
 
 // One still-open Op::PushCsgWrap bracket's own state -- see that op's own

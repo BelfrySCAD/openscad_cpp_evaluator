@@ -52,6 +52,23 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
     // polygon
     Value pointsArg = getArg(args, 0, "points", Value{});
     Value pathsArg = getArg(args, 1, "paths", Value{});
+
+    // polygon(obj) -- the 2D counterpart of polyhedron(obj): an object()
+    // with `vertices` (and optionally `paths`) stands in for the two lists.
+    if (isObject(pointsArg)) {
+        const Value* verts = objectFieldOrNull(pointsArg, "vertices");
+        if (!verts) verts = objectFieldOrNull(pointsArg, "points");
+        if (!verts) ev.error("polygon: object has no 'vertices' (or 'points') key", node);
+        const Value* paths = objectFieldOrNull(pointsArg, "paths");
+        // Copy before assigning -- both borrow into pointsArg's ObjectPtr.
+        Value newPoints = *verts;
+        Value newPaths = paths ? *paths : Value{};
+        pointsArg = std::move(newPoints);
+        // A missing `paths` stays undef, which already means "pts is one
+        // single contour" below -- no error, unlike polyhedron's `faces`.
+        pathsArg = std::move(newPaths);
+    }
+
     const ListPtr* pointsList = std::get_if<ListPtr>(&pointsArg);
     if (!pointsList || !*pointsList) {
         ev.error("polygon: 'points' is required", node);
