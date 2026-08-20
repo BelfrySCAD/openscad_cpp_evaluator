@@ -90,6 +90,24 @@ struct RoleSplit {
 };
 RoleSplit splitByRole(const std::vector<ColoredBody>& bodies);
 
+// polyhedron(obj) / polygon(obj): a render()-expression result -- or any
+// object() carrying the same keys -- may stand in for the two separate list
+// arguments, so the round trip is `polyhedron(render() { ... })` rather than
+// `polyhedron(obj.vertices, obj.faces)`. Returns nullptr when `v` is not an
+// object or has no such key.
+inline const Value* objectFieldOrNull(const Value& v, const std::string& key) {
+    const ObjectPtr* o = std::get_if<ObjectPtr>(&v);
+    if (!o || !*o) return nullptr;
+    for (const std::pair<std::string, Value>& kv : (*o)->items) {
+        if (kv.first == key) return &kv.second;
+    }
+    return nullptr;
+}
+inline bool isObject(const Value& v) {
+    const ObjectPtr* o = std::get_if<ObjectPtr>(&v);
+    return o && *o;
+}
+
 // manifold::ToString(Manifold::Error) only exists under MANIFOLD_DEBUG --
 // not enabled in this build -- so this mirrors it. Shared by import.cpp and
 // primitives_3d.cpp, both of which report why a mesh wouldn't build.

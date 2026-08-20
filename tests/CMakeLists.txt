@@ -18,6 +18,7 @@ add_executable(oscad_eval_tests
   test_export.cpp
   test_primitives.cpp
   test_transforms.cpp
+  test_render_expr.cpp
   test_booleans.cpp
   test_control_flow.cpp
   test_tail_calls.cpp

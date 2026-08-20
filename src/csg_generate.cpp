@@ -48,7 +48,11 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
         std::optional<std::vector<ColoredBody>> cached = key ? manifoldCache_->get(*key) : std::nullopt;
         if (cached) {
             node.bodies = std::move(*cached);
-            if (node.node) {
+            // Skipped entirely while measuring: restampCachedIds writes
+            // idToNode/idToColor, and geometry that is about to be discarded
+            // has no click-to-source identity worth recording. See
+            // Evaluator::measuring_.
+            if (node.node && !measuring_) {
                 auto producer = cacheProducer_.find(*key);
                 restampCachedIds(node.bodies, *node.node,
                                  producer == cacheProducer_.end() ? nullptr : producer->second);
@@ -83,8 +87,13 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 node.bodies = flattenCsgTree(node.children);
             }
             if (key) {
+                // The geometry itself is still cached while measuring --
+                // cacheKey is content-addressed, so the real render can
+                // legitimately reuse it. Only the PRODUCER attribution is
+                // suppressed: a node that gets discarded must never be
+                // recorded as the origin of geometry a later render draws.
                 manifoldCache_->put(*key, node.bodies);
-                cacheProducer_[*key] = node.node;
+                if (!measuring_) cacheProducer_[*key] = node.node;
             }
         }
         for (const ColoredBody& b : node.bodies) topLevelBodies.push_back(b);
@@ -271,9 +280,11 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
 ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue) {
     manifold::MeshGL mesh = body.GetMeshGL();
     std::optional<std::array<float, 4>> color = valueToColor(colorValue);
-    for (uint32_t originalId : mesh.runOriginalID) {
-        idToNode[originalId] = &node;
-        idToColor[originalId] = color;
+    if (!measuring_) {
+        for (uint32_t originalId : mesh.runOriginalID) {
+            idToNode[originalId] = &node;
+            idToColor[originalId] = color;
+        }
     }
     ColoredBody cb;
     cb.body = std::move(body);
@@ -291,8 +302,10 @@ ColoredBody Evaluator::tagDisplayOnly(manifold::MeshGL mesh, const oscad::ASTNod
     const uint32_t originalId = manifold::Manifold::ReserveIDs(1);
     mesh.runOriginalID = {originalId};
     mesh.runIndex = {0, static_cast<uint32_t>(mesh.triVerts.size())};
-    idToNode[originalId] = &node;
-    idToColor[originalId] = color;
+    if (!measuring_) {
+        idToNode[originalId] = &node;
+        idToColor[originalId] = color;
+    }
 
     ColoredBody cb;
     // Left set-but-empty rather than nullopt: consumers dereference
