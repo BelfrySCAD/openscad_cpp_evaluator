@@ -18,6 +18,7 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
 #include "builtins/builtins.hpp"
+#include "openscad_cpp_evaluator/mesh_check.hpp"
 
 #include <manifold/manifold.h>
 
@@ -69,35 +70,86 @@ Value objectOfPairs(std::vector<std::pair<std::string, Value>> items) {
 // someone actually wants prettier output.
 template <typename MeshT>
 void meshToVertsAndFaces(const MeshT& mesh, Value& vertsOut, Value& facesOut) {
-    std::map<std::array<double, 3>, int> vertMap;
-    std::vector<Value> verts;
-    std::vector<Value> faces;
-
     const size_t numProp = mesh.numProp == 0 ? 3 : static_cast<size_t>(mesh.numProp);
-    const size_t numVert = mesh.vertProperties.size() / (numProp == 0 ? 1 : numProp);
+    const size_t numVert = numProp == 0 ? 0 : mesh.vertProperties.size() / numProp;
 
-    const auto indexOf = [&](uint32_t v) -> int {
-        if (static_cast<size_t>(v) >= numVert) return -1;
-        const size_t base = static_cast<size_t>(v) * numProp;
-        const std::array<double, 3> pos = {static_cast<double>(mesh.vertProperties[base + 0]),
-                                           static_cast<double>(mesh.vertProperties[base + 1]),
-                                           static_cast<double>(mesh.vertProperties[base + 2])};
-        auto it = vertMap.find(pos);
-        if (it != vertMap.end()) return it->second;
-        const int idx = static_cast<int>(verts.size());
-        vertMap.emplace(pos, idx);
-        verts.push_back(pointOf(pos[0], pos[1], pos[2]));
-        return idx;
+    std::vector<std::array<double, 3>> raw;
+    raw.reserve(numVert);
+    for (size_t v = 0; v < numVert; ++v) {
+        const size_t base = v * numProp;
+        raw.push_back({static_cast<double>(mesh.vertProperties[base + 0]),
+                       static_cast<double>(mesh.vertProperties[base + 1]),
+                       static_cast<double>(mesh.vertProperties[base + 2])});
+    }
+
+    // Weld by exact position, purely for tidiness: Manifold splits
+    // property-vertices, so a plain cube arrives as 24 vertices rather than
+    // 8, and a script reading obj.vertices should not have to see that.
+    std::map<std::array<double, 3>, uint32_t> seen;
+    std::vector<uint32_t> remap(raw.size());
+    std::vector<std::array<double, 3>> welded;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        auto it = seen.find(raw[i]);
+        if (it != seen.end()) {
+            remap[i] = it->second;
+        } else {
+            const uint32_t idx = static_cast<uint32_t>(welded.size());
+            welded.push_back(raw[i]);
+            seen.emplace(raw[i], idx);
+            remap[i] = idx;
+        }
+    }
+
+    // ...but tidiness must never cost correctness. Coincident vertices are
+    // not always redundant: a solid with two shells that TOUCH (the two
+    // halves of an XOR meeting along a shared surface) has genuinely
+    // distinct vertices at identical positions, and merging those fuses the
+    // shells into edges with four faces. Measured on exactly that case: 248
+    // vertices, 168 distinct positions, and welding turned a watertight
+    // manifold mesh into one with 76 non-manifold edges -- which then lost
+    // 500 units of volume on the way back through polyhedron().
+    //
+    // Manifold's own indexing is manifold by construction, so the raw mesh
+    // is always the safe answer; the weld is kept only when it provably
+    // does no harm. checkMesh is a cheap combinatorial pass.
+    bool useWelded = welded.size() != raw.size();
+    if (useWelded) {
+        manifold::MeshGL64 probe;
+        probe.numProp = 3;
+        probe.vertProperties.reserve(welded.size() * 3);
+        for (const auto& v : welded) {
+            probe.vertProperties.push_back(v[0]);
+            probe.vertProperties.push_back(v[1]);
+            probe.vertProperties.push_back(v[2]);
+        }
+        probe.triVerts.reserve(mesh.triVerts.size());
+        for (uint32_t t : mesh.triVerts) {
+            probe.triVerts.push_back(t < remap.size() ? remap[t] : 0);
+        }
+        if (!checkMesh(probe).manifold()) useWelded = false;
+    }
+
+    const std::vector<std::array<double, 3>>& outVerts = useWelded ? welded : raw;
+    std::vector<Value> verts;
+    verts.reserve(outVerts.size());
+    for (const auto& v : outVerts) verts.push_back(pointOf(v[0], v[1], v[2]));
+
+    const auto index = [&](uint32_t v) -> double {
+        const uint32_t i = useWelded ? (v < remap.size() ? remap[v] : 0) : v;
+        return static_cast<double>(i);
     };
 
+    std::vector<Value> faces;
+    faces.reserve(mesh.triVerts.size() / 3);
     for (size_t t = 0; t + 2 < mesh.triVerts.size(); t += 3) {
-        const int a = indexOf(mesh.triVerts[t + 0]);
-        const int b = indexOf(mesh.triVerts[t + 1]);
-        const int c = indexOf(mesh.triVerts[t + 2]);
-        if (a < 0 || b < 0 || c < 0) continue;
+        if (mesh.triVerts[t] >= numVert || mesh.triVerts[t + 1] >= numVert ||
+            mesh.triVerts[t + 2] >= numVert) {
+            continue;
+        }
         // a, c, b -- see (1) above.
-        faces.push_back(listOf({Value{static_cast<double>(a)}, Value{static_cast<double>(c)},
-                                Value{static_cast<double>(b)}}));
+        faces.push_back(listOf({Value{index(mesh.triVerts[t + 0])},
+                                Value{index(mesh.triVerts[t + 2])},
+                                Value{index(mesh.triVerts[t + 1])}}));
     }
 
     vertsOut = listOf(std::move(verts));

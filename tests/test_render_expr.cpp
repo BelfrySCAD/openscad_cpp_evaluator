@@ -384,3 +384,78 @@ TEST(RenderExprEngines, ProvenanceStaysCleanUnderTheVm) {
     EXPECT_EQ(with.ev.idToNode.size(), without.ev.idToNode.size());
     EXPECT_EQ(with.ev.idToColor.size(), without.ev.idToColor.size());
 }
+
+// -- Touching shells must not be welded together ---------------------------
+//
+// Regression for a silent, geometry-destroying bug. Welding coincident
+// vertices is a REPAIR for meshes whose seams carry duplicates (BOSL2 VNFs
+// routinely do). Applied blindly it destroys a mesh that was already sound:
+// a solid whose shells TOUCH has genuinely distinct vertices at identical
+// positions, and merging those fuses the shells into edges with four faces.
+//
+// Measured on the case below: welding turned a watertight manifold mesh of
+// 104 vertices into a 72-vertex one with 32 non-manifold edges. Both the
+// exporter and polyhedron() now weld only when it provably does no harm.
+
+namespace {
+
+// A block with a rod through it, XORed: the rod's protruding stubs touch the
+// block's faces exactly, so the shells share vertex positions.
+constexpr const char* kTouchingShells =
+    "union() {\n"
+    "  difference(){ cube([20,20,20],center=true); cylinder(d=8,h=60,center=true,$fn=16); }\n"
+    "  difference(){ cylinder(d=8,h=60,center=true,$fn=16); cube([20,20,20],center=true); }\n"
+    "}\n";
+
+} // namespace
+
+TEST(RenderExpr, DoesNotWeldTouchingShellsTogether) {
+    Measured r = runScript(std::string("o = render() { ") + kTouchingShells + " };\n"
+                            "echo(o.volume, o.genus, len(o.vertices));");
+    ASSERT_EQ(r.echoes.size(), 1u);
+    // 104, not 72: the 32 coincident-but-distinct vertices are kept apart.
+    // A negative genus is the signal that this solid has several shells.
+    EXPECT_EQ(r.echoes[0], "ECHO: 8979.67, -1, 104");
+}
+
+TEST(RenderExpr, TouchingShellsSurviveThePolyhedronRoundTrip) {
+    // The end-to-end symptom: volume silently dropped on the way back
+    // through polyhedron(), and the viewport showed backfaces where the
+    // fused shells had inverted.
+    Measured r = runScript(std::string("o = render() { ") + kTouchingShells + " };\n"
+                            "rt = render() { polyhedron(o); };\n"
+                            "echo(o.volume == rt.volume, o.genus == rt.genus,\n"
+                            "     len(o.vertices) == len(rt.vertices));");
+    ASSERT_EQ(r.echoes.size(), 1u);
+    EXPECT_EQ(r.echoes[0], "ECHO: true, true, true");
+}
+
+TEST(RenderExpr, WeldingStillHappensWhenItIsSafe) {
+    // The weld must not be abandoned wholesale -- Manifold splits
+    // property-vertices, so a plain cube arrives as 24 vertices and a script
+    // reading obj.vertices should still see 8.
+    Measured r = runScript("o = render() { cube(10); };\necho(len(o.vertices), len(o.faces));");
+    ASSERT_EQ(r.echoes.size(), 1u);
+    EXPECT_EQ(r.echoes[0], "ECHO: 8, 12");
+}
+
+TEST(RenderExpr, XorChainMatchesTheSameGeometryBuiltDirectly) {
+    // The reported failure, reduced: an XOR chain routed through render()
+    // and polyhedron() must produce the same solid as building it inline.
+    const std::string shapes =
+        "$fn=36;\n"
+        "module geometry(o) { if (o.dim == 3) polyhedron(o); }\n"
+        "A = [30,10,10]; B = [10,30,10];\n";
+    const std::string inlineXor =
+        shapes +
+        "x = render() { union() {\n"
+        "  difference(){ cube(A,center=true); cube(B,center=true); }\n"
+        "  difference(){ cube(B,center=true); cube(A,center=true); } } };\n"
+        "y = render() { union() {\n"
+        "  difference(){ polyhedron(x); rotate([90,0,0]) cylinder(d=5,h=30,center=true); }\n"
+        "  difference(){ rotate([90,0,0]) cylinder(d=5,h=30,center=true); polyhedron(x); } } };\n"
+        "echo(y.volume);";
+    Measured r = runScript(inlineXor);
+    ASSERT_EQ(r.echoes.size(), 1u);
+    EXPECT_EQ(r.echoes[0], "ECHO: 3804.65");
+}
