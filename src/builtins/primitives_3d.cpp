@@ -630,6 +630,37 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
         facesArg = std::move(newFaces);
     }
 
+    // polyhedron(vnf) -- BOSL2's [vertices, faces] 2-list, which is what
+    // every BOSL2 function passes around and what obj.vnf holds. Only
+    // considered when `faces` was not given separately, so the two-argument
+    // form always wins and can never be reinterpreted.
+    //
+    // The discriminator is BOSL2's own is_vnf test: a VNF's second element
+    // is a list of FACES, i.e. a list of lists. A plain points list of
+    // length 2 has a point there instead -- bare numbers, not lists -- and
+    // is left alone. (Two points cannot describe a polyhedron anyway, so
+    // nothing legitimate is being taken over.)
+    if (isUndef(facesArg)) {
+        if (const ListPtr* outer = std::get_if<ListPtr>(&pointsArg); outer && *outer &&
+            (*outer)->items.size() == 2) {
+            const ListPtr* maybeVerts = std::get_if<ListPtr>(&(*outer)->items[0]);
+            const ListPtr* maybeFaces = std::get_if<ListPtr>(&(*outer)->items[1]);
+            const bool facesAreLists =
+                maybeFaces && *maybeFaces && !(*maybeFaces)->items.empty() &&
+                std::holds_alternative<ListPtr>((*maybeFaces)->items[0]);
+            const bool vertsArePoints =
+                maybeVerts && *maybeVerts && !(*maybeVerts)->items.empty() &&
+                std::holds_alternative<ListPtr>((*maybeVerts)->items[0]);
+            if (facesAreLists && vertsArePoints) {
+                // Copy before assigning: both borrow into pointsArg's list.
+                Value newPoints = (*outer)->items[0];
+                Value newFaces = (*outer)->items[1];
+                pointsArg = std::move(newPoints);
+                facesArg = std::move(newFaces);
+            }
+        }
+    }
+
     const ListPtr* pointsList = std::get_if<ListPtr>(&pointsArg);
     const ListPtr* facesList = std::get_if<ListPtr>(&facesArg);
     if (!pointsList || !*pointsList || !facesList || !*facesList) {

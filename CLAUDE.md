@@ -1128,6 +1128,20 @@ vector and `oscEqual` is order-sensitive):
 `vnf` is the `[vertices, faces]` 2-list BOSL2 functions actually take.
 `polyhedron()` and `polygon()` also accept the object directly, and will accept
 *any* object carrying the right keys, not just one `render()` produced.
+`polyhedron()` additionally accepts the bare `[vertices, faces]` 2-list, so a
+BOSL2 VNF goes straight in — all four of these are the same call:
+
+```openscad
+polyhedron(obj);                        // the object
+polyhedron(obj.vnf);                    // the 2-list
+polyhedron(obj.vertices, obj.faces);    // the halves
+polyhedron(spheroid(d=30));             // any BOSL2 VNF
+```
+
+The 2-list form is only considered when `faces` was not given separately, so the
+two-argument call can never be reinterpreted. The discriminator is BOSL2's own
+`is_vnf` test — a VNF's second element is a list of *lists*, where a plain points
+list has a point (bare numbers) there.
 
 ### Things that will bite
 
