@@ -1,3 +1,4 @@
+#include "openscad_cpp_evaluator/mesh_check.hpp"
 #include "builtins.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
@@ -666,22 +667,64 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
         }
     }
 
-    std::vector<uint32_t> tris;
+    // Triangulate against the RAW indices first. Welding only renames
+    // vertices, never moves them, so the ear clipping is identical either
+    // way -- which means the welded triangles can be derived afterwards by
+    // remapping, rather than triangulating twice.
+    std::vector<uint32_t> rawTris;
     for (const Value& faceVal : (*facesList)->items) {
         const ListPtr* faceList = std::get_if<ListPtr>(&faceVal);
         if (!faceList || !*faceList) continue;
-        std::vector<size_t> remapped;
-        remapped.reserve((*faceList)->items.size());
+        std::vector<size_t> face;
+        face.reserve((*faceList)->items.size());
         for (const Value& idxVal : (*faceList)->items) {
             const size_t idx = static_cast<size_t>(toDoubleLenient(idxVal));
-            remapped.push_back(idx < remap.size() ? remap[idx] : 0);
+            face.push_back(idx < rawVerts.size() ? idx : 0);
         }
-        triangulateFace(uniqueVerts, remapped, tris);
+        triangulateFace(rawVerts, face, rawTris);
     }
 
+    std::vector<uint32_t> weldedTris;
+    weldedTris.reserve(rawTris.size());
+    for (uint32_t t : rawTris) weldedTris.push_back(static_cast<uint32_t>(remap[t]));
+
+    // Welding is a repair for meshes whose seams and poles carry duplicate
+    // vertices -- BOSL2 VNFs routinely do, and without it they come out as
+    // NotManifold. But it is only ever a repair, and applied blindly it
+    // BREAKS a mesh that was already sound: a solid with two shells that
+    // touch (the two halves of an XOR meeting along a shared surface) has
+    // genuinely coincident vertices belonging to different shells, and
+    // merging those fuses the shells into edges with four faces. Measured
+    // on exactly such a case: 248 raw vertices, 168 distinct positions,
+    // welding turned a watertight manifold mesh into one with 76
+    // non-manifold edges and silently lost 500 units of volume.
+    //
+    // So: weld only when the raw mesh actually needs it. checkMesh is a
+    // cheap combinatorial pass (no Manifold construction), and its own doc
+    // comment names this exact hazard -- "two boxes fused along a face are
+    // watertight but have edges with four faces".
+    const bool weldChangesAnything = uniqueVerts.size() != rawVerts.size();
+    bool useWelded = weldChangesAnything;
+    if (weldChangesAnything) {
+        manifold::MeshGL64 probe;
+        probe.numProp = 3;
+        probe.vertProperties.reserve(rawVerts.size() * 3);
+        for (const auto& v : rawVerts) {
+            probe.vertProperties.push_back(v[0]);
+            probe.vertProperties.push_back(v[1]);
+            probe.vertProperties.push_back(v[2]);
+        }
+        probe.triVerts.assign(rawTris.begin(), rawTris.end());
+        // Already sound without the repair -> leave it alone.
+        if (checkMesh(probe).manifold()) useWelded = false;
+    }
+
+    const std::vector<std::array<double, 3>>& outVerts = useWelded ? uniqueVerts : rawVerts;
+    const std::vector<uint32_t>& tris = useWelded ? weldedTris : rawTris;
+
     std::vector<Value> vertsValues;
-    vertsValues.reserve(uniqueVerts.size() * 3);
-    for (const auto& v : uniqueVerts) {
+    vertsValues.reserve(outVerts.size() * 3);
+    for (const auto& v : outVerts) {
         vertsValues.push_back(Value{v[0]});
         vertsValues.push_back(Value{v[1]});
         vertsValues.push_back(Value{v[2]});
