@@ -459,3 +459,38 @@ TEST(RenderExpr, XorChainMatchesTheSameGeometryBuiltDirectly) {
     ASSERT_EQ(r.echoes.size(), 1u);
     EXPECT_EQ(r.echoes[0], "ECHO: 3804.65");
 }
+
+// -- polyhedron() accepts a VNF 2-list ------------------------------------
+//
+// [vertices, faces] is what every BOSL2 function passes around and what
+// obj.vnf holds, so it should go straight in without being split apart.
+
+TEST(RenderExpr, PolyhedronAcceptsAVnfTwoList) {
+    Measured r = runScript(
+        "o = render() { difference(){ cube(20,center=true); "
+        "cylinder(d=8,h=40,center=true,$fn=16); } };\n"
+        "a = render() { polyhedron(o.vnf); };\n"
+        "b = render() { polyhedron(o.vertices, o.faces); };\n"
+        "c = render() { polyhedron(o); };\n"
+        "echo(a.volume == b.volume, b.volume == c.volume, a.genus == c.genus);");
+    ASSERT_EQ(r.echoes.size(), 1u);
+    EXPECT_EQ(r.echoes[0], "ECHO: true, true, true");
+}
+
+TEST(RenderExpr, ExplicitFacesAlwaysWinOverVnfInterpretation) {
+    // The 2-list form is only considered when `faces` was not supplied, so
+    // the two-argument call can never be reinterpreted.
+    Measured r = runScript("o = render() { cube(4); };\n"
+                            "x = render() { polyhedron(points=o.vertices, faces=o.faces); };\n"
+                            "echo(x.volume);");
+    ASSERT_EQ(r.echoes.size(), 1u);
+    EXPECT_EQ(r.echoes[0], "ECHO: 64");
+}
+
+TEST(RenderExpr, TwoPointListIsNotMistakenForAVnf) {
+    // A points list that happens to have length 2 has a POINT as its second
+    // element -- bare numbers, not lists -- so it must not be taken over.
+    // It is still not a valid polyhedron, so it errors rather than silently
+    // building something.
+    EXPECT_THROW(evalSrc("polyhedron([[0,0,0],[1,1,1]]);"), std::exception);
+}
