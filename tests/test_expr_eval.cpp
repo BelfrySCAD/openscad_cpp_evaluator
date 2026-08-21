@@ -511,6 +511,112 @@ TEST(ExprEvalIndexing, ObjectIndexingByKey) {
     EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc("object(a=1)[\"nope\"]", ev)));
 }
 
+// -- object() entry lists -------------------------------------------------
+//
+// An unnamed list argument holds entries: [key, value] SETS, and the
+// single-element [key] DELETES. Every value and every warning below was
+// diffed character-for-character against OpenSCAD 2026.02.01 running with
+// --enable=object-function.
+
+namespace {
+
+// Renders an object as its key list, "a,c,d" -- enough to pin both which
+// keys survived and their ORDER, which is observable (ValueObject is
+// insertion-ordered and oscEqual is order-sensitive).
+std::string keysOf(const Value& v) {
+    const ObjectPtr* o = std::get_if<ObjectPtr>(&v);
+    if (!o || !*o) return "<undef>";
+    std::string out;
+    for (const auto& [k, _] : (*o)->items) {
+        if (!out.empty()) out += ",";
+        out += k;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(ExprEvalObject, SingleElementEntryDeletesTheKey) {
+    Evaluator ev;
+    EXPECT_EQ(keysOf(evalSrc("object(object(a=42,b=53,c=8), [[\"d\",18],[\"b\"]])", ev)), "a,c,d");
+    EXPECT_EQ(keysOf(evalSrc("object(object(a=42,b=53,c=8), [[\"b\"]])", ev)), "a,c");
+}
+
+TEST(ExprEvalObject, TwoElementEntryStillSets) {
+    Evaluator ev;
+    EXPECT_EQ(keysOf(evalSrc("object(object(a=42,b=53,c=8), [[\"d\",18]])", ev)), "a,b,c,d");
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("object(object(a=1), [[\"a\",9]]).a", ev)), 9.0);
+}
+
+TEST(ExprEvalObject, DeleteRemovesRatherThanBlanks) {
+    // Observable through ORDER: a deleted key re-set afterwards lands at the
+    // end, where an overwrite would have kept its original position.
+    Evaluator ev;
+    EXPECT_EQ(keysOf(evalSrc("object(object(a=42,b=53,c=8), [[\"b\"],[\"b\",99]])", ev)), "a,c,b");
+    EXPECT_EQ(keysOf(evalSrc("object(object(a=42,b=53,c=8), [[\"b\",99],[\"b\"]])", ev)), "a,c");
+    EXPECT_DOUBLE_EQ(asNum(evalSrc("object(object(a=42,b=53,c=8), [[\"b\"],[\"b\",99]]).b", ev)), 99.0);
+}
+
+TEST(ExprEvalObject, DeletingAnAbsentKeyIsASilentNoOp) {
+    std::vector<std::string> warnings;
+    Evaluator ev([&](const std::string& m) { warnings.push_back(m); });
+    EXPECT_EQ(keysOf(evalSrc("object(object(a=42,b=53,c=8), [[\"zz\"]])", ev)), "a,b,c");
+    EXPECT_TRUE(warnings.empty()) << "unexpected: " << (warnings.empty() ? "" : warnings[0]);
+}
+
+TEST(ExprEvalObject, DeletingTwiceIsHarmless) {
+    Evaluator ev;
+    EXPECT_EQ(keysOf(evalSrc("object(object(a=42,b=53,c=8), [[\"b\"],[\"b\"]])", ev)), "a,c");
+}
+
+TEST(ExprEvalObject, MalformedEntriesWarnAndYieldUndef) {
+    // Each abandons the whole call at the first bad entry.
+    const char* cases[] = {
+        "object(object(a=1), [[]])",              // empty entry
+        "object(object(a=1), [[\"a\",1,2]])",       // too long
+        "object(object(a=1), [[5,1]])",           // non-string key, 2 elements
+        "object(object(a=1), [[5]])",             // non-string key, 1 element
+        "object(object(a=1), [\"b\"])",             // entry is not a list
+        "object(object(a=1), 42)",                // argument is neither object nor list
+    };
+    for (const char* src : cases) {
+        std::vector<std::string> warnings;
+        Evaluator ev([&](const std::string& m) { warnings.push_back(m); });
+        EXPECT_TRUE(std::holds_alternative<std::monostate>(evalSrc(src, ev))) << src;
+        EXPECT_EQ(warnings.size(), 1u) << src;
+    }
+}
+
+TEST(ExprEvalObject, WarningTextMatchesTheReference) {
+    // Quoted verbatim from OpenSCAD 2026.02.01, including its own
+    // inconsistent spacing: the "not a list" case puts spaces inside the
+    // parens where the others do not, and the "unnamed argument" case ends
+    // with a trailing space before the position suffix.
+    struct Case { const char* src; const char* want; };
+    const Case cases[] = {
+        {"object(object(a=1), [[]])",
+         "object(Argument 1 [Element 0 []]) Entry is empty."},
+        {"object(object(a=1), [[\"a\",1,2]])",
+         "object(Argument 1 [Element 0 [...]]) Entry length is 3, must be 1 [key] or 2 [key,value]."},
+        {"object(object(a=1), [[5,1]])",
+         "object(Argument 1 [Element 0 [<number>,value]]) The key of the entry is not <string> but <number>."},
+        {"object(object(a=1), [[5]])",
+         "object(Argument 1 [Element 0 [<number>]]) The key of the entry is not <string> but <number>."},
+        {"object(object(a=1), [\"b\"])",
+         "object( Argument 1 [Element 0 <string>] ) Entry type is not a list, it is <string>."},
+        {"object(object(a=1), 42)",
+         "object(Argument 1 <number>) An unnamed argument must be either <object> or <list>, it is <number>. "},
+    };
+    for (const auto& c : cases) {
+        std::vector<std::string> warnings;
+        Evaluator ev([&](const std::string& m) { warnings.push_back(m); });
+        evalSrc(c.src, ev);
+        ASSERT_EQ(warnings.size(), 1u) << c.src;
+        EXPECT_NE(warnings[0].find(c.want), std::string::npos)
+            << "for: " << c.src << "\n  got: " << warnings[0] << "\n want: " << c.want;
+    }
+}
+
 TEST(ExprEvalIndexing, ObjectMemberAccessByName) {
     Evaluator ev;
     EXPECT_DOUBLE_EQ(asNum(evalSrc("object(a=1, b=2).b", ev)), 2.0);

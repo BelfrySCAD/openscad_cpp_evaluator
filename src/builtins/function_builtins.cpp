@@ -454,7 +454,33 @@ bool isBuiltinFunctionName(const std::string& name) {
     return names.count(name) > 0;
 }
 
-Value mergeObjectArgs(const std::vector<std::pair<std::optional<std::string>, Value>>& evaluated) {
+// object(...) argument merging, matching the reference's own semantics and
+// diagnostics (Builtins.cc's builtin_object).
+//
+// An unnamed argument is either another object (its keys are merged in) or
+// a LIST of entries, where each entry is:
+//   [key, value]  -- set (or overwrite) that key
+//   [key]         -- DELETE that key
+//
+// The single-element delete form is the part that is easy to miss. Deleting
+// removes the key outright rather than blanking it, so a later re-set
+// appends at the end: object(a, [["b"], ["b", 99]]) puts b last, while
+// object(a, [["b", 99], ["b"]]) has no b at all. That ordering is
+// observable -- ValueObject is insertion-ordered and oscEqual is
+// order-sensitive.
+//
+// Deleting a key that is not there is a silent no-op, as it is upstream.
+// Every malformed entry warns and abandons the whole call (returning undef),
+// stopping at the first one. The warning text is quoted verbatim from the
+// reference, including its own inconsistent spacing -- the "not a list"
+// case really does put spaces inside the parens where the others do not,
+// and the "unnamed argument" case really does end with a trailing space.
+Value mergeObjectArgs(Evaluator& ev, const std::vector<std::pair<std::optional<std::string>, Value>>& evaluated,
+                       const oscad::Position* pos) {
+    static const char* kEntryRules =
+        " In an unnamed list, entries must be [key,value] to set or [key] to delete."
+        " The key must be <string>.";
+
     std::vector<std::pair<std::string, Value>> result;
     const auto setKey = [&](const std::string& k, const Value& v) {
         for (auto& [ek, ev2] : result) {
@@ -465,30 +491,79 @@ Value mergeObjectArgs(const std::vector<std::pair<std::optional<std::string>, Va
         }
         result.emplace_back(k, v);
     };
-    for (const auto& [name, v] : evaluated) {
+    const auto deleteKey = [&](const std::string& k) {
+        for (auto it = result.begin(); it != result.end(); ++it) {
+            if (it->first == k) {
+                result.erase(it);
+                return;
+            }
+        }
+        // Deleting an absent key is deliberately silent.
+    };
+
+    for (size_t argIdx = 0; argIdx < evaluated.size(); ++argIdx) {
+        const auto& [name, v] = evaluated[argIdx];
         if (name) {
             setKey(*name, v);
             continue;
         }
+        const std::string argPrefix = "object(Argument " + std::to_string(argIdx) + " ";
         if (const ObjectPtr* o = std::get_if<ObjectPtr>(&v); o && *o) {
             for (const auto& [k, kv] : (*o)->items) setKey(k, kv);
-        } else if (const ListPtr* l = std::get_if<ListPtr>(&v); l && *l) {
-            for (const Value& entry : (*l)->items) {
-                const ListPtr* pair = std::get_if<ListPtr>(&entry);
-                if (pair && *pair && (*pair)->items.size() == 2 && std::holds_alternative<std::string>((*pair)->items[0])) {
-                    setKey(std::get<std::string>((*pair)->items[0]), (*pair)->items[1]);
-                } else {
-                    return Value{};
-                }
-            }
-        } else if (!std::holds_alternative<std::monostate>(v)) {
+            continue;
+        }
+        const ListPtr* l = std::get_if<ListPtr>(&v);
+        if (!l || !*l) {
+            // undef is accepted and contributes nothing, as upstream.
+            if (std::holds_alternative<std::monostate>(v)) continue;
+            ev.warn(argPrefix + "<" + oscTypeName(v) + ">) An unnamed argument must be either <object> or"
+                                 " <list>, it is <" + oscTypeName(v) + ">. ",
+                    pos);
             return Value{};
+        }
+        for (size_t elemIdx = 0; elemIdx < (*l)->items.size(); ++elemIdx) {
+            const Value& entry = (*l)->items[elemIdx];
+            const std::string where = "[Element " + std::to_string(elemIdx) + " ";
+            const ListPtr* pair = std::get_if<ListPtr>(&entry);
+            if (!pair || !*pair) {
+                // Note the spaces inside the parens: upstream's own quirk.
+                ev.warn("object( Argument " + std::to_string(argIdx) + " " + where + "<" + oscTypeName(entry) +
+                            ">] ) Entry type is not a list, it is <" + oscTypeName(entry) + ">." + kEntryRules,
+                        pos);
+                return Value{};
+            }
+            const size_t n = (*pair)->items.size();
+            if (n == 0) {
+                ev.warn(argPrefix + where + "[]]) Entry is empty." + kEntryRules, pos);
+                return Value{};
+            }
+            if (n > 2) {
+                ev.warn(argPrefix + where + "[...]]) Entry length is " + std::to_string(n) +
+                            ", must be 1 [key] or 2 [key,value]." + kEntryRules,
+                        pos);
+                return Value{};
+            }
+            const Value& key = (*pair)->items[0];
+            if (!std::holds_alternative<std::string>(key)) {
+                const std::string shape = n == 2 ? "[<" + oscTypeName(key) + ">,value]"
+                                                  : "[<" + oscTypeName(key) + ">]";
+                ev.warn(argPrefix + where + shape + "]) The key of the entry is not <string> but <" +
+                            oscTypeName(key) + ">." + kEntryRules,
+                        pos);
+                return Value{};
+            }
+            if (n == 2) {
+                setKey(std::get<std::string>(key), (*pair)->items[1]);
+            } else {
+                deleteKey(std::get<std::string>(key));
+            }
         }
     }
     return Value{std::make_shared<const ValueObject>(ValueObject{std::move(result)})};
 }
 
-Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx) {
+Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
+                     const oscad::ASTNode& node) {
     std::vector<std::pair<std::optional<std::string>, Value>> evaluated;
     evaluated.reserve(arguments.size());
     for (const auto& argPtr : arguments) {
@@ -499,7 +574,7 @@ Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argu
         }
         evaluated.emplace_back(std::move(name), std::move(v));
     }
-    return mergeObjectArgs(evaluated);
+    return mergeObjectArgs(ev, evaluated, &node.position());
 }
 
 namespace {

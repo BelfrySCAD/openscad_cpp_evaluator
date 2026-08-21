@@ -41,7 +41,8 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
 // evaluated exactly once (resolving into a CallArgs first and then
 // re-evaluating from the raw list here would run every argument expression
 // twice -- wrong for anything with a side effect, e.g. rands()).
-Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx);
+Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
+                     const oscad::ASTNode& node);
 
 // The shared merge core builtinObject wraps: given ALREADY-EVALUATED
 // (name-or-nullopt, Value) pairs in exact call-site order, merges them the
@@ -52,6 +53,7 @@ Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argu
 // logic against its own already-evaluated (argNames[i], args[i]) pairs
 // (already in call-site order by construction -- see CallSite::argNames)
 // without re-deriving the merge rules or touching raw AST nodes.
-Value mergeObjectArgs(const std::vector<std::pair<std::optional<std::string>, Value>>& evaluated);
+Value mergeObjectArgs(Evaluator& ev, const std::vector<std::pair<std::optional<std::string>, Value>>& evaluated,
+                       const oscad::Position* pos);
 
 } // namespace oscadeval

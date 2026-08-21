@@ -787,7 +787,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         std::vector<std::pair<std::optional<std::string>, Value>> pairs;
                         pairs.reserve(argCount);
                         for (size_t i = 0; i < argCount; ++i) pairs.emplace_back(site.argNames[i], std::move(args[i]));
-                        f.stack.push_back(mergeObjectArgs(pairs));
+                        f.stack.push_back(mergeObjectArgs(ev, pairs, &site.callNode->position()));
                         ++f.pc;
                     } else if (site.isBuiltin) {
                         CallArgs callArgs = buildCallArgs(site, args, argCount);

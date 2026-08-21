@@ -886,7 +886,7 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
             // call-site interleaved order (see builtinObject's own
             // comment) -- called directly, before resolveArgs, so
             // arguments aren't evaluated twice.
-            if (leftId->name == "object") return builtinObject(*this, node.arguments, ctx);
+            if (leftId->name == "object") return builtinObject(*this, node.arguments, ctx, node);
             CallArgs args = resolveArgs(*this, node.arguments, ctx);
             return evalBuiltinFunction(*this, leftId->name, args, node);
         }
