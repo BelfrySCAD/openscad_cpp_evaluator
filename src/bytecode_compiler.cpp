@@ -466,7 +466,7 @@ public:
                 compileExpr(*n.start, out, scope);
                 compileExpr(*n.end, out, scope);
                 compileExpr(*n.step, out, scope);
-                out.push_back({Op::Range, 0, 0, &n.position()});
+                out.push_back({Op::Range, n.implicitStep ? 1 : 0, 0, &n.position()});
                 return;
             }
             case NodeKind::PrimaryIndex: {

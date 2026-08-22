@@ -1355,18 +1355,34 @@ const char* kSmaller = "begin is smaller than the end, but step is negative";
 
 } // namespace
 
-TEST(RangeDirection, PositiveStepPastTheEndWarns) {
-    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[3:1:1]) echo(i);"), kGreater));
-    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[1:0]) echo(i);"), kGreater));  // implicit step
+TEST(RangeDirection, ImplicitStepPastTheEndWarns) {
+    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[1:0]) echo(i);"), kGreater));
+    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[3:1]) echo(i);"), kGreater));
 }
 
-TEST(RangeDirection, NegativeStepPastTheEndWarns) {
-    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[0:-1:3]) echo(i);"), kSmaller));
+TEST(RangeDirection, AnExplicitStepIsTakenAsDeliberate) {
+    // Divergence from the reference, which warns for both of these. Writing
+    // the step out is a statement of intent; the warning exists for the
+    // author who wrote [3:1] meaning [3:-1:1] and got an empty loop.
+    for (const char* src : {"for (i=[3:1:1]) echo(i);", "for (i=[0:-1:3]) echo(i);"}) {
+        EXPECT_TRUE(warningsFrom(src).empty()) << src;
+    }
+}
+
+TEST(RangeDirection, TheNegativeStepWordingIsUnreachable) {
+    // An implicit step is always exactly 1, so no input can produce the
+    // reference's second message. If this ever fires, the gate has been
+    // widened back to explicit steps and this port needs that wording back.
+    for (const char* src : {"for (i=[0:-1:3]) echo(i);", "for (i=[3:1]) echo(i);",
+                             "x = [5:0];", "echo(chr([70:65]));"}) {
+        EXPECT_FALSE(hasWarning(warningsFrom(src), kSmaller)) << src;
+    }
 }
 
 TEST(RangeDirection, AWellFormedRangeIsSilent) {
     for (const char* src : {"for (i=[1:1:3]) echo(i);", "for (i=[3:-1:1]) echo(i);",
-                             "for (i=[3:3]) echo(i);", "for (i=[0:0.5:2]) echo(i);"}) {
+                             "for (i=[3:3]) echo(i);", "for (i=[0:0.5:2]) echo(i);",
+                             "for (i=[1:3]) echo(i);"}) {
         EXPECT_TRUE(warningsFrom(src).empty()) << src;
     }
 }
@@ -1380,24 +1396,33 @@ TEST(RangeDirection, AZeroStepIsNotReportedAsADirectionProblem) {
     EXPECT_FALSE(hasWarning(w, kSmaller));
 }
 
-TEST(RangeDirection, EveryRangeIteratingConstructWarns) {
-    // The point of wiring this into expandIterable rather than one caller.
+TEST(RangeDirection, WarnsWhereTheRangeIsBuiltNotWhereItIsIterated) {
+    // The reference reports this against the range literal, so a range that
+    // is assigned and never iterated still warns -- matched here.
+    EXPECT_TRUE(hasWarning(warningsFrom("r = [5:0];\ncube(1);"), kGreater));
+    // And a range built once, iterated twice, warns once.
+    const std::vector<std::string> w =
+        warningsFrom("r = [5:0];\nfor (i=r) echo(i);\nfor (j=r) echo(j);");
+    EXPECT_EQ(w.size(), 1u);
+}
+
+TEST(RangeDirection, EveryRangeBuildingConstructWarns) {
+    // Construction is one shared site, but each of these reaches it by its
+    // own route -- the interpreter's literal, the VM's Range op, and the
+    // argument-evaluation path into a builtin.
     {
-        const std::vector<std::string> w = warningsFrom("x = [for (i=[3:1:1]) i];");
+        const std::vector<std::string> w = warningsFrom("x = [for (i=[3:1]) i];");
         std::string got;
         for (const std::string& m : w) got += "\n    " + m;
         EXPECT_TRUE(hasWarning(w, kGreater)) << "list comprehension, got:" << got;
     }
-    EXPECT_TRUE(hasWarning(warningsFrom("intersection_for (i=[3:1:1]) cube(1);"), kGreater))
+    EXPECT_TRUE(hasWarning(warningsFrom("intersection_for (i=[3:1]) cube(1);"), kGreater))
         << "intersection_for";
-    EXPECT_TRUE(hasWarning(warningsFrom("echo(chr([70:1:65]));"), kGreater))
-        << "chr";
+    EXPECT_TRUE(hasWarning(warningsFrom("echo(chr([70:65]));"), kGreater)) << "chr";
     EXPECT_TRUE(hasWarning(warningsFrom(
         "module p() { children([1:0]); }\np() { cube(1); cube(2); }"), kGreater))
         << "children";
+    EXPECT_TRUE(hasWarning(warningsFrom("function f() = [5:0];\nx = f();"), kGreater))
+        << "returned from a function";
 }
 
-TEST(RangeDirection, WarnsOncePerEvaluationNotPerAbsentIteration) {
-    const std::vector<std::string> w = warningsFrom("for (i=[3:1:1]) echo(i);");
-    EXPECT_EQ(w.size(), 1u);
-}

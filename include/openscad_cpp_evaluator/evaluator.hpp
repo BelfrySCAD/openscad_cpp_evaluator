@@ -392,7 +392,12 @@ public:
     Value applyUnaryOp(oscad::NodeKind kind, const Value& v, const oscad::Position& pos);
     Value applyIndexAccess(const Value& obj, const Value& idx);
     Value applyMemberAccess(const Value& obj, const std::string& member);
-    Value applyRange(const Value& startV, const Value& endV, const Value& stepV);
+    // `implicitStep` is the RangeLiteral's own flag: true when the source
+    // wrote `[a:b]` and the parser supplied the 1.0. It only affects whether
+    // the backwards-range warning fires; the resulting value is the same
+    // either way. `pos` locates that warning.
+    Value applyRange(const Value& startV, const Value& endV, const Value& stepV, bool implicitStep = false,
+                     const oscad::Position* pos = nullptr);
 
     // Entry point for a call site resolved INSIDE compiled bytecode (the
     // CALL_FN opcode, bytecode_vm.cpp): `bound` is already fully evaluated
