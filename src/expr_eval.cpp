@@ -309,12 +309,14 @@ Value Evaluator::applyRange(const Value& startV, const Value& endV, const Value&
     // here, at construction, because that is where the reference reports it:
     // `r = [5:0];` warns even if nothing ever iterates r.
     //
-    // Only an IMPLICIT step is checked. Writing the step out is taken as
-    // deliberate, so [5:1:0] and [0:-1:5] stay silent -- a deliberate
-    // divergence from the reference, which warns for those too. An implicit
-    // step is always exactly 1, so the reference's other wording ("begin is
-    // smaller than the end, but step is negative") cannot arise here and no
-    // longer exists in this port.
+    // ponytail: only an IMPLICIT step is checked -- a deliberate divergence
+    // from the reference, which warns for [5:1:0] and [0:-1:5] as well.
+    // Writing the step out is taken as a statement of intent; the warning is
+    // for the author who wrote [5:0] meaning [5:-1:0] and got a silent empty
+    // loop. An implicit step is always exactly 1, so the reference's other
+    // wording ("begin is smaller than the end, but step is negative") cannot
+    // arise here and no longer exists in this port -- if it is ever needed
+    // again, this gate has been widened back to explicit steps.
     //
     // The epsilon matches the one the iteration path used before this check
     // moved here, so a range built from float arithmetic that lands a hair
