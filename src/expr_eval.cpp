@@ -177,6 +177,8 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                 const oscad::Position* pos = &assign->position();
                 IterableValues iter = expandIterable(values, [&](size_t count) {
                     warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
+                }, [&](bool stepPositive) {
+                    warn(rangeDirectionWarning(stepPositive), pos);
                 });
                 for (const Value& val : iter) {
                     EvalContext childCtx = parentCtx.letChildCtx();
