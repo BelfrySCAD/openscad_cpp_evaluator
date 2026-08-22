@@ -1157,3 +1157,247 @@ TEST(DollarVarChildren, ChildrenNIndexesStatementNotOutputBodyWhenAnEarlierState
     ASSERT_EQ(e.bodies.size(), 1u);
     EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-9); // cube(2)
 }
+
+// -- children(index): number, vector or range -----------------------------
+//
+// children() takes a number, a VECTOR of numbers, or a RANGE, so
+// children([3:1:5]) is children(3); children(4); children(5), and
+// children([3:-1:1]) is 3, 2, 1 in that order.
+//
+// Only a plain number used to be handled. toDoubleLenient collapses a list
+// or a range to 0, so every vector/range form silently rendered child 0 --
+// wrong geometry, no warning. Every case below was diffed against OpenSCAD
+// 2026.02.01.
+
+namespace {
+
+// Which children ran, in order, as "c3,c2,c1". Each child echoes its own
+// index, which survives ordering where a union of overlapping bodies would
+// not -- and unlike geometry it also shows duplicates.
+std::string childOrder(const std::string& picker) {
+    std::string out;
+    Evaluator ev([&](const std::string& m) {
+        const std::string tag = "ECHO: \"c";
+        const size_t at = m.find(tag);
+        if (at == std::string::npos) return;
+        if (!out.empty()) out += ",";
+        out += "c" + m.substr(at + tag.size(), m.find('"', at + tag.size()) - at - tag.size());
+    });
+    const std::string src =
+        "module pick() { " + picker + " }\n"
+        "pick() { echo(\"c0\"); echo(\"c1\"); echo(\"c2\"); echo(\"c3\"); echo(\"c4\"); echo(\"c5\"); }\n";
+    std::vector<std::unique_ptr<oscad::ASTNode>> ast = test::parseSrc(src);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    return out;
+}
+
+std::vector<std::string> childWarnings(const std::string& picker) {
+    std::vector<std::string> warnings;
+    Evaluator ev([&](const std::string& m) {
+        if (m.rfind("WARNING:", 0) == 0) warnings.push_back(m);
+    });
+    const std::string src =
+        "module pick() { " + picker + " }\n"
+        "pick() { echo(\"c0\"); echo(\"c1\"); echo(\"c2\"); }\n";
+    std::vector<std::unique_ptr<oscad::ASTNode>> ast = test::parseSrc(src);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    return warnings;
+}
+
+} // namespace
+
+TEST(ChildrenIndex, PlainNumberStillWorks) {
+    EXPECT_EQ(childOrder("children(2);"), "c2");
+    EXPECT_EQ(childOrder("children();"), "c0,c1,c2,c3,c4,c5");
+}
+
+TEST(ChildrenIndex, AscendingRangeSelectsEachInTurn) {
+    EXPECT_EQ(childOrder("children([3:1:5]);"), "c3,c4,c5");
+    EXPECT_EQ(childOrder("children([1:3]);"), "c1,c2,c3");  // implicit step
+}
+
+TEST(ChildrenIndex, DescendingRangeRunsBackwards) {
+    // The sign of the step decides direction, exactly as in a for-loop.
+    EXPECT_EQ(childOrder("children([3:-1:1]);"), "c3,c2,c1");
+    EXPECT_EQ(childOrder("children([5:-1:3]);"), "c5,c4,c3");
+    EXPECT_EQ(childOrder("children([2:-1:0]);"), "c2,c1,c0");
+}
+
+TEST(ChildrenIndex, RangeStepIsHonoured) {
+    EXPECT_EQ(childOrder("children([5:-2:0]);"), "c5,c3,c1");
+    EXPECT_EQ(childOrder("children([0:2:5]);"), "c0,c2,c4");
+}
+
+TEST(ChildrenIndex, SingleElementRange) {
+    EXPECT_EQ(childOrder("children([3:-1:3]);"), "c3");
+    EXPECT_EQ(childOrder("children([3:1:3]);"), "c3");
+}
+
+TEST(ChildrenIndex, VectorSelectsInTheGivenOrder) {
+    EXPECT_EQ(childOrder("children([3,4,5]);"), "c3,c4,c5");
+    EXPECT_EQ(childOrder("children([5,0,2]);"), "c5,c0,c2");
+}
+
+TEST(ChildrenIndex, DuplicatesAreKept) {
+    // children([2,2,2]) really does evaluate child 2 three times.
+    EXPECT_EQ(childOrder("children([2,2,2]);"), "c2,c2,c2");
+}
+
+TEST(ChildrenIndex, FractionalIndicesTruncate) {
+    EXPECT_EQ(childOrder("children([1.7]);"), "c1");
+    EXPECT_EQ(childOrder("children([0:0.5:2]);"), "c0,c0,c1,c1,c2");
+}
+
+TEST(ChildrenIndex, EmptySelectionsProduceNothing) {
+    EXPECT_EQ(childOrder("children([]);"), "");
+    // Wrong direction for the step -- naturally empty, same as a for-loop.
+    EXPECT_EQ(childOrder("children([1:0]);"), "");
+    EXPECT_EQ(childOrder("children([3:1:1]);"), "");
+}
+
+TEST(ChildrenIndex, AnOutOfRangeIndexIsSkippedNotFatal) {
+    // children([0,99]) still draws child 0.
+    EXPECT_EQ(childOrder("children([0,99]);"), "c0");
+    EXPECT_EQ(childOrder("children([99,1]);"), "c1");
+    EXPECT_EQ(childOrder("children([-1,0]);"), "c0");
+}
+
+TEST(ChildrenIndex, OutOfRangeWarns) {
+    // This used to return silently, for the plain-number form too.
+    const std::vector<std::string> w = childWarnings("children(99);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("Children index (99) out of bounds (3 children)"), std::string::npos) << w[0];
+}
+
+TEST(ChildrenIndex, NegativeIndexWarns) {
+    const std::vector<std::string> w = childWarnings("children(-1);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("out of bounds"), std::string::npos) << w[0];
+}
+
+TEST(ChildrenIndex, EachBadIndexInAVectorWarnsSeparately) {
+    const std::vector<std::string> w = childWarnings("children([99,98]);");
+    EXPECT_EQ(w.size(), 2u);
+}
+
+TEST(ChildrenIndex, BadParameterTypeWarns) {
+    // Quoted verbatim from the reference, trailing period included.
+    for (const char* src : {"children(\"a\");", "children([\"a\"]);",
+                             "children(true);", "children([true]);"}) {
+        const std::vector<std::string> w = childWarnings(src);
+        ASSERT_FALSE(w.empty()) << src;
+        EXPECT_NE(w[0].find("for children, only accept: empty, number, vector, range."),
+                  std::string::npos) << src << " -> " << w[0];
+    }
+}
+
+TEST(ChildrenIndex, GeometryFollowsTheSelection) {
+    // The echo-based checks above prove ordering; this one proves the
+    // geometry really is the selected children and not child 0.
+    // Written out rather than looped: children are counted as STATEMENTS,
+    // and a for-loop is one statement however many bodies it emits.
+    Evaluated e = evalSrc(
+        "module pick() { children([3:1:5]); }\n"
+        "pick() {\n"
+        "  translate([0,0,0]) cube(1);  translate([2,0,0]) cube(1);\n"
+        "  translate([4,0,0]) cube(1);  translate([6,0,0]) cube(1);\n"
+        "  translate([8,0,0]) cube(1);  translate([10,0,0]) cube(1);\n"
+        "}\n");
+    double total = 0.0;
+    manifold::Box all;
+    bool first = true;
+    for (const ColoredBody& b : e.bodies) {
+        if (!b.body || b.body->IsEmpty()) continue;
+        total += b.body->Volume();
+        all = first ? b.body->BoundingBox() : all.Union(b.body->BoundingBox());
+        first = false;
+    }
+    EXPECT_NEAR(total, 3.0, 1e-9);      // three unit cubes
+    EXPECT_NEAR(all.min.x, 6.0, 1e-9);  // children 3, 4, 5 sit at x = 6, 8, 10
+    EXPECT_NEAR(all.max.x, 11.0, 1e-9);
+}
+
+// -- range direction warnings ---------------------------------------------
+//
+// A range whose step points away from its end is naturally empty. The
+// reference warns rather than iterating zero times in silence, since it is
+// almost always a typo -- [1:0] where [1:-1:0] was meant. We did not warn
+// anywhere. Wired into expandIterable, so every construct that iterates a
+// range gets it: for, list comprehensions, intersection_for, children().
+
+namespace {
+
+std::vector<std::string> warningsFrom(const std::string& src) {
+    std::vector<std::string> warnings;
+    Evaluator ev([&](const std::string& m) {
+        if (m.rfind("WARNING:", 0) == 0) warnings.push_back(m);
+    });
+    std::vector<std::unique_ptr<oscad::ASTNode>> ast = test::parseSrc(src);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    return warnings;
+}
+
+bool hasWarning(const std::vector<std::string>& w, const std::string& needle) {
+    for (const std::string& m : w) {
+        if (m.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+const char* kGreater = "begin is greater than the end, but step is positive";
+const char* kSmaller = "begin is smaller than the end, but step is negative";
+
+} // namespace
+
+TEST(RangeDirection, PositiveStepPastTheEndWarns) {
+    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[3:1:1]) echo(i);"), kGreater));
+    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[1:0]) echo(i);"), kGreater));  // implicit step
+}
+
+TEST(RangeDirection, NegativeStepPastTheEndWarns) {
+    EXPECT_TRUE(hasWarning(warningsFrom("for (i=[0:-1:3]) echo(i);"), kSmaller));
+}
+
+TEST(RangeDirection, AWellFormedRangeIsSilent) {
+    for (const char* src : {"for (i=[1:1:3]) echo(i);", "for (i=[3:-1:1]) echo(i);",
+                             "for (i=[3:3]) echo(i);", "for (i=[0:0.5:2]) echo(i);"}) {
+        EXPECT_TRUE(warningsFrom(src).empty()) << src;
+    }
+}
+
+TEST(RangeDirection, AZeroStepIsNotReportedAsADirectionProblem) {
+    // Different failure entirely -- the reference calls it "too many
+    // elements". It shares rangeElementCount's nullopt with the
+    // wrong-direction case only by coincidence.
+    const std::vector<std::string> w = warningsFrom("for (i=[0:0:3]) echo(i);");
+    EXPECT_FALSE(hasWarning(w, kGreater));
+    EXPECT_FALSE(hasWarning(w, kSmaller));
+}
+
+TEST(RangeDirection, EveryRangeIteratingConstructWarns) {
+    // The point of wiring this into expandIterable rather than one caller.
+    {
+        const std::vector<std::string> w = warningsFrom("x = [for (i=[3:1:1]) i];");
+        std::string got;
+        for (const std::string& m : w) got += "\n    " + m;
+        EXPECT_TRUE(hasWarning(w, kGreater)) << "list comprehension, got:" << got;
+    }
+    EXPECT_TRUE(hasWarning(warningsFrom("intersection_for (i=[3:1:1]) cube(1);"), kGreater))
+        << "intersection_for";
+    EXPECT_TRUE(hasWarning(warningsFrom("echo(chr([70:1:65]));"), kGreater))
+        << "chr";
+    EXPECT_TRUE(hasWarning(warningsFrom(
+        "module p() { children([1:0]); }\np() { cube(1); cube(2); }"), kGreater))
+        << "children";
+}
+
+TEST(RangeDirection, WarnsOncePerEvaluationNotPerAbsentIteration) {
+    const std::vector<std::string> w = warningsFrom("for (i=[3:1:1]) echo(i);");
+    EXPECT_EQ(w.size(), 1u);
+}

@@ -355,6 +355,20 @@ private:
 // it, keeping expandIterable() itself free of any Evaluator/echo coupling.
 using RangeTooManyFn = std::function<void(size_t count)>;
 
+// Called when a range's step points AWAY from its end -- begin > end with a
+// positive step, or begin < end with a negative step. Such a range is
+// naturally empty, and the reference warns rather than iterating zero times
+// in silence. `stepPositive` picks which of its two messages applies; use
+// rangeDirectionWarning() to build the text.
+//
+// Separate from RangeTooManyFn for the same reason that one exists: it
+// keeps expandIterable() free of any Evaluator/echo coupling.
+using RangeDirectionFn = std::function<void(bool stepPositive)>;
+
+// The reference's own wording, quoted verbatim, for a range whose step
+// points away from its end. Shared so the five call sites cannot drift.
+std::string rangeDirectionWarning(bool stepPositive);
+
 // Converts a for()/intersection_for() loop assignment's evaluated RHS into
 // the sequence of values to iterate: undef -> empty, range -> a LAZY
 // sequence (matching OscRange's own start/step/end iteration, half-open
@@ -380,7 +394,8 @@ using RangeTooManyFn = std::function<void(size_t count)>;
 // one with a live consumer (BelfrySCAD) that surfaced it. The count is
 // computed in closed form (not IterableValues::size()'s O(n) walk) so a
 // legitimate huge-but-under-the-limit range never pays an eager pass.
-IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany = nullptr);
+IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany = nullptr,
+                               const RangeDirectionFn& onWrongDirection = nullptr);
 
 // `each <body>`'s own flatten-one-level rule, shared by the AST interpreter
 // (evalListLiteral/evalListElement's ListCompEach handling, expr_eval.cpp)

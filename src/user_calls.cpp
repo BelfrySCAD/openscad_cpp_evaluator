@@ -984,7 +984,6 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     // filtered statement may produce 0 bodies, which would shift every
     // subsequent body-index lookup, so the Nth statement is evaluated
     // directly instead.
-    const int idx = static_cast<int>(toDoubleLenient(idxArg));
     std::vector<const oscad::ASTNode*> geoNodes;
     for (const oscad::ASTNode* c : *ctx.childrenNodes) {
         if (c->kind() != oscad::NodeKind::Assignment && c->kind() != oscad::NodeKind::ModuleDeclaration &&
@@ -992,8 +991,59 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
             geoNodes.push_back(c);
         }
     }
-    if (idx < 0 || static_cast<size_t>(idx) >= geoNodes.size()) return std::nullopt;
-    return ChildrenForward{std::move(evalCtx), {geoNodes[static_cast<size_t>(idx)]}};
+
+    // The argument is a number, a VECTOR of numbers, or a RANGE --
+    // children([3:1:5]) is children(3); children(4); children(5), and
+    // children([3:-1:1]) is 3, 2, 1 in that order. Only a plain number was
+    // handled before, and toDoubleLenient collapses a list or a range to 0,
+    // so every vector/range form silently rendered child 0 instead.
+    //
+    // Ranges go through expandIterable, the same path a for-loop uses, so
+    // step direction, fractional steps and naturally-empty ranges all
+    // behave identically in both places rather than growing a second
+    // interpretation here.
+    std::vector<Value> indexValues;
+    if (std::holds_alternative<double>(idxArg)) {
+        indexValues.push_back(idxArg);
+    } else if (std::holds_alternative<ListPtr>(idxArg) || std::holds_alternative<OscRange>(idxArg)) {
+        const IterableValues iter = expandIterable(idxArg, nullptr, [&](bool stepPositive) {
+            warn(rangeDirectionWarning(stepPositive), currentWarnEntry());
+        });
+        for (const Value& v : iter) indexValues.push_back(v);
+    } else {
+        warn("Bad parameter type (" + fmtValue(idxArg) +
+                 ") for children, only accept: empty, number, vector, range.",
+             currentWarnEntry());
+        return std::nullopt;
+    }
+
+    // Order is preserved and duplicates are kept: children([2,2,2]) really
+    // does evaluate child 2 three times, and the order shows through in the
+    // CSG tree even though a union usually hides it.
+    std::vector<const oscad::ASTNode*> picked;
+    picked.reserve(indexValues.size());
+    for (const Value& v : indexValues) {
+        if (!std::holds_alternative<double>(v)) {
+            warn("Bad parameter type (" + fmtValue(v) +
+                     ") for children, only accept: empty, number, vector, range.",
+                 currentWarnEntry());
+            return std::nullopt;
+        }
+        // Truncates, matching the reference: children([1.7]) is child 1.
+        const long long idx = static_cast<long long>(std::get<double>(v));
+        if (idx < 0 || static_cast<size_t>(idx) >= geoNodes.size()) {
+            // An out-of-range index is skipped, not fatal -- children([0,99])
+            // still draws child 0. Warned about either way; this used to
+            // return silently.
+            warn("Children index (" + fmtValue(v) + ") out of bounds (" +
+                     std::to_string(geoNodes.size()) + " children)",
+                 currentWarnEntry());
+            continue;
+        }
+        picked.push_back(geoNodes[static_cast<size_t>(idx)]);
+    }
+    if (picked.empty()) return std::nullopt;
+    return ChildrenForward{std::move(evalCtx), std::move(picked)};
 }
 
 void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
