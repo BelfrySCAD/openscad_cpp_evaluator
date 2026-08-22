@@ -128,8 +128,6 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
         const oscad::Position* pos = &assign->position();
         IterableValues iter = expandIterable(values, [&](size_t count) {
             ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
-        }, [&](bool stepPositive) {
-            ev.warn(rangeDirectionWarning(stepPositive), pos);
         });
         for (const Value& val : iter) {
             EvalContext childCtx = parentCtx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);

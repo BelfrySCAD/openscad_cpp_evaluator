@@ -1006,9 +1006,7 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     if (std::holds_alternative<double>(idxArg)) {
         indexValues.push_back(idxArg);
     } else if (std::holds_alternative<ListPtr>(idxArg) || std::holds_alternative<OscRange>(idxArg)) {
-        const IterableValues iter = expandIterable(idxArg, nullptr, [&](bool stepPositive) {
-            warn(rangeDirectionWarning(stepPositive), currentWarnEntry());
-        });
+        const IterableValues iter = expandIterable(idxArg);
         for (const Value& v : iter) indexValues.push_back(v);
     } else {
         warn("Bad parameter type (" + fmtValue(idxArg) +

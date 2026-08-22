@@ -952,11 +952,7 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
                 }
                 if (const OscRange* r = std::get_if<OscRange>(&c)) {
                     std::string out;
-                    // The reference warns here too -- chr([70:1:65]) is
-                    // as much a typo as for(i=[70:1:65]) would be.
-                    const IterableValues seq = expandIterable(Value{*r}, nullptr, [&](bool stepPositive) {
-                        ev.warn(rangeDirectionWarning(stepPositive), &node.position());
-                    });
+                    const IterableValues seq = expandIterable(Value{*r});
                     for (const Value& item : seq) out += encode(item);
                     return out;
                 }

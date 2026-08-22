@@ -634,7 +634,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     f.stack.pop_back();
                     Value start = std::move(f.stack.back());
                     f.stack.pop_back();
-                    f.stack.push_back(ev.applyRange(start, end, step));
+                    f.stack.push_back(ev.applyRange(start, end, step, ins.a != 0, ins.pos));
                     ++f.pc;
                     break;
                 }
@@ -740,8 +740,6 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     il.values = expandIterable(v, [&](size_t count) {
                         ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")",
                                 ins.pos);
-                    }, [&](bool stepPositive) {
-                        ev.warn(rangeDirectionWarning(stepPositive), ins.pos);
                     });
                     il.index = 0;
                     il.total = il.values.size();
@@ -1466,8 +1464,6 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     il.values = expandIterable(v, [&](size_t count) {
                         ev.warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")",
                                 ins.pos);
-                    }, [&](bool stepPositive) {
-                        ev.warn(rangeDirectionWarning(stepPositive), ins.pos);
                     });
                     il.index = 0;
                     il.total = il.values.size();

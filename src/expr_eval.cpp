@@ -177,8 +177,6 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
                 const oscad::Position* pos = &assign->position();
                 IterableValues iter = expandIterable(values, [&](size_t count) {
                     warn("Bad range parameter in for statement: too many elements (" + std::to_string(count) + ")", pos);
-                }, [&](bool stepPositive) {
-                    warn(rangeDirectionWarning(stepPositive), pos);
                 });
                 for (const Value& val : iter) {
                     EvalContext childCtx = parentCtx.letChildCtx();
@@ -294,16 +292,36 @@ Value Evaluator::evalListLiteral(const oscad::ListComprehension& node, EvalConte
 }
 
 Value Evaluator::evalRangeLiteral(const oscad::RangeLiteral& node, EvalContext& ctx) {
-    return applyRange(evalExpr(*node.start, ctx), evalExpr(*node.end, ctx), evalExpr(*node.step, ctx));
+    return applyRange(evalExpr(*node.start, ctx), evalExpr(*node.end, ctx), evalExpr(*node.step, ctx),
+                      node.implicitStep, &node.position());
 }
 
 // Shared with the bytecode VM's RANGE opcode -- see applyBinaryOp's own
 // comment on why these are factored out as plain Value x Value x Value ->
 // Value functions.
-Value Evaluator::applyRange(const Value& startV, const Value& endV, const Value& stepV) {
+Value Evaluator::applyRange(const Value& startV, const Value& endV, const Value& stepV, bool implicitStep,
+                            const oscad::Position* pos) {
     double start = std::holds_alternative<std::monostate>(startV) ? 0.0 : toDoubleLenient(startV);
     double end = std::holds_alternative<std::monostate>(endV) ? 0.0 : toDoubleLenient(endV);
     double step = std::holds_alternative<std::monostate>(stepV) ? 1.0 : toDoubleLenient(stepV);
+    // A range whose begin is already past its end iterates zero times, which
+    // is almost always a typo -- [5:0] where [5:-1:0] was meant. Reported
+    // here, at construction, because that is where the reference reports it:
+    // `r = [5:0];` warns even if nothing ever iterates r.
+    //
+    // Only an IMPLICIT step is checked. Writing the step out is taken as
+    // deliberate, so [5:1:0] and [0:-1:5] stay silent -- a deliberate
+    // divergence from the reference, which warns for those too. An implicit
+    // step is always exactly 1, so the reference's other wording ("begin is
+    // smaller than the end, but step is negative") cannot arise here and no
+    // longer exists in this port.
+    //
+    // The epsilon matches the one the iteration path used before this check
+    // moved here, so a range built from float arithmetic that lands a hair
+    // past its end is still treated as empty-but-fine rather than a typo.
+    if (implicitStep && (start - end) > 1e-10) {
+        warn("begin is greater than the end, but step is positive", pos);
+    }
     return Value{OscRange{start, step, end}};
 }
 

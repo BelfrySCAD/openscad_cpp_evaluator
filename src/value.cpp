@@ -490,30 +490,18 @@ std::optional<size_t> rangeElementCount(const OscRange& r) {
     return static_cast<size_t>(std::floor(n + 1e-10)) + 1;
 }
 
-std::string rangeDirectionWarning(bool stepPositive) {
-    return stepPositive ? "begin is greater than the end, but step is positive"
-                        : "begin is smaller than the end, but step is negative";
-}
-
-IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany,
-                               const RangeDirectionFn& onWrongDirection) {
+IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany) {
     if (std::holds_alternative<std::monostate>(v)) return IterableValues{};
     if (const OscRange* r = std::get_if<OscRange>(&v)) {
         if (const std::optional<size_t> count = rangeElementCount(*r); count && *count >= 1'000'000) {
             if (onTooMany) onTooMany(*count);
             return IterableValues{};
         }
-        // A step pointing away from the end yields nothing. That is almost
-        // always a typo -- [1:0] where [1:-1:0] was meant -- so the
-        // reference says so rather than silently running zero times.
-        //
-        // A zero step is deliberately NOT reported here: it is a different
-        // failure (the reference calls it "too many elements") and shares
-        // rangeElementCount's nullopt with this case only by coincidence.
-        if (onWrongDirection && r->step != 0.0) {
-            const double n = (r->end - r->start) / r->step;
-            if (n < -1e-10) onWrongDirection(r->step > 0.0);
-        }
+        // A step pointing away from the end yields nothing, and that is
+        // almost always a typo -- but the warning for it belongs to the
+        // range's CONSTRUCTION, not its iteration: only the range literal
+        // knows whether the author chose the step or the parser supplied
+        // it. See Evaluator::applyRange.
         // Lazy -- IterableValues itself reproduces this exact
         // termination condition (a zero step is naturally empty: neither
         // `x <= end` nor `x >= end` branch ever fires for it) without
