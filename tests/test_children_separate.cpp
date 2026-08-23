@@ -179,16 +179,34 @@ TEST(ChildrenSeparate, DoesNotAffectALaterUnrelatedDifference) {
     }
 }
 
-TEST(ChildrenSeparate, PropagatesThroughAUserModuleWrapper) {
-    // A judgement call, pinned so it cannot drift silently: the mark rides
-    // on the nodes, so a module whose whole body is children(separate=true)
-    // passes the separateness outward to whatever encloses the call.
-    // Retreating to "stop at the module boundary" is any_of -> all_of in
-    // spliceModuleChildren.
+TEST(ChildrenSeparate, StopsAtAUserModuleBoundary) {
+    // separate=true applies to the operator enclosing THAT children() call,
+    // not to whatever encloses the module the call sits in. pass() is its
+    // own shape; that it forwards its children separately is its business,
+    // and difference() outside it still sees one operand.
+    //
+    // Mechanically: a user module's splice wraps its children as usual,
+    // which hides the marks from the group walk. Only the children() call's
+    // own splice honours them (spliceModuleChildren's honorSeparateMarks).
     for (bool vm : {false, true}) {
         ScopedVm guard(vm);
         Evaluated e = evalSrc(std::string("module pass() { children(separate=true); }\n"
                                           "difference() pass() ") + kThreeChildren);
+        EXPECT_NEAR(totalVolume(e.bodies), kCube, 1e-6) << "vm=" << vm;
+    }
+}
+
+TEST(ChildrenSeparate, StillWorksInsideTheModuleThatAsksForIt) {
+    // The other half of the boundary rule: a module that puts the operator
+    // and the children(separate=true) call together still works, however
+    // deeply that module is itself nested.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        Evaluated e = evalSrc(std::string("module frame() { difference() children(separate=true); }\n"
+                                          "module outer() { frame() { cube(50, center=true);"
+                                          "                           translate([-15,0,0]) cube(10, center=true);"
+                                          "                           translate([ 15,0,0]) cube(10, center=true); } }\n"
+                                          "outer();"));
         EXPECT_NEAR(totalVolume(e.bodies), kCube - 2 * kSmall, 1e-6) << "vm=" << vm;
     }
 }

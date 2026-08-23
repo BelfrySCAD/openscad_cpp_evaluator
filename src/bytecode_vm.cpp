@@ -516,8 +516,12 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 if (isModule && ownsModuleSplice) {
                     std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                     ev.treeStack_.pop_back();
+                    // separateChildren is set only by pushChildrenForwardFrame,
+                    // so it also answers "is this a children() splice?" -- a
+                    // user module's frame always passes false and wraps.
                     if (separateChildren) markSeparateOperands(children, 0);
-                    ev.spliceModuleChildren(std::move(children), moduleRandsBefore, *moduleSpliceCallNode);
+                    ev.spliceModuleChildren(std::move(children), moduleRandsBefore, *moduleSpliceCallNode,
+                                            /*honorSeparateMarks=*/separateChildren);
                 }
                 if (isFloorFrame) {
                     finalResult = std::move(result); // unused by a module caller (runCompiledModuleBody ignores it)
@@ -1076,7 +1080,8 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                         ev.treeStack_.pop_back();
                         if (separate) markSeparateOperands(children, 0);
-                        ev.spliceModuleChildren(std::move(children), randsBefore, *callNode);
+                        ev.spliceModuleChildren(std::move(children), randsBefore, *callNode,
+                                                /*honorSeparateMarks=*/true);
                         ++f.pc;
                     }
                     break;

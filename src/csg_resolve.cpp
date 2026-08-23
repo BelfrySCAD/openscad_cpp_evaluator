@@ -126,9 +126,10 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     // under a synthetic (display-only, is_builtin=false) "union" node so
     // the tree still reads as one shape at this call site. Mirrors
     // _eval_statement's splice branch exactly.
-    const bool splice = (name == "children" && isBuiltin) || !isBuiltin;
+    const bool isChildrenCall = (name == "children" && isBuiltin);
+    const bool splice = isChildrenCall || !isBuiltin;
     if (splice) {
-        spliceModuleChildren(std::move(children), randsBefore, node);
+        spliceModuleChildren(std::move(children), randsBefore, node, isChildrenCall);
         return;
     }
 
@@ -147,7 +148,7 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
 }
 
 void Evaluator::spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> children, std::uint64_t randsBefore,
-                                      const oscad::ASTNode& callNode) {
+                                      const oscad::ASTNode& callNode, bool honorSeparateMarks) {
     if (randsCallCount_ != randsBefore) {
         // rands() fired directly during *this* call's own resolve (e.g. an
         // assignment before any geometry statement in a user module's
@@ -161,7 +162,18 @@ void Evaluator::spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> child
     // children(separate=true) marked these to start their own operand
     // groups, and the group walk only inspects the enclosing frame's top
     // level -- so the wrapper would hide the marks. Splice instead.
+    //
+    // Only for the children() call's own splice. A USER MODULE wrapping
+    // such a call wraps as usual, which hides the marks and is exactly what
+    // makes separateness stop at the module boundary:
+    //
+    //     module pass() { children(separate=true); }
+    //     difference() pass() { a; b; }   // a | b, not a - b
+    //
+    // pass() is its own shape; that it happens to forward its children
+    // separately is its business, not its caller's.
     const bool anySeparate =
+        honorSeparateMarks &&
         std::any_of(children.begin(), children.end(), [](const auto& c) { return c->separateOperand; });
     if (children.size() > 1 && !anySeparate) {
         auto unionNode = std::make_unique<CSGNode>();

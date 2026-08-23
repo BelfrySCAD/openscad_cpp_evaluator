@@ -484,7 +484,10 @@ grep for `ponytail:`.
   and `builtinChildren` (children()/children(N), deferred evaluation; `children(separate=true)`
   additionally marks each forwarded node `separateOperand` so the enclosing
   union/difference/intersection treats them as separate operands rather than one grouped one --
-  a BelfrySCAD extension, see `Evaluator::appendGroupSizes`). `evalFunctionCall`'s
+  a BelfrySCAD extension, see `Evaluator::appendGroupSizes`. The marks stop at a user-module
+  boundary: only the children() call's own splice honours them
+  (`spliceModuleChildren`'s `honorSeparateMarks`), so a module wrapping such a call wraps its
+  children as usual and its own caller sees one operand). `evalFunctionCall`'s
   precedence order (checked in this exact sequence): `import` (special-cased, its own
   module/expression-context split) → `isBuiltinFunctionName` (function_builtins.hpp — always wins
   if true) → user function lookup → function-literal *value* probe → "unknown function" warning.
