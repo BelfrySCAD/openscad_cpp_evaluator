@@ -999,8 +999,13 @@ public:
     // (evalModularCall's OWN "is this splice or wrap-as-a-tagged-node"
     // branch already decided `splice` before ever reaching a user module,
     // so this helper never needs that decision itself).
+    // `honorSeparateMarks` is true only for a children() call's OWN splice.
+    // A user module's splice passes false, so it wraps its marked children
+    // as usual and the marks stop there -- children(separate=true) applies
+    // to the operator enclosing that call, not to whatever encloses the
+    // module the call happens to sit in.
     void spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> children, std::uint64_t randsBefore,
-                               const oscad::ASTNode& callNode);
+                               const oscad::ASTNode& callNode, bool honorSeparateMarks = false);
 private:
     Value evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
                             const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
