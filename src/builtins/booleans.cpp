@@ -68,7 +68,12 @@ std::optional<manifold::CrossSection> toCrossSection(const std::vector<ColoredBo
 // operand (unioned together), and each subsequent statement's bodies are
 // unioned then subtracted -- a flat evaluation would lose this grouping and
 // misbehave when e.g. BOSL2's attachable() returns multiple bodies (parent
-// + attached children) as one operand. Mirrors _resolve_csg/_generate_csg,
+// + attached children) as one operand.
+//
+// One statement can contribute MORE than one group: children(separate=true)
+// marks the nodes it forwards so each starts its own operand group, which is
+// how `difference() children(separate=true)` subtracts children 1..n from
+// child 0. See Evaluator::appendGroupSizes, which both engines share. Mirrors _resolve_csg/_generate_csg,
 // minus _attach_tri_colors' multi-color-merge provenance (ponytail: a
 // merged body always takes its first contributing child's color, matching
 // this evaluator's own pre-tri_colors baseline behavior -- revisit
@@ -101,8 +106,7 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
     for (const oscad::ASTNode* geoNode : geoNodes) {
         const size_t before = ev.currentTreeFrameSize();
         ev.evalChildren(std::vector<const oscad::ASTNode*>{geoNode}, effCtx);
-        const size_t after = ev.currentTreeFrameSize();
-        groupSizes.push_back(Value{static_cast<double>(after - before)});
+        ev.appendGroupSizes(groupSizes, before);
     }
 
     CSGParams params;

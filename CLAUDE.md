@@ -481,7 +481,10 @@ grep for `ponytail:`.
   lexically nested inside an already-active call," picking `childCtx()` vs `callCtx()`
   accordingly; read its doc comment before touching it, it's the second-trickiest mechanism in this
   codebase after the CSG tree stack), `evalUserModule`/`evalUserFunction`/`evalFunctionLiteral`,
-  and `builtinChildren` (children()/children(N), deferred evaluation). `evalFunctionCall`'s
+  and `builtinChildren` (children()/children(N), deferred evaluation; `children(separate=true)`
+  additionally marks each forwarded node `separateOperand` so the enclosing
+  union/difference/intersection treats them as separate operands rather than one grouped one --
+  a BelfrySCAD extension, see `Evaluator::appendGroupSizes`). `evalFunctionCall`'s
   precedence order (checked in this exact sequence): `import` (special-cased, its own
   module/expression-context split) → `isBuiltinFunctionName` (function_builtins.hpp — always wins
   if true) → user function lookup → function-literal *value* probe → "unknown function" warning.

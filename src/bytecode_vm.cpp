@@ -360,7 +360,7 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
 // because module chunks never contain tail-call opcodes); don't inherit
 // a pooled function frame's stale true here either.
 void pushChildrenForwardFrame(Evaluator& ev, const CompiledChunk& chunk, EvalContext evalCtx,
-                               std::uint64_t randsBefore, const oscad::ASTNode& callNode) {
+                               std::uint64_t randsBefore, const oscad::ASTNode& callNode, bool separate) {
     if (ev.vmCallStack_.size() >= Evaluator::kMaxVmCallStackDepth) {
         ev.error("Recursion too deep while forwarding children()", callNode);
     }
@@ -381,6 +381,7 @@ void pushChildrenForwardFrame(Evaluator& ev, const CompiledChunk& chunk, EvalCon
     frame->ownsModuleSplice = true;
     frame->moduleRandsBefore = randsBefore;
     frame->moduleSpliceCallNode = &callNode;
+    frame->separateChildren = separate;
     ev.vmCallStack_.push_back(std::move(frame));
     ev.vmCallBrackets_.emplace_back(std::nullopt);
 }
@@ -505,6 +506,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 const bool ownsModuleSplice = finished->ownsModuleSplice;
                 const std::uint64_t moduleRandsBefore = finished->moduleRandsBefore;
                 const oscad::ASTNode* moduleSpliceCallNode = finished->moduleSpliceCallNode;
+                const bool separateChildren = finished->separateChildren;
                 while (!finished->ctxChain.empty()) finished->ctxChain.pop_back();
                 // Module frames never fire returnHook (native evalUserModule
                 // never did either -- a module call has no "return value"
@@ -514,6 +516,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 if (isModule && ownsModuleSplice) {
                     std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                     ev.treeStack_.pop_back();
+                    if (separateChildren) markSeparateOperands(children, 0);
                     ev.spliceModuleChildren(std::move(children), moduleRandsBefore, *moduleSpliceCallNode);
                 }
                 if (isFloorFrame) {
@@ -1023,6 +1026,11 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         static_cast<const oscad::ModularCall*>(f.chunk->nativeStatements[static_cast<size_t>(ins.a)]);
                     EvalContext scopedCtx = ctx.withScope(callNode->scope() ? callNode->scope() : ctx.scope);
                     ev.checkDebug(*callNode, scopedCtx);
+                    // Same order as evalModularCall's own (csg_resolve.cpp):
+                    // warn, then resolve. Without this a children() typo
+                    // warns only under the interpreter, so no test for that
+                    // warning could run under both engines.
+                    warnUnexpectedBuiltinArgs(ev, *callNode);
                     const std::uint64_t randsBefore = ev.randsCallCount();
                     auto [args, effCtx] = resolveCallArgs(ev, callNode->arguments, scopedCtx);
                     std::optional<Evaluator::ChildrenForward> fwd = ev.prepareChildrenForward(args, effCtx);
@@ -1039,9 +1047,11 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     const CompiledChunk* chunk = (ev.useBytecodeVm() && ev.inResolvePass())
                                                      ? ev.lookupOrCompileChildrenListChunk(fwd->nodes)
                                                      : nullptr;
+                    // Read before fwd->evalCtx is moved from.
+                    const bool separate = fwd->separate;
                     if (chunk) {
                         ev.treeStack_.emplace_back();
-                        pushChildrenForwardFrame(ev, *chunk, std::move(fwd->evalCtx), randsBefore, *callNode);
+                        pushChildrenForwardFrame(ev, *chunk, std::move(fwd->evalCtx), randsBefore, *callNode, separate);
                         // f.pc deliberately NOT advanced -- resumes when
                         // the pushed frame completes; driveVm's completion
                         // branch runs the splice (isModule &&
@@ -1065,6 +1075,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                         std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                         ev.treeStack_.pop_back();
+                        if (separate) markSeparateOperands(children, 0);
                         ev.spliceModuleChildren(std::move(children), randsBefore, *callNode);
                         ++f.pc;
                     }
@@ -1304,8 +1315,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 }
                 case Op::CsgGroupEnd: {
                     PendingCsgWrap& pending = f.csgWrapStack.back();
-                    const size_t after = ev.treeStack_.back().size();
-                    pending.groupSizes.push_back(Value{static_cast<double>(after - pending.groupStartSize)});
+                    ev.appendGroupSizes(pending.groupSizes, pending.groupStartSize);
                     ++f.pc;
                     break;
                 }

@@ -158,7 +158,12 @@ void Evaluator::spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> child
         // landed on.
         for (auto& c : children) c->uncacheable = true;
     }
-    if (children.size() > 1) {
+    // children(separate=true) marked these to start their own operand
+    // groups, and the group walk only inspects the enclosing frame's top
+    // level -- so the wrapper would hide the marks. Splice instead.
+    const bool anySeparate =
+        std::any_of(children.begin(), children.end(), [](const auto& c) { return c->separateOperand; });
+    if (children.size() > 1 && !anySeparate) {
         auto unionNode = std::make_unique<CSGNode>();
         unionNode->kind = "union";
         unionNode->node = &callNode;
