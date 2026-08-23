@@ -481,13 +481,19 @@ grep for `ponytail:`.
   lexically nested inside an already-active call," picking `childCtx()` vs `callCtx()`
   accordingly; read its doc comment before touching it, it's the second-trickiest mechanism in this
   codebase after the CSG tree stack), `evalUserModule`/`evalUserFunction`/`evalFunctionLiteral`,
-  and `builtinChildren` (children()/children(N), deferred evaluation; `children(separate=true)`
-  additionally marks each forwarded node `separateOperand` so the enclosing
-  union/difference/intersection treats them as separate operands rather than one grouped one --
-  a BelfrySCAD extension, see `Evaluator::appendGroupSizes`. The marks stop at a user-module
-  boundary: only the children() call's own splice honours them
-  (`spliceModuleChildren`'s `honorSeparateMarks`), so a module wrapping such a call wraps its
-  children as usual and its own caller sees one operand). `evalFunctionCall`'s
+  and `builtinChildren` (children()/children(N), deferred evaluation).
+  **`children(..., separate=true)`** is a BelfrySCAD extension handled *before* any of that, by
+  `expandChildStatements`: a block is read with each separating forward replaced by one synthetic
+  `children(k)` statement per child it selects (`makeChildrenIndexCall`, owned by
+  `syntheticNodes_` and cleared with `idToNode` at `resolveTreeImpl` entry). Everything the
+  feature does follows from their being real statements -- `$children` counts them,
+  `children(i)` indexes them, and `union`/`difference`/`intersection` give each its own operand
+  group -- with no flag on `CSGNode` and nothing to leak. Called from `buildModuleChildCtx`,
+  `resolveCsg`, `resolveIntersectionFor`, and the VM's `Op::CsgGroupChildren`, which exists
+  because the compiler fixes group boundaries long before `$children` (and so the expansion size)
+  is knowable; it shares `expandSeparatingChildren` with the interpreter so the engines cannot
+  drift. Synthetic calls carry the author's own `Position` and no scope, so they resolve in the
+  evaluating context (`evalChildren`'s `runAll`). `evalFunctionCall`'s
   precedence order (checked in this exact sequence): `import` (special-cased, its own
   module/expression-context split) → `isBuiltinFunctionName` (function_builtins.hpp — always wins
   if true) → user function lookup → function-literal *value* probe → "unknown function" warning.

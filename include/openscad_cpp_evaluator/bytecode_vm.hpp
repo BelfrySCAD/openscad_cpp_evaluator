@@ -219,10 +219,6 @@ struct VmFrame {
     // mirrors evalModularCall's own `&node` (csg_resolve.cpp). Only
     // meaningful when ownsModuleSplice is true.
     const oscad::ASTNode* moduleSpliceCallNode = nullptr;
-    // children(separate=true) on the call this frame is forwarding for.
-    // Only meaningful while ownsModuleSplice is true, same as the two
-    // fields above; reset in releaseVmFrame for the same pooling reason.
-    bool separateChildren = false;
 
     // Whether callStack_.back() (at push time) genuinely IS this frame's
     // own logical call, and therefore safe for a tail hop inside this

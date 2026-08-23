@@ -426,6 +426,21 @@ enum class Op {
     // own `groupSizes.push_back(Value{...})` loop.
     CsgGroupEnd,
 
+    // One `children(..., separate=true)` statement inside a CSG bracket.
+    // `a` interns the ModularCall in nativeStatements.
+    //
+    // A statement of its own, rather than a CsgGroupStart/End pair around
+    // compiled code, because how many groups it contributes is only known
+    // at RUNTIME -- `children([2:$children-1], separate=true)` reads
+    // $children, and the compiler emits its group boundaries long before
+    // any of that exists. So this op expands the call (the same
+    // Evaluator::expandSeparatingChildren the interpreter uses, so the two
+    // engines cannot drift) and records one group per expanded statement.
+    //
+    // Not an interpreter bail: the forwarded statements go through
+    // evalChildren, which self-gates and retries its own compiled chunks.
+    CsgGroupChildren,
+
     // Closes the matching Op::PushCsgWrap bracket: pops
     // VmFrame::csgWrapStack's own top entry FIRST (before anything that can
     // itself throw, e.g. setTreeDepthOrThrow below -- same "exception-

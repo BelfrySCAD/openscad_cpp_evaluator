@@ -70,10 +70,11 @@ std::optional<manifold::CrossSection> toCrossSection(const std::vector<ColoredBo
 // misbehave when e.g. BOSL2's attachable() returns multiple bodies (parent
 // + attached children) as one operand.
 //
-// One statement can contribute MORE than one group: children(separate=true)
-// marks the nodes it forwards so each starts its own operand group, which is
+// One statement can still turn into several: children(separate=true) is
+// expanded into one `children(k)` statement per child it forwards, before
+// this loop ever sees the block (Evaluator::expandChildStatements), which is
 // how `difference() children(separate=true)` subtracts children 1..n from
-// child 0. See Evaluator::appendGroupSizes, which both engines share. Mirrors _resolve_csg/_generate_csg,
+// child 0. Nothing special happens here -- they are simply statements. Mirrors _resolve_csg/_generate_csg,
 // minus _attach_tri_colors' multi-color-merge provenance (ponytail: a
 // merged body always takes its first contributing child's color, matching
 // this evaluator's own pre-tri_colors baseline behavior -- revisit
@@ -92,11 +93,11 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
 
     std::vector<const oscad::ASTNode*> assignNodes;
     std::vector<const oscad::ASTNode*> geoNodes;
-    for (const auto& c : node.children) {
+    for (const oscad::ASTNode* c : ev.expandChildStatements(node.children, effCtx)) {
         if (c->kind() == oscad::NodeKind::Assignment) {
-            assignNodes.push_back(c.get());
+            assignNodes.push_back(c);
         } else if (c->kind() != oscad::NodeKind::ModuleDeclaration && c->kind() != oscad::NodeKind::FunctionDeclaration) {
-            geoNodes.push_back(c.get());
+            geoNodes.push_back(c);
         }
     }
     if (!assignNodes.empty()) ev.evalChildren(assignNodes, effCtx);
@@ -106,7 +107,7 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
     for (const oscad::ASTNode* geoNode : geoNodes) {
         const size_t before = ev.currentTreeFrameSize();
         ev.evalChildren(std::vector<const oscad::ASTNode*>{geoNode}, effCtx);
-        ev.appendGroupSizes(groupSizes, before);
+        groupSizes.push_back(Value{static_cast<double>(ev.currentTreeFrameSize() - before)});
     }
 
     CSGParams params;

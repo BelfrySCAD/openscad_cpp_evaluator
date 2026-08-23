@@ -34,15 +34,6 @@ struct CSGNode {
     CSGParams params;                      // resolve step's plain-data output
     bool uncacheable = false;              // set by a later phase (ManifoldCache, Phase 8)
 
-    // Set only by children(separate=true): this node begins its OWN operand
-    // group in an enclosing union/difference/intersection/intersection_for,
-    // instead of merging into the single group its enclosing statement
-    // would otherwise form. See Evaluator::appendGroupSizes.
-    //
-    // Deliberately absent from cacheKey()'s allowlist (manifold_cache.cpp):
-    // it changes the PARENT's hashed "group_sizes" param, never this node's
-    // own geometry, so the parent already re-keys and this node must not.
-    bool separateOperand = false;
 
     // The call site that entered this node's call chain from the top
     // level, captured at RESOLVE time -- non-owning, AST-lifetime-bound
@@ -83,12 +74,5 @@ struct CSGNode {
     std::optional<std::string> cachedKey;
 };
 
-// Marks every node from `from` onward as starting its own operand group --
-// what children(separate=true) does to the geometry it just forwarded.
-// A free function, not a member, so all three splice sites (user_calls.cpp
-// and bytecode_vm.cpp's two) can reach it from this header alone.
-inline void markSeparateOperands(std::vector<std::unique_ptr<CSGNode>>& nodes, size_t from) {
-    for (size_t i = from; i < nodes.size(); ++i) nodes[i]->separateOperand = true;
-}
 
 } // namespace oscadeval
