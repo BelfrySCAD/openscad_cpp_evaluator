@@ -294,3 +294,122 @@ TEST(ChildrenSeparate, AcceptsThePositionalSecondArgument) {
         EXPECT_NEAR(totalVolume(e.bodies), kCube - 2 * kSmall, 1e-6) << "vm=" << vm;
     }
 }
+
+// -- Statement-level splicing ---------------------------------------------
+//
+// separate=true expands the forward into one real `children(k)` statement
+// per child at the call site. These pin the consequences of that, which is
+// everything the feature actually is.
+
+namespace {
+
+std::vector<std::string> echoesFrom(const std::string& src) {
+    std::vector<std::string> out;
+    evalSrc(src, [&](const std::string& m) { out.push_back(m); });
+    return out;
+}
+
+} // namespace
+
+TEST(ChildrenSeparate, ForwardedChildrenBecomeCountableStatements) {
+    // The divergence from OpenSCAD, stated as a test: $children counts child
+    // STATEMENTS, and a separating forward now IS several of them. Every
+    // other shape keeps counting exactly as OpenSCAD does -- verified
+    // against the reference binary, which reports 1/1/2/1 here.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e = echoesFrom(
+            "module inner() { echo($children); }\n"
+            "module plain() { inner() { children([0:2]); }; }\n"
+            "module sep()   { inner() { children([0:2], separate=true); }; }\n"
+            "module mixed() { inner() { cube(1); children([0:1], separate=true); }; }\n"
+            "plain() { cube(1); cube(2); cube(3); }\n"
+            "sep()   { cube(1); cube(2); cube(3); }\n"
+            "mixed() { cube(1); cube(2); cube(3); }\n"
+            "inner() { for (i=[0:9]) cube(1); }\n");
+        ASSERT_EQ(e.size(), 4u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("1"), std::string::npos) << "plain, vm=" << vm;   // a forward is one statement
+        EXPECT_NE(e[1].find("3"), std::string::npos) << "sep, vm=" << vm;     // <- the divergence
+        EXPECT_NE(e[2].find("3"), std::string::npos) << "mixed, vm=" << vm;   // 1 written + 2 spliced
+        EXPECT_NE(e[3].find("1"), std::string::npos) << "for-loop, vm=" << vm;
+    }
+}
+
+TEST(ChildrenSeparate, SplicedChildrenAreIndexableIndividually) {
+    // If they count as statements they must also index as statements.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        Evaluated e = evalSrc("module pick1() { children(1); }\n"
+                              "module fwd()   { pick1() { children([0:2], separate=true); }; }\n"
+                              "fwd() { cube(1); cube(10); cube(100); }");
+        EXPECT_NEAR(totalVolume(e.bodies), 1000.0, 1e-6) << "vm=" << vm;  // the middle one
+    }
+}
+
+TEST(ChildrenSeparate, OneStatementStaysOneOperandHoweverManyBodiesItMakes) {
+    // The bug that motivated the redesign. A `for` child is ONE statement, so
+    // it is ONE operand -- the same "statements, not bodies" rule that lets
+    // BOSL2's attachable() return parent+attachments as a single operand.
+    // The old per-body marking made it three, so the first cube alone became
+    // the positive operand and the volume came out 875 instead of 2875.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const char* kids = "{ for (i=[0:2]) translate([i*20,0,0]) cube(10); cube(5); }";
+        Evaluated sep = evalSrc(std::string("module m() { difference() children(separate=true); }\nm() ") + kids);
+        Evaluated hand = evalSrc(std::string("difference() ") + kids);
+        EXPECT_NEAR(totalVolume(sep.bodies), 2875.0, 1e-6) << "vm=" << vm;
+        EXPECT_NEAR(totalVolume(sep.bodies), totalVolume(hand.bodies), 1e-6) << "vm=" << vm;
+    }
+}
+
+TEST(ChildrenSeparate, SelectingNothingContributesNoStatements) {
+    // A forward that picks nothing expands to zero statements, so the block
+    // can hold FEWER statements than it has lines. Deliberate: the count has
+    // to describe what is really there for indexing to stay honest.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        // A parent with no children at all, so the forward selects nothing
+        // without also warning about anything -- echoesFrom sees warnings
+        // too, and a backwards range would have put one first.
+        const std::vector<std::string> e = echoesFrom(
+            "module inner() { echo($children); }\n"
+            "module outer() { inner() { cube(1); children(separate=true); }; }\n"
+            "outer();\n");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm << " (unexpected warning?)";
+        EXPECT_NE(e[0].find("1"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+    }
+}
+
+TEST(ChildrenSeparate, SurvivesARecursiveForward) {
+    // The shape the whole redesign exists for: a module forwarding "all the
+    // rest" to itself. It only terminates correctly because $children sees
+    // the spliced members, so each level really does peel one child off.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e = echoesFrom(
+            "module peel() {\n"
+            "    echo($children);\n"
+            "    if ($children > 1) peel() { children([1:$children-1], separate=true); }\n"
+            "}\n"
+            "peel() { cube(1); cube(2); cube(3); cube(4); }\n");
+        ASSERT_EQ(e.size(), 4u) << "vm=" << vm;   // 4, 3, 2, 1 -- one per level
+        for (size_t i = 0; i < 4; ++i) {
+            EXPECT_NE(e[i].find(std::to_string(4 - i)), std::string::npos)
+                << "level " << i << ", vm=" << vm << ", got " << e[i];
+        }
+    }
+}
+
+TEST(ChildrenSeparate, ASeparatingForwardInsideALoopStillGroupsPerStatement) {
+    // Exercises Op::CsgGroupChildren's own loop against the interpreter's:
+    // the expansion happens per evaluation, inside a construct that is
+    // itself transparent in the CSG tree.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        Evaluated e = evalSrc("module m() { difference() { children(0); children([1:2], separate=true); } }\n"
+                              "m() { cube(50, center=true);"
+                              "      translate([-15,0,0]) cube(10, center=true);"
+                              "      translate([ 15,0,0]) cube(10, center=true); }");
+        EXPECT_NEAR(totalVolume(e.bodies), 125000.0 - 2000.0, 1e-6) << "vm=" << vm;
+    }
+}

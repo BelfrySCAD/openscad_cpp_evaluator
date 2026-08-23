@@ -360,7 +360,7 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
 // because module chunks never contain tail-call opcodes); don't inherit
 // a pooled function frame's stale true here either.
 void pushChildrenForwardFrame(Evaluator& ev, const CompiledChunk& chunk, EvalContext evalCtx,
-                               std::uint64_t randsBefore, const oscad::ASTNode& callNode, bool separate) {
+                               std::uint64_t randsBefore, const oscad::ASTNode& callNode) {
     if (ev.vmCallStack_.size() >= Evaluator::kMaxVmCallStackDepth) {
         ev.error("Recursion too deep while forwarding children()", callNode);
     }
@@ -381,7 +381,6 @@ void pushChildrenForwardFrame(Evaluator& ev, const CompiledChunk& chunk, EvalCon
     frame->ownsModuleSplice = true;
     frame->moduleRandsBefore = randsBefore;
     frame->moduleSpliceCallNode = &callNode;
-    frame->separateChildren = separate;
     ev.vmCallStack_.push_back(std::move(frame));
     ev.vmCallBrackets_.emplace_back(std::nullopt);
 }
@@ -506,7 +505,6 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 const bool ownsModuleSplice = finished->ownsModuleSplice;
                 const std::uint64_t moduleRandsBefore = finished->moduleRandsBefore;
                 const oscad::ASTNode* moduleSpliceCallNode = finished->moduleSpliceCallNode;
-                const bool separateChildren = finished->separateChildren;
                 while (!finished->ctxChain.empty()) finished->ctxChain.pop_back();
                 // Module frames never fire returnHook (native evalUserModule
                 // never did either -- a module call has no "return value"
@@ -516,12 +514,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 if (isModule && ownsModuleSplice) {
                     std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                     ev.treeStack_.pop_back();
-                    // separateChildren is set only by pushChildrenForwardFrame,
-                    // so it also answers "is this a children() splice?" -- a
-                    // user module's frame always passes false and wraps.
-                    if (separateChildren) markSeparateOperands(children, 0);
-                    ev.spliceModuleChildren(std::move(children), moduleRandsBefore, *moduleSpliceCallNode,
-                                            /*honorSeparateMarks=*/separateChildren);
+                    ev.spliceModuleChildren(std::move(children), moduleRandsBefore, *moduleSpliceCallNode);
                 }
                 if (isFloorFrame) {
                     finalResult = std::move(result); // unused by a module caller (runCompiledModuleBody ignores it)
@@ -1051,11 +1044,9 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     const CompiledChunk* chunk = (ev.useBytecodeVm() && ev.inResolvePass())
                                                      ? ev.lookupOrCompileChildrenListChunk(fwd->nodes)
                                                      : nullptr;
-                    // Read before fwd->evalCtx is moved from.
-                    const bool separate = fwd->separate;
                     if (chunk) {
                         ev.treeStack_.emplace_back();
-                        pushChildrenForwardFrame(ev, *chunk, std::move(fwd->evalCtx), randsBefore, *callNode, separate);
+                        pushChildrenForwardFrame(ev, *chunk, std::move(fwd->evalCtx), randsBefore, *callNode);
                         // f.pc deliberately NOT advanced -- resumes when
                         // the pushed frame completes; driveVm's completion
                         // branch runs the splice (isModule &&
@@ -1079,9 +1070,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                         std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
                         ev.treeStack_.pop_back();
-                        if (separate) markSeparateOperands(children, 0);
-                        ev.spliceModuleChildren(std::move(children), randsBefore, *callNode,
-                                                /*honorSeparateMarks=*/true);
+                        ev.spliceModuleChildren(std::move(children), randsBefore, *callNode);
                         ++f.pc;
                     }
                     break;
@@ -1318,9 +1307,30 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     ++f.pc;
                     break;
                 }
+                case Op::CsgGroupChildren: {
+                    const auto& call =
+                        static_cast<const oscad::ModularCall&>(*f.chunk->nativeStatements[static_cast<size_t>(ins.a)]);
+                    PendingCsgWrap& pending = f.csgWrapStack.back();
+                    std::optional<std::vector<const oscad::ASTNode*>> expanded =
+                        ev.expandSeparatingChildren(call, ctx);
+                    // nullopt = `separate` resolved falsey: one group, the
+                    // original statement, exactly as CsgGroupStart/End would
+                    // have done for it.
+                    const std::vector<const oscad::ASTNode*> stmts =
+                        expanded ? *expanded : std::vector<const oscad::ASTNode*>{&call};
+                    for (const oscad::ASTNode* stmt : stmts) {
+                        const size_t before = ev.treeStack_.back().size();
+                        ev.evalChildren(std::vector<const oscad::ASTNode*>{stmt}, ctx);
+                        pending.groupSizes.push_back(
+                            Value{static_cast<double>(ev.treeStack_.back().size() - before)});
+                    }
+                    ++f.pc;
+                    break;
+                }
                 case Op::CsgGroupEnd: {
                     PendingCsgWrap& pending = f.csgWrapStack.back();
-                    ev.appendGroupSizes(pending.groupSizes, pending.groupStartSize);
+                    const size_t after = ev.treeStack_.back().size();
+                    pending.groupSizes.push_back(Value{static_cast<double>(after - pending.groupStartSize)});
                     ++f.pc;
                     break;
                 }

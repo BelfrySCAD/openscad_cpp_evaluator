@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/dispatch.hpp"
+#include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 
 #include "builtins/builtins.hpp"
@@ -1292,6 +1293,12 @@ public:
         }
         compileStatementList(assignNodes, out);
         for (const oscad::ASTNode* geoNode : geoNodes) {
+            // A separating children() forward contributes a runtime-decided
+            // NUMBER of groups, so it cannot be bracketed at compile time.
+            if (Evaluator::isSeparatingChildrenCall(*geoNode)) {
+                out.push_back({Op::CsgGroupChildren, internNativeStatement(geoNode), 0, &geoNode->position()});
+                continue;
+            }
             out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
             compileStatementList(std::vector<const oscad::ASTNode*>{geoNode}, out);
             out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});

@@ -179,7 +179,6 @@ void Evaluator::releaseVmFrame(std::unique_ptr<VmFrame> frame) {
     frame->ownsModuleSplice = false;
     frame->moduleRandsBefore = 0;
     frame->moduleSpliceCallNode = nullptr;
-    frame->separateChildren = false;
     vmFramePool_.push_back(std::move(frame));
 }
 
@@ -340,9 +339,10 @@ EvalContext Evaluator::buildModuleChildCtx(const oscad::ModuleDeclaration& decl,
                                             EvalContext& ctx, BoundArgs bound) {
     const oscad::Scope* childScope = decl.scope() ? decl.scope() : ctx.scope;
 
-    auto childrenNodes = std::make_shared<ChildrenNodeList>();
-    childrenNodes->reserve(call.children.size());
-    for (const auto& c : call.children) childrenNodes->push_back(c.get());
+    // Expanded, so a children(..., separate=true) in this block becomes one
+    // real statement per child it selects -- which is what makes $children
+    // below count them and children(i) index them.
+    auto childrenNodes = std::make_shared<ChildrenNodeList>(expandChildStatements(call.children, ctx));
 
     EvalContext childCtx = callCtxFor(decl, ctx, childScope, childrenNodes, &ctx);
     // callCtx reset this to false; carry the CALLER's value across so
@@ -353,7 +353,7 @@ EvalContext Evaluator::buildModuleChildCtx(const oscad::ModuleDeclaration& decl,
     // `{}`, not the number of geometries they produce -- e.g. children()
     // counts as one child even if it forwards zero bodies.
     int childrenCount = 0;
-    for (const auto& c : call.children) {
+    for (const oscad::ASTNode* c : *childrenNodes) {
         if (c->kind() != oscad::NodeKind::Assignment && c->kind() != oscad::NodeKind::ModuleDeclaration &&
             c->kind() != oscad::NodeKind::FunctionDeclaration) {
             ++childrenCount;
@@ -983,7 +983,15 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     }
 
     if (std::holds_alternative<std::monostate>(idxArg)) {
-        return ChildrenForward{std::move(evalCtx), *ctx.childrenNodes, separate};
+        std::vector<size_t> allIndices;
+        size_t geoIdx = 0;
+        for (const oscad::ASTNode* c : *ctx.childrenNodes) {
+            if (c->kind() != oscad::NodeKind::Assignment && c->kind() != oscad::NodeKind::ModuleDeclaration &&
+                c->kind() != oscad::NodeKind::FunctionDeclaration) {
+                allIndices.push_back(geoIdx++);
+            }
+        }
+        return ChildrenForward{std::move(evalCtx), *ctx.childrenNodes, separate, std::move(allIndices)};
     }
 
     // children(N) indexes child *statements*, not output bodies -- a
@@ -1025,6 +1033,7 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     // does evaluate child 2 three times, and the order shows through in the
     // CSG tree even though a union usually hides it.
     std::vector<const oscad::ASTNode*> picked;
+    std::vector<size_t> pickedIndices;
     picked.reserve(indexValues.size());
     for (const Value& v : indexValues) {
         if (!std::holds_alternative<double>(v)) {
@@ -1045,17 +1054,93 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
             continue;
         }
         picked.push_back(geoNodes[static_cast<size_t>(idx)]);
+        pickedIndices.push_back(static_cast<size_t>(idx));
     }
     if (picked.empty()) return std::nullopt;
-    return ChildrenForward{std::move(evalCtx), std::move(picked), separate};
+    return ChildrenForward{std::move(evalCtx), std::move(picked), separate, std::move(pickedIndices)};
+}
+
+// Syntactic only -- whether the flag is actually TRUE still needs the
+// argument evaluated, but gating on its presence first means an ordinary
+// children() call never has its arguments resolved twice.
+bool Evaluator::isSeparatingChildrenCall(const oscad::ASTNode& stmt) {
+    if (stmt.kind() != oscad::NodeKind::ModularCall) return false;
+    const auto& call = static_cast<const oscad::ModularCall&>(stmt);
+    if (!call.name || call.name->name != "children") return false;
+    size_t positional = 0;
+    for (const auto& arg : call.arguments) {
+        if (arg->kind() == oscad::NodeKind::NamedArgument) {
+            if (static_cast<const oscad::NamedArgument&>(*arg).name->name == "separate") return true;
+        } else if (++positional == 2) {
+            return true;  // children(index, separate) positionally
+        }
+    }
+    return false;
+}
+
+std::optional<std::vector<const oscad::ASTNode*>> Evaluator::expandSeparatingChildren(const oscad::ModularCall& call,
+                                                                                       EvalContext& ctx) {
+    auto [args, effCtx] = resolveCallArgs(*this, call.arguments, ctx);
+    std::optional<ChildrenForward> fwd = prepareChildrenForward(args, effCtx);
+    if (!fwd) return std::vector<const oscad::ASTNode*>{};  // selects nothing -> no statements at all
+    if (!fwd->separate) {
+        // ponytail: `separate` written but falsey -- tell the caller to run
+        // the original statement, which resolves its arguments a second
+        // time. Only observable if an argument expression has side effects
+        // (echo/rands inside `children(0, someFalseFlag)`); building a
+        // faithful single-statement equivalent instead would cost a
+        // synthetic vector-literal node for a shape nobody writes.
+        return std::nullopt;
+    }
+    std::vector<const oscad::ASTNode*> out;
+    out.reserve(fwd->pickedIndices.size());
+    for (size_t idx : fwd->pickedIndices) out.push_back(makeChildrenIndexCall(call, idx));
+    return out;
+}
+
+const oscad::ASTNode* Evaluator::makeChildrenIndexCall(const oscad::ModularCall& origin, size_t index) {
+    std::vector<std::unique_ptr<oscad::Argument>> args;
+    args.push_back(std::make_unique<oscad::PositionalArgument>(
+        origin.position(), std::make_unique<oscad::NumberLiteral>(origin.position(), static_cast<double>(index))));
+    auto call = std::make_unique<oscad::ModularCall>(
+        origin.position(), std::make_unique<oscad::Identifier>(origin.position(), "children"), std::move(args),
+        std::vector<std::unique_ptr<oscad::ASTNode>>{});
+    // Position copied from the call the author actually wrote, so a warning
+    // or a click-to-source lands on that line rather than nowhere.
+    //
+    // No scope is set: every consumer falls back to the evaluating
+    // context's own scope for a node without one (see evalChildren's runAll
+    // in stmt_eval.cpp), which is exactly where this call should resolve.
+    const oscad::ASTNode* raw = call.get();
+    syntheticNodes_.push_back(std::move(call));
+    return raw;
+}
+
+std::vector<const oscad::ASTNode*> Evaluator::expandChildStatements(
+    const std::vector<std::unique_ptr<oscad::ASTNode>>& block, EvalContext& ctx) {
+    std::vector<const oscad::ASTNode*> out;
+    out.reserve(block.size());
+    for (const auto& stmtPtr : block) {
+        const oscad::ASTNode* stmt = stmtPtr.get();
+        if (!isSeparatingChildrenCall(*stmt)) {
+            out.push_back(stmt);
+            continue;
+        }
+        std::optional<std::vector<const oscad::ASTNode*>> expanded =
+            expandSeparatingChildren(static_cast<const oscad::ModularCall&>(*stmt), ctx);
+        if (!expanded) {
+            out.push_back(stmt);
+            continue;
+        }
+        for (const oscad::ASTNode* n : *expanded) out.push_back(n);
+    }
+    return out;
 }
 
 void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
     std::optional<ChildrenForward> fwd = prepareChildrenForward(args, ctx);
     if (!fwd) return;
-    const size_t before = currentTreeFrameSize();
     evalChildren(fwd->nodes, fwd->evalCtx);
-    if (fwd->separate) markSeparateOperands(treeStack_.back(), before);
 }
 
 } // namespace oscadeval

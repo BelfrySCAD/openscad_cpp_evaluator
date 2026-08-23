@@ -190,29 +190,6 @@ public:
     // statement.
     size_t currentTreeFrameSize() const { return treeStack_.back().size(); }
 
-    // Records the group(s) one child statement contributed, given the frame
-    // size captured before it ran. Normally that is exactly one group, of
-    // however many nodes the statement pushed -- including a group of size
-    // ZERO for a statement that produced no geometry (a disabled `*cube()`),
-    // which generateCsg relies on to reset intersection() and to bail
-    // difference(). Only children(separate=true) produces more than one:
-    // each node it marked starts a fresh group, so its forwarded children
-    // reach the enclosing operator as separate operands.
-    //
-    // Shared by all four group builders -- resolveCsg, resolveIntersectionFor
-    // and the VM's Op::CsgGroupEnd (which serves both) -- because
-    // "group_sizes" is otherwise built twice, once per engine, and would
-    // drift.
-    void appendGroupSizes(std::vector<Value>& groupSizes, size_t before) const {
-        const std::vector<std::unique_ptr<CSGNode>>& frame = treeStack_.back();
-        size_t start = before;
-        for (size_t i = before + 1; i < frame.size(); ++i) {
-            if (!frame[i]->separateOperand) continue;
-            groupSizes.push_back(Value{static_cast<double>(i - start)});
-            start = i;
-        }
-        groupSizes.push_back(Value{static_cast<double>(frame.size() - start)});
-    }
 
     // Generate pass: walks `tree` bottom-up (children before their own
     // node), calling each node's registered GenerateFn (falling back to
@@ -366,13 +343,48 @@ public:
     struct ChildrenForward {
         EvalContext evalCtx;
         std::vector<const oscad::ASTNode*> nodes;
-        // children(separate=true): hand these to the enclosing union/
-        // difference/intersection as SEPARATE operands rather than as one
-        // grouped operand. Acted on after the nodes are evaluated, by
-        // marking the CSGNodes they produced -- see markSeparateOperands.
+        // The `separate` flag as written at the call. Read by
+        // expandSeparatingChildren, which turns the forward into one
+        // statement per child; builtinChildren itself ignores it, since by
+        // the time a forward runs the expansion has already happened.
         bool separate = false;
+        // Which of the caller's geometry statements `nodes` came from, in
+        // the same order. Needed by expandChildStatements, which turns each
+        // one back into its own `children(k)` statement.
+        std::vector<size_t> pickedIndices;
     };
     std::optional<ChildrenForward> prepareChildrenForward(const CallArgs& args, EvalContext& ctx);
+
+    // A child-statement block with every `children(..., separate=true)`
+    // replaced by one synthetic `children(k)` statement per child it
+    // selects. That is the whole of what separate=true does: the forwarded
+    // children become real, countable statements at this call site, so
+    // $children sees them, children(i) indexes them, and a boolean operator
+    // gives each its own operand group -- all for free, because they ARE
+    // statements rather than nodes wearing a flag.
+    //
+    // Called wherever a block is consumed: a module call's children
+    // (buildModuleChildCtx), and union/difference/intersection/
+    // intersection_for's own child list.
+    std::vector<const oscad::ASTNode*> expandChildStatements(
+        const std::vector<std::unique_ptr<oscad::ASTNode>>& block, EvalContext& ctx);
+
+    // One synthetic `children(index)` statement, owned by syntheticNodes_.
+    const oscad::ASTNode* makeChildrenIndexCall(const oscad::ModularCall& origin, size_t index);
+
+    // Syntactic gate: is this statement a `children(..., separate=true)`?
+    // Cheap and side-effect-free, so the bytecode compiler can ask it at
+    // COMPILE time to decide which opcode to emit, long before the flag's
+    // value (or the child count it selects) is knowable.
+    static bool isSeparatingChildrenCall(const oscad::ASTNode& stmt);
+
+    // The runtime half: the statements `call` expands to. nullopt means the
+    // `separate` flag resolved falsey after all, and the caller should run
+    // the original statement unchanged. Shared by expandChildStatements
+    // (interpreter) and Op::CsgGroupChildren (VM) so the engines cannot
+    // drift on what expansion means.
+    std::optional<std::vector<const oscad::ASTNode*>> expandSeparatingChildren(const oscad::ModularCall& call,
+                                                                               EvalContext& ctx);
 
     // "WARNING: {message}{locSuffix(position)}" via echoFn_, no-op if unset.
     // Public: builtins/import.cpp's not-manifold warning is emitted from a
@@ -999,13 +1011,8 @@ public:
     // (evalModularCall's OWN "is this splice or wrap-as-a-tagged-node"
     // branch already decided `splice` before ever reaching a user module,
     // so this helper never needs that decision itself).
-    // `honorSeparateMarks` is true only for a children() call's OWN splice.
-    // A user module's splice passes false, so it wraps its marked children
-    // as usual and the marks stop there -- children(separate=true) applies
-    // to the operator enclosing that call, not to whatever encloses the
-    // module the call happens to sit in.
     void spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> children, std::uint64_t randsBefore,
-                               const oscad::ASTNode& callNode, bool honorSeparateMarks = false);
+                               const oscad::ASTNode& callNode);
 private:
     Value evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
                             const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
@@ -1661,6 +1668,12 @@ public:
     // is on top *at that moment* -- the frame this node's own build call
     // pushed just before resolving. See csg_resolve.cpp for the full
     // push/call/pop sequence.
+    // Synthetic `children(k)` calls built by expandChildStatements. Owned
+    // here because CSGNode::node and idToNode hold non-owning pointers into
+    // them, so they must outlive the pass; cleared with those maps at
+    // resolveTreeImpl entry.
+    std::vector<std::unique_ptr<oscad::ASTNode>> syntheticNodes_;
+
     std::vector<std::vector<std::unique_ptr<CSGNode>>> treeStack_;
 
 private:

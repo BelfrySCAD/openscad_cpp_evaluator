@@ -97,9 +97,10 @@ ColoredBody combineBodies(const std::vector<ColoredBody>& bodies) {
 // children) -- same rationale as booleans.cpp's own group_sizes. Mirrors
 // _resolve_intersection_for/_generate_intersection_for.
 CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersectionFor& node, EvalContext& ctx) {
-    std::vector<const oscad::ASTNode*> bodyNodes;
-    bodyNodes.reserve(node.body.size());
-    for (const auto& b : node.body) bodyNodes.push_back(b.get());
+    // Expanded for the same reason resolveCsg expands its own block: a
+    // children(..., separate=true) here contributes one statement -- and so
+    // one operand group per iteration -- per child it selects.
+    const std::vector<const oscad::ASTNode*> bodyNodes = ev.expandChildStatements(node.body, ctx);
 
     std::vector<Value> groupSizes;
 
@@ -119,7 +120,7 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
             if (!bodyNodes.empty()) ev.checkDebug(*bodyNodes.front(), parentCtx, /*forced=*/false, /*exprLevel=*/true);
             const size_t before = ev.currentTreeFrameSize();
             ev.evalChildren(bodyNodes, parentCtx);
-            ev.appendGroupSizes(groupSizes, before);
+            groupSizes.push_back(Value{static_cast<double>(ev.currentTreeFrameSize() - before)});
             return;
         }
         const auto& assign = node.assignments[depth];
