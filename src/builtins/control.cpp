@@ -119,8 +119,7 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
             if (!bodyNodes.empty()) ev.checkDebug(*bodyNodes.front(), parentCtx, /*forced=*/false, /*exprLevel=*/true);
             const size_t before = ev.currentTreeFrameSize();
             ev.evalChildren(bodyNodes, parentCtx);
-            const size_t after = ev.currentTreeFrameSize();
-            groupSizes.push_back(Value{static_cast<double>(after - before)});
+            ev.appendGroupSizes(groupSizes, before);
             return;
         }
         const auto& assign = node.assignments[depth];

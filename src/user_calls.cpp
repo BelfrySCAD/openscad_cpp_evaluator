@@ -179,6 +179,7 @@ void Evaluator::releaseVmFrame(std::unique_ptr<VmFrame> frame) {
     frame->ownsModuleSplice = false;
     frame->moduleRandsBefore = 0;
     frame->moduleSpliceCallNode = nullptr;
+    frame->separateChildren = false;
     vmFramePool_.push_back(std::move(frame));
 }
 
@@ -932,6 +933,11 @@ Value Evaluator::parentModuleName(int idx) const {
 
 std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(const CallArgs& args, EvalContext& ctx) {
     Value idxArg = getArg(args, 0, "index", Value{});
+    // Positional slot 1 is accepted as well as the name: adding "separate"
+    // to the builtin's parameter list already suppresses the "Too many
+    // unnamed arguments" warning for children(0, true), so reading it
+    // named-only would silently ignore an argument the author wrote.
+    const bool separate = truthy(getArg(args, 1, "separate", Value{false}));
     if (!ctx.childrenNodes || ctx.childrenNodes->empty()) return std::nullopt;
     const EvalContext* callerCtx = ctx.childrenCallerCtx;
     if (!callerCtx) return std::nullopt;
@@ -977,7 +983,7 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     }
 
     if (std::holds_alternative<std::monostate>(idxArg)) {
-        return ChildrenForward{std::move(evalCtx), *ctx.childrenNodes};
+        return ChildrenForward{std::move(evalCtx), *ctx.childrenNodes, separate};
     }
 
     // children(N) indexes child *statements*, not output bodies -- a
@@ -1041,13 +1047,15 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
         picked.push_back(geoNodes[static_cast<size_t>(idx)]);
     }
     if (picked.empty()) return std::nullopt;
-    return ChildrenForward{std::move(evalCtx), std::move(picked)};
+    return ChildrenForward{std::move(evalCtx), std::move(picked), separate};
 }
 
 void Evaluator::builtinChildren(const CallArgs& args, EvalContext& ctx) {
     std::optional<ChildrenForward> fwd = prepareChildrenForward(args, ctx);
     if (!fwd) return;
+    const size_t before = currentTreeFrameSize();
     evalChildren(fwd->nodes, fwd->evalCtx);
+    if (fwd->separate) markSeparateOperands(treeStack_.back(), before);
 }
 
 } // namespace oscadeval

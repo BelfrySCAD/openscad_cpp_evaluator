@@ -112,7 +112,7 @@ const std::vector<std::string>* builtinParamNames(const std::string& name) {
         {"intersection", {}},
         {"hull", {}},
         {"minkowski", {"convexity"}},
-        {"children", {"index"}},
+        {"children", {"index", "separate"}},
         {"render", {"convexity"}},
         // "repair" is this port's own addition, not an upstream parameter.
         {"import",

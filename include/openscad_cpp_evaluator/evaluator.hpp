@@ -190,6 +190,30 @@ public:
     // statement.
     size_t currentTreeFrameSize() const { return treeStack_.back().size(); }
 
+    // Records the group(s) one child statement contributed, given the frame
+    // size captured before it ran. Normally that is exactly one group, of
+    // however many nodes the statement pushed -- including a group of size
+    // ZERO for a statement that produced no geometry (a disabled `*cube()`),
+    // which generateCsg relies on to reset intersection() and to bail
+    // difference(). Only children(separate=true) produces more than one:
+    // each node it marked starts a fresh group, so its forwarded children
+    // reach the enclosing operator as separate operands.
+    //
+    // Shared by all four group builders -- resolveCsg, resolveIntersectionFor
+    // and the VM's Op::CsgGroupEnd (which serves both) -- because
+    // "group_sizes" is otherwise built twice, once per engine, and would
+    // drift.
+    void appendGroupSizes(std::vector<Value>& groupSizes, size_t before) const {
+        const std::vector<std::unique_ptr<CSGNode>>& frame = treeStack_.back();
+        size_t start = before;
+        for (size_t i = before + 1; i < frame.size(); ++i) {
+            if (!frame[i]->separateOperand) continue;
+            groupSizes.push_back(Value{static_cast<double>(i - start)});
+            start = i;
+        }
+        groupSizes.push_back(Value{static_cast<double>(frame.size() - start)});
+    }
+
     // Generate pass: walks `tree` bottom-up (children before their own
     // node), calling each node's registered GenerateFn (falling back to
     // concatenating children's bodies for a kind with none registered).
@@ -342,6 +366,11 @@ public:
     struct ChildrenForward {
         EvalContext evalCtx;
         std::vector<const oscad::ASTNode*> nodes;
+        // children(separate=true): hand these to the enclosing union/
+        // difference/intersection as SEPARATE operands rather than as one
+        // grouped operand. Acted on after the nodes are evaluated, by
+        // marking the CSGNodes they produced -- see markSeparateOperands.
+        bool separate = false;
     };
     std::optional<ChildrenForward> prepareChildrenForward(const CallArgs& args, EvalContext& ctx);
 
