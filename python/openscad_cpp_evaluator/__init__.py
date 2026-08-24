@@ -504,6 +504,17 @@ class Evaluator:
         except EvalError:
             raise
         except Exception as e:  # ParseError/EvalError from C++ arrive as RuntimeError
+            # The binding attaches whatever the script echoed before it failed
+            # as args[1] (see bindings/module.cpp). Replay it first: a failed
+            # run's own output is the most useful thing it produced, and
+            # dropping it means the console shows the error with none of the
+            # context that led to it.
+            args = getattr(e, "args", ())
+            if len(args) == 2 and isinstance(args[1], list):
+                if self._echo_fn:
+                    for line in args[1]:
+                        self._echo_fn(line)
+                raise EvalError(str(args[0])) from e
             raise EvalError(str(e)) from e
         bodies = bodies_from_dicts(body_dicts)
         # originalID -> a node with `.position` (start/end offsets) for WYSIWYG

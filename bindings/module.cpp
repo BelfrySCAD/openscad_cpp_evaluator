@@ -385,17 +385,36 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
     {
         nb::gil_scoped_release rel;
         auto logFn = [&echoes](const std::string& m) { echoes.push_back(m); };
-        std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
-        oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, logFn);
-        oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile);
-        oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
-        bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
-        collectIdSpans(ev, idSpans);
-        csgTree = std::move(ev.csgTree);
-        profileResult = std::move(ev.profileResult);
-        {
-            nb::gil_scoped_acquire g; // building Python objects needs the GIL back
-            std::tie(dyn, dynExplicit) = dynStateToPy(ctx);
+        try {
+            std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
+            oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, logFn);
+            oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile);
+            oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
+            bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
+            collectIdSpans(ev, idSpans);
+            csgTree = std::move(ev.csgTree);
+            profileResult = std::move(ev.profileResult);
+            {
+                nb::gil_scoped_acquire g; // building Python objects needs the GIL back
+                std::tie(dyn, dynExplicit) = dynStateToPy(ctx);
+            }
+        } catch (const std::exception& e) {
+            // `echoes` is a local, so letting this unwind past here loses
+            // every echo and warning the script produced BEFORE it failed --
+            // which is exactly the output you want when something fails. The
+            // batching that makes them cheap (no GIL round-trip per line) is
+            // also what made them disposable.
+            //
+            // Carry them out on the exception itself: args = (message,
+            // [echo, ...]). The facade replays them through echo_fn and then
+            // re-raises. Anything that only looks at str(e) is unaffected,
+            // since args[0] is still the formatted diagnostic.
+            nb::gil_scoped_acquire g;
+            nb::list partial;
+            for (const std::string& s : echoes) partial.append(s);
+            nb::object args = nb::make_tuple(nb::str(e.what()), partial);
+            PyErr_SetObject(PyExc_RuntimeError, args.ptr());
+            throw nb::python_error();
         }
     }
 
