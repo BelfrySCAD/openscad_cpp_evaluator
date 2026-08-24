@@ -30,6 +30,19 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     // rather than a string -- so comparisons need no string splitting.
     // Which FEATURES exist is a separate question with a better answer:
     // supported_feature() (function_builtins.cpp).
+    // $_SUPPORTED_FEATURE -- "supported_feature() is callable here". Set by
+    // any implementation that provides the function, not just this one, so a
+    // script can check for the FUNCTION rather than for a vendor:
+    //
+    //     if ($_SUPPORTED_FEATURE && supported_feature("separate-children"))
+    //
+    // Solves the bootstrapping problem -- you cannot safely call
+    // supported_feature() without first knowing it exists -- and, because
+    // && short-circuits, an evaluator lacking it warns once about this
+    // variable instead of once about the variable and again about the call.
+    // If OpenSCAD ever adds supported_feature(), it sets this too and the
+    // same script starts working there with no edit.
+    ctx.dyn->set("$_SUPPORTED_FEATURE", Value{true});
     ctx.dyn->set("$_BELFRYSCAD",
                  Value{std::make_shared<const ValueList>(ValueList{{Value{double{OSCAD_EVAL_VERSION_MAJOR}},
                                                                     Value{double{OSCAD_EVAL_VERSION_MINOR}},

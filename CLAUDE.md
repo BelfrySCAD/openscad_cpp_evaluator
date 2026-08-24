@@ -441,7 +441,11 @@ handling in arithmetic, the closure-detection rule for `call_ctx` vs `child_ctx`
 verbatim port, not an independent design. Deliberate divergences are called out in code comments —
 grep for `ponytail:`.
 
-- **Feature detection** — `$_BELFRYSCAD` (seeded in `EvalContext::makeRoot`, `src/eval_context.cpp`, as
+- **Feature detection** — `$_SUPPORTED_FEATURE` (just `true`; names the CAPABILITY rather than the
+  vendor, so any evaluator adding `supported_feature()` is meant to set it, and checking it first
+  solves the bootstrapping problem of calling a function you don't know exists -- `&&`
+  short-circuits, so an evaluator with neither warns once rather than twice, verified against the
+  reference), `$_BELFRYSCAD` (seeded in `EvalContext::makeRoot`, `src/eval_context.cpp`, as
   `[major, minor, patch]` from `OSCAD_EVAL_VERSION_*` compile definitions that the top-level
   `CMakeLists.txt` parses out of `pyproject.toml`, so wheel and local builds cannot disagree and a
   bump needs one edit) and `supported_feature("name")` (`featureLevels()` in

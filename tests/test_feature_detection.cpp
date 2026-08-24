@@ -97,6 +97,34 @@ TEST(FeatureDetection, ANonStringArgumentIsZeroRatherThanAnError) {
     }
 }
 
+TEST(FeatureDetection, SupportedFeatureMarkerIsSet) {
+    // Vendor-neutral: it says "supported_feature() is callable", not "this is
+    // BelfrySCAD". Any implementation adding the function is meant to set it,
+    // so a script guards on the capability rather than on who is running it.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e = echoesFrom("echo($_SUPPORTED_FEATURE);");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("true"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+    }
+}
+
+TEST(FeatureDetection, TheMarkerGuardsTheCallItself) {
+    // The bootstrapping shape: you cannot safely CALL supported_feature()
+    // without first knowing it exists. Checking the marker first solves that,
+    // and because && short-circuits, an evaluator lacking both warns once
+    // rather than twice -- verified against the reference binary, which
+    // reports exactly one warning for this source and takes the else branch.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e = echoesFrom(
+            "if ($_SUPPORTED_FEATURE && supported_feature(\"separate-children\")) echo(\"extended\");\n"
+            "else echo(\"portable\");\n");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("extended"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+    }
+}
+
 TEST(FeatureDetection, TheGuardIdiomReadsTrueHere) {
     // What a script actually writes. In OpenSCAD $_BELFRYSCAD is undef and
     // supported_feature() is an unknown function returning undef -- both
