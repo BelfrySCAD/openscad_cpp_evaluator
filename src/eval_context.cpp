@@ -21,6 +21,19 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     // see undef, take the falsy branch by accident rather than by rule, and
     // warn about an unknown variable while doing it.
     ctx.dyn->set("$preview", Value{false});
+    // $_BELFRYSCAD -- present only here, so a script can tell which
+    // evaluator it is running under. OpenSCAD leaves it undef, which is the
+    // whole point: `if ($_BELFRYSCAD == undef)` is the portable test, and it
+    // works because an unknown $-variable is undef rather than an error.
+    //
+    // Shaped like OpenSCAD's own version() -- a [major, minor, patch] list
+    // rather than a string -- so comparisons need no string splitting.
+    // Which FEATURES exist is a separate question with a better answer:
+    // supported_feature() (function_builtins.cpp).
+    ctx.dyn->set("$_BELFRYSCAD",
+                 Value{std::make_shared<const ValueList>(ValueList{{Value{double{OSCAD_EVAL_VERSION_MAJOR}},
+                                                                    Value{double{OSCAD_EVAL_VERSION_MINOR}},
+                                                                    Value{double{OSCAD_EVAL_VERSION_PATCH}}}})});
     ctx.let_ = TrailView<Value>::makeRoot();
     ctx.dynPositions = TrailView<const oscad::Position*>::makeRoot();
     ctx.childrenNodes = std::make_shared<const ChildrenNodeList>();

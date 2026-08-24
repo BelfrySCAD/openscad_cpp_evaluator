@@ -1,5 +1,17 @@
 cmake_minimum_required(VERSION 3.24)
-project(openscad_cpp_evaluator CXX)
+
+# Read the version straight out of pyproject.toml rather than repeating it
+# here. It reaches C++ as OSCAD_EVAL_VERSION_{MAJOR,MINOR,PATCH} (see
+# src/CMakeLists.txt), which is what seeds $_BELFRYSCAD -- so a released
+# wheel and a local `cmake --build` always report the same numbers, and a
+# version bump needs one edit, not three.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml" _oscad_pyproject)
+if(NOT _oscad_pyproject MATCHES "\nversion = \"([0-9]+)\.([0-9]+)\.([0-9]+)\"")
+    message(FATAL_ERROR "could not read version = \"X.Y.Z\" from pyproject.toml")
+endif()
+set(OSCAD_EVAL_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+
+project(openscad_cpp_evaluator VERSION ${OSCAD_EVAL_VERSION} LANGUAGES CXX)
 
 # On Apple Silicon, warn (don't fail -- a universal or intentionally-x86_64
 # build is legitimate) if the effective target architecture is x86_64 while
