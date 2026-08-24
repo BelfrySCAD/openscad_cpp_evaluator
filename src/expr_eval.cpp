@@ -138,7 +138,19 @@ Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* 
         // $-name anyway (dynamic variables aren't scope-declarable) and
         // exists only for plain identifiers.
         const Value* v = ctx.dyn->find(name);
-        return v ? *v : Value{};
+        if (v) return *v;
+        // Warns like any other unknown name. This used to return silently
+        // for EVERY $-read, on the strength of BOSL2's get_slop() --
+        // `is_undef($slop) ? 0 : $slop` with $slop never assigned -- being
+        // silent in the reference. It is, but for two narrower reasons: the
+        // probe does not warn about its own argument (undefProbeTarget), and
+        // the else branch never runs when is_undef() is true. A plain
+        // `echo($nope)` DOES warn there, in every context checked --
+        // assignment, function body, module body, comparison. Real BOSL2
+        // (gears, threading, rounded_prism, diff/attach, path_sweep) emits
+        // none of these, because it guards its own $-reads.
+        if (warnIfUndef) warn("Ignoring unknown variable '" + name + "'", position);
+        return Value{};
     }
 
     if (name == "PI") return Value{std::numbers::pi};
