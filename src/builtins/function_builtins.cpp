@@ -449,7 +449,7 @@ bool isBuiltinFunctionName(const std::string& name) {
         "acos", "atan", "atan2", "max", "min", "pow", "norm", "cross", "rands", "concat", "len", "str",
         "chr", "ord", "is_undef", "is_num", "is_bool", "is_string", "is_list", "is_function", "is_object",
         "search", "lookup", "has_key", "version", "version_num", "parent_module",
-        "object", "textmetrics", "fontmetrics", "dxf_dim", "dxf_cross",
+        "object", "textmetrics", "fontmetrics", "dxf_dim", "dxf_cross", "supported_feature",
     };
     return names.count(name) > 0;
 }
@@ -591,8 +591,36 @@ enum class BuiltinFnId {
     TextMetrics, FontMetrics, Abs, Sign, Ceil, Floor, Round, Sqrt, Ln, Log, Exp, Sin, Cos, Tan,
     Asin, Acos, Atan, Atan2, Max, Min, Pow, Norm, Cross, Rands, Concat, Len, Str, Chr, Ord,
     IsUndef, IsNum, IsBool, IsString, IsList, IsFunction, IsObject, Search, Lookup, HasKey,
-    Version, VersionNum, ParentModule, DxfDim, DxfCross,
+    Version, VersionNum, ParentModule, DxfDim, DxfCross, SupportedFeature,
 };
+
+// supported_feature("name") -> the level at which this build implements that
+// feature, or 0 for one it does not implement (and for a name it has never
+// heard of, which is deliberate: probing for a feature from a future release
+// is supposed to be safe).
+//
+// A LEVEL rather than a boolean so a feature whose semantics change later
+// can be told apart from its earlier self. Everything here is 1 today;
+// nothing has changed since this function existed, and a script cannot
+// observe what a build without supported_feature() did anyway.
+//
+// This is the answer to a real hazard: OpenSCAD does not reject arguments or
+// names it doesn't know -- children(separate=true) is silently ignored there
+// -- so a script using an extension runs and quietly renders something else.
+// Guarding on supported_feature() is how a script says so out loud.
+const std::unordered_map<std::string, double>& featureLevels() {
+    static const std::unordered_map<std::string, double> levels = {
+        {"separate-children", 1.0},  // children(..., separate=true)
+        {"minkowski-diff", 1.0},     // minkowski_difference()
+        {"sphere-styles", 1.0},      // sphere(style=)
+        {"export-name", 1.0},        // $export_name
+        {"simplify-op", 1.0},        // simplify()
+        {"expr-import", 1.0},        // import() in expression position
+        {"object-function", 1.0},    // object(), unconditional here
+        {"roof-op", 1.0},            // roof(), method="voronoi" only
+    };
+    return levels;
+}
 
 const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
     static const std::unordered_map<std::string, BuiltinFnId> ids = {
@@ -614,6 +642,7 @@ const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
         {"version", BuiltinFnId::Version}, {"version_num", BuiltinFnId::VersionNum},
         {"parent_module", BuiltinFnId::ParentModule},
         {"dxf_dim", BuiltinFnId::DxfDim}, {"dxf_cross", BuiltinFnId::DxfCross},
+        {"supported_feature", BuiltinFnId::SupportedFeature},
     };
     return ids;
 }
@@ -694,6 +723,7 @@ const std::unordered_map<int, BuiltinCheck>& builtinChecks() {
         // warning, so only the too-many case is an arity error.
         add(BuiltinFnId::ParentModule, {0, 1, "1", {kNum}});
         add(BuiltinFnId::HasKey, {-1, -1, nullptr, {{TObj, "object"}, {TStr, "string"}}});
+        add(BuiltinFnId::SupportedFeature, {1, 1, "1", {}});
         for (BuiltinFnId id : {BuiltinFnId::IsUndef, BuiltinFnId::IsNum, BuiltinFnId::IsBool,
                                 BuiltinFnId::IsString, BuiltinFnId::IsList, BuiltinFnId::IsFunction,
                                 BuiltinFnId::IsObject}) {
@@ -1008,6 +1038,17 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         // The OpenSCAD release we track. version_num() is that same
         // year/month/day folded as y * 10000 + m * 100 + d, exactly like the
         // reference's own builtin_version_num (builtin_functions.cc).
+        case BuiltinFnId::SupportedFeature: {
+            const Value name = getArg(args, 0, "feature", Value{});
+            const std::string* s = std::get_if<std::string>(&name);
+            // A non-string is 0 rather than an error, same as an unknown
+            // name: the whole point of this function is that asking is
+            // always safe.
+            if (!s) return Value{0.0};
+            const auto& levels = featureLevels();
+            const auto it = levels.find(*s);
+            return Value{it == levels.end() ? 0.0 : it->second};
+        }
         case BuiltinFnId::Version: return numList({2026.0, 1.0, 1.0});
         case BuiltinFnId::VersionNum: {
             // The optional vector argument the reference also accepts: with

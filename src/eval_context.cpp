@@ -21,6 +21,34 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     // see undef, take the falsy branch by accident rather than by rule, and
     // warn about an unknown variable while doing it.
     ctx.dyn->set("$preview", Value{false});
+    // $_BELFRYSCAD -- present only here, so a script can tell which
+    // evaluator it is running under. OpenSCAD leaves it undef, which is the
+    // whole point: `if ($_BELFRYSCAD == undef)` is the portable test, and it
+    // works because an unknown $-variable is undef rather than an error.
+    //
+    // Shaped like OpenSCAD's own version() -- a [major, minor, patch] list
+    // rather than a string -- so comparisons need no string splitting.
+    // Which FEATURES exist is a separate question with a better answer:
+    // supported_feature() (function_builtins.cpp).
+    // $_SUPPORTED_FEATURE -- "supported_feature() is callable here". Set by
+    // any implementation that provides the function, not just this one, so a
+    // script can check for the FUNCTION rather than for a vendor:
+    //
+    //     if (!is_undef($_SUPPORTED_FEATURE) && supported_feature("sep..."))
+    //
+    // Solves the bootstrapping problem -- you cannot safely call
+    // supported_feature() without first knowing it exists -- and in that
+    // exact form it is SILENT in OpenSCAD: is_undef() is the one way to
+    // read an unknown variable there without a warning, and && short-
+    // circuits so the unknown function is never reached. Verified against
+    // the reference binary: no warning, correct branch.
+    // If OpenSCAD ever adds supported_feature(), it sets this too and the
+    // same script starts working there with no edit.
+    ctx.dyn->set("$_SUPPORTED_FEATURE", Value{true});
+    ctx.dyn->set("$_BELFRYSCAD",
+                 Value{std::make_shared<const ValueList>(ValueList{{Value{double{OSCAD_EVAL_VERSION_MAJOR}},
+                                                                    Value{double{OSCAD_EVAL_VERSION_MINOR}},
+                                                                    Value{double{OSCAD_EVAL_VERSION_PATCH}}}})});
     ctx.let_ = TrailView<Value>::makeRoot();
     ctx.dynPositions = TrailView<const oscad::Position*>::makeRoot();
     ctx.childrenNodes = std::make_shared<const ChildrenNodeList>();

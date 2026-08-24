@@ -46,6 +46,14 @@ add_library(openscad_cpp_evaluator STATIC
   builtins/surface.cpp
 )
 
+# Seeds $_BELFRYSCAD (eval_context.cpp). Parsed from pyproject.toml by the
+# top-level CMakeLists so there is one source of truth for the version.
+target_compile_definitions(openscad_cpp_evaluator PRIVATE
+  OSCAD_EVAL_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+  OSCAD_EVAL_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+  OSCAD_EVAL_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+)
+
 target_include_directories(openscad_cpp_evaluator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
 )

@@ -441,6 +441,21 @@ handling in arithmetic, the closure-detection rule for `call_ctx` vs `child_ctx`
 verbatim port, not an independent design. Deliberate divergences are called out in code comments —
 grep for `ponytail:`.
 
+- **Feature detection** — `$_SUPPORTED_FEATURE` (just `true`; names the CAPABILITY rather than the
+  vendor, so any evaluator adding `supported_feature()` is meant to set it, and checking it first
+  solves the bootstrapping problem of calling a function you don't know exists. Written
+  `!is_undef($_SUPPORTED_FEATURE) && supported_feature(...)` the guard is **silent** in OpenSCAD --
+  `is_undef()` is the one way to read an unknown variable there without a warning, and `&&`
+  short-circuits past the unknown call; verified against the reference), `$_BELFRYSCAD` (seeded in `EvalContext::makeRoot`, `src/eval_context.cpp`, as
+  `[major, minor, patch]` from `OSCAD_EVAL_VERSION_*` compile definitions that the top-level
+  `CMakeLists.txt` parses out of `pyproject.toml`, so wheel and local builds cannot disagree and a
+  bump needs one edit) and `supported_feature("name")` (`featureLevels()` in
+  `src/builtins/function_builtins.cpp`, returning a LEVEL so a feature whose semantics change can
+  be told from its earlier self; 0 for unknown names and non-string arguments, deliberately
+  silent so probing for a future feature is safe). Both exist because OpenSCAD **silently ignores**
+  unknown arguments -- `children(separate=true)` renders the wrong shape there with no warning --
+  and both read as `undef` in OpenSCAD, so a guard written against them works in both.
+
 - `include/openscad_cpp_evaluator/value.hpp`, `src/value.cpp` — the `Value` variant (OpenSCAD's
   dynamic value type) and its free-function arithmetic/comparison helpers. See the plan's §1 for
   the type-mapping table and why there's no numpy-equivalent library.
