@@ -34,12 +34,14 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
     // any implementation that provides the function, not just this one, so a
     // script can check for the FUNCTION rather than for a vendor:
     //
-    //     if ($_SUPPORTED_FEATURE && supported_feature("separate-children"))
+    //     if (!is_undef($_SUPPORTED_FEATURE) && supported_feature("sep..."))
     //
     // Solves the bootstrapping problem -- you cannot safely call
-    // supported_feature() without first knowing it exists -- and, because
-    // && short-circuits, an evaluator lacking it warns once about this
-    // variable instead of once about the variable and again about the call.
+    // supported_feature() without first knowing it exists -- and in that
+    // exact form it is SILENT in OpenSCAD: is_undef() is the one way to
+    // read an unknown variable there without a warning, and && short-
+    // circuits so the unknown function is never reached. Verified against
+    // the reference binary: no warning, correct branch.
     // If OpenSCAD ever adds supported_feature(), it sets this too and the
     // same script starts working there with no edit.
     ctx.dyn->set("$_SUPPORTED_FEATURE", Value{true});

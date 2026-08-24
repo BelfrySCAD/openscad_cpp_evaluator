@@ -118,7 +118,8 @@ TEST(FeatureDetection, TheMarkerGuardsTheCallItself) {
     for (bool vm : {false, true}) {
         ScopedVm guard(vm);
         const std::vector<std::string> e = echoesFrom(
-            "if ($_SUPPORTED_FEATURE && supported_feature(\"separate-children\")) echo(\"extended\");\n"
+            "if (!is_undef($_SUPPORTED_FEATURE) && supported_feature(\"separate-children\"))\n"
+            "    echo(\"extended\");\n"
             "else echo(\"portable\");\n");
         ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
         EXPECT_NE(e[0].find("extended"), std::string::npos) << "vm=" << vm << ", got " << e[0];
