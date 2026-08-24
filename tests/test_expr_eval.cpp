@@ -52,21 +52,34 @@ TEST(ExprEvalIdentifiers, UnknownVariableWarnsAndIsUndef) {
     EXPECT_NE(lastWarning.find("Ignoring unknown variable 'nope'"), std::string::npos);
 }
 
-TEST(ExprEvalIdentifiers, UndefinedDollarVariableIsUndefWithNoWarning) {
-    // Found via BOSL2's constants.scad: `function get_slop() = is_undef($slop)
-    // ? 0 : $slop;` with $slop never assigned anywhere in the script. Real
-    // OpenSCAD.app produces no warning at all -- $-prefixed names are a
-    // separate, always-implicitly-available namespace, never requiring a
-    // scope declaration the way a bare identifier does. This port's
-    // bytecode VM (Op::LoadDyn, bytecode_vm.cpp) already got this right by
-    // construction; the plain interpreter incorrectly fell through to the
-    // same "Ignoring unknown variable" path a genuinely undeclared bare
-    // identifier hits.
+TEST(ExprEvalIdentifiers, UndefinedDollarVariableIsUndefAndWarns) {
+    // A never-assigned $-name reads as undef and warns, exactly like a
+    // never-declared bare identifier.
+    //
+    // This test used to assert the opposite, on the strength of BOSL2's
+    // constants.scad -- `function get_slop() = is_undef($slop) ? 0 : $slop;`
+    // with $slop never assigned -- being silent in real OpenSCAD. It is,
+    // but not because $-reads are exempt: is_undef() does not warn about the
+    // name it probes, and the else branch never runs while is_undef() is
+    // true. Measured against the reference, a PLAIN read warns in every
+    // context tried -- echo, assignment, function body, module body,
+    // comparison -- so the old blanket exemption was over-generalised from
+    // one guarded expression.
     std::string lastWarning;
     Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
     Value v = evalSrc("$slop", ev);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(v));
-    EXPECT_TRUE(lastWarning.empty());
+    EXPECT_NE(lastWarning.find("Ignoring unknown variable '$slop'"), std::string::npos) << lastWarning;
+}
+
+TEST(ExprEvalIdentifiers, TheBoslGetSlopIdiomStaysSilent) {
+    // The case the old exemption existed for, kept as a test in its own
+    // right: it must remain silent through the is_undef() probe alone.
+    std::string lastWarning;
+    Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
+    Value v = evalSrc("is_undef($slop) ? 0 : $slop", ev);
+    EXPECT_TRUE(lastWarning.empty()) << lastWarning;
+    EXPECT_EQ(std::get<double>(v), 0.0);
 }
 
 TEST(ExprEvalIdentifiers, ResolvesViaScopeFallbackWhenNotEagerlyBound) {

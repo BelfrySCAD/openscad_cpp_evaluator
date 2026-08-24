@@ -562,6 +562,8 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     } else if (const Value* v = ctx.dyn->find(name)) {
                         f.stack.push_back(*v);
                     } else {
+                        // ins.b = warn flag; see compileIdentifierLoad.
+                        if (ins.b) ev.warn("Ignoring unknown variable '" + name + "'", ins.pos);
                         f.stack.push_back(Value{});
                     }
                     ++f.pc;

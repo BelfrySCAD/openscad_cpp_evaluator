@@ -262,7 +262,10 @@ public:
     void compileIdentifierLoad(const std::string& name, const oscad::Position& pos, std::vector<Instruction>& out,
                                 CompileScope& scope, bool warnIfUndef) {
         if (!name.empty() && name[0] == '$') {
-            out.push_back({Op::LoadDyn, internName(name), 0, &pos});
+            // `b` is the warn flag -- a $-name reached through the
+            // is_undef() probe must stay quiet, same as LoadFreeNoWarn does
+            // for a plain one.
+            out.push_back({Op::LoadDyn, internName(name), warnIfUndef ? 1 : 0, &pos});
         } else if (auto slot = scope.resolve(name)) {
             out.push_back({Op::LoadLocal, *slot, 0, &pos});
         } else if (auto upvalSlot = resolveEnclosing(name)) {
