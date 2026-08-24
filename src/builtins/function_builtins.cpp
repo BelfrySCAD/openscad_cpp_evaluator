@@ -610,6 +610,8 @@ enum class BuiltinFnId {
 // Guarding on supported_feature() is how a script says so out loud.
 const std::unordered_map<std::string, double>& featureLevels() {
     static const std::unordered_map<std::string, double> levels = {
+        {"render-expr", 1.0},        // render() in expression position
+        {"polyhedron-vnf", 1.0},     // polyhedron(vnf) / polyhedron(object)
         {"separate-children", 1.0},  // children(..., separate=true)
         {"minkowski-diff", 1.0},     // minkowski_difference()
         {"sphere-styles", 1.0},      // sphere(style=)
