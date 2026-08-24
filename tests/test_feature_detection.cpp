@@ -126,6 +126,26 @@ TEST(FeatureDetection, TheMarkerGuardsTheCallItself) {
     }
 }
 
+TEST(FeatureDetection, IsUndefDoesNotWarnAboutTheNameItProbes) {
+    // Asking whether a name is defined must not itself complain that it
+    // isn't -- otherwise the portable guard is noisy here while being
+    // silent in OpenSCAD. Both spellings, since only the $-prefixed one
+    // used to be quiet.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        for (const char* name : {"$_NO_SUCH_DOLLAR", "no_such_plain"}) {
+            const std::vector<std::string> e = echoesFrom(std::string("echo(is_undef(") + name + "));");
+            ASSERT_EQ(e.size(), 1u) << name << ", vm=" << vm << " (warned?)";
+            EXPECT_NE(e[0].find("true"), std::string::npos) << name << ", vm=" << vm << ", got " << e[0];
+        }
+        // A plain read of an unknown name still warns -- only the probe is
+        // exempt, and only for its own argument.
+        const std::vector<std::string> e = echoesFrom("echo(no_such_plain);");
+        ASSERT_EQ(e.size(), 2u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("Ignoring unknown variable"), std::string::npos) << "vm=" << vm;
+    }
+}
+
 TEST(FeatureDetection, TheGuardIdiomReadsTrueHere) {
     // What a script actually writes. In OpenSCAD $_BELFRYSCAD is undef and
     // supported_feature() is an unknown function returning undef -- both

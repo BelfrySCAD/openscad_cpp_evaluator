@@ -882,6 +882,16 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
         // exactly (name in _BUILTIN_FN_NAMES gates which branch runs at
         // all).
         if (isBuiltinFunctionName(leftId->name)) {
+            // is_undef(name) is a probe: asking whether a name is defined
+            // must not itself warn that it isn't. The $-branch of
+            // evalIdentifier is already silent for any name, but a PLAIN
+            // identifier warned -- so `is_undef(some_flag)` was noisy here
+            // and silent in the reference. Verified against OpenSCAD:
+            // no warning for either spelling inside is_undef().
+            if (const oscad::Identifier* probe = undefProbeTarget(node)) {
+                return Value{std::holds_alternative<std::monostate>(
+                    evalIdentifier(probe->name, &probe->position(), ctx, /*warnIfUndef=*/false))};
+            }
             // object() needs the raw argument list, not a pre-resolved
             // CallArgs, to merge positional/named arguments in their exact
             // call-site interleaved order (see builtinObject's own

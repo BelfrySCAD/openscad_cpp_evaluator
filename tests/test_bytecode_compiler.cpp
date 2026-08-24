@@ -162,13 +162,13 @@ TEST(BytecodeCompiler, SelfReferentialParameterDefaultResolvesToUndef) {
     ScopedVm vm(true);
     // Referencing "x" inside its own default falls all the way through to
     // Scope::lookupVariable finding nothing usable there (a
-    // ParameterDeclaration), producing the same "Ignoring unknown
-    // variable" WARNING the plain interpreter does today (verified against
-    // the unmodified CLI directly, not assumed) -- this test's own point is
-    // that the compiled path reproduces that exactly, warning included, not
-    // that the warning is otherwise desirable.
-    EXPECT_EQ(runCapturingEcho("function foo(x = is_undef(x) ? 5 : x) = x;\necho(foo());"),
-              "WARNING: Ignoring unknown variable 'x' in file <string>, line 1\nECHO: 5");
+    // ParameterDeclaration) -- undef, so the ternary takes the 5. Silent:
+    // is_undef() is a probe and does not warn about the name it asks about,
+    // matching the reference, which is silent for this exact script. This
+    // test's own point is that the compiled path reproduces the interpreter
+    // exactly; it used to assert a warning both engines emitted and the
+    // reference did not.
+    EXPECT_EQ(runCapturingEcho("function foo(x = is_undef(x) ? 5 : x) = x;\necho(foo());"), "ECHO: 5");
     // Caller-supplied value: default expression never runs at all, so no
     // warning either.
     EXPECT_EQ(runCapturingEcho("function foo(x = is_undef(x) ? 5 : x) = x;\necho(foo(10));"), "ECHO: 10");

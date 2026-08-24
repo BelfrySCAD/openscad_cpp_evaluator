@@ -372,6 +372,13 @@ public:
     // One synthetic `children(index)` statement, owned by syntheticNodes_.
     const oscad::ASTNode* makeChildrenIndexCall(const oscad::ModularCall& origin, size_t index);
 
+    // The sole argument of `is_undef(x)` when x is a bare identifier, else
+    // nullptr. That call is a PROBE -- asking whether a name is defined must
+    // not itself complain that it isn't -- so the name is read with
+    // warnIfUndef=false. Static and syntactic so the bytecode compiler can
+    // ask at compile time and emit LoadFreeNoWarn.
+    static const oscad::Identifier* undefProbeTarget(const oscad::PrimaryCall& call);
+
     // Syntactic gate: is this statement a `children(..., separate=true)`?
     // Cheap and side-effect-free, so the bytecode compiler can ask it at
     // COMPILE time to decide which opcode to emit, long before the flag's

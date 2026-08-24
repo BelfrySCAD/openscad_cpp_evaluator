@@ -107,6 +107,16 @@ void Evaluator::warn(const std::string& message, const oscad::Position* position
     echoFn_(formatWarning(message, position, callStack_));
 }
 
+const oscad::Identifier* Evaluator::undefProbeTarget(const oscad::PrimaryCall& call) {
+    if (call.left->kind() != oscad::NodeKind::Identifier) return nullptr;
+    if (static_cast<const oscad::Identifier&>(*call.left).name != "is_undef") return nullptr;
+    if (call.arguments.size() != 1) return nullptr;
+    if (call.arguments[0]->kind() != oscad::NodeKind::PositionalArgument) return nullptr;
+    const auto& arg = static_cast<const oscad::PositionalArgument&>(*call.arguments[0]);
+    if (arg.expr->kind() != oscad::NodeKind::Identifier) return nullptr;
+    return static_cast<const oscad::Identifier*>(arg.expr.get());
+}
+
 Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* position, EvalContext& ctx,
                                  bool warnIfUndef) {
     if (const Value* v = ctx.let_->find(name)) return *v;
