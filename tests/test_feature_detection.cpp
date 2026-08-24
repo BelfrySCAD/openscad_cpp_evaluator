@@ -33,8 +33,9 @@ std::vector<std::string> echoesFrom(const std::string& src) {
 
 // Every feature name the docs promise. A typo in either direction -- here or
 // in featureLevels() -- shows up as a 0.
-const char* kFeatures[] = {"separate-children", "minkowski-diff", "sphere-styles", "export-name",
-                            "simplify-op",       "expr-import",    "object-function", "roof-op"};
+const char* kFeatures[] = {"separate-children", "minkowski-diff", "sphere-styles",   "export-name",
+                            "simplify-op",       "expr-import",    "object-function", "roof-op",
+                            "render-expr",       "polyhedron-vnf"};
 
 } // namespace
 
