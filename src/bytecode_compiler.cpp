@@ -620,15 +620,24 @@ public:
                     }
                 }
 
-                for (const auto& argPtr : n.arguments) {
-                    if (argPtr->kind() == NodeKind::NamedArgument) {
-                        auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
-                        compileExpr(*a.expr, out, scope); // an argument is never tail
-                        site.argNames.push_back(a.name->name);
-                    } else {
-                        auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
-                        compileExpr(*a.expr, out, scope);
-                        site.argNames.push_back(std::nullopt);
+                // is_undef(name) probes rather than reads -- the same quiet
+                // load the interpreter uses (Evaluator::undefProbeTarget),
+                // so the two engines agree on which reads warn.
+                if (const oscad::Identifier* undefProbe = Evaluator::undefProbeTarget(n)) {
+                    compileIdentifierLoad(undefProbe->name, undefProbe->position(), out, scope,
+                                          /*warnIfUndef=*/false);
+                    site.argNames.push_back(std::nullopt);
+                } else {
+                    for (const auto& argPtr : n.arguments) {
+                        if (argPtr->kind() == NodeKind::NamedArgument) {
+                            auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
+                            compileExpr(*a.expr, out, scope); // an argument is never tail
+                            site.argNames.push_back(a.name->name);
+                        } else {
+                            auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
+                            compileExpr(*a.expr, out, scope);
+                            site.argNames.push_back(std::nullopt);
+                        }
                     }
                 }
                 int siteIdx = static_cast<int>(chunk_.callSites.size());

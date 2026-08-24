@@ -52,11 +52,14 @@ TEST(UseStatement, InjectsFunctionAndModuleButNotVariables) {
     std::vector<std::string> echoed;
     UseEvaluated e = evalFile(main, [&](const std::string& m) { echoed.push_back(m); });
 
-    ASSERT_EQ(echoed.size(), 3u);
+    // Two, not three: is_undef() is a probe and does not warn about the name
+    // it is asking about -- matching the reference, which is silent for this
+    // exact script. `ECHO: true` is what proves lib_var wasn't injected; the
+    // warning this used to also assert was our own divergence, not the point.
+    ASSERT_EQ(echoed.size(), 2u);
     EXPECT_EQ(echoed[0], "ECHO: 103"); // 1 + 2 + lib_var(100) -- proves lib_add's body resolves
                                         // lib_var from *its own* file's scope (reanchoring)
-    EXPECT_NE(echoed[1].find("WARNING: Ignoring unknown variable 'lib_var'"), std::string::npos); // NOT injected
-    EXPECT_EQ(echoed[2], "ECHO: true"); // is_undef(lib_var) in main's own scope
+    EXPECT_EQ(echoed[1], "ECHO: true"); // is_undef(lib_var) in main's own scope -- NOT injected
     EXPECT_EQ(e.bodies.size(), 1u);     // lib_cube(5) still produced geometry
     std::filesystem::remove(lib);
     std::filesystem::remove(main);
