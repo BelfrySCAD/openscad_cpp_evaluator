@@ -876,11 +876,32 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
             CallArgs args = resolveArgs(*this, node.arguments, ctx);
             return importAsValue(*this, args, node);
         }
-        // A builtin function name always wins over a same-named user
-        // function -- checked *before* the user-function lookup, not
-        // after, matching the reference's _eval_function_call precedence
-        // exactly (name in _BUILTIN_FN_NAMES gates which branch runs at
-        // all).
+        // A user-defined function SHADOWS a same-named builtin, so the
+        // user lookup runs FIRST. Verified against OpenSCAD 2026.02.01:
+        // `function norm(x) = 999; echo(norm([3,4]));` echoes 999 there,
+        // and 5 here until this was fixed.
+        //
+        // The comment this replaces asserted the opposite order matched
+        // "the reference's _eval_function_call precedence exactly" -- but
+        // _eval_function_call / _BUILTIN_FN_NAMES are the old PYTHON
+        // evaluator, not OpenSCAD, and that prototype had it backwards.
+        // The C++ port inherited the mistake. Modules were always right
+        // (a user `module sphere()` does override the builtin); only
+        // functions resolved the wrong way round.
+        //
+        // bytecode_compiler.cpp's Op::CallFn site resolution has the same
+        // ordering and is fixed with it -- the VM is the default engine,
+        // so fixing only this one would leave the bug in place.
+        const oscad::ASTNode* decl = ctx.scope->lookupFunction(leftId->name);
+        if (decl && decl->kind() == oscad::NodeKind::FunctionDeclaration) {
+            // Call-site stop, in the CALLER's context, before descending
+            // into the callee (whose own body-entry stop comes later, from
+            // evalUserFunctionCore). Builtins deliberately get none --
+            // only the user-function and function-literal branches stop.
+            checkDebug(node, ctx, /*forced=*/false, /*exprLevel=*/false, /*callSite=*/true);
+            return evalUserFunction(leftId->name, static_cast<const oscad::FunctionDeclaration&>(*decl), node.arguments,
+                                     ctx, &node);
+        }
         if (isBuiltinFunctionName(leftId->name)) {
             // is_undef(name) is a probe: asking whether a name is defined
             // must not itself warn that it isn't. The $-branch of
@@ -900,17 +921,6 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
             if (leftId->name == "object") return builtinObject(*this, node.arguments, ctx, node);
             CallArgs args = resolveArgs(*this, node.arguments, ctx);
             return evalBuiltinFunction(*this, leftId->name, args, node);
-        }
-        const oscad::ASTNode* decl = ctx.scope->lookupFunction(leftId->name);
-        if (decl && decl->kind() == oscad::NodeKind::FunctionDeclaration) {
-            // Call-site stop, in the CALLER's context, before descending
-            // into the callee (whose own body-entry stop comes later, from
-            // evalUserFunctionCore). Builtins deliberately get none --
-            // mirrors _eval_function_call, where only the user-function and
-            // function-literal branches call _check_debug.
-            checkDebug(node, ctx, /*forced=*/false, /*exprLevel=*/false, /*callSite=*/true);
-            return evalUserFunction(leftId->name, static_cast<const oscad::FunctionDeclaration&>(*decl), node.arguments,
-                                     ctx, &node);
         }
     }
 

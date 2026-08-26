@@ -508,18 +508,99 @@ TEST(ObjectBuiltin, PositionalNonObjectNonListArgumentIsUndef) {
     EXPECT_TRUE(isUndef(evalSrc("object(5)", ev)));
 }
 
-// -- Precedence: a builtin function name always wins over a same-named --
-// user function, unlike modules (where a user module CAN shadow a builtin).
+// -- Precedence: a user function SHADOWS a same-named builtin ------------
+//
+// Same rule as modules, which always got this right. It used to be
+// backwards for functions: the builtin won, because the port copied the old
+// Python evaluator's _eval_function_call order rather than OpenSCAD's.
+//
+// Read off OpenSCAD 2026.02.01:
+//   function abs(x) = 999;  echo(abs(-3));            -> 999
+//   function is_undef(x) = "mine"; echo(is_undef(q)); -> "mine", and it
+//       WARNS about the unknown variable q, because a user function
+//       evaluates its arguments normally -- only the builtin probe is
+//       silent.
+//
+// Every case runs under both engines: the VM decides builtin-vs-user at
+// COMPILE time (bytecode_compiler.cpp), so it needs its own fix and its
+// own coverage.
 
-TEST(FunctionBuiltinPrecedence, BuiltinWinsOverSameNamedUserFunction) {
-    Evaluator ev;
-    auto ast = parseSrc("function abs(x) = 999;\nresult = abs(-3);");
-    auto scope = oscad::buildScopes(ast);
-    auto* assign = dynamic_cast<oscad::Assignment*>(ast[1].get());
-    ASSERT_NE(assign, nullptr);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    Value v = ev.evalExpr(*assign->expr, ctx);
-    EXPECT_DOUBLE_EQ(asNum(v), 3.0); // builtin abs(), not the user's abs()
+namespace {
+
+class ScopedVm {
+public:
+    explicit ScopedVm(bool enabled) { Evaluator::setBytecodeVmEnabledForTesting(enabled); }
+    ~ScopedVm() { Evaluator::setBytecodeVmEnabledForTesting(std::nullopt); }
+};
+
+std::vector<std::string> echoesOf(const std::string& src) {
+    std::vector<std::string> out;
+    oscadeval::test::evalSrc(src, [&](const std::string& m) { out.push_back(m); });
+    return out;
+}
+
+} // namespace
+
+TEST(FunctionBuiltinPrecedence, UserFunctionShadowsSameNamedBuiltin) {
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e = echoesOf("function abs(x) = 999;\necho(abs(-3));");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("999"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+    }
+}
+
+TEST(FunctionBuiltinPrecedence, TheBuiltinStillWinsWhenNobodyRedefinesIt) {
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e = echoesOf("echo(abs(-3));");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("3"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+        EXPECT_EQ(e[0].find("999"), std::string::npos) << "vm=" << vm;
+    }
+}
+
+TEST(FunctionBuiltinPrecedence, ShadowingHoldsInsideAUserFunctionBody) {
+    // The call is inside another function, so on the VM path it is reached
+    // through a COMPILED chunk rather than the interpreter -- this is the
+    // case a compiler-side fix is needed for.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e =
+            echoesOf("function abs(x) = 999;\nfunction outer() = abs(-3);\necho(outer());");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("999"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+    }
+}
+
+TEST(FunctionBuiltinPrecedence, AUserDefinedIsUndefShadowsTheProbe) {
+    // is_undef() is the one builtin with argument handling of its own (it
+    // must not warn about the name it is probing). A user's own is_undef
+    // takes over completely, arguments evaluated the ordinary way -- so the
+    // unknown-variable warning the probe suppresses DOES appear, exactly as
+    // upstream.
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        std::vector<std::string> msgs;
+        oscadeval::test::evalSrc("function is_undef(x) = \"mine\";\necho(is_undef(nothing));",
+                                  [&](const std::string& m) { msgs.push_back(m); });
+        bool sawMine = false, sawWarning = false;
+        for (const std::string& m : msgs) {
+            if (m.find("mine") != std::string::npos) sawMine = true;
+            if (m.find("nothing") != std::string::npos) sawWarning = true;
+        }
+        EXPECT_TRUE(sawMine) << "vm=" << vm;
+        EXPECT_TRUE(sawWarning) << "vm=" << vm << ": a user function evaluates its argument normally";
+    }
+}
+
+TEST(FunctionBuiltinPrecedence, TheIsUndefProbeIsStillSilentWhenNotRedefined) {
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e = echoesOf("echo(is_undef(nothing));");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm << ": probing must not warn";
+        EXPECT_NE(e[0].find("true"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+    }
 }
 
 // -- Builtin argument diagnostics (reference parity) ---------------------

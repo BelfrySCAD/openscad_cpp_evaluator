@@ -567,6 +567,19 @@ public:
                         // evalBuiltinFunction when isImport is set.
                         site.isImport = true;
                         isStatic = true;
+                    } else if (const oscad::ASTNode* userFn =
+                                   scope_ ? scope_->lookupFunction(calleeName) : nullptr;
+                               userFn && userFn->kind() == NodeKind::FunctionDeclaration) {
+                        // A user-defined function SHADOWS a same-named
+                        // builtin, so this lookup runs BEFORE the builtin
+                        // table -- the same reordering as
+                        // evalFunctionCall's (user_calls.cpp), and it has
+                        // to happen here too: this decision is baked in at
+                        // COMPILE time, so leaving the builtin test first
+                        // would keep the bug on the default engine no
+                        // matter what the interpreter does.
+                        site.decl = static_cast<const oscad::FunctionDeclaration*>(userFn);
+                        isStatic = true;
                     } else if (isBuiltinFunctionName(calleeName)) {
                         // object() is already in this table -- it gets
                         // isBuiltin=true here like any other builtin, and
@@ -578,13 +591,10 @@ public:
                         // split positional/named CallArgs shape).
                         site.isBuiltin = true;
                         isStatic = true;
-                    } else {
-                        const oscad::ASTNode* found = scope_ ? scope_->lookupFunction(calleeName) : nullptr;
-                        if (found && found->kind() == NodeKind::FunctionDeclaration) {
-                            site.decl = static_cast<const oscad::FunctionDeclaration*>(found);
-                            isStatic = true;
-                        }
                     }
+                    // Anything else stays dynamic: a function-literal value,
+                    // or a name that is simply unknown. Op::CallDynamic
+                    // resolves it (and warns) at runtime.
                 }
 
                 if (!isStatic) {
@@ -626,7 +636,17 @@ public:
                 // is_undef(name) probes rather than reads -- the same quiet
                 // load the interpreter uses (Evaluator::undefProbeTarget),
                 // so the two engines agree on which reads warn.
-                if (const oscad::Identifier* undefProbe = Evaluator::undefProbeTarget(n)) {
+                //
+                // Only when the call resolves to the BUILTIN, though. A
+                // user function named is_undef shadows it (site resolution
+                // above) and evaluates its argument the ordinary way,
+                // warnings included -- which is what OpenSCAD does. The
+                // interpreter gets this for free by testing the probe
+                // inside its builtin branch; here the two are separate, so
+                // the condition has to be spelled out.
+                const oscad::Identifier* undefProbe =
+                    site.isBuiltin ? Evaluator::undefProbeTarget(n) : nullptr;
+                if (undefProbe) {
                     compileIdentifierLoad(undefProbe->name, undefProbe->position(), out, scope,
                                           /*warnIfUndef=*/false);
                     site.argNames.push_back(std::nullopt);
