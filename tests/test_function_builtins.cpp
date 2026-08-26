@@ -725,3 +725,102 @@ TEST(StringListBuiltins, ChrIsVariadicAndRangeChecked) {
     EXPECT_EQ(asStr(evalSrc("chr(55296)", ev)), ""); // 0xD800, a surrogate
     EXPECT_EQ(asStr(evalSrc("chr(1114112)", ev)), ""); // 0x110000, one past the top
 }
+
+// -- matrix_solve(A, b) --------------------------------------------------
+//
+// One pivoted LU, three answers: x, det, singular. Oracle is BOSL2 plus
+// arithmetic -- OpenSCAD has no equivalent, so there is no reference
+// binary to compare against.
+//
+// Measured against BOSL2 through the CLI, same matrices, identical
+// determinants: n=10  3.17s -> 0.33s, n=11  31.49s -> 0.33s. BOSL2's
+// determinant() is a cofactor expansion, growing x10 per step; this is
+// O(n^3).
+
+TEST(MatrixSolve, SolvesASquareSystem) {
+    Evaluator ev;
+    // asList() returns a reference INTO v, so v has to outlive it -- taking
+    // asList(evalSrc(...)) directly dangles the moment the temporary dies.
+    const Value v = evalSrc("matrix_solve([[2,1],[1,3]], [5,10]).x", ev);
+    const std::vector<Value>& x = asList(v);
+    ASSERT_EQ(x.size(), 2u);
+    EXPECT_NEAR(asNum(x[0]), 1.0, 1e-12);
+    EXPECT_NEAR(asNum(x[1]), 3.0, 1e-12);
+}
+
+TEST(MatrixSolve, DeterminantComesFreeFromTheSameFactorisation) {
+    Evaluator ev;
+    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[2,1],[1,3]]).det", ev)), 5.0, 1e-12);
+    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[1,0,0],[0,1,0],[0,0,1]]).det", ev)), 1.0, 1e-12);
+    // Sign follows the row swaps, not just the magnitude.
+    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[0,1],[1,0]]).det", ev)), -1.0, 1e-12);
+}
+
+TEST(MatrixSolve, WithNoRightHandSideThereIsNoSolution) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[2,1],[1,3]]).x", ev)));
+}
+
+TEST(MatrixSolve, ASingularMatrixAnswersRatherThanWarning) {
+    // "Is this matrix singular?" is a fair question to ask, so it is
+    // reported, not warned about: det 0, singular true, no solution.
+    Evaluator ev;
+    EXPECT_TRUE(asBool(evalSrc("matrix_solve([[1,2],[2,4]], [1,2]).singular", ev)));
+    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[1,2],[2,4]], [1,2]).det", ev)), 0.0, 1e-12);
+    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[2,4]], [1,2]).x", ev)));
+}
+
+TEST(MatrixSolve, SingularityIsRelativeToTheMatrixNotAbsolute) {
+    // 2*I scaled by 1e-10 is perfectly conditioned, and BOSL2's
+    // linear_solve calls it singular -- its test is a fixed absolute 1e-9
+    // on R's diagonal with no scaling by the size of the matrix. Verified
+    // through the CLI: BOSL2 says SINGULAR at 1e-10 and 1e-12 where this
+    // solves correctly.
+    Evaluator ev;
+    EXPECT_FALSE(asBool(evalSrc("matrix_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).singular", ev)));
+    const Value v = evalSrc("matrix_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).x", ev);
+    const std::vector<Value>& x = asList(v);
+    ASSERT_EQ(x.size(), 2u);
+    EXPECT_NEAR(asNum(x[0]), 0.5, 1e-9);
+}
+
+TEST(MatrixSolve, AMatrixRightHandSideSolvesEveryColumn) {
+    Evaluator ev;
+    // Solving against the identity is the inverse; [[2,1],[1,3]] has
+    // det 5, so the inverse is [[0.6,-0.2],[-0.2,0.4]].
+    const Value v = evalSrc("matrix_solve([[2,1],[1,3]], [[1,0],[0,1]]).x", ev);
+    const std::vector<Value>& rows = asList(v);
+    ASSERT_EQ(rows.size(), 2u);
+    const std::vector<Value>& r0 = asList(rows[0]);
+    ASSERT_EQ(r0.size(), 2u);
+    EXPECT_NEAR(asNum(r0[0]), 0.6, 1e-12);
+    EXPECT_NEAR(asNum(r0[1]), -0.2, 1e-12);
+}
+
+TEST(MatrixSolve, RejectsWhatItCannotFactor) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2,3],[4,5,6]], [1,2])", ev)));   // not square
+    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[3,\"x\"]], [1,2])", ev)));   // not numeric
+    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[3,4]], [1,2,3])", ev)));     // wrong rhs length
+    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[3,4,5]], [1,2])", ev)));     // ragged
+}
+
+TEST(MatrixSolve, NonSquareWarnsWithItsShape) {
+    const std::vector<std::string> w = builtinWarnings("matrix_solve([[1,2,3],[4,5,6]], [1,2])");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("matrix_solve() requires a square matrix, found 2 x 3"), std::string::npos)
+        << "got " << w[0];
+}
+
+TEST(MatrixSolve, WorksUnderBothEngines) {
+    for (bool vm : {false, true}) {
+        ScopedVm guard(vm);
+        const std::vector<std::string> e =
+            echoesOf("r = matrix_solve([[2,1],[1,3]], [5,10]);\necho(r.x, r.det, r.singular);");
+        ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
+        EXPECT_NE(e[0].find("[1, 3]"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+        EXPECT_NE(e[0].find("5"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+        EXPECT_NE(e[0].find("false"), std::string::npos) << "vm=" << vm << ", got " << e[0];
+    }
+}
+

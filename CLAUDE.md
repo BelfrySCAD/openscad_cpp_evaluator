@@ -460,6 +460,20 @@ grep for `ponytail:`.
   unknown arguments -- `children(separate=true)` renders the wrong shape there with no warning --
   and both read as `undef` in OpenSCAD, so a guard written against them works in both.
 
+- **`matrix_solve(A, b)`** (`src/builtins/function_builtins.cpp`, feature name `matrix-solve`) —
+  one pivoted LU answering three questions from the same factorisation: `.x` (solution; a vector
+  for a vector `b`, a matrix for a matrix `b`, `undef` when `b` is omitted), `.det`, `.singular`.
+  Square systems only — BOSL2's `linear_solve` also does least-squares/minimum-norm via QR, which
+  LU cannot, and those paths are already fast in script. A non-square or non-numeric matrix warns
+  and returns `undef`; a **singular** one is reported (`singular=true`, `det=0`, `x=undef`), not
+  warned about, because asking whether a matrix is singular is a fair question.
+  Why it exists: BOSL2's `determinant()` is a cofactor expansion, O(n!) in time *and* in
+  intermediate list allocation. Measured through the CLI on identical matrices, with identical
+  results: **n=10 3.17s → 0.33s, n=11 31.49s → 0.33s**. Its `linear_solve` is not the problem
+  (128×128 in ~0.18s since its Apr 2026 Householder rewrite) — but its singularity test is a fixed
+  **absolute** `1e-9` on R's diagonal with no scaling by ‖A‖, so `2*I` scaled by 1e-10 is declared
+  singular there and solves correctly here. This one uses a relative threshold.
+
 - `include/openscad_cpp_evaluator/value.hpp`, `src/value.cpp` — the `Value` variant (OpenSCAD's
   dynamic value type) and its free-function arithmetic/comparison helpers. See the plan's §1 for
   the type-mapping table and why there's no numpy-equivalent library.
