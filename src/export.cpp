@@ -764,6 +764,91 @@ void writeX3d(const std::string& path, const std::vector<ExportObject>& objects)
     out << "  </Scene>\n</X3D>\n";
 }
 
+// AMF is XML like X3D, but its colour model is per-VOLUME rather than
+// per-face: a mesh carries one <vertices> list and any number of <volume>
+// blocks, each naming a material. So an object whose triangles are not all
+// one colour is written as one volume per distinct colour -- <color> on an
+// individual <triangle> is legal but far less widely read, and slicers are
+// the audience here.
+//
+// Material and object ids start at 1; id 0 is reserved by the spec.
+// The material table is global, so two objects sharing a colour share one
+// material entry rather than each declaring its own.
+void writeAmf(const std::string& path, const std::vector<ExportObject>& objects) {
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("Could not open '" + path + "' for writing");
+
+    std::vector<std::array<float, 4>> materials;
+    const auto materialFor = [&](const std::array<float, 4>& c) -> size_t {
+        for (size_t i = 0; i < materials.size(); ++i) {
+            if (materials[i] == c) return i + 1;
+        }
+        materials.push_back(c);
+        return materials.size();
+    };
+
+    struct Volume {
+        size_t material = 1;
+        std::vector<uint32_t> tris;
+    };
+    std::vector<std::vector<Volume>> perObject;
+    perObject.reserve(objects.size());
+    for (const ExportObject& o : objects) {
+        const FaceColors fc = faceColors(o);
+        std::vector<Volume> vols;
+        if (fc.palette.empty()) {
+            Volume v;
+            v.material = materialFor(o.color);
+            v.tris = o.tris;
+            vols.push_back(std::move(v));
+        } else {
+            vols.resize(fc.palette.size());
+            for (size_t i = 0; i < fc.palette.size(); ++i) vols[i].material = materialFor(fc.palette[i]);
+            for (size_t t = 0; t < o.tris.size() / 3; ++t) {
+                std::vector<uint32_t>& dst = vols[fc.index[t]].tris;
+                dst.push_back(o.tris[t * 3]);
+                dst.push_back(o.tris[t * 3 + 1]);
+                dst.push_back(o.tris[t * 3 + 2]);
+            }
+        }
+        perObject.push_back(std::move(vols));
+    }
+
+    out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    out << "<amf unit=\"millimeter\" version=\"1.1\">\n";
+    out << "  <metadata type=\"cad\">BelfrySCAD</metadata>\n";
+    for (size_t i = 0; i < materials.size(); ++i) {
+        const std::array<float, 4>& c = materials[i];
+        out << "  <material id=\"" << (i + 1) << "\">\n";
+        out << "    <color><r>" << formatG6(c[0]) << "</r><g>" << formatG6(c[1]) << "</g><b>"
+            << formatG6(c[2]) << "</b>";
+        if (c[3] < 1.0f) out << "<a>" << formatG6(c[3]) << "</a>";
+        out << "</color>\n";
+        out << "  </material>\n";
+    }
+    for (size_t oi = 0; oi < objects.size(); ++oi) {
+        const ExportObject& o = objects[oi];
+        out << "  <object id=\"" << (oi + 1) << "\">\n    <mesh>\n      <vertices>\n";
+        for (size_t v = 0; v < o.verts.size() / 3; ++v) {
+            out << "        <vertex><coordinates><x>" << formatG6(o.verts[v * 3]) << "</x><y>"
+                << formatG6(o.verts[v * 3 + 1]) << "</y><z>" << formatG6(o.verts[v * 3 + 2])
+                << "</z></coordinates></vertex>\n";
+        }
+        out << "      </vertices>\n";
+        for (const Volume& vol : perObject[oi]) {
+            if (vol.tris.empty()) continue;
+            out << "      <volume materialid=\"" << vol.material << "\">\n";
+            for (size_t t = 0; t < vol.tris.size() / 3; ++t) {
+                out << "        <triangle><v1>" << vol.tris[t * 3] << "</v1><v2>" << vol.tris[t * 3 + 1]
+                    << "</v2><v3>" << vol.tris[t * 3 + 2] << "</v3></triangle>\n";
+            }
+            out << "      </volume>\n";
+        }
+        out << "    </mesh>\n  </object>\n";
+    }
+    out << "</amf>\n";
+}
+
 
 // -- one entry point ------------------------------------------------------
 
@@ -779,7 +864,7 @@ std::string lowerExtension(const std::string& path) {
 }
 
 bool isMultiObject(const std::string& ext) {
-    return ext == ".3mf" || ext == ".obj" || ext == ".ply" || ext == ".wrl" || ext == ".x3d";
+    return ext == ".3mf" || ext == ".amf" || ext == ".obj" || ext == ".ply" || ext == ".wrl" || ext == ".x3d";
 }
 
 // The merged single mesh STL/OFF write, with the open shells kept.
@@ -898,7 +983,7 @@ void writeOffMesh(const std::string& path, const manifold::MeshGL& mesh) {
 } // namespace
 
 const std::vector<std::string>& exportExtensions() {
-    static const std::vector<std::string> exts = {".3mf", ".stl", ".obj", ".off", ".ply", ".wrl", ".x3d"};
+    static const std::vector<std::string> exts = {".3mf", ".amf", ".stl", ".obj", ".off", ".ply", ".wrl", ".x3d"};
     return exts;
 }
 
@@ -929,6 +1014,8 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
         if (objects.empty()) throw std::runtime_error("No geometry to export");
         if (ext == ".3mf") {
             writeThreeMf(path, objects);
+        } else if (ext == ".amf") {
+            writeAmf(path, objects);
         } else if (ext == ".obj") {
             writeObj(path, objects);
         } else if (ext == ".ply") {

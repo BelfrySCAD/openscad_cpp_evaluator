@@ -97,6 +97,13 @@ void writeVrml(const std::string& path, const std::vector<ExportObject>& objects
 // Color) and Shape level 1 (Appearance, Material), exactly the nodes used.
 void writeX3d(const std::string& path, const std::vector<ExportObject>& objects);
 
+// AMF 1.1. XML like X3D, but its colour lives on the <volume>, not the
+// face: a mesh holds one vertex list and one <volume> per material. An
+// object whose triangles are not all one colour therefore becomes several
+// volumes -- which is what a multimaterial slicer reads as separate
+// materials to assign to tools.
+void writeAmf(const std::string& path, const std::vector<ExportObject>& objects);
+
 // OFF (Object File Format): header "OFF", "$verts $tris 0", vertex lines,
 // then "3 i j k" per triangle (0-indexed, count-prefixed). Mirrors
 // export.py's write_off.

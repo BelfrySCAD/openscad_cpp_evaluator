@@ -711,8 +711,17 @@ grep for `ponytail:`.
   — skip it and the mesh comes out non-manifold at the seam). Self-contained 2D geometry math here
   (`dot2`/`len2`/`norm2`, the parabola-canonical-frame rotation in `discretizeArc`) exists nowhere
   else in this codebase.
-- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — binary STL, OBJ, OFF, and 3MF
-  writers (compose every body into one solid first; 3MF via `zip_stored.hpp`'s `writeDeflateZip`).
+- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all eight
+  formats `exportExtensions()` lists: 3MF, AMF, STL, OBJ, OFF, PLY, VRML, X3D (3MF via
+  `zip_stored.hpp`'s `writeDeflateZip`). **`exportExtensions()` is the one source of truth for
+  which formats exist** — the Python facade and BelfrySCAD's dialog/CLI all ask it rather than
+  restating the list, because three hand-written copies had already drifted far enough that `.off`
+  could be written by neither the GUI nor the CLI while every test passed.
+  Colour is carried by 3MF, AMF, OBJ (companion `.mtl`), PLY, VRML and X3D; STL and OFF compose
+  every body into one solid and store geometry only. **AMF** puts colour on the `<volume>` rather
+  than the face, so an object whose triangles are not all one colour is written as one volume per
+  colour — per-triangle `<color>` is legal in the spec but poorly supported by the slicers that are
+  the audience for it.
   `colored_body.hpp`/`.cpp`'s `toRenderableBodies()` (thin-extrudes any top-level 2D-only result to
   a 1e-3-unit-tall `flatPreview` Manifold) must run on a body list before handing it to any of these
   writers — none of them look at `ColoredBody::section` at all, only `.body`. `tools/cli/cli_lib.cpp`

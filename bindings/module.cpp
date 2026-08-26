@@ -786,6 +786,10 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "logging them. Raises RuntimeError when there is no geometry, the format is unknown, or the "
           "file cannot be opened.");
 
+    m.def("export_extensions", []() { return oscadeval::exportExtensions(); },
+          "The file extensions export_model understands, dot-prefixed. Read from the C++ writer table "
+          "rather than restated here, so the Python side cannot drift from what can actually be written.");
+
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
           nb::arg("profile") = false,
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).");
