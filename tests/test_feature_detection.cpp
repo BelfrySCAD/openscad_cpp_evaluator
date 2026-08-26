@@ -35,7 +35,7 @@ std::vector<std::string> echoesFrom(const std::string& src) {
 // in featureLevels() -- shows up as a 0.
 const char* kFeatures[] = {"separate-children", "minkowski-diff", "sphere-styles",   "export-name",
                             "simplify-op",       "expr-import",    "object-function", "roof-op",
-                            "render-expr",       "polyhedron-vnf"};
+                            "render-expr",       "polyhedron-vnf", "matrix-solve"};
 
 } // namespace
 

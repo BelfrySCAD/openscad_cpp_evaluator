@@ -169,6 +169,172 @@ Value builtinCross(const Value& aArg, const Value& bArg) {
     return Value{};
 }
 
+// -- matrix_solve(A, b) --------------------------------------------------
+//
+// One pivoted LU answers three questions at once -- the solution, the
+// determinant, and whether A is singular -- because all three fall out of
+// the same factorisation.
+//
+// The motivation is BOSL2's determinant() (linalg.scad), a cofactor
+// expansion: O(n!) time AND O(n!) intermediate list allocation. Measured
+// through this evaluator: 0.04s at n=8, 0.38s at n=9, 2.7s at n=10, and
+// projecting to minutes at n=12. This is O(n^3). BOSL2's linear_solve, by
+// contrast, was already fast (128x128 in ~0.18s after its Apr 2026
+// Householder rewrite), so speed is not the argument for the solve half --
+// a correct singularity test is. See below.
+//
+// Square systems only. BOSL2's linear_solve also handles overdetermined
+// (least-squares) and underdetermined (minimum-norm) systems via QR; LU
+// cannot, and those paths are quick enough in script. A non-square matrix
+// warns rather than silently doing something else.
+
+// Defined further down, next to the other object() helpers.
+Value objectOf(std::vector<std::pair<std::string, Value>> items);
+
+// A rectangular numeric matrix as (row-major values, column count).
+// nullopt for anything that is not a non-empty list of equal-length,
+// non-empty numeric lists.
+std::optional<std::pair<std::vector<double>, size_t>> numericMatrix(const Value& v) {
+    const ListPtr* rows = std::get_if<ListPtr>(&v);
+    if (!rows || !*rows || (*rows)->items.empty()) return std::nullopt;
+    std::vector<double> flat;
+    size_t cols = 0;
+    for (size_t r = 0; r < (*rows)->items.size(); ++r) {
+        const std::optional<std::vector<double>> row = allNumericList((*rows)->items[r]);
+        if (!row || row->empty()) return std::nullopt;
+        if (r == 0) {
+            cols = row->size();
+        } else if (row->size() != cols) {
+            return std::nullopt;
+        }
+        flat.insert(flat.end(), row->begin(), row->end());
+    }
+    return std::make_pair(std::move(flat), cols);
+}
+
+Value builtinMatrixSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bool haveB,
+                          const oscad::ASTNode& node) {
+    const auto parsed = numericMatrix(aArg);
+    if (!parsed) {
+        ev.warn("matrix_solve() requires a matrix of numbers", &node.position());
+        return Value{};
+    }
+    std::vector<double> lu = parsed->first;
+    const size_t cols = parsed->second;
+    const size_t n = lu.size() / cols;
+    if (n != cols) {
+        ev.warn("matrix_solve() requires a square matrix, found " + std::to_string(n) + " x " +
+                    std::to_string(cols),
+                &node.position());
+        return Value{};
+    }
+    double maxAbs = 0.0;
+    for (double x : lu) {
+        if (!std::isfinite(x)) {
+            ev.warn("matrix_solve() matrix contains a non-finite value", &node.position());
+            return Value{};
+        }
+        maxAbs = std::max(maxAbs, std::abs(x));
+    }
+
+    // Right-hand side: a vector of n is one column; a matrix of n rows is
+    // one column per column. Kept row-major alongside the factorisation.
+    size_t k = 0;
+    bool bWasVector = false;
+    std::vector<double> rhs;
+    if (haveB) {
+        if (const std::optional<std::vector<double>> vec = allNumericList(bArg); vec && vec->size() == n) {
+            bWasVector = true;
+            k = 1;
+            rhs = *vec;
+        } else if (const auto bm = numericMatrix(bArg); bm && bm->first.size() / bm->second == n) {
+            k = bm->second;
+            rhs = bm->first;
+        } else {
+            ev.warn("matrix_solve() right-hand side must be a vector of " + std::to_string(n) +
+                        " numbers, or a matrix with that many rows",
+                    &node.position());
+            return Value{};
+        }
+        for (double x : rhs) {
+            if (!std::isfinite(x)) {
+                ev.warn("matrix_solve() right-hand side contains a non-finite value", &node.position());
+                return Value{};
+            }
+        }
+    }
+
+    // Relative singularity threshold. BOSL2 compares R's diagonal against a
+    // fixed ABSOLUTE 1e-9 (its _EPSILON) with no scaling by the size of the
+    // matrix, so a perfectly well-conditioned system scaled down by 1e-10
+    // is declared singular there. Scaling by maxAbs is what makes
+    // matrix_solve(A*1e-10) still solvable.
+    const double tol = std::numeric_limits<double>::epsilon() * static_cast<double>(n) * std::max(maxAbs, 1.0);
+
+    double det = 1.0;
+    bool singular = false;
+    for (size_t col = 0; col < n && !singular; ++col) {
+        size_t pivot = col;
+        for (size_t r = col + 1; r < n; ++r) {
+            if (std::abs(lu[r * n + col]) > std::abs(lu[pivot * n + col])) pivot = r;
+        }
+        if (std::abs(lu[pivot * n + col]) <= tol) {
+            singular = true;
+            break;
+        }
+        if (pivot != col) {
+            for (size_t c = 0; c < n; ++c) std::swap(lu[col * n + c], lu[pivot * n + c]);
+            for (size_t c = 0; c < k; ++c) std::swap(rhs[col * k + c], rhs[pivot * k + c]);
+            det = -det;
+        }
+        const double p = lu[col * n + col];
+        det *= p;
+        for (size_t r = col + 1; r < n; ++r) {
+            const double f = lu[r * n + col] / p;
+            if (f == 0.0) continue;
+            lu[r * n + col] = 0.0;
+            for (size_t c = col + 1; c < n; ++c) lu[r * n + c] -= f * lu[col * n + c];
+            for (size_t c = 0; c < k; ++c) rhs[r * k + c] -= f * rhs[col * k + c];
+        }
+    }
+
+    std::vector<std::pair<std::string, Value>> out;
+    if (singular) {
+        // Not a misuse -- "is this matrix singular?" is a legitimate
+        // question to ask matrix_solve, so it answers rather than warning.
+        out.emplace_back("x", Value{});
+        out.emplace_back("det", Value{0.0});
+        out.emplace_back("singular", Value{true});
+        return objectOf(std::move(out));
+    }
+
+    if (haveB) {
+        for (size_t col = n; col-- > 0;) {
+            for (size_t c = 0; c < k; ++c) {
+                double acc = rhs[col * k + c];
+                for (size_t j = col + 1; j < n; ++j) acc -= lu[col * n + j] * rhs[j * k + c];
+                rhs[col * k + c] = acc / lu[col * n + col];
+            }
+        }
+        if (bWasVector) {
+            out.emplace_back("x", numList(rhs));
+        } else {
+            std::vector<Value> rowsOut;
+            rowsOut.reserve(n);
+            for (size_t r = 0; r < n; ++r) {
+                rowsOut.push_back(numList(std::vector<double>(rhs.begin() + static_cast<long>(r * k),
+                                                               rhs.begin() + static_cast<long>((r + 1) * k))));
+            }
+            out.emplace_back("x", listOf(std::move(rowsOut)));
+        }
+    } else {
+        out.emplace_back("x", Value{});
+    }
+    out.emplace_back("det", Value{det});
+    out.emplace_back("singular", Value{false});
+    return objectOf(std::move(out));
+}
+
 Value builtinRands(double minv, double maxv, double nArg, const Value& seedArg) {
     // ponytail: doesn't reproduce Python's Mersenne-Twister bit-for-bit --
     // no script should depend on cross-language RNG equality, only on
@@ -450,6 +616,7 @@ bool isBuiltinFunctionName(const std::string& name) {
         "chr", "ord", "is_undef", "is_num", "is_bool", "is_string", "is_list", "is_function", "is_object",
         "search", "lookup", "has_key", "version", "version_num", "parent_module",
         "object", "textmetrics", "fontmetrics", "dxf_dim", "dxf_cross", "supported_feature",
+        "matrix_solve",
     };
     return names.count(name) > 0;
 }
@@ -591,7 +758,7 @@ enum class BuiltinFnId {
     TextMetrics, FontMetrics, Abs, Sign, Ceil, Floor, Round, Sqrt, Ln, Log, Exp, Sin, Cos, Tan,
     Asin, Acos, Atan, Atan2, Max, Min, Pow, Norm, Cross, Rands, Concat, Len, Str, Chr, Ord,
     IsUndef, IsNum, IsBool, IsString, IsList, IsFunction, IsObject, Search, Lookup, HasKey,
-    Version, VersionNum, ParentModule, DxfDim, DxfCross, SupportedFeature,
+    Version, VersionNum, ParentModule, DxfDim, DxfCross, SupportedFeature, MatrixSolve,
 };
 
 // supported_feature("name") -> the level at which this build implements that
@@ -611,6 +778,7 @@ enum class BuiltinFnId {
 const std::unordered_map<std::string, double>& featureLevels() {
     static const std::unordered_map<std::string, double> levels = {
         {"render-expr", 1.0},        // render() in expression position
+        {"matrix-solve", 1.0},       // matrix_solve(A, b) -> {x, det, singular}
         {"polyhedron-vnf", 1.0},     // polyhedron(vnf) / polyhedron(object)
         {"separate-children", 1.0},  // children(..., separate=true)
         {"minkowski-diff", 1.0},     // minkowski_difference()
@@ -645,6 +813,7 @@ const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
         {"parent_module", BuiltinFnId::ParentModule},
         {"dxf_dim", BuiltinFnId::DxfDim}, {"dxf_cross", BuiltinFnId::DxfCross},
         {"supported_feature", BuiltinFnId::SupportedFeature},
+        {"matrix_solve", BuiltinFnId::MatrixSolve},
     };
     return ids;
 }
@@ -726,6 +895,7 @@ const std::unordered_map<int, BuiltinCheck>& builtinChecks() {
         add(BuiltinFnId::ParentModule, {0, 1, "1", {kNum}});
         add(BuiltinFnId::HasKey, {-1, -1, nullptr, {{TObj, "object"}, {TStr, "string"}}});
         add(BuiltinFnId::SupportedFeature, {1, 1, "1", {}});
+        add(BuiltinFnId::MatrixSolve, {1, 2, "1 or 2", {kVec}});
         for (BuiltinFnId id : {BuiltinFnId::IsUndef, BuiltinFnId::IsNum, BuiltinFnId::IsBool,
                                 BuiltinFnId::IsString, BuiltinFnId::IsList, BuiltinFnId::IsFunction,
                                 BuiltinFnId::IsObject}) {
@@ -1040,6 +1210,9 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         // The OpenSCAD release we track. version_num() is that same
         // year/month/day folded as y * 10000 + m * 100 + d, exactly like the
         // reference's own builtin_version_num (builtin_functions.cc).
+        case BuiltinFnId::MatrixSolve:
+            return builtinMatrixSolve(ev, getArg(args, 0, "A", Value{}), getArg(args, 1, "b", Value{}),
+                                       args.findPositional(1) != nullptr || args.findNamed("b") != nullptr, node);
         case BuiltinFnId::SupportedFeature: {
             const Value name = getArg(args, 0, "feature", Value{});
             const std::string* s = std::get_if<std::string>(&name);
