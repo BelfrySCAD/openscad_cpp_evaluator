@@ -464,15 +464,26 @@ grep for `ponytail:`.
   one pivoted LU answering three questions from the same factorisation: `.x` (solution; a vector
   for a vector `b`, a matrix for a matrix `b`, `undef` when `b` is omitted), `.det`, `.singular`.
   Square systems only — BOSL2's `linear_solve` also does least-squares/minimum-norm via QR, which
-  LU cannot, and those paths are already fast in script. A non-square or non-numeric matrix warns
+  LU cannot; those shapes still have to go through BOSL2. A non-square or non-numeric matrix warns
   and returns `undef`; a **singular** one is reported (`singular=true`, `det=0`, `x=undef`), not
   warned about, because asking whether a matrix is singular is a fair question.
-  Why it exists: BOSL2's `determinant()` is a cofactor expansion, O(n!) in time *and* in
-  intermediate list allocation. Measured through the CLI on identical matrices, with identical
-  results: **n=10 3.17s → 0.33s, n=11 31.49s → 0.33s**. Its `linear_solve` is not the problem
-  (128×128 in ~0.18s since its Apr 2026 Householder rewrite) — but its singularity test is a fixed
-  **absolute** `1e-9` on R's diagonal with no scaling by ‖A‖, so `2*I` scaled by 1e-10 is declared
-  singular there and solves correctly here. This one uses a relative threshold.
+  Why it exists, measured per call with BOSL2's ~0.22s load subtracted and enough repetitions to
+  clear the noise (harness sanity-checked: 200/2000/20000 reps at n=64 give 43/45/43 µs):
+
+  | n | BOSL2 `linear_solve` | `matrix_solve` | | | n | BOSL2 `determinant` | `matrix_solve().det` |
+  |---:|---:|---:|---:|---|---:|---:|---:|
+  | 4 | 280 µs | 1.5 µs | 187× | | 10 | 3.17 s | 0.33 s |
+  | 16 | 2.58 ms | 4.0 µs | 644× | | 11 | 31.49 s | 0.33 s |
+  | 64 | 42.5 ms | 43 µs | 988× | | | *cofactor expansion, O(n!)* | |
+
+  **Do not repeat the claim this replaces.** It said `linear_solve` "is not the problem (128×128 in
+  ~0.18s)" — a one-shot measurement in which the solve vanishes into BOSL2's own load time. Measured
+  properly it is 187–988× slower, and the original framing understated the solve case badly. Keep
+  the comparison fair, though: BOSL2 does **QR**, which is more work than this LU, and validates its
+  arguments every call — not the same algorithm run twice.
+  Correctness, not just speed: BOSL2's singularity test is a fixed **absolute** `1e-9` on R's
+  diagonal with no scaling by ‖A‖, so `2*I` scaled by 1e-10 is declared singular there and solves
+  correctly here. This one uses a relative threshold.
 
 - `include/openscad_cpp_evaluator/value.hpp`, `src/value.cpp` — the `Value` variant (OpenSCAD's
   dynamic value type) and its free-function arithmetic/comparison helpers. See the plan's §1 for
