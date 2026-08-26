@@ -45,9 +45,13 @@ comprehension clause kinds, user function calls (recursion, defaults, `FunctionL
 user module calls (`children()`/`children(N)`, closure detection via `callCtxFor`), list
 indexing/swizzle member access; the full math/string/list/type-check builtin *function* dispatch
 (`sin`/`cos`/`pow`/`search`/`lookup`/`chr`/`ord`/`is_*`/`object`/`has_key`/etc, ~43 names — a
-completely separate namespace/precedence rule from the builtin *modules* in `registry.cpp`: a
-builtin function name always wins over a same-named user function, checked *before* the
-user-function lookup), STL/OBJ/OFF/3MF `import()` in both module (geometry) and expression
+same precedence rule as the builtin *modules* in `registry.cpp`: a user-defined function
+**shadows** a same-named builtin, looked up *before* the builtin table. This was backwards until
+0.47.0 — the port copied the old Python evaluator's `_eval_function_call` order, which had it
+wrong; OpenSCAD 2026.02.01 echoes 999 for `function abs(x)=999; abs(-3)` and we echoed 3. Fixing
+it needs **both** resolution sites: `evalFunctionCall` (`user_calls.cpp`) and the compiler's
+call-site resolution (`bytecode_compiler.cpp`), which bakes builtin-vs-user in at compile time,
+plus gating the silent `is_undef` probe on the call actually resolving to the builtin), STL/OBJ/OFF/3MF `import()` in both module (geometry) and expression
 (VNF/JSON) contexts, and 3MF read/write; (Phase 6) `hull()`/`minkowski()` (transparent-splice
 CSG-tree shape like union/difference/intersection, role-split via the shared `splitByRole`),
 `linear_extrude()`/`rotate_extrude()`/`projection(cut=)`, and `roof()`; and (Phase 7) `offset()`,
