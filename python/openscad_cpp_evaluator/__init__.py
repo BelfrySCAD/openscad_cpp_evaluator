@@ -315,8 +315,14 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
 
 
 def export_extensions() -> list:
-    """The file extensions export_model understands, dot-prefixed."""
-    return [".3mf", ".stl", ".obj", ".off", ".ply", ".wrl", ".x3d"]
+    """The file extensions export_model understands, dot-prefixed.
+
+    Asked of the extension rather than restated here. The hardcoded copy
+    this replaces had already drifted: it was missing formats the C++
+    writer table had gained, and nothing failed -- callers simply could
+    not reach them.
+    """
+    return list(_ext.export_extensions())
 
 
 def check_mesh(verts, tris) -> dict:

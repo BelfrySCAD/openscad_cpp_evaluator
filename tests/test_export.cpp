@@ -121,3 +121,88 @@ TEST(ToRenderableBodies, A3dBodyPassesThroughUnchanged) {
     EXPECT_FALSE(renderable[0].flatPreview);
     EXPECT_NEAR(renderable[0].body->Volume(), 8.0, 1e-9);
 }
+
+// -- AMF -------------------------------------------------------------------
+
+namespace {
+
+std::string readFile(const std::string& path) {
+    std::ifstream in(path);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+size_t countOf(const std::string& hay, const std::string& needle) {
+    size_t n = 0, at = 0;
+    while ((at = hay.find(needle, at)) != std::string::npos) { ++n; at += needle.size(); }
+    return n;
+}
+
+} // namespace
+
+TEST(ExportAmf, IsAnOfferedFormat) {
+    const std::vector<std::string>& exts = exportExtensions();
+    EXPECT_NE(std::find(exts.begin(), exts.end(), ".amf"), exts.end());
+}
+
+TEST(ExportAmf, WritesOneObjectAndOneMaterialPerColour) {
+    // Two separated cubes, different colours: two objects, two materials.
+    std::vector<ColoredBody> bodies =
+        evalToBodies("color(\"red\") cube(2); translate([10,0,0]) color(\"blue\") cube(2);");
+    const std::string path = tempPath("two.amf").string();
+    exportModel(path, bodies, ExportOptions{});
+
+    const std::string xml = readFile(path);
+    EXPECT_EQ(countOf(xml, "<object id="), 2u);
+    EXPECT_EQ(countOf(xml, "<material id="), 2u);
+    // 12 triangles per cube, and every one lands in some volume.
+    EXPECT_EQ(countOf(xml, "<triangle>"), 24u);
+    EXPECT_NE(xml.find("<amf unit=\"millimeter\""), std::string::npos);
+    std::remove(path.c_str());
+}
+
+TEST(ExportAmf, TwoObjectsSharingAColourShareOneMaterial) {
+    std::vector<ColoredBody> bodies =
+        evalToBodies("color(\"red\") cube(2); translate([10,0,0]) color(\"red\") cube(2);");
+    const std::string path = tempPath("shared.amf").string();
+    exportModel(path, bodies, ExportOptions{});
+
+    const std::string xml = readFile(path);
+    EXPECT_EQ(countOf(xml, "<object id="), 2u);
+    EXPECT_EQ(countOf(xml, "<material id="), 1u);
+    std::remove(path.c_str());
+}
+
+TEST(ExportAmf, MaterialAndObjectIdsStartAtOne) {
+    // id 0 is reserved by the spec; a reader may drop anything using it.
+    std::vector<ColoredBody> bodies = evalToBodies("cube(2);");
+    const std::string path = tempPath("ids.amf").string();
+    exportModel(path, bodies, ExportOptions{});
+
+    const std::string xml = readFile(path);
+    EXPECT_NE(xml.find("<material id=\"1\">"), std::string::npos);
+    EXPECT_NE(xml.find("<object id=\"1\">"), std::string::npos);
+    EXPECT_EQ(xml.find("id=\"0\""), std::string::npos);
+    std::remove(path.c_str());
+}
+
+TEST(ExportAmf, NoGeometryThrows) {
+    std::vector<ColoredBody> empty;
+    EXPECT_THROW(exportModel(tempPath("empty.amf").string(), empty, ExportOptions{}), std::runtime_error);
+}
+
+TEST(ExportAmf, AMultiColouredObjectBecomesOneVolumePerColour) {
+    // A union welds these into ONE solid whose surface carries two colours.
+    // AMF has no per-face colour that slicers read reliably, so the object
+    // is written as one <volume> per colour -- which is exactly what a
+    // multimaterial slicer assigns to separate tools.
+    std::vector<ColoredBody> bodies = evalToBodies(
+        "union() { color(\"red\") cube(20); color(\"blue\") translate([10,5,5]) cube(20); }");
+    const std::string path = tempPath("multi.amf").string();
+    exportModel(path, bodies, ExportOptions{});
+
+    const std::string xml = readFile(path);
+    EXPECT_EQ(countOf(xml, "<object id="), 1u);
+    EXPECT_EQ(countOf(xml, "<volume materialid="), 2u);
+    EXPECT_EQ(countOf(xml, "<material id="), 2u);
+    std::remove(path.c_str());
+}
