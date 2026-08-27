@@ -883,3 +883,17 @@ TEST(LinearSolve, WorksUnderBothEngines) {
     }
 }
 
+
+TEST(LinearSolve, AnExplicitlyUndefRightHandSideCountsAsAbsent) {
+    // BOSL2's builtins.scad pattern is a wrapper with a fixed signature:
+    //   function _linear_solve(A, b) = linear_solve(A, b);
+    // so a determinant()-style caller that passes no right-hand side still
+    // forwards b as undef. Treating that as a BAD argument would warn on
+    // every such call. Passing undef is idiomatically the same as not
+    // passing in OpenSCAD -- BOSL2 threads optional arguments through
+    // wrappers that way throughout.
+    Evaluator ev;
+    EXPECT_NEAR(asNum(evalSrc("linear_solve([[2,1],[1,3]], undef).det", ev)), 5.0, 1e-12);
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[2,1],[1,3]], undef).x", ev)));
+    EXPECT_TRUE(builtinWarnings("linear_solve([[2,1],[1,3]], undef)").empty());
+}

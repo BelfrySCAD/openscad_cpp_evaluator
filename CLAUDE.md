@@ -492,6 +492,14 @@ grep for `ponytail:`.
   same reason.
   Calling the field function from the generate pass has no live `EvalContext`, so a root is built
   from the closure's own scope — `$`-variables sit at their defaults inside it.
+  **An explicitly-undef optional argument counts as ABSENT**, not as a bad one — the same rule in
+  `linear_solve` (`b`) and `levelset` (`isovalue`). BOSL2 reaches a builtin it also defines by
+  wrapping it in `builtins.scad`, which `use <>`s nothing, so the names there bind to the builtins:
+  `function _linear_solve(A, b) = linear_solve(A, b);`. That wrapper has a fixed signature and so
+  forwards `b` even when the caller passed none, so treating undef as a *bad* argument warned on
+  every `determinant()`-style call. Passing undef is idiomatically the same as not passing in
+  OpenSCAD, which is how BOSL2 threads optional arguments through wrappers throughout.
+  Verified against OpenSCAD 2026.02.01: the wrapper pattern resolves identically there.
   Sign convention: Manifold takes positive as inside; a distance field is the other way round, so
   the default flips it and `invert=true` flips back.
   Two behaviours that look alike and are opposite: an isovalue **nothing reaches** gives empty
