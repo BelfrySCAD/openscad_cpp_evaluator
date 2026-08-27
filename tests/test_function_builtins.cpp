@@ -726,7 +726,7 @@ TEST(StringListBuiltins, ChrIsVariadicAndRangeChecked) {
     EXPECT_EQ(asStr(evalSrc("chr(1114112)", ev)), ""); // 0x110000, one past the top
 }
 
-// -- matrix_solve(A, b) --------------------------------------------------
+// -- linear_solve(A, b) --------------------------------------------------
 //
 // One pivoted LU, three answers: x, det, singular. Oracle is BOSL2 plus
 // arithmetic -- OpenSCAD has no equivalent, so there is no reference
@@ -737,58 +737,58 @@ TEST(StringListBuiltins, ChrIsVariadicAndRangeChecked) {
 // determinant() is a cofactor expansion, growing x10 per step; this is
 // O(n^3).
 
-TEST(MatrixSolve, SolvesASquareSystem) {
+TEST(LinearSolve, SolvesASquareSystem) {
     Evaluator ev;
     // asList() returns a reference INTO v, so v has to outlive it -- taking
     // asList(evalSrc(...)) directly dangles the moment the temporary dies.
-    const Value v = evalSrc("matrix_solve([[2,1],[1,3]], [5,10]).x", ev);
+    const Value v = evalSrc("linear_solve([[2,1],[1,3]], [5,10]).x", ev);
     const std::vector<Value>& x = asList(v);
     ASSERT_EQ(x.size(), 2u);
     EXPECT_NEAR(asNum(x[0]), 1.0, 1e-12);
     EXPECT_NEAR(asNum(x[1]), 3.0, 1e-12);
 }
 
-TEST(MatrixSolve, DeterminantComesFreeFromTheSameFactorisation) {
+TEST(LinearSolve, DeterminantComesFreeFromTheSameFactorisation) {
     Evaluator ev;
-    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[2,1],[1,3]]).det", ev)), 5.0, 1e-12);
-    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[1,0,0],[0,1,0],[0,0,1]]).det", ev)), 1.0, 1e-12);
+    EXPECT_NEAR(asNum(evalSrc("linear_solve([[2,1],[1,3]]).det", ev)), 5.0, 1e-12);
+    EXPECT_NEAR(asNum(evalSrc("linear_solve([[1,0,0],[0,1,0],[0,0,1]]).det", ev)), 1.0, 1e-12);
     // Sign follows the row swaps, not just the magnitude.
-    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[0,1],[1,0]]).det", ev)), -1.0, 1e-12);
+    EXPECT_NEAR(asNum(evalSrc("linear_solve([[0,1],[1,0]]).det", ev)), -1.0, 1e-12);
 }
 
-TEST(MatrixSolve, WithNoRightHandSideThereIsNoSolution) {
+TEST(LinearSolve, WithNoRightHandSideThereIsNoSolution) {
     Evaluator ev;
-    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[2,1],[1,3]]).x", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[2,1],[1,3]]).x", ev)));
 }
 
-TEST(MatrixSolve, ASingularMatrixAnswersRatherThanWarning) {
+TEST(LinearSolve, ASingularMatrixAnswersRatherThanWarning) {
     // "Is this matrix singular?" is a fair question to ask, so it is
     // reported, not warned about: det 0, singular true, no solution.
     Evaluator ev;
-    EXPECT_TRUE(asBool(evalSrc("matrix_solve([[1,2],[2,4]], [1,2]).singular", ev)));
-    EXPECT_NEAR(asNum(evalSrc("matrix_solve([[1,2],[2,4]], [1,2]).det", ev)), 0.0, 1e-12);
-    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[2,4]], [1,2]).x", ev)));
+    EXPECT_TRUE(asBool(evalSrc("linear_solve([[1,2],[2,4]], [1,2]).singular", ev)));
+    EXPECT_NEAR(asNum(evalSrc("linear_solve([[1,2],[2,4]], [1,2]).det", ev)), 0.0, 1e-12);
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[1,2],[2,4]], [1,2]).x", ev)));
 }
 
-TEST(MatrixSolve, SingularityIsRelativeToTheMatrixNotAbsolute) {
+TEST(LinearSolve, SingularityIsRelativeToTheMatrixNotAbsolute) {
     // 2*I scaled by 1e-10 is perfectly conditioned, and BOSL2's
     // linear_solve calls it singular -- its test is a fixed absolute 1e-9
     // on R's diagonal with no scaling by the size of the matrix. Verified
     // through the CLI: BOSL2 says SINGULAR at 1e-10 and 1e-12 where this
     // solves correctly.
     Evaluator ev;
-    EXPECT_FALSE(asBool(evalSrc("matrix_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).singular", ev)));
-    const Value v = evalSrc("matrix_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).x", ev);
+    EXPECT_FALSE(asBool(evalSrc("linear_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).singular", ev)));
+    const Value v = evalSrc("linear_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).x", ev);
     const std::vector<Value>& x = asList(v);
     ASSERT_EQ(x.size(), 2u);
     EXPECT_NEAR(asNum(x[0]), 0.5, 1e-9);
 }
 
-TEST(MatrixSolve, AMatrixRightHandSideSolvesEveryColumn) {
+TEST(LinearSolve, AMatrixRightHandSideSolvesEveryColumn) {
     Evaluator ev;
     // Solving against the identity is the inverse; [[2,1],[1,3]] has
     // det 5, so the inverse is [[0.6,-0.2],[-0.2,0.4]].
-    const Value v = evalSrc("matrix_solve([[2,1],[1,3]], [[1,0],[0,1]]).x", ev);
+    const Value v = evalSrc("linear_solve([[2,1],[1,3]], [[1,0],[0,1]]).x", ev);
     const std::vector<Value>& rows = asList(v);
     ASSERT_EQ(rows.size(), 2u);
     const std::vector<Value>& r0 = asList(rows[0]);
@@ -797,26 +797,85 @@ TEST(MatrixSolve, AMatrixRightHandSideSolvesEveryColumn) {
     EXPECT_NEAR(asNum(r0[1]), -0.2, 1e-12);
 }
 
-TEST(MatrixSolve, RejectsWhatItCannotFactor) {
+TEST(LinearSolve, RejectsWhatItCannotFactor) {
     Evaluator ev;
-    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2,3],[4,5,6]], [1,2])", ev)));   // not square
-    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[3,\"x\"]], [1,2])", ev)));   // not numeric
-    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[3,4]], [1,2,3])", ev)));     // wrong rhs length
-    EXPECT_TRUE(isUndef(evalSrc("matrix_solve([[1,2],[3,4,5]], [1,2])", ev)));     // ragged
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[1,2],[3,\"x\"]], [1,2])", ev)));   // not numeric
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[1,2],[3,4]], [1,2,3])", ev)));     // wrong rhs length
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[1,2],[3,4,5]], [1,2])", ev)));     // ragged
 }
 
-TEST(MatrixSolve, NonSquareWarnsWithItsShape) {
-    const std::vector<std::string> w = builtinWarnings("matrix_solve([[1,2,3],[4,5,6]], [1,2])");
-    ASSERT_EQ(w.size(), 1u);
-    EXPECT_NE(w[0].find("matrix_solve() requires a square matrix, found 2 x 3"), std::string::npos)
-        << "got " << w[0];
+// -- non-square: QR ------------------------------------------------------
+//
+// m > n is least squares, m < n is minimum norm -- the same two answers
+// BOSL2's linear_solve gives, and cross-checked against it.
+
+TEST(LinearSolve, OverdeterminedGivesTheLeastSquaresFit) {
+    // Fit y = a + b*x to (0,1) (1,3) (2,5) (3,7): exactly on the line
+    // y = 1 + 2x, so the residual is zero and a=1, b=2.
+    Evaluator ev;
+    const Value v = evalSrc("linear_solve([[1,0],[1,1],[1,2],[1,3]], [1,3,5,7]).x", ev);
+    const std::vector<Value>& x = asList(v);
+    ASSERT_EQ(x.size(), 2u);
+    EXPECT_NEAR(asNum(x[0]), 1.0, 1e-10);
+    EXPECT_NEAR(asNum(x[1]), 2.0, 1e-10);
 }
 
-TEST(MatrixSolve, WorksUnderBothEngines) {
+TEST(LinearSolve, OverdeterminedWithNoExactSolutionMinimisesTheResidual) {
+    // (0,0) (1,1) (2,2) (3,10): no line fits. The normal equations put the
+    // least-squares line at y = -1.4 + 3.1x -- computed independently, not
+    // read off this implementation.
+    Evaluator ev;
+    const Value v = evalSrc("linear_solve([[1,0],[1,1],[1,2],[1,3]], [0,1,2,10]).x", ev);
+    const std::vector<Value>& x = asList(v);
+    ASSERT_EQ(x.size(), 2u);
+    EXPECT_NEAR(asNum(x[0]), -1.4, 1e-9);
+    EXPECT_NEAR(asNum(x[1]), 3.1, 1e-9);
+}
+
+TEST(LinearSolve, UnderdeterminedGivesTheMinimUmNormSolution) {
+    // x + y = 2 has infinitely many solutions; the smallest is [1,1].
+    // Anything satisfying the equation passes a residual check, so this
+    // asserts the NORM -- that is the whole claim of a minimum-norm solve.
+    Evaluator ev;
+    const Value v = evalSrc("linear_solve([[1,1]], [2]).x", ev);
+    const std::vector<Value>& x = asList(v);
+    ASSERT_EQ(x.size(), 2u);
+    EXPECT_NEAR(asNum(x[0]), 1.0, 1e-12);
+    EXPECT_NEAR(asNum(x[1]), 1.0, 1e-12);
+}
+
+TEST(LinearSolve, UnderdeterminedSatisfiesEveryEquation) {
+    // 2 x 3: the plane_intersection shape BOSL2 relies on.
+    Evaluator ev;
+    const Value v = evalSrc("linear_solve([[1,0,1],[0,1,1]], [3,5]).x", ev);
+    const std::vector<Value>& x = asList(v);
+    ASSERT_EQ(x.size(), 3u);
+    const double a = asNum(x[0]), b = asNum(x[1]), c = asNum(x[2]);
+    EXPECT_NEAR(a + c, 3.0, 1e-12);
+    EXPECT_NEAR(b + c, 5.0, 1e-12);
+    // minimum norm: the component along the null direction [1,1,-1] is zero
+    EXPECT_NEAR(a + b - c, 0.0, 1e-9);
+}
+
+TEST(LinearSolve, NonSquareHasNoDeterminant) {
+    Evaluator ev;
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[1,0],[1,1],[1,2]], [1,2,3]).det", ev)));
+    EXPECT_FALSE(asBool(evalSrc("linear_solve([[1,0],[1,1],[1,2]], [1,2,3]).singular", ev)));
+}
+
+TEST(LinearSolve, RankDeficientNonSquareIsReportedNotWrong) {
+    // Two identical columns: rank 1, not 2.
+    Evaluator ev;
+    EXPECT_TRUE(asBool(evalSrc("linear_solve([[1,1],[2,2],[3,3]], [1,2,3]).singular", ev)));
+    EXPECT_TRUE(isUndef(evalSrc("linear_solve([[1,1],[2,2],[3,3]], [1,2,3]).x", ev)));
+}
+
+
+TEST(LinearSolve, WorksUnderBothEngines) {
     for (bool vm : {false, true}) {
         ScopedVm guard(vm);
         const std::vector<std::string> e =
-            echoesOf("r = matrix_solve([[2,1],[1,3]], [5,10]);\necho(r.x, r.det, r.singular);");
+            echoesOf("r = linear_solve([[2,1],[1,3]], [5,10]);\necho(r.x, r.det, r.singular);");
         ASSERT_EQ(e.size(), 1u) << "vm=" << vm;
         EXPECT_NE(e[0].find("[1, 3]"), std::string::npos) << "vm=" << vm << ", got " << e[0];
         EXPECT_NE(e[0].find("5"), std::string::npos) << "vm=" << vm << ", got " << e[0];
