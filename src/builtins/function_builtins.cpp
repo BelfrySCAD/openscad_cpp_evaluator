@@ -169,7 +169,7 @@ Value builtinCross(const Value& aArg, const Value& bArg) {
     return Value{};
 }
 
-// -- matrix_solve(A, b) --------------------------------------------------
+// -- linear_solve(A, b) --------------------------------------------------
 //
 // One pivoted LU answers three questions at once -- the solution, the
 // determinant, and whether A is singular -- because all three fall out of
@@ -212,26 +212,96 @@ std::optional<std::pair<std::vector<double>, size_t>> numericMatrix(const Value&
     return std::make_pair(std::move(flat), cols);
 }
 
-Value builtinMatrixSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bool haveB,
+// Householder QR of a tall matrix `a` (m rows, n cols, m >= n), in place.
+//
+// On return the upper triangle of `a` is R. Below the diagonal, column j
+// holds the reflector vector v_j from element 1 onwards -- v_j[0] is
+// normalised to 1 and therefore not stored -- and `taus[j]` is its scale,
+// so H_j = I - tau_j v_j v_j^T. Q is never formed: everything that needs
+// it applies the reflectors instead, which is the whole reason this is
+// smaller and quicker than materialising an m x m matrix.
+//
+// The sign of alpha is chosen away from x[0] so that v[0] can never cancel
+// to zero -- the textbook guard against catastrophic cancellation here.
+//
+// Returns false if a diagonal falls at or below `tol`, i.e. rank-deficient
+// to the tolerance given. Without column pivoting this cannot tell
+// rank-deficient from merely very ill-conditioned; see the caller's note.
+bool householderQr(std::vector<double>& a, size_t m, size_t n, std::vector<double>& taus, double tol) {
+    taus.assign(n, 0.0);
+    for (size_t j = 0; j < n; ++j) {
+        double normx = 0.0;
+        for (size_t r = j; r < m; ++r) normx += a[r * n + j] * a[r * n + j];
+        normx = std::sqrt(normx);
+        if (normx <= tol) return false;
+
+        const double x0 = a[j * n + j];
+        const double alpha = (x0 >= 0.0) ? -normx : normx;
+        const double v0 = x0 - alpha;
+        // Store v scaled so v[0] == 1; the below-diagonal entries are the tail.
+        double vv = 1.0;
+        for (size_t r = j + 1; r < m; ++r) {
+            a[r * n + j] /= v0;
+            vv += a[r * n + j] * a[r * n + j];
+        }
+        taus[j] = 2.0 / vv;
+        a[j * n + j] = alpha;
+
+        // Apply H_j to the trailing columns.
+        for (size_t c = j + 1; c < n; ++c) {
+            double dot = a[j * n + c];
+            for (size_t r = j + 1; r < m; ++r) dot += a[r * n + j] * a[r * n + c];
+            const double f = taus[j] * dot;
+            a[j * n + c] -= f;
+            for (size_t r = j + 1; r < m; ++r) a[r * n + c] -= f * a[r * n + j];
+        }
+    }
+    return true;
+}
+
+// b <- Q^T b, for b with `k` columns. Reflectors applied in forward order.
+void applyQtranspose(const std::vector<double>& a, size_t m, size_t n, const std::vector<double>& taus,
+                      std::vector<double>& b, size_t k) {
+    for (size_t j = 0; j < n; ++j) {
+        for (size_t c = 0; c < k; ++c) {
+            double dot = b[j * k + c];
+            for (size_t r = j + 1; r < m; ++r) dot += a[r * n + j] * b[r * k + c];
+            const double f = taus[j] * dot;
+            b[j * k + c] -= f;
+            for (size_t r = j + 1; r < m; ++r) b[r * k + c] -= f * a[r * n + j];
+        }
+    }
+}
+
+// z <- Q z. Same reflectors, reverse order -- that is the only difference
+// between applying Q and applying Q^T.
+void applyQ(const std::vector<double>& a, size_t m, size_t n, const std::vector<double>& taus,
+             std::vector<double>& z, size_t k) {
+    for (size_t jj = n; jj-- > 0;) {
+        for (size_t c = 0; c < k; ++c) {
+            double dot = z[jj * k + c];
+            for (size_t r = jj + 1; r < m; ++r) dot += a[r * n + jj] * z[r * k + c];
+            const double f = taus[jj] * dot;
+            z[jj * k + c] -= f;
+            for (size_t r = jj + 1; r < m; ++r) z[r * k + c] -= f * a[r * n + jj];
+        }
+    }
+}
+
+Value builtinLinearSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bool haveB,
                           const oscad::ASTNode& node) {
     const auto parsed = numericMatrix(aArg);
     if (!parsed) {
-        ev.warn("matrix_solve() requires a matrix of numbers", &node.position());
+        ev.warn("linear_solve() requires a matrix of numbers", &node.position());
         return Value{};
     }
     std::vector<double> lu = parsed->first;
-    const size_t cols = parsed->second;
-    const size_t n = lu.size() / cols;
-    if (n != cols) {
-        ev.warn("matrix_solve() requires a square matrix, found " + std::to_string(n) + " x " +
-                    std::to_string(cols),
-                &node.position());
-        return Value{};
-    }
+    const size_t n = parsed->second;          // columns == unknowns
+    const size_t m = lu.size() / n;           // rows == equations
     double maxAbs = 0.0;
     for (double x : lu) {
         if (!std::isfinite(x)) {
-            ev.warn("matrix_solve() matrix contains a non-finite value", &node.position());
+            ev.warn("linear_solve() matrix contains a non-finite value", &node.position());
             return Value{};
         }
         maxAbs = std::max(maxAbs, std::abs(x));
@@ -243,22 +313,22 @@ Value builtinMatrixSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bo
     bool bWasVector = false;
     std::vector<double> rhs;
     if (haveB) {
-        if (const std::optional<std::vector<double>> vec = allNumericList(bArg); vec && vec->size() == n) {
+        if (const std::optional<std::vector<double>> vec = allNumericList(bArg); vec && vec->size() == m) {
             bWasVector = true;
             k = 1;
             rhs = *vec;
-        } else if (const auto bm = numericMatrix(bArg); bm && bm->first.size() / bm->second == n) {
+        } else if (const auto bm = numericMatrix(bArg); bm && bm->first.size() / bm->second == m) {
             k = bm->second;
             rhs = bm->first;
         } else {
-            ev.warn("matrix_solve() right-hand side must be a vector of " + std::to_string(n) +
+            ev.warn("linear_solve() right-hand side must be a vector of " + std::to_string(m) +
                         " numbers, or a matrix with that many rows",
                     &node.position());
             return Value{};
         }
         for (double x : rhs) {
             if (!std::isfinite(x)) {
-                ev.warn("matrix_solve() right-hand side contains a non-finite value", &node.position());
+                ev.warn("linear_solve() right-hand side contains a non-finite value", &node.position());
                 return Value{};
             }
         }
@@ -268,8 +338,72 @@ Value builtinMatrixSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bo
     // fixed ABSOLUTE 1e-9 (its _EPSILON) with no scaling by the size of the
     // matrix, so a perfectly well-conditioned system scaled down by 1e-10
     // is declared singular there. Scaling by maxAbs is what makes
-    // matrix_solve(A*1e-10) still solvable.
-    const double tol = std::numeric_limits<double>::epsilon() * static_cast<double>(n) * std::max(maxAbs, 1.0);
+    // linear_solve(A*1e-10) still solvable.
+    const double tol =
+        std::numeric_limits<double>::epsilon() * static_cast<double>(std::max(m, n)) * std::max(maxAbs, 1.0);
+
+    // Non-square: QR, and no determinant to report.
+    //
+    // m > n  overdetermined -> least squares. Factor A, apply Q^T to b, then
+    //        back-substitute the leading n x n block of R.
+    // m < n  underdetermined -> minimum norm. Factor A^T instead, forward-solve
+    //        R^T y = b, and return Q [y; 0]. Padding with zeros is what makes
+    //        it the SMALLEST solution rather than just any solution.
+    if (m != n) {
+        std::vector<std::pair<std::string, Value>> outNs;
+        std::vector<double> taus;
+        const auto answer = [&](Value x, bool sing) {
+            outNs.emplace_back("x", std::move(x));
+            outNs.emplace_back("det", Value{});      // undefined for a non-square matrix
+            outNs.emplace_back("singular", Value{sing});
+            return objectOf(std::move(outNs));
+        };
+        const auto shape = [&](const std::vector<double>& v, size_t rows, size_t cols) {
+            if (bWasVector) return numList(v);
+            std::vector<Value> rowsOut;
+            rowsOut.reserve(rows);
+            for (size_t r = 0; r < rows; ++r) {
+                rowsOut.push_back(numList(std::vector<double>(v.begin() + static_cast<long>(r * cols),
+                                                               v.begin() + static_cast<long>((r + 1) * cols))));
+            }
+            return listOf(std::move(rowsOut));
+        };
+
+        if (m > n) {
+            if (!householderQr(lu, m, n, taus, tol)) return answer(Value{}, true);
+            if (!haveB) return answer(Value{}, false);
+            applyQtranspose(lu, m, n, taus, rhs, k);
+            for (size_t row = n; row-- > 0;) {
+                for (size_t c = 0; c < k; ++c) {
+                    double acc = rhs[row * k + c];
+                    for (size_t j = row + 1; j < n; ++j) acc -= lu[row * n + j] * rhs[j * k + c];
+                    rhs[row * k + c] = acc / lu[row * n + row];
+                }
+            }
+            rhs.resize(n * k);
+            return answer(shape(rhs, n, k), false);
+        }
+
+        // m < n: factor the transpose, which is the tall one.
+        std::vector<double> at(n * m);
+        for (size_t r = 0; r < m; ++r)
+            for (size_t c = 0; c < n; ++c) at[c * m + r] = lu[r * n + c];
+        if (!householderQr(at, n, m, taus, tol)) return answer(Value{}, true);
+        if (!haveB) return answer(Value{}, false);
+        // Forward-solve R^T y = b (R is m x m upper, so R^T is lower).
+        for (size_t row = 0; row < m; ++row) {
+            for (size_t c = 0; c < k; ++c) {
+                double acc = rhs[row * k + c];
+                for (size_t j = 0; j < row; ++j) acc -= at[j * m + row] * rhs[j * k + c];
+                rhs[row * k + c] = acc / at[row * m + row];
+            }
+        }
+        std::vector<double> z(n * k, 0.0);
+        for (size_t r = 0; r < m; ++r)
+            for (size_t c = 0; c < k; ++c) z[r * k + c] = rhs[r * k + c];
+        applyQ(at, n, m, taus, z, k);
+        return answer(shape(z, n, k), false);
+    }
 
     double det = 1.0;
     bool singular = false;
@@ -301,7 +435,7 @@ Value builtinMatrixSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bo
     std::vector<std::pair<std::string, Value>> out;
     if (singular) {
         // Not a misuse -- "is this matrix singular?" is a legitimate
-        // question to ask matrix_solve, so it answers rather than warning.
+        // question to ask linear_solve, so it answers rather than warning.
         out.emplace_back("x", Value{});
         out.emplace_back("det", Value{0.0});
         out.emplace_back("singular", Value{true});
@@ -616,7 +750,7 @@ bool isBuiltinFunctionName(const std::string& name) {
         "chr", "ord", "is_undef", "is_num", "is_bool", "is_string", "is_list", "is_function", "is_object",
         "search", "lookup", "has_key", "version", "version_num", "parent_module",
         "object", "textmetrics", "fontmetrics", "dxf_dim", "dxf_cross", "supported_feature",
-        "matrix_solve",
+        "linear_solve",
     };
     return names.count(name) > 0;
 }
@@ -758,7 +892,7 @@ enum class BuiltinFnId {
     TextMetrics, FontMetrics, Abs, Sign, Ceil, Floor, Round, Sqrt, Ln, Log, Exp, Sin, Cos, Tan,
     Asin, Acos, Atan, Atan2, Max, Min, Pow, Norm, Cross, Rands, Concat, Len, Str, Chr, Ord,
     IsUndef, IsNum, IsBool, IsString, IsList, IsFunction, IsObject, Search, Lookup, HasKey,
-    Version, VersionNum, ParentModule, DxfDim, DxfCross, SupportedFeature, MatrixSolve,
+    Version, VersionNum, ParentModule, DxfDim, DxfCross, SupportedFeature, LinearSolve,
 };
 
 // supported_feature("name") -> the level at which this build implements that
@@ -778,7 +912,7 @@ enum class BuiltinFnId {
 const std::unordered_map<std::string, double>& featureLevels() {
     static const std::unordered_map<std::string, double> levels = {
         {"render-expr", 1.0},        // render() in expression position
-        {"matrix-solve", 1.0},       // matrix_solve(A, b) -> {x, det, singular}
+        {"linear-solve", 1.0},       // linear_solve(A, b) -> {x, det, singular}
         {"polyhedron-vnf", 1.0},     // polyhedron(vnf) / polyhedron(object)
         {"separate-children", 1.0},  // children(..., separate=true)
         {"minkowski-diff", 1.0},     // minkowski_difference()
@@ -813,7 +947,7 @@ const std::unordered_map<std::string, BuiltinFnId>& builtinFnIds() {
         {"parent_module", BuiltinFnId::ParentModule},
         {"dxf_dim", BuiltinFnId::DxfDim}, {"dxf_cross", BuiltinFnId::DxfCross},
         {"supported_feature", BuiltinFnId::SupportedFeature},
-        {"matrix_solve", BuiltinFnId::MatrixSolve},
+        {"linear_solve", BuiltinFnId::LinearSolve},
     };
     return ids;
 }
@@ -895,7 +1029,7 @@ const std::unordered_map<int, BuiltinCheck>& builtinChecks() {
         add(BuiltinFnId::ParentModule, {0, 1, "1", {kNum}});
         add(BuiltinFnId::HasKey, {-1, -1, nullptr, {{TObj, "object"}, {TStr, "string"}}});
         add(BuiltinFnId::SupportedFeature, {1, 1, "1", {}});
-        add(BuiltinFnId::MatrixSolve, {1, 2, "1 or 2", {kVec}});
+        add(BuiltinFnId::LinearSolve, {1, 2, "1 or 2", {kVec}});
         for (BuiltinFnId id : {BuiltinFnId::IsUndef, BuiltinFnId::IsNum, BuiltinFnId::IsBool,
                                 BuiltinFnId::IsString, BuiltinFnId::IsList, BuiltinFnId::IsFunction,
                                 BuiltinFnId::IsObject}) {
@@ -1210,8 +1344,8 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         // The OpenSCAD release we track. version_num() is that same
         // year/month/day folded as y * 10000 + m * 100 + d, exactly like the
         // reference's own builtin_version_num (builtin_functions.cc).
-        case BuiltinFnId::MatrixSolve:
-            return builtinMatrixSolve(ev, getArg(args, 0, "A", Value{}), getArg(args, 1, "b", Value{}),
+        case BuiltinFnId::LinearSolve:
+            return builtinLinearSolve(ev, getArg(args, 0, "A", Value{}), getArg(args, 1, "b", Value{}),
                                        args.findPositional(1) != nullptr || args.findNamed("b") != nullptr, node);
         case BuiltinFnId::SupportedFeature: {
             const Value name = getArg(args, 0, "feature", Value{});

@@ -460,30 +460,58 @@ grep for `ponytail:`.
   unknown arguments -- `children(separate=true)` renders the wrong shape there with no warning --
   and both read as `undef` in OpenSCAD, so a guard written against them works in both.
 
-- **`matrix_solve(A, b)`** (`src/builtins/function_builtins.cpp`, feature name `matrix-solve`) —
-  one pivoted LU answering three questions from the same factorisation: `.x` (solution; a vector
-  for a vector `b`, a matrix for a matrix `b`, `undef` when `b` is omitted), `.det`, `.singular`.
-  Square systems only — BOSL2's `linear_solve` also does least-squares/minimum-norm via QR, which
-  LU cannot; those shapes still have to go through BOSL2. A non-square or non-numeric matrix warns
-  and returns `undef`; a **singular** one is reported (`singular=true`, `det=0`, `x=undef`), not
-  warned about, because asking whether a matrix is singular is a fair question.
-  Why it exists, measured per call with BOSL2's ~0.22s load subtracted and enough repetitions to
-  clear the noise (harness sanity-checked: 200/2000/20000 reps at n=64 give 43/45/43 µs):
+- **`linear_solve(A, b)`** (`src/builtins/function_builtins.cpp`, feature name `linear-solve`) —
+  returns `.x` (solution), `.det`, `.singular`. Dispatches on shape:
 
-  | n | BOSL2 `linear_solve` | `matrix_solve` | | | n | BOSL2 `determinant` | `matrix_solve().det` |
-  |---:|---:|---:|---:|---|---:|---:|---:|
-  | 4 | 280 µs | 1.5 µs | 187× | | 10 | 3.17 s | 0.33 s |
-  | 16 | 2.58 ms | 4.0 µs | 644× | | 11 | 31.49 s | 0.33 s |
-  | 64 | 42.5 ms | 43 µs | 988× | | | *cofactor expansion, O(n!)* | |
+  | shape | method | `.x` | `.det` |
+  |---|---|---|---|
+  | m = n | pivoted **LU** | the solution | product of U's diagonal, signed by row swaps |
+  | m > n | **Householder QR** | least squares | `undef` |
+  | m < n | **QR of Aᵀ** | minimum norm | `undef` |
 
-  **Do not repeat the claim this replaces.** It said `linear_solve` "is not the problem (128×128 in
-  ~0.18s)" — a one-shot measurement in which the solve vanishes into BOSL2's own load time. Measured
-  properly it is 187–988× slower, and the original framing understated the solve case badly. Keep
-  the comparison fair, though: BOSL2 does **QR**, which is more work than this LU, and validates its
-  arguments every call — not the same algorithm run twice.
-  Correctness, not just speed: BOSL2's singularity test is a fixed **absolute** `1e-9` on R's
-  diagonal with no scaling by ‖A‖, so `2*I` scaled by 1e-10 is declared singular there and solves
-  correctly here. This one uses a relative threshold.
+  Q is never formed. The reflectors are stored below the diagonal (v[0]
+  normalised to 1, scale in `taus`) and applied in forward order for `Qᵀb`,
+  reverse order for `Qy` — which is why this is far smaller and quicker than
+  BOSL2, whose QR materialises an m×m Q *and* an n×n permutation matrix and
+  then multiplies by it. **Minimum norm** comes from padding `y` with zeros to
+  length n before applying Q; a residual check alone will NOT catch getting
+  that wrong, since any solution passes it — assert the norm.
+  Rank deficiency without column pivoting cannot distinguish rank-deficient
+  from very ill-conditioned. It is a relative-tolerance heuristic on the
+  diagonal; say so rather than implying it is exact.
+
+  **Named to collide, deliberately.** BOSL2 defines `linear_solve()`, and since
+  0.47.0 a user function *shadows* a builtin — so this is unreachable from any
+  script that includes BOSL2 until BOSL2 drops its own. That is the intended
+  path (BelfrySCAD's author maintains BOSL2); callers then gain a `.x`, since
+  BOSL2's returns the bare solution and `[]` for singular. **Do not "fix" the
+  shadowing to make this reachable** — the shadowing is the correct, reference-
+  matching behaviour, and was itself a bug fix.
+
+  Measured per call, BOSL2 load subtracted, enough repetitions to clear noise
+  (harness checked: 200/2000/20000 reps at n=64 give 43/45/43 µs):
+
+  | n | BOSL2 `linear_solve` | ours | | n | BOSL2 `determinant` | ours |
+  |---:|---:|---:|---:|---:|---:|---:|
+  | 4 | 280 µs | 1.5 µs | 187× | 10 | 3.17 s | 0.33 s |
+  | 16 | 2.58 ms | 4.0 µs | 644× | 11 | 31.49 s | 0.33 s |
+  | 64 | 42.5 ms | 43 µs | 988× | | *cofactor expansion, O(n!)* | |
+
+  **Do not repeat the claim this replaces**: that BOSL2's solve "is not the
+  problem (128×128 in ~0.18s)". That was one-shot, with the solve lost inside
+  BOSL2's own load time. Keep the comparison fair though — BOSL2 does QR where
+  the square path here does LU, and it validates arguments every call.
+  Also correctness, not only speed: BOSL2's singularity test is a fixed
+  **absolute** `1e-9` on R's diagonal, unscaled by ‖A‖, so `2*I` scaled by
+  1e-10 is called singular there and solves correctly here.
+
+  **Profiling that shaped the scope** (don't redo it): NURBS *evaluation* is
+  0.6% linear algebra — basis eval 44%, type checks 25%. NURBS *interpolation*
+  is 35% at n=400, and every hot solve is **square**, so the QR paths are a
+  capability, not a measured win. `plane_intersection` (2×3, underdetermined)
+  is 0.1% of a `rounded_prism` model. The recurring cost across every workload
+  profiled is BOSL2's **argument type-checking**: 25–45%, millions of
+  `is_finite`/`is_num`/`is_nan` calls.
 
 - `include/openscad_cpp_evaluator/value.hpp`, `src/value.cpp` — the `Value` variant (OpenSCAD's
   dynamic value type) and its free-function arithmetic/comparison helpers. See the plan's §1 for
