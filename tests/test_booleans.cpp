@@ -994,10 +994,18 @@ TEST(LevelSetFn, AFunctionFieldRequiresEdge) {
 }
 
 TEST(LevelSetFn, AFunctionOfTheWrongArityWarns) {
-    const std::vector<std::string> w = levelsetWarnings(
+    // One parameter is wrong for either dimension, so the message names both.
+    const std::vector<std::string> one = levelsetWarnings(
         "levelset(function(p) 1, bounds=[[-1,-1,-1],[1,1,1]], edge=0.5);");
-    ASSERT_EQ(w.size(), 1u);
-    EXPECT_NE(w[0].find("three parameters"), std::string::npos) << w[0];
+    ASSERT_EQ(one.size(), 1u);
+    EXPECT_NE(one[0].find("function(x,y)"), std::string::npos) << one[0];
+
+    // Two parameters is right for 2D and wrong for 3D, which is only
+    // knowable once `bounds` has been read -- hence a second, later check.
+    const std::vector<std::string> two = levelsetWarnings(
+        "levelset(function(x,y) x, bounds=[[-1,-1,-1],[1,1,1]], edge=0.5);");
+    ASSERT_EQ(two.size(), 1u);
+    EXPECT_NE(two[0].find("three parameters"), std::string::npos) << two[0];
 }
 
 TEST(LevelSetFn, AFieldFunctionCanCaptureOuterVariables) {
@@ -1019,4 +1027,119 @@ TEST(LevelSet, AnExplicitlyUndefIsovalueFallsBackToTheDefault) {
     EXPECT_TRUE(levelsetWarnings(sphereFieldSrc(30, 30) +
                                   "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=undef);")
                     .empty());
+}
+
+// -- levelset: bounded isovalue ranges -------------------------------------
+//
+// isovalue is unified as a band: a scalar v means [-INF, v] ("at or below",
+// the distance-field reading), a range means BETWEEN, and [lo, INF] is
+// BOSL2's "at or above" idiom. One LevelSet pass either way -- a bounded
+// range could be had as difference(levelset(hi), levelset(lo)), but that
+// meshes twice and then booleans.
+
+TEST(LevelSetRange, ABoundedRangeGivesAShell) {
+    Evaluated e = evalSrc(
+        "levelset(function(x,y,z) sqrt(x*x+y*y+z*z), bounds=[[-30,-30,-30],[30,30,30]], "
+        "isovalue=[15,20], edge=1);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const double analytic = 4.0 / 3.0 * 3.14159265358979 * (8000 - 3375);
+    EXPECT_NEAR(soleBody(e).Volume(), analytic, 0.01 * analytic);
+    EXPECT_EQ(soleBody(e).Genus(), -1);   // hollow: a void inside
+}
+
+TEST(LevelSetRange, AnOpenEndedRangeIsBosl2sIdiom) {
+    // BOSL2 passes [isovalue, INF] to mean "at or above", the opposite of
+    // our scalar default. A caller forwarding BOSL2's own argument gets
+    // BOSL2's own semantics with no translation and no invert.
+    Evaluated e = evalSrc(
+        "levelset(function(x,y,z) sqrt(x*x+y*y+z*z), bounds=[[-30,-30,-30],[30,30,30]], "
+        "isovalue=[20,1e18], edge=1);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const double expect = 60.0 * 60.0 * 60.0 - 4.0 / 3.0 * 3.14159265358979 * 8000;
+    EXPECT_NEAR(soleBody(e).Volume(), expect, 0.01 * expect);
+}
+
+TEST(LevelSetRange, ABackwardsRangeWarns) {
+    EXPECT_FALSE(levelsetWarnings("levelset(function(x,y,z) x, bounds=[[-1,-1,-1],[1,1,1]], "
+                                   "isovalue=[5,1], edge=0.5);")
+                     .empty());
+}
+
+// -- levelset: 2D ----------------------------------------------------------
+//
+// CrossSection has no contour extraction, so the contours come from marching
+// squares here and are handed to CrossSection(Polygons, FillRule). 2D or 3D
+// is decided by `bounds`, not guessed from the field.
+
+TEST(LevelSet2d, AFunctionFieldGivesADisc) {
+    Evaluated e = evalSrc(
+        "levelset(function(x,y) sqrt(x*x+y*y), bounds=[[-30,-30],[30,30]], isovalue=20, edge=0.5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265358979 * 400, 1.0);
+}
+
+TEST(LevelSet2d, AGridFieldGivesTheSameDisc) {
+    Evaluated e = evalSrc(
+        "N = 121;\nfunction co(t) = -30 + 60*t/(N-1);\n"
+        "plane = [for (i=[0:N-1]) [for (j=[0:N-1]) sqrt(co(i)*co(i) + co(j)*co(j)) ]];\n"
+        "levelset(plane, bounds=[[-30,-30],[30,30]], isovalue=20);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265358979 * 400, 1.0);
+}
+
+TEST(LevelSet2d, ARangeGivesAnAnnulusWithARealHole) {
+    Evaluated e = evalSrc(
+        "levelset(function(x,y) sqrt(x*x+y*y), bounds=[[-30,-30],[30,30]], "
+        "isovalue=[15,20], edge=0.5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265358979 * 175, 1.0);
+    EXPECT_EQ(e.bodies[0].section->NumContour(), 2u);   // outer + hole
+}
+
+TEST(LevelSet2d, AContourRunningOffTheBoxIsClippedExactly) {
+    // The padded ring sits a spacing outside the box, so a contour that meets
+    // the edge lands out in the padding. Measured before clipping: a
+    // half-plane came out 0.9 * spacing too big along every side it touched,
+    // an O(h) error where a closed contour is O(h^2). Clipping to `bounds`
+    // removes exactly that, and the answer becomes resolution-independent.
+    for (const char* edge : {"1", "0.5", "0.25"}) {
+        Evaluated e = evalSrc(std::string("levelset(function(x,y) x, bounds=[[-20,-20],[20,20]], "
+                                           "isovalue=[-1e18,0], edge=") +
+                               edge + ");");
+        ASSERT_EQ(e.bodies.size(), 1u) << "edge=" << edge;
+        EXPECT_NEAR(e.bodies[0].section->Area(), 800.0, 1e-6) << "edge=" << edge;
+    }
+}
+
+TEST(LevelSet2d, IndexOrderIsXThenY) {
+    // Asymmetric on purpose: a symmetric field passes even transposed.
+    Evaluated e = evalSrc(
+        "levelset(function(x,y) max(abs(x)/5, abs(y)/15), bounds=[[-30,-30],[30,30]], "
+        "isovalue=1, edge=0.5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Rect r = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(r.max.x, 5.0, 0.6);
+    EXPECT_NEAR(r.max.y, 15.0, 0.6);
+}
+
+TEST(LevelSet2d, SeparateBlobsStaySeparate) {
+    Evaluated e = evalSrc(
+        "levelset(function(x,y) min(norm([x-12,y]), norm([x+12,y])), "
+        "bounds=[[-30,-30],[30,30]], isovalue=8, edge=0.5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(e.bodies[0].section->NumContour(), 2u);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 2 * 3.14159265358979 * 64, 1.5);
+}
+
+TEST(LevelSet2d, A2dFunctionWithA3dBoundsWarns) {
+    EXPECT_FALSE(levelsetWarnings("levelset(function(x,y) x, bounds=[[-1,-1,-1],[1,1,1]], edge=0.5);")
+                     .empty());
+}
+
+TEST(LevelSet2d, A3dArrayWithA2dBoundsWarns) {
+    EXPECT_FALSE(levelsetWarnings("levelset([[[1,2],[3,4]],[[5,6],[7,8]]], bounds=[[0,0],[1,1]]);")
+                     .empty());
 }

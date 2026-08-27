@@ -461,8 +461,17 @@ grep for `ponytail:`.
   and both read as `undef` in OpenSCAD, so a guard written against them works in both.
 
 - **`levelset(field, bounds, isovalue)`** (`src/builtins/topology.cpp`, feature name `levelset`) —
-  a solid from a grid of sampled values: `field[i][j][k]` with i,j,k mapping to x,y,z. Wraps
-  `Manifold::LevelSet` with a C++ trilinear-sampling lambda; no new Manifold API.
+  a solid (or a section) from an implicit surface. **2D or 3D is decided by `bounds`**, not guessed
+  from the field: a 2-vector corner means a section, a 3-vector means a solid. `field` is an array
+  (`field[i][j]` or `field[i][j][k]`, i,j,k → x,y,z) or a `function(x,y)`/`function(x,y,z)`.
+  The array is **not parsed until `bounds` has been read** — parsing it as 3D up front rejected
+  every 2D grid before the 2D path could run.
+  **`isovalue` is a band**: a scalar `v` is `[-INF, v]` ("at or below", the distance-field
+  reading), a range means *between*, and `[lo, INF]` is BOSL2's "at or above" idiom — so code
+  forwarding BOSL2's own isovalue gets BOSL2's semantics with no translation and no `invert`.
+  One `LevelSet` pass either way; a bounded range *could* be
+  `difference(levelset(hi), levelset(lo))` but that meshes twice and then booleans.
+  3D wraps `Manifold::LevelSet` with a C++ sampling lambda; no new Manifold API.
   **The field is a grid OR a `function(x,y,z)`, and the two trade off against each other** —
   neither is simply better:
 
@@ -500,6 +509,16 @@ grep for `ponytail:`.
   every `determinant()`-style call. Passing undef is idiomatically the same as not passing in
   OpenSCAD, which is how BOSL2 threads optional arguments through wrappers throughout.
   Verified against OpenSCAD 2026.02.01: the wrapper pattern resolves identically there.
+  **2D is marching squares here** — `CrossSection` has no contour extraction, only construction
+  from polygons. Three details carry the correctness: saddles (cases 5/10) resolved by the
+  cell-centre average, or the topology is a coin flip; vertices keyed on **edge identity** so
+  loops close exactly rather than nearly; and the field padded with an outside ring so no contour
+  runs off the box.
+  **The padding then has to be clipped back off.** Measured: a half-plane came out **0.9 × spacing
+  too large along every side it touched** — an O(h) error where a closed contour is O(h²) — because
+  the contour landed out in the pad. `clipToBounds` intersects with the `bounds` rectangle and the
+  answer becomes exact and resolution-independent (`LevelSet2d.AContourRunningOffTheBoxIsClippedExactly`).
+  Do not remove it, and do not "fix" it by moving the pad closer instead.
   Sign convention: Manifold takes positive as inside; a distance field is the other way round, so
   the default flips it and `invert=true` flips back.
   Two behaviours that look alike and are opposite: an isovalue **nothing reaches** gives empty
