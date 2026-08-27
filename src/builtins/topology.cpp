@@ -970,6 +970,19 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
             if (i0[a] > n[a] - 2) i0[a] = n[a] - 2;
             t[a] = g[a] - static_cast<double>(i0[a]);
         }
+        // Outside the sampled block the answer is "outside", falling away
+        // with distance. Clamping instead (which is what the interpolation
+        // above does on its own) would smear the boundary values outward and
+        // extend the surface rather than close it.
+        double outside = 0.0;
+        for (int a = 0; a < 3; ++a) {
+            const double maxg = static_cast<double>(n[a] - 1);
+            const double raw = (pos[a] - origin[a]) / spacing[a];
+            if (raw < 0.0) outside = std::max(outside, -raw);
+            else if (raw > maxg) outside = std::max(outside, raw - maxg);
+        }
+        if (outside > 0.0) return invert ? (1.0 + outside) : -(1.0 + outside);
+
         double acc = 0.0;
         for (int c = 0; c < 8; ++c) {
             const size_t di = static_cast<size_t>(c & 1), dj = static_cast<size_t>((c >> 1) & 1),
@@ -980,8 +993,18 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
         return bandDistance(acc, isoLo, isoHi, invert);
     };
 
-    manifold::Box bounds(manifold::vec3(origin[0], origin[1], origin[2]),
-                          manifold::vec3((*hi)[0], (*hi)[1], (*hi)[2]));
+    // Manifold closes the mesh where the surface meets the edge of the box it
+    // is given, and that closure follows the sample lattice -- a visible
+    // staircase on anything that reaches the boundary, which a gyroid does
+    // everywhere. So sample a PADDED box, let the ragged closure happen out
+    // there, and cut back to the box actually asked for. The cut is then a
+    // clean plane.
+    //
+    // Exactly the fix already applied to the 2D path (clipToBounds); it was
+    // not applied here at the time because the 2D error was the one measured.
+    const double pad = 2.0 * edge;
+    manifold::Box bounds(manifold::vec3(origin[0] - pad, origin[1] - pad, origin[2] - pad),
+                          manifold::vec3((*hi)[0] + pad, (*hi)[1] + pad, (*hi)[2] + pad));
     // tolerance -1: a positive value makes Manifold do EXTRA evaluations per
     // output vertex to snap nearer the true surface. Against a fixed grid
     // those only re-interpolate data already used -- cost, no information.
@@ -995,6 +1018,10 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
         fieldFn ? manifold::Manifold::LevelSet(sampleFn, bounds, edge, 0.0, -1.0, /*canParallel=*/false)
                  : manifold::Manifold::LevelSet(sampleGrid, bounds, edge, 0.0, -1.0, /*canParallel=*/true);
 
+    if (solid.IsEmpty()) return {};
+    solid = solid ^ manifold::Manifold::Cube(
+                        manifold::vec3((*hi)[0] - origin[0], (*hi)[1] - origin[1], (*hi)[2] - origin[2]))
+                        .Translate(manifold::vec3(origin[0], origin[1], origin[2]));
     if (solid.IsEmpty()) return {};
     ColoredBody b;
     b.body = std::move(solid);

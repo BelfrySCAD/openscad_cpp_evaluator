@@ -1143,3 +1143,49 @@ TEST(LevelSet2d, A3dArrayWithA2dBoundsWarns) {
     EXPECT_FALSE(levelsetWarnings("levelset([[[1,2],[3,4]],[[5,6],[7,8]]], bounds=[[0,0],[1,1]]);")
                      .empty());
 }
+
+TEST(LevelSet, ASurfaceMeetingTheBoxIsCutCleanly) {
+    // Manifold closes the mesh where the surface reaches the edge of the box
+    // it is given, and that closure follows the SAMPLE LATTICE -- a visible
+    // staircase on anything that touches the boundary. A gyroid touches it
+    // everywhere, which is how this was found: the shape looked ragged next
+    // to BOSL2's isosurface() of the same field.
+    //
+    // Sampling a padded box and cutting back makes the cut a plane. The
+    // numeric form of that: a half-space is EXACTLY half the box, at every
+    // resolution. Before the fix it was resolution-dependent.
+    //
+    // The 2D path had this fixed already (clipToBounds); 3D did not, because
+    // 2D was the case that got measured at the time.
+    for (const char* edge : {"2", "1", "0.5"}) {
+        Evaluated e = evalSrc(std::string("levelset(function(x,y,z) x, "
+                                           "bounds=[[-20,-20,-20],[20,20,20]], "
+                                           "isovalue=[-1e18,0], edge=") +
+                               edge + ");");
+        ASSERT_EQ(e.bodies.size(), 1u) << "edge=" << edge;
+        EXPECT_NEAR(soleBody(e).Volume(), 32000.0, 1e-6) << "edge=" << edge;
+    }
+}
+
+TEST(LevelSet, PaddingDoesNotDisturbAShapeInsideTheBox) {
+    // The padding is sampled outside the requested bounds, so a shape that
+    // never reaches the boundary must come out exactly as before.
+    Evaluated e = evalSrc(sphereFieldSrc(50, 30) +
+                           "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=20);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const double analytic = 4.0 / 3.0 * 3.14159265358979 * 8000;
+    EXPECT_NEAR(soleBody(e).Volume(), analytic, 0.01 * analytic);
+    EXPECT_EQ(soleBody(e).Genus(), 0);
+}
+
+TEST(LevelSet, AGridFieldIsAlsoCutCleanlyAtTheBox) {
+    // The grid intake cannot sample beyond its data, so the sampler reads
+    // "outside" past the block rather than clamping and smearing the edge
+    // values outward. Same clean cut as the function form.
+    Evaluated e = evalSrc(
+        "N = 41;\nfunction co(t) = -20 + 40*t/(N-1);\n"
+        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1]) co(i) ]]];\n"
+        "levelset(f, bounds=[[-20,-20,-20],[20,20,20]], isovalue=[-1e18,0]);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(soleBody(e).Volume(), 32000.0, 40.0);   // one sample layer of slack
+}
