@@ -460,6 +460,30 @@ grep for `ponytail:`.
   unknown arguments -- `children(separate=true)` renders the wrong shape there with no warning --
   and both read as `undef` in OpenSCAD, so a guard written against them works in both.
 
+- **`levelset(field, bounds, isovalue)`** (`src/builtins/topology.cpp`, feature name `levelset`) —
+  a solid from a grid of sampled values: `field[i][j][k]` with i,j,k mapping to x,y,z. Wraps
+  `Manifold::LevelSet` with a C++ trilinear-sampling lambda; no new Manifold API.
+  **It takes a GRID, not an SDF callback, and that is the whole design.** Measured: building the
+  field in script costs **0.41 µs/sample** against **0.96 µs** for a closure call per sample (the
+  arithmetic inlines into the comprehension). More importantly a grid means C++ never re-enters
+  the evaluator, so **`canParallel` is true** — Manifold warns that parallel policies "will crash
+  language runtimes with runtime locks that expect to not be called back by unregistered threads",
+  which is exactly what a callback design forfeits.
+  Measured against BOSL2's `isosurface.scad` (217 KB of marching cubes in script), same field:
+  **50³ 0.26 s vs 2.07 s (8.0×), 100³ 1.15 s vs 14.59 s (12.7×)**.
+  The trade is **memory**: ~67 bytes/cell, so 200³ ≈ 550 MB is the practical ceiling. A callback
+  samples lazily and has none.
+  **Accuracy is bounded by the grid, not by Manifold.** It samples on a body-centred cubic lattice
+  (`sdf.cpp:440-446`) so a plain cubic grid does not line up and the lambda interpolates — same
+  accuracy as grid-based marching cubes in script, worse than `LevelSet` given a true SDF. Hence
+  `tolerance = -1` is forced: a positive value makes Manifold do extra evaluations per vertex that
+  would only re-interpolate data already used. `edgeLength` defaults to the grid spacing for the
+  same reason.
+  Sign convention: Manifold takes positive as inside; a distance field is the other way round, so
+  the default flips it and `invert=true` flips back.
+  Two behaviours that look alike and are opposite: an isovalue **nothing reaches** gives empty
+  geometry; one **everything satisfies** gives the whole bounding box. Both are tested.
+
 - **`linear_solve(A, b)`** (`src/builtins/function_builtins.cpp`, feature name `linear-solve`) —
   returns `.x` (solution), `.det`, `.singular`. Dispatches on shape:
 

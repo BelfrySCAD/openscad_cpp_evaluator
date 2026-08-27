@@ -451,4 +451,190 @@ std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params
     return out;
 }
 
+// -- levelset(field, bounds, isovalue) -------------------------------------
+//
+// A solid from a grid of sampled values. Wraps Manifold::LevelSet with a C++
+// trilinear-sampling lambda over the array the script handed us.
+//
+// Why a grid rather than Manifold's own SDF-callback shape, which would be
+// the obvious mapping: measured, building the field in OpenSCAD costs
+// 0.41 us/sample against 0.96 us for a closure call per sample, because the
+// arithmetic inlines into the list comprehension. More importantly a grid
+// means the C++ side never re-enters the evaluator, so canParallel can be
+// TRUE -- Manifold's docs warn that parallel policies "will crash language
+// runtimes with runtime locks that expect to not be called back by
+// unregistered threads", which is exactly what a callback design forfeits.
+//
+// The trade is memory: ~67 bytes per cell, so 200^3 is about 550 MB and that
+// is the practical ceiling. A callback samples lazily and has no ceiling.
+//
+// Accuracy is bounded by the GRID, not by Manifold. Manifold samples on a
+// body-centred cubic lattice (two interleaved cubic grids, sdf.cpp:440-446)
+// and a plain cubic grid does not line up with those points, so the lambda
+// interpolates. Same accuracy as a grid-based marching-cubes implementation
+// in script; worse than LevelSet given a true SDF. Do not imply otherwise.
+
+namespace {
+
+struct ScalarField {
+    std::vector<double> v;      // flat, x fastest
+    size_t nx = 0, ny = 0, nz = 0;
+    double at(size_t i, size_t j, size_t k) const { return v[(k * ny + j) * nx + i]; }
+};
+
+// field[i][j][k] -> flat, checking it is a full rectangular block.
+std::optional<ScalarField> readField(const Value& val) {
+    const ListPtr* xs = std::get_if<ListPtr>(&val);
+    if (!xs || !*xs || (*xs)->items.empty()) return std::nullopt;
+    ScalarField f;
+    f.nx = (*xs)->items.size();
+    for (size_t i = 0; i < f.nx; ++i) {
+        const ListPtr* ys = std::get_if<ListPtr>(&(*xs)->items[i]);
+        if (!ys || !*ys || (*ys)->items.empty()) return std::nullopt;
+        if (i == 0) f.ny = (*ys)->items.size();
+        else if ((*ys)->items.size() != f.ny) return std::nullopt;
+        for (size_t j = 0; j < f.ny; ++j) {
+            const ListPtr* zs = std::get_if<ListPtr>(&(*ys)->items[j]);
+            if (!zs || !*zs || (*zs)->items.empty()) return std::nullopt;
+            if (i == 0 && j == 0) {
+                f.nz = (*zs)->items.size();
+                f.v.assign(f.nx * f.ny * f.nz, 0.0);
+            } else if ((*zs)->items.size() != f.nz) {
+                return std::nullopt;
+            }
+            for (size_t k = 0; k < f.nz; ++k) {
+                const double* d = std::get_if<double>(&(*zs)->items[k]);
+                if (!d || !std::isfinite(*d)) return std::nullopt;
+                f.v[(k * f.ny + j) * f.nx + i] = *d;
+            }
+        }
+    }
+    return f;
+}
+
+std::optional<std::array<double, 3>> readVec3(const Value& v) {
+    const ListPtr* l = std::get_if<ListPtr>(&v);
+    if (!l || !*l || (*l)->items.size() != 3) return std::nullopt;
+    std::array<double, 3> out{};
+    for (size_t i = 0; i < 3; ++i) {
+        const double* d = std::get_if<double>(&(*l)->items[i]);
+        if (!d || !std::isfinite(*d)) return std::nullopt;
+        out[i] = *d;
+    }
+    return out;
+}
+
+} // namespace
+
+CSGParams resolveLevelSet(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    CSGParams params;
+    params["field"] = getArg(args, 0, "field", Value{});
+    params["bounds"] = getArg(args, 1, "bounds", Value{});
+    params["isovalue"] = getArg(args, 2, "isovalue", Value{0.0});
+    params["invert"] = getArg(args, 3, "invert", Value{false});
+    params["edge"] = getArg(args, 4, "edge", Value{});
+    ev.evalChildren(node.children, effCtx);
+    return params;
+}
+
+std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params,
+                                           const std::vector<std::unique_ptr<CSGNode>>&,
+                                           const oscad::ASTNode& node) {
+    const std::optional<ScalarField> field = readField(params.at("field"));
+    if (!field) {
+        ev.warn("levelset(): field must be a rectangular field[i][j][k] of numbers", &node.position());
+        return {};
+    }
+    if (field->nx < 2 || field->ny < 2 || field->nz < 2) {
+        ev.warn("levelset(): the field needs at least 2 samples along each axis", &node.position());
+        return {};
+    }
+
+    const ListPtr* bb = std::get_if<ListPtr>(&params.at("bounds"));
+    std::optional<std::array<double, 3>> lo, hi;
+    if (bb && *bb && (*bb)->items.size() == 2) {
+        lo = readVec3((*bb)->items[0]);
+        hi = readVec3((*bb)->items[1]);
+    }
+    if (!lo || !hi) {
+        ev.warn("levelset(): bounds must be [[x0,y0,z0],[x1,y1,z1]]", &node.position());
+        return {};
+    }
+    for (int a = 0; a < 3; ++a) {
+        if (!((*hi)[a] > (*lo)[a])) {
+            ev.warn("levelset(): bounds must be increasing along every axis", &node.position());
+            return {};
+        }
+    }
+
+    const double* isoArg = std::get_if<double>(&params.at("isovalue"));
+    if (!isoArg) {
+        ev.warn("levelset(): isovalue must be a number", &node.position());
+        return {};
+    }
+    const double isovalue = *isoArg;
+    const bool invert = truthy(params.at("invert"));
+
+    // Grid spacing is corner-sample to corner-sample, so n-1 intervals.
+    const std::array<double, 3> origin = *lo;
+    const std::array<double, 3> spacing = {((*hi)[0] - (*lo)[0]) / static_cast<double>(field->nx - 1),
+                                            ((*hi)[1] - (*lo)[1]) / static_cast<double>(field->ny - 1),
+                                            ((*hi)[2] - (*lo)[2]) / static_cast<double>(field->nz - 1)};
+
+    // Finer than the grid buys nothing -- there is no information between
+    // samples -- and coarser throws away what the script paid to compute.
+    double edge = std::min({spacing[0], spacing[1], spacing[2]});
+    if (const double* e = std::get_if<double>(&params.at("edge"))) {
+        if (*e > 0.0) edge = *e;
+        else ev.warn("levelset(): edge must be positive; using the grid spacing", &node.position());
+    }
+
+    const ScalarField& f = *field;
+    const auto sample = [&f, origin, spacing, isovalue, invert](manifold::vec3 p) -> double {
+        double g[3];
+        size_t i0[3];
+        double t[3];
+        const double pos[3] = {p.x, p.y, p.z};
+        const size_t n[3] = {f.nx, f.ny, f.nz};
+        for (int a = 0; a < 3; ++a) {
+            g[a] = (pos[a] - origin[a]) / spacing[a];
+            if (g[a] < 0.0) g[a] = 0.0;
+            const double maxg = static_cast<double>(n[a] - 1);
+            if (g[a] > maxg) g[a] = maxg;
+            i0[a] = static_cast<size_t>(g[a]);
+            if (i0[a] > n[a] - 2) i0[a] = n[a] - 2;
+            t[a] = g[a] - static_cast<double>(i0[a]);
+        }
+        double acc = 0.0;
+        for (int c = 0; c < 8; ++c) {
+            const size_t di = static_cast<size_t>(c & 1), dj = static_cast<size_t>((c >> 1) & 1),
+                          dk = static_cast<size_t>((c >> 2) & 1);
+            const double w = (di ? t[0] : 1.0 - t[0]) * (dj ? t[1] : 1.0 - t[1]) * (dk ? t[2] : 1.0 - t[2]);
+            acc += w * f.at(i0[0] + di, i0[1] + dj, i0[2] + dk);
+        }
+        // Manifold takes POSITIVE as inside. A distance field is the other
+        // way round, which is the common case, so the default flips it.
+        const double d = acc - isovalue;
+        return invert ? d : -d;
+    };
+
+    manifold::Box bounds(manifold::vec3(origin[0], origin[1], origin[2]),
+                          manifold::vec3((*hi)[0], (*hi)[1], (*hi)[2]));
+    // tolerance -1: a positive value makes Manifold do EXTRA evaluations per
+    // output vertex to snap nearer the true surface. Against a fixed grid
+    // those only re-interpolate data already used -- cost, no information.
+    // canParallel true: the lambda is pure C++ and never re-enters the
+    // evaluator, which is the whole point of taking a grid.
+    manifold::Manifold solid =
+        manifold::Manifold::LevelSet(sample, bounds, edge, 0.0, /*tolerance=*/-1.0, /*canParallel=*/true);
+
+    if (solid.IsEmpty()) return {};
+    ColoredBody b;
+    b.body = std::move(solid);
+    std::vector<ColoredBody> out;
+    out.push_back(std::move(b));
+    return out;
+}
+
 } // namespace oscadeval

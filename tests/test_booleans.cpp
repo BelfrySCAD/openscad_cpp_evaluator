@@ -793,3 +793,146 @@ TEST(Simplify, NoChildrenIsEmpty) {
     Evaluated e = evalSrc("simplify();");
     EXPECT_TRUE(e.bodies.empty());
 }
+
+// -- levelset -------------------------------------------------------------
+//
+// A solid from a grid of sampled values. Takes a grid rather than an SDF
+// callback: measured, building the field in script costs 0.41 us/sample
+// against 0.96 us for a closure call, and a grid lets Manifold mesh in
+// parallel because nothing re-enters the evaluator.
+//
+// Accuracy is bounded by the grid, not by Manifold -- it samples on a
+// body-centred cubic lattice and the lambda interpolates -- so every
+// tolerance here is a percentage, not an epsilon.
+
+namespace {
+
+// field[i][j][k] of the distance from the origin, over [-half, half]^3.
+std::string sphereFieldSrc(int n, double half) {
+    return "N = " + std::to_string(n) + "; H = " + std::to_string(half) +
+            ";\nfunction co(t) = -H + 2*H*t/(N-1);\n"
+            "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1])\n"
+            "      sqrt(co(i)*co(i) + co(j)*co(j) + co(k)*co(k)) ]]];\n";
+}
+
+std::vector<std::string> levelsetWarnings(const std::string& code) {
+    std::vector<std::string> out;
+    evalSrc(code, [&](const std::string& m) {
+        if (m.rfind("WARNING", 0) == 0) out.push_back(m);
+    });
+    return out;
+}
+
+} // namespace
+
+TEST(LevelSet, ASphereFieldGivesASphere) {
+    Evaluated e = evalSrc(sphereFieldSrc(50, 30) +
+                           "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=20);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const double analytic = 4.0 / 3.0 * 3.14159265358979 * 20 * 20 * 20;
+    EXPECT_NEAR(soleBody(e).Volume(), analytic, 0.01 * analytic);  // within 1%
+    EXPECT_EQ(soleBody(e).Genus(), 0);
+}
+
+TEST(LevelSet, AccuracyImprovesWithGridResolution) {
+    // The grid is the accuracy limit, so more samples must mean less error.
+    // Anything else means the resolution argument is not doing its job.
+    const double analytic = 4.0 / 3.0 * 3.14159265358979 * 20 * 20 * 20;
+    double prevErr = 1e30;
+    for (int n : {25, 40, 60}) {
+        Evaluated e = evalSrc(sphereFieldSrc(n, 30) +
+                               "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=20);");
+        ASSERT_EQ(e.bodies.size(), 1u) << "n=" << n;
+        const double err = std::abs(soleBody(e).Volume() - analytic);
+        EXPECT_LT(err, prevErr) << "n=" << n << " was no better than the coarser grid";
+        prevErr = err;
+    }
+}
+
+TEST(LevelSet, ATorusFieldHasGenusOne) {
+    // The test that catches an implementation producing plausible-looking
+    // but topologically wrong output -- volume alone would not.
+    Evaluated e = evalSrc(
+        "N = 60; H = 30;\nfunction co(t) = -H + 2*H*t/(N-1);\n"
+        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1])\n"
+        "      let(q = sqrt(co(i)*co(i) + co(j)*co(j)) - 15)\n"
+        "      sqrt(q*q + co(k)*co(k)) ]]];\n"
+        "levelset(f, bounds=[[-H,-H,-H],[H,H,H]], isovalue=6);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(e).Genus(), 1);
+}
+
+TEST(LevelSet, DisjointBlobsComeOutAsSeparateComponents) {
+    // Two spheres: Euler characteristic 4, so genus 1 - 4/2 = -1.
+    Evaluated e = evalSrc(
+        "N = 60; H = 30;\nfunction co(t) = -H + 2*H*t/(N-1);\n"
+        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1])\n"
+        "      min(sqrt((co(i)-12)*(co(i)-12) + co(j)*co(j) + co(k)*co(k)),\n"
+        "          sqrt((co(i)+12)*(co(i)+12) + co(j)*co(j) + co(k)*co(k))) ]]];\n"
+        "levelset(f, bounds=[[-H,-H,-H],[H,H,H]], isovalue=8);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(e).Genus(), -1);
+}
+
+TEST(LevelSet, IndexOrderIsXThenYThenZ) {
+    // Deliberately asymmetric: a symmetric field passes even if the axes are
+    // transposed, which is the classic marching-cubes bug.
+    Evaluated e = evalSrc(
+        "N = 60; H = 30;\nfunction co(t) = -H + 2*H*t/(N-1);\n"
+        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1])\n"
+        "      max(abs(co(i))/5, abs(co(j))/10, abs(co(k))/20) ]]];\n"
+        "levelset(f, bounds=[[-H,-H,-H],[H,H,H]], isovalue=1);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box b = soleBody(e).BoundingBox();
+    EXPECT_NEAR(b.max.x, 5.0, 0.6);
+    EXPECT_NEAR(b.max.y, 10.0, 0.6);
+    EXPECT_NEAR(b.max.z, 20.0, 0.6);
+}
+
+TEST(LevelSet, IsovalueSelectsTheSurface) {
+    Evaluated small = evalSrc(sphereFieldSrc(40, 30) +
+                               "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=10);");
+    Evaluated big = evalSrc(sphereFieldSrc(40, 30) +
+                             "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=20);");
+    EXPECT_LT(soleBody(small).Volume(), soleBody(big).Volume());
+}
+
+TEST(LevelSet, BoundsPlaceTheResult) {
+    Evaluated e = evalSrc(sphereFieldSrc(40, 30) +
+                           "levelset(f, bounds=[[100,-30,-30],[160,30,30]], isovalue=20);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box b = soleBody(e).BoundingBox();
+    EXPECT_NEAR((b.min.x + b.max.x) / 2, 130.0, 1.0);
+}
+
+TEST(LevelSet, AnIsovalueNothingReachesIsEmpty) {
+    // A distance field is never negative, so nothing is inside. Not an
+    // error: asking is a fair question.
+    Evaluated e = evalSrc(sphereFieldSrc(20, 30) +
+                           "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=-1);");
+    EXPECT_TRUE(e.bodies.empty());
+}
+
+TEST(LevelSet, AnIsovalueEverythingSatisfiesFillsTheBounds) {
+    // The mirror case, and it is NOT empty: if every sample is inside, the
+    // solid is the whole box, clipped at the bounds. Worth pinning, because
+    // "nothing crossed the surface" and "everything is inside" look alike
+    // from the outside and mean opposite things.
+    Evaluated e = evalSrc(sphereFieldSrc(20, 30) +
+                           "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=1000);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box b = soleBody(e).BoundingBox();
+    EXPECT_NEAR(b.max.x - b.min.x, 60.0, 1.0);
+    EXPECT_NEAR(soleBody(e).Volume(), 60.0 * 60.0 * 60.0, 0.02 * 60.0 * 60.0 * 60.0);
+}
+
+TEST(LevelSet, MalformedFieldsWarn) {
+    for (const char* code : {
+             "levelset([[[1,2],[3,4]],[[5,6],[7]]], bounds=[[0,0,0],[1,1,1]]);",   // ragged
+             "levelset([[[1,2],[3,\"x\"]],[[5,6],[7,8]]], bounds=[[0,0,0],[1,1,1]]);", // not numeric
+             "levelset(5, bounds=[[0,0,0],[1,1,1]]);",                              // not a field
+             "levelset([[[1,2],[3,4]],[[5,6],[7,8]]], bounds=[[0,0,0],[0,1,1]]);",  // empty extent
+         }) {
+        EXPECT_FALSE(levelsetWarnings(code).empty()) << "silent on: " << code;
+    }
+}
