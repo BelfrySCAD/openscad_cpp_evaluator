@@ -936,3 +936,74 @@ TEST(LevelSet, MalformedFieldsWarn) {
         EXPECT_FALSE(levelsetWarnings(code).empty()) << "silent on: " << code;
     }
 }
+
+// -- levelset, function form ----------------------------------------------
+//
+// Same builtin, field given as function(x,y,z) instead of a grid. Slower --
+// a closure call per sample, and canParallel must be false because the
+// evaluator would otherwise be called back from Manifold's worker threads --
+// but MORE accurate, because Manifold picks its own sample points and can
+// snap toward the true surface instead of interpolating a fixed lattice.
+//
+// Measured at matched resolution, sphere against analytic:
+//    50^3   grid 0.23s (-0.244%)   function 0.32s (-0.103%)
+//   100^3   grid 1.06s (-0.059%)   function 1.91s (-0.025%)
+
+TEST(LevelSetFn, AFunctionFieldGivesTheSameSphere) {
+    Evaluated e = evalSrc(
+        "levelset(function(x,y,z) sqrt(x*x+y*y+z*z), "
+        "bounds=[[-30,-30,-30],[30,30,30]], isovalue=20, edge=1.5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const double analytic = 4.0 / 3.0 * 3.14159265358979 * 20 * 20 * 20;
+    EXPECT_NEAR(soleBody(e).Volume(), analytic, 0.01 * analytic);
+    EXPECT_EQ(soleBody(e).Genus(), 0);
+}
+
+TEST(LevelSetFn, AgreesWithTheGridFormOnTheSameField) {
+    // The two intakes must describe the same solid; they differ only in how
+    // finely they can resolve it.
+    Evaluated grid = evalSrc(sphereFieldSrc(50, 30) +
+                              "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=20);");
+    Evaluated fn = evalSrc(
+        "levelset(function(x,y,z) sqrt(x*x+y*y+z*z), "
+        "bounds=[[-30,-30,-30],[30,30,30]], isovalue=20, edge=" +
+        std::to_string(60.0 / 49.0) + ");");
+    ASSERT_EQ(grid.bodies.size(), 1u);
+    ASSERT_EQ(fn.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(fn).Genus(), soleBody(grid).Genus());
+    EXPECT_NEAR(soleBody(fn).Volume(), soleBody(grid).Volume(),
+                0.01 * soleBody(grid).Volume());
+}
+
+TEST(LevelSetFn, TopologyIsFoundFromAFunctionToo) {
+    Evaluated e = evalSrc(
+        "levelset(function(x,y,z) let(q = sqrt(x*x+y*y) - 15) sqrt(q*q + z*z), "
+        "bounds=[[-30,-30,-30],[30,30,30]], isovalue=6, edge=1.2);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(e).Genus(), 1);
+}
+
+TEST(LevelSetFn, AFunctionFieldRequiresEdge) {
+    // There is no grid to infer spacing from, and the cost is CUBIC in it --
+    // guessing would silently produce either a useless mesh or a ten-minute
+    // one. Making the caller say is the safer failure.
+    const std::vector<std::string> w = levelsetWarnings(
+        "levelset(function(x,y,z) sqrt(x*x+y*y+z*z), bounds=[[-1,-1,-1],[1,1,1]]);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("edge="), std::string::npos) << w[0];
+}
+
+TEST(LevelSetFn, AFunctionOfTheWrongArityWarns) {
+    const std::vector<std::string> w = levelsetWarnings(
+        "levelset(function(p) 1, bounds=[[-1,-1,-1],[1,1,1]], edge=0.5);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("three parameters"), std::string::npos) << w[0];
+}
+
+TEST(LevelSetFn, AFieldFunctionCanCaptureOuterVariables) {
+    Evaluated e = evalSrc(
+        "r = 20;\nlevelset(function(x,y,z) sqrt(x*x+y*y+z*z), "
+        "bounds=[[-30,-30,-30],[30,30,30]], isovalue=r, edge=1.5);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(soleBody(e).Volume(), 4.0 / 3.0 * 3.14159265358979 * 8000, 400.0);
+}

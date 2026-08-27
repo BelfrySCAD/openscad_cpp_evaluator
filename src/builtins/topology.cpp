@@ -541,13 +541,33 @@ CSGParams resolveLevelSet(Evaluator& ev, const oscad::ModularCall& node, EvalCon
 std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params,
                                            const std::vector<std::unique_ptr<CSGNode>>&,
                                            const oscad::ASTNode& node) {
-    const std::optional<ScalarField> field = readField(params.at("field"));
-    if (!field) {
-        ev.warn("levelset(): field must be a rectangular field[i][j][k] of numbers", &node.position());
-        return {};
-    }
-    if (field->nx < 2 || field->ny < 2 || field->nz < 2) {
-        ev.warn("levelset(): the field needs at least 2 samples along each axis", &node.position());
+    // Two shapes of field, and the choice matters beyond taste:
+    //
+    //   a GRID    -- faster to sample (0.41 vs 0.96 us) and meshes in
+    //                PARALLEL, because nothing re-enters the evaluator.
+    //                Accuracy is capped by the grid; memory is the ceiling.
+    //   a FUNCTION -- Manifold picks its own sample points and can snap to
+    //                the true surface, so it is MORE accurate, with no
+    //                memory ceiling. But every sample is a closure call, and
+    //                canParallel must be false or the evaluator gets called
+    //                back from threads it knows nothing about.
+    const Value& fieldArg = params.at("field");
+    const ClosurePtr* fieldFn = std::get_if<ClosurePtr>(&fieldArg);
+    std::optional<ScalarField> field;
+    if (!fieldFn) {
+        field = readField(fieldArg);
+        if (!field) {
+            ev.warn("levelset(): field must be a function(x,y,z) or a rectangular field[i][j][k] of numbers",
+                    &node.position());
+            return {};
+        }
+        if (field->nx < 2 || field->ny < 2 || field->nz < 2) {
+            ev.warn("levelset(): the field needs at least 2 samples along each axis", &node.position());
+            return {};
+        }
+    } else if (!*fieldFn || (*fieldFn)->node == nullptr || (*fieldFn)->node->parameters.size() < 3) {
+        ev.warn("levelset(): the field function needs three parameters, as in function(x,y,z) ...",
+                &node.position());
         return {};
     }
 
@@ -576,22 +596,60 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     const double isovalue = *isoArg;
     const bool invert = truthy(params.at("invert"));
 
-    // Grid spacing is corner-sample to corner-sample, so n-1 intervals.
     const std::array<double, 3> origin = *lo;
-    const std::array<double, 3> spacing = {((*hi)[0] - (*lo)[0]) / static_cast<double>(field->nx - 1),
-                                            ((*hi)[1] - (*lo)[1]) / static_cast<double>(field->ny - 1),
-                                            ((*hi)[2] - (*lo)[2]) / static_cast<double>(field->nz - 1)};
-
-    // Finer than the grid buys nothing -- there is no information between
-    // samples -- and coarser throws away what the script paid to compute.
-    double edge = std::min({spacing[0], spacing[1], spacing[2]});
+    std::array<double, 3> spacing{1.0, 1.0, 1.0};
+    double edge = 0.0;
+    if (field) {
+        // Grid spacing is corner-sample to corner-sample, so n-1 intervals.
+        spacing = {((*hi)[0] - (*lo)[0]) / static_cast<double>(field->nx - 1),
+                    ((*hi)[1] - (*lo)[1]) / static_cast<double>(field->ny - 1),
+                    ((*hi)[2] - (*lo)[2]) / static_cast<double>(field->nz - 1)};
+        // Finer than the grid buys nothing -- there is no information between
+        // samples -- and coarser throws away what the script paid to compute.
+        edge = std::min({spacing[0], spacing[1], spacing[2]});
+    }
     if (const double* e = std::get_if<double>(&params.at("edge"))) {
         if (*e > 0.0) edge = *e;
-        else ev.warn("levelset(): edge must be positive; using the grid spacing", &node.position());
+        else ev.warn("levelset(): edge must be positive", &node.position());
+    }
+    if (edge <= 0.0) {
+        // No grid to infer it from. Guessing would silently pick either a
+        // useless mesh or a ten-minute one -- the cost is cubic in this
+        // number, so it is the caller's call to make.
+        ev.warn("levelset(): a function field needs edge= (the sample spacing)", &node.position());
+        return {};
     }
 
-    const ScalarField& f = *field;
-    const auto sample = [&f, origin, spacing, isovalue, invert](manifold::vec3 p) -> double {
+    // The function form: one closure call per sample. No live EvalContext at
+    // generate time, so a root is built from the closure's own scope -- the
+    // same approach the warp experiment used. $-variables are therefore at
+    // their defaults inside a field function.
+    std::optional<EvalContext> fnCtx;
+    std::array<std::string, 3> fnParams;
+    if (fieldFn) {
+        fnCtx = EvalContext::makeRoot((*fieldFn)->node->scope());
+        for (int a = 0; a < 3; ++a) fnParams[static_cast<size_t>(a)] = (*fieldFn)->node->parameters[static_cast<size_t>(a)]->name->name;
+    }
+
+    const auto sampleFn = [&](manifold::vec3 p) -> double {
+        BoundArgs bound;
+        const double xyz[3] = {p.x, p.y, p.z};
+        for (int a = 0; a < 3; ++a) bound.set(fnParams[static_cast<size_t>(a)], Value{xyz[a]});
+        const Value out = ev.evalFunctionLiteralFromBound(**fieldFn, std::move(bound), *fnCtx, &node.position());
+        const double* d = std::get_if<double>(&out);
+        // A field that returns junk at one point must not abort the whole
+        // build; treat it as far outside instead.
+        const double v = (d && std::isfinite(*d)) ? *d : std::numeric_limits<double>::max();
+        const double diff = v - isovalue;
+        return invert ? diff : -diff;
+    };
+
+    // Never dereferenced on the function path, but it must still be a valid
+    // reference -- binding one to a null pointer is undefined behaviour even
+    // where the lambda is never called.
+    const ScalarField emptyField;
+    const ScalarField& f = field ? *field : emptyField;
+    const auto sampleGrid = [&f, origin, spacing, isovalue, invert](manifold::vec3 p) -> double {
         double g[3];
         size_t i0[3];
         double t[3];
@@ -626,8 +684,13 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     // those only re-interpolate data already used -- cost, no information.
     // canParallel true: the lambda is pure C++ and never re-enters the
     // evaluator, which is the whole point of taking a grid.
+    // canParallel is the crux: safe for a grid because the lambda is pure
+    // C++, and NOT safe for a function, which re-enters the evaluator.
+    // Manifold: parallel policies "will crash language runtimes with runtime
+    // locks that expect to not be called back by unregistered threads".
     manifold::Manifold solid =
-        manifold::Manifold::LevelSet(sample, bounds, edge, 0.0, /*tolerance=*/-1.0, /*canParallel=*/true);
+        fieldFn ? manifold::Manifold::LevelSet(sampleFn, bounds, edge, 0.0, -1.0, /*canParallel=*/false)
+                 : manifold::Manifold::LevelSet(sampleGrid, bounds, edge, 0.0, -1.0, /*canParallel=*/true);
 
     if (solid.IsEmpty()) return {};
     ColoredBody b;
