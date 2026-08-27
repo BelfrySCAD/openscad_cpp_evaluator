@@ -1345,9 +1345,19 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         // The OpenSCAD release we track. version_num() is that same
         // year/month/day folded as y * 10000 + m * 100 + d, exactly like the
         // reference's own builtin_version_num (builtin_functions.cc).
-        case BuiltinFnId::LinearSolve:
-            return builtinLinearSolve(ev, getArg(args, 0, "A", Value{}), getArg(args, 1, "b", Value{}),
-                                       args.findPositional(1) != nullptr || args.findNamed("b") != nullptr, node);
+        case BuiltinFnId::LinearSolve: {
+            // An explicitly-undef b counts as ABSENT, not as a bad argument.
+            // A wrapper with a fixed signature -- BOSL2's builtins.scad
+            // pattern, `function _linear_solve(A, b) = linear_solve(A, b);`
+            // -- always forwards b, so determinant()-style callers that pass
+            // no right-hand side would otherwise warn on every call.
+            // Passing undef is idiomatically the same as not passing in
+            // OpenSCAD, which is how optional arguments are threaded through
+            // wrappers throughout BOSL2.
+            const Value bArg = getArg(args, 1, "b", Value{});
+            const bool haveB = !std::holds_alternative<std::monostate>(bArg);
+            return builtinLinearSolve(ev, getArg(args, 0, "A", Value{}), bArg, haveB, node);
+        }
         case BuiltinFnId::SupportedFeature: {
             const Value name = getArg(args, 0, "feature", Value{});
             const std::string* s = std::get_if<std::string>(&name);

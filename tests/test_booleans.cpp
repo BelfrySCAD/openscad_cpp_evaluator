@@ -1007,3 +1007,16 @@ TEST(LevelSetFn, AFieldFunctionCanCaptureOuterVariables) {
     ASSERT_EQ(e.bodies.size(), 1u);
     EXPECT_NEAR(soleBody(e).Volume(), 4.0 / 3.0 * 3.14159265358979 * 8000, 400.0);
 }
+
+TEST(LevelSet, AnExplicitlyUndefIsovalueFallsBackToTheDefault) {
+    // Same rule as linear_solve's b, and for the same reason: a wrapper
+    // with a fixed signature forwards every parameter, undef included.
+    Evaluated withUndef = evalSrc(sphereFieldSrc(30, 30) +
+                                   "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=undef);");
+    Evaluated withZero = evalSrc(sphereFieldSrc(30, 30) +
+                                  "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=0);");
+    EXPECT_EQ(withUndef.bodies.size(), withZero.bodies.size());
+    EXPECT_TRUE(levelsetWarnings(sphereFieldSrc(30, 30) +
+                                  "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=undef);")
+                    .empty());
+}

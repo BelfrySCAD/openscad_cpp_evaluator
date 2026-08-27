@@ -588,12 +588,18 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
         }
     }
 
-    const double* isoArg = std::get_if<double>(&params.at("isovalue"));
-    if (!isoArg) {
-        ev.warn("levelset(): isovalue must be a number", &node.position());
-        return {};
+    // Same rule as linear_solve's b: an explicitly-undef argument is ABSENT,
+    // so a fixed-signature wrapper forwarding every parameter still works.
+    const Value& isoVal = params.at("isovalue");
+    double isovalue = 0.0;
+    if (!std::holds_alternative<std::monostate>(isoVal)) {
+        const double* isoArg = std::get_if<double>(&isoVal);
+        if (!isoArg) {
+            ev.warn("levelset(): isovalue must be a number", &node.position());
+            return {};
+        }
+        isovalue = *isoArg;
     }
-    const double isovalue = *isoArg;
     const bool invert = truthy(params.at("invert"));
 
     const std::array<double, 3> origin = *lo;
