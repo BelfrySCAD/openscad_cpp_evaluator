@@ -512,6 +512,63 @@ std::optional<ScalarField> readField(const Value& val) {
     return f;
 }
 
+// field[i][j] -> rows of equal length. The 2D twin of readField.
+std::optional<std::vector<std::vector<double>>> readPlane(const Value& val) {
+    const ListPtr* xs = std::get_if<ListPtr>(&val);
+    if (!xs || !*xs || (*xs)->items.empty()) return std::nullopt;
+    std::vector<std::vector<double>> out;
+    out.reserve((*xs)->items.size());
+    size_t ny = 0;
+    for (size_t i = 0; i < (*xs)->items.size(); ++i) {
+        const ListPtr* ys = std::get_if<ListPtr>(&(*xs)->items[i]);
+        if (!ys || !*ys || (*ys)->items.empty()) return std::nullopt;
+        if (i == 0) ny = (*ys)->items.size();
+        else if ((*ys)->items.size() != ny) return std::nullopt;
+        std::vector<double> row;
+        row.reserve(ny);
+        for (const Value& item : (*ys)->items) {
+            const double* d = std::get_if<double>(&item);
+            if (!d || !std::isfinite(*d)) return std::nullopt;
+            row.push_back(*d);
+        }
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+// Like a numeric list, but INF and -INF are legal -- BOSL2 writes its
+// open-ended ranges as [isovalue, INF].
+std::optional<std::vector<double>> numbersOrInf(const Value& v) {
+    const ListPtr* l = std::get_if<ListPtr>(&v);
+    if (!l || !*l) return std::nullopt;
+    std::vector<double> out;
+    out.reserve((*l)->items.size());
+    for (const Value& item : (*l)->items) {
+        const double* d = std::get_if<double>(&item);
+        if (!d || std::isnan(*d)) return std::nullopt;
+        out.push_back(*d);
+    }
+    return out;
+}
+
+// Positive inside the band [lo, hi], zero on either surface. Manifold takes
+// POSITIVE as inside and imposes no continuity or true-distance requirement,
+// so the min() kink at the middle of a bounded band is fine.
+//
+// One pass, not two: a bounded range could be had as
+// difference(levelset(hi), levelset(lo)), and that works, but it meshes
+// twice and then does a boolean.
+double bandDistance(double v, double lo, double hi, bool invert) {
+    const bool loFinite = std::isfinite(lo);
+    const bool hiFinite = std::isfinite(hi);
+    double d;
+    if (loFinite && hiFinite) d = std::min(v - lo, hi - v);
+    else if (hiFinite) d = hi - v;      // [-INF, hi] -- a scalar isovalue
+    else if (loFinite) d = v - lo;      // [lo, INF] -- BOSL2's idiom
+    else d = 1.0;                        // unbounded both ways: everything is inside
+    return invert ? -d : d;
+}
+
 std::optional<std::array<double, 3>> readVec3(const Value& v) {
     const ListPtr* l = std::get_if<ListPtr>(&v);
     if (!l || !*l || (*l)->items.size() != 3) return std::nullopt;
@@ -525,6 +582,130 @@ std::optional<std::array<double, 3>> readVec3(const Value& v) {
 }
 
 } // namespace
+
+// -- 2D: marching squares --------------------------------------------------
+//
+// CrossSection has no contour extraction -- it only builds from explicit
+// polygons -- so the contours are produced here and handed to
+// CrossSection(Polygons, FillRule).
+//
+// Three details are where the bugs live in this algorithm, so all three are
+// handled explicitly rather than hoped for:
+//
+//  * SADDLES. Cases 5 and 10 have two opposite corners inside and two out,
+//    and admit two different connections. Picking wrong changes the
+//    TOPOLOGY -- two touching blobs versus one pinched shape. Resolved with
+//    the cell-centre average (the asymptotic decider).
+//  * SHARED VERTICES. Segments are keyed on EDGE IDENTITY, never on float
+//    coordinates. Two cells sharing an edge then produce the same vertex id
+//    by construction, so loops close exactly instead of nearly.
+//  * THE BOUNDARY. A contour running off the box would be an open path. The
+//    field is padded with a ring of "outside" first, so every contour closes.
+//    That is BOSL2's closed=true, and the only behaviour offered here.
+
+struct Contours2d {
+    std::vector<double> v;          // (ny+2) x (nx+2), padded
+    size_t nx = 0, ny = 0;          // padded dimensions
+    double ox = 0, oy = 0, dx = 1, dy = 1;   // origin/spacing of the PADDED grid
+    double at(size_t i, size_t j) const { return v[j * nx + i]; }
+};
+
+// The padded ring sits a full spacing outside the box, so a contour that
+// runs off the edge lands out in the padding -- measured, that inflated a
+// half-plane by 0.9 * spacing along every side it touched, an O(h) error
+// where a closed contour is O(h^2). Clipping to the box afterwards removes
+// exactly that overhang, and is what the caller means by `bounds` anyway.
+manifold::CrossSection clipToBounds(const manifold::CrossSection& cs, const std::vector<double>& lo,
+                                     const std::vector<double>& hi) {
+    manifold::Rect box(manifold::vec2(lo[0], lo[1]), manifold::vec2(hi[0], hi[1]));
+    return cs ^ manifold::CrossSection(box);
+}
+
+manifold::Polygons marchingSquares(const Contours2d& g) {
+    const size_t nx = g.nx, ny = g.ny;
+    // A vertex can sit on a horizontal edge (between i,j and i+1,j) or a
+    // vertical one (between i,j and i,j+1). Ids are derived from the edge,
+    // so the two cells sharing it agree exactly.
+    const auto hId = [&](size_t i, size_t j) { return j * (nx - 1) + i; };
+    const size_t hCount = (nx - 1) * ny;
+    const auto vId = [&](size_t i, size_t j) { return hCount + j * nx + i; };
+
+    std::unordered_map<size_t, manifold::vec2> pts;
+    const auto lerpEdge = [&](size_t i0, size_t j0, size_t i1, size_t j1, size_t id) {
+        if (pts.count(id)) return;
+        const double a = g.at(i0, j0), b = g.at(i1, j1);
+        const double t = (a == b) ? 0.5 : a / (a - b);
+        pts[id] = manifold::vec2(g.ox + (static_cast<double>(i0) + t * (static_cast<double>(i1) - static_cast<double>(i0))) * g.dx,
+                                  g.oy + (static_cast<double>(j0) + t * (static_cast<double>(j1) - static_cast<double>(j0))) * g.dy);
+    };
+
+    std::vector<std::pair<size_t, size_t>> segs;
+    for (size_t j = 0; j + 1 < ny; ++j) {
+        for (size_t i = 0; i + 1 < nx; ++i) {
+            const double d0 = g.at(i, j), d1 = g.at(i + 1, j), d2 = g.at(i + 1, j + 1), d3 = g.at(i, j + 1);
+            const int mask = (d0 > 0 ? 1 : 0) | (d1 > 0 ? 2 : 0) | (d2 > 0 ? 4 : 0) | (d3 > 0 ? 8 : 0);
+            if (mask == 0 || mask == 15) continue;
+
+            const size_t eB = hId(i, j), eT = hId(i, j + 1), eL = vId(i, j), eR = vId(i + 1, j);
+            const auto mkB = [&] { lerpEdge(i, j, i + 1, j, eB); };
+            const auto mkT = [&] { lerpEdge(i, j + 1, i + 1, j + 1, eT); };
+            const auto mkL = [&] { lerpEdge(i, j, i, j + 1, eL); };
+            const auto mkR = [&] { lerpEdge(i + 1, j, i + 1, j + 1, eR); };
+            const auto add = [&](size_t a, size_t b) { segs.emplace_back(a, b); };
+
+            switch (mask) {
+                case 1:  case 14: mkL(); mkB(); add(eL, eB); break;
+                case 2:  case 13: mkB(); mkR(); add(eB, eR); break;
+                case 3:  case 12: mkL(); mkR(); add(eL, eR); break;
+                case 4:  case 11: mkR(); mkT(); add(eR, eT); break;
+                case 6:  case 9:  mkB(); mkT(); add(eB, eT); break;
+                case 8:  case 7:  mkT(); mkL(); add(eT, eL); break;
+                case 5: case 10: {
+                    // Saddle: the centre decides which way the two contours
+                    // pass. Without this the topology is a coin flip.
+                    mkL(); mkB(); mkR(); mkT();
+                    const double centre = 0.25 * (d0 + d1 + d2 + d3);
+                    const bool joinLB = (mask == 5) == (centre > 0);
+                    if (joinLB) { add(eL, eB); add(eR, eT); }
+                    else        { add(eL, eT); add(eB, eR); }
+                    break;
+                }
+                default: break;
+            }
+        }
+    }
+    if (segs.empty()) return {};
+
+    // Chain segments into closed loops. Every vertex sits on exactly two
+    // segments in a well-formed field, so this is a plain walk.
+    std::unordered_map<size_t, std::vector<size_t>> adj;
+    for (const auto& [a, b] : segs) {
+        adj[a].push_back(b);
+        adj[b].push_back(a);
+    }
+    std::unordered_set<size_t> used;
+    manifold::Polygons out;
+    for (const auto& [start, _] : adj) {
+        if (used.count(start)) continue;
+        manifold::SimplePolygon loop;
+        size_t cur = start, prev = SIZE_MAX;
+        while (true) {
+            if (used.count(cur)) break;
+            used.insert(cur);
+            loop.push_back(pts[cur]);
+            size_t next = SIZE_MAX;
+            for (size_t cand : adj[cur]) {
+                if (cand != prev && !used.count(cand)) { next = cand; break; }
+            }
+            if (next == SIZE_MAX) break;
+            prev = cur;
+            cur = next;
+        }
+        if (loop.size() >= 3) out.push_back(std::move(loop));
+    }
+    return out;
+}
+
 
 CSGParams resolveLevelSet(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
@@ -553,7 +734,187 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     //                back from threads it knows nothing about.
     const Value& fieldArg = params.at("field");
     const ClosurePtr* fieldFn = std::get_if<ClosurePtr>(&fieldArg);
+    // The array is NOT parsed yet: whether it should be field[i][j] or
+    // field[i][j][k] depends on `bounds`, which is read below. Parsing it as
+    // 3D here rejected every 2D grid before the 2D path ever ran.
     std::optional<ScalarField> field;
+    if (fieldFn && (!*fieldFn || (*fieldFn)->node == nullptr || (*fieldFn)->node->parameters.size() < 2)) {
+        ev.warn("levelset(): the field function needs function(x,y) for 2D or function(x,y,z) for 3D",
+                &node.position());
+        return {};
+    }
+
+    // 2D or 3D is decided by `bounds`, not guessed from the field: a 2-vector
+    // corner means a section, a 3-vector means a solid. Explicit, and it
+    // matches how the caller already has to think about the box.
+    const ListPtr* bb = std::get_if<ListPtr>(&params.at("bounds"));
+    std::optional<std::vector<double>> bLo, bHi;
+    if (bb && *bb && (*bb)->items.size() == 2) {
+        bLo = numbersOrInf((*bb)->items[0]);
+        bHi = numbersOrInf((*bb)->items[1]);
+    }
+    if (!bLo || !bHi || bLo->size() != bHi->size() || (bLo->size() != 2 && bLo->size() != 3)) {
+        ev.warn("levelset(): bounds must be [[x0,y0],[x1,y1]] or [[x0,y0,z0],[x1,y1,z1]]",
+                &node.position());
+        return {};
+    }
+    const bool is2d = bLo->size() == 2;
+    std::optional<std::array<double, 3>> lo, hi;
+    if (!is2d) {
+        lo = std::array<double, 3>{(*bLo)[0], (*bLo)[1], (*bLo)[2]};
+        hi = std::array<double, 3>{(*bHi)[0], (*bHi)[1], (*bHi)[2]};
+    }
+    for (size_t a = 0; a < bLo->size(); ++a) {
+        if (!((*bHi)[a] > (*bLo)[a])) {
+            ev.warn("levelset(): bounds must be increasing along every axis", &node.position());
+            return {};
+        }
+    }
+
+    // isovalue is a single level OR a bounded range [lo, hi].
+    //
+    // Unified as a band: a scalar v is [-INF, v], so "at or below" -- the
+    // distance-field reading, where smaller means further inside. A range
+    // means BETWEEN, which is what BOSL2's isosurface/contour pass around,
+    // and [lo, INF] is its "at or above" idiom. A caller handing us BOSL2's
+    // own isovalue argument therefore gets BOSL2's own semantics with no
+    // translation and no invert.
+    //
+    // Same rule as linear_solve's b: an explicitly-undef argument is ABSENT,
+    // so a fixed-signature wrapper forwarding every parameter still works.
+    const Value& isoVal = params.at("isovalue");
+    double isoLo = -std::numeric_limits<double>::infinity();
+    double isoHi = 0.0;
+    if (!std::holds_alternative<std::monostate>(isoVal)) {
+        if (const double* isoArg = std::get_if<double>(&isoVal)) {
+            isoHi = *isoArg;
+        } else if (const std::optional<std::vector<double>> pair = numbersOrInf(isoVal);
+                    pair && pair->size() == 2) {
+            isoLo = (*pair)[0];
+            isoHi = (*pair)[1];
+            if (!(isoHi > isoLo)) {
+                ev.warn("levelset(): isovalue range must be increasing", &node.position());
+                return {};
+            }
+        } else {
+            ev.warn("levelset(): isovalue must be a number or a [low, high] range", &node.position());
+            return {};
+        }
+    }
+    const bool invert = truthy(params.at("invert"));
+
+    const std::array<double, 3> origin = *lo;
+    std::array<double, 3> spacing{1.0, 1.0, 1.0};
+    double edge = 0.0;
+    // Grid spacing is filled in below, once the array has been read at the
+    // right dimensionality. Finer than the grid buys nothing.
+    if (const double* e = std::get_if<double>(&params.at("edge"))) {
+        if (*e > 0.0) edge = *e;
+        else ev.warn("levelset(): edge must be positive", &node.position());
+    }
+    if (edge <= 0.0 && fieldFn) {
+        // No grid to infer it from. Guessing would silently pick either a
+        // useless mesh or a ten-minute one -- the cost is cubic in this
+        // number, so it is the caller's call to make.
+        ev.warn("levelset(): a function field needs edge= (the sample spacing)", &node.position());
+        return {};
+    }
+
+    // The function form: one closure call per sample. No live EvalContext at
+    // generate time, so a root is built from the closure's own scope. Its
+    // $-variables are therefore at their defaults.
+    std::optional<EvalContext> fnCtx;
+    std::vector<std::string> fnParams2;
+    if (fieldFn) {
+        fnCtx = EvalContext::makeRoot((*fieldFn)->node->scope());
+        for (const auto& prm : (*fieldFn)->node->parameters) fnParams2.push_back(prm->name->name);
+    }
+
+    // ---- 2D: sample onto a padded grid, contour it, hand to CrossSection.
+    if (is2d) {
+        size_t nx = 0, ny = 0;
+        double sx = 0, sy = 0;
+        if (field) {
+            ev.warn("levelset(): a 2D field must be field[i][j]; a 3D array was given",
+                    &node.position());
+            return {};
+        }
+        if (!fieldFn) {
+            const std::optional<std::vector<std::vector<double>>> plane = readPlane(fieldArg);
+            if (!plane || plane->size() < 2 || (*plane)[0].size() < 2) {
+                ev.warn("levelset(): 2D field must be a rectangular field[i][j] of numbers",
+                        &node.position());
+                return {};
+            }
+            nx = plane->size();
+            ny = (*plane)[0].size();
+            sx = ((*bHi)[0] - (*bLo)[0]) / static_cast<double>(nx - 1);
+            sy = ((*bHi)[1] - (*bLo)[1]) / static_cast<double>(ny - 1);
+            Contours2d g;
+            g.nx = nx + 2;
+            g.ny = ny + 2;
+            g.dx = sx;
+            g.dy = sy;
+            g.ox = (*bLo)[0] - sx;
+            g.oy = (*bLo)[1] - sy;
+            // Padded with a ring that is firmly OUTSIDE, so a contour meeting
+            // the box edge closes along it instead of running off. This is
+            // BOSL2's closed=true, and the only behaviour offered.
+            g.v.assign(g.nx * g.ny, -1.0);
+            for (size_t i = 0; i < nx; ++i)
+                for (size_t j = 0; j < ny; ++j)
+                    g.v[(j + 1) * g.nx + (i + 1)] = bandDistance((*plane)[i][j], isoLo, isoHi, invert);
+            const manifold::Polygons polys = marchingSquares(g);
+            if (polys.empty()) return {};
+            ColoredBody b;
+            b.section = clipToBounds(manifold::CrossSection(polys, manifold::CrossSection::FillRule::EvenOdd),
+                                      *bLo, *bHi);
+            if (b.section->IsEmpty()) return {};
+            std::vector<ColoredBody> out;
+            out.push_back(std::move(b));
+            return out;
+        }
+        // function(x,y): edge= gives the spacing, as in 3D
+        nx = static_cast<size_t>(std::floor(((*bHi)[0] - (*bLo)[0]) / edge)) + 1;
+        ny = static_cast<size_t>(std::floor(((*bHi)[1] - (*bLo)[1]) / edge)) + 1;
+        if (nx < 2 || ny < 2) {
+            ev.warn("levelset(): edge is larger than the bounds", &node.position());
+            return {};
+        }
+        sx = ((*bHi)[0] - (*bLo)[0]) / static_cast<double>(nx - 1);
+        sy = ((*bHi)[1] - (*bLo)[1]) / static_cast<double>(ny - 1);
+        Contours2d g;
+        g.nx = nx + 2;
+        g.ny = ny + 2;
+        g.dx = sx;
+        g.dy = sy;
+        g.ox = (*bLo)[0] - sx;
+        g.oy = (*bLo)[1] - sy;
+        g.v.assign(g.nx * g.ny, -1.0);
+        for (size_t i = 0; i < nx; ++i) {
+            for (size_t j = 0; j < ny; ++j) {
+                BoundArgs bound;
+                bound.set(fnParams2[0], Value{(*bLo)[0] + static_cast<double>(i) * sx});
+                bound.set(fnParams2[1], Value{(*bLo)[1] + static_cast<double>(j) * sy});
+                const Value outv =
+                    ev.evalFunctionLiteralFromBound(**fieldFn, std::move(bound), *fnCtx, &node.position());
+                const double* d = std::get_if<double>(&outv);
+                const double val = (d && std::isfinite(*d)) ? *d : std::numeric_limits<double>::max();
+                g.v[(j + 1) * g.nx + (i + 1)] = bandDistance(val, isoLo, isoHi, invert);
+            }
+        }
+        const manifold::Polygons polys = marchingSquares(g);
+        if (polys.empty()) return {};
+        ColoredBody b;
+        b.section = clipToBounds(manifold::CrossSection(polys, manifold::CrossSection::FillRule::EvenOdd),
+                                  *bLo, *bHi);
+        if (b.section->IsEmpty()) return {};
+        std::vector<ColoredBody> out;
+        out.push_back(std::move(b));
+        return out;
+    }
+
+
     if (!fieldFn) {
         field = readField(fieldArg);
         if (!field) {
@@ -565,89 +926,28 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
             ev.warn("levelset(): the field needs at least 2 samples along each axis", &node.position());
             return {};
         }
-    } else if (!*fieldFn || (*fieldFn)->node == nullptr || (*fieldFn)->node->parameters.size() < 3) {
-        ev.warn("levelset(): the field function needs three parameters, as in function(x,y,z) ...",
+        spacing = {((*bHi)[0] - (*bLo)[0]) / static_cast<double>(field->nx - 1),
+                    ((*bHi)[1] - (*bLo)[1]) / static_cast<double>(field->ny - 1),
+                    ((*bHi)[2] - (*bLo)[2]) / static_cast<double>(field->nz - 1)};
+        if (!std::get_if<double>(&params.at("edge"))) edge = std::min({spacing[0], spacing[1], spacing[2]});
+    }
+
+    if (fieldFn && fnParams2.size() < 3) {
+        ev.warn("levelset(): a 3D field function needs three parameters, as in function(x,y,z) ...",
                 &node.position());
         return {};
-    }
-
-    const ListPtr* bb = std::get_if<ListPtr>(&params.at("bounds"));
-    std::optional<std::array<double, 3>> lo, hi;
-    if (bb && *bb && (*bb)->items.size() == 2) {
-        lo = readVec3((*bb)->items[0]);
-        hi = readVec3((*bb)->items[1]);
-    }
-    if (!lo || !hi) {
-        ev.warn("levelset(): bounds must be [[x0,y0,z0],[x1,y1,z1]]", &node.position());
-        return {};
-    }
-    for (int a = 0; a < 3; ++a) {
-        if (!((*hi)[a] > (*lo)[a])) {
-            ev.warn("levelset(): bounds must be increasing along every axis", &node.position());
-            return {};
-        }
-    }
-
-    // Same rule as linear_solve's b: an explicitly-undef argument is ABSENT,
-    // so a fixed-signature wrapper forwarding every parameter still works.
-    const Value& isoVal = params.at("isovalue");
-    double isovalue = 0.0;
-    if (!std::holds_alternative<std::monostate>(isoVal)) {
-        const double* isoArg = std::get_if<double>(&isoVal);
-        if (!isoArg) {
-            ev.warn("levelset(): isovalue must be a number", &node.position());
-            return {};
-        }
-        isovalue = *isoArg;
-    }
-    const bool invert = truthy(params.at("invert"));
-
-    const std::array<double, 3> origin = *lo;
-    std::array<double, 3> spacing{1.0, 1.0, 1.0};
-    double edge = 0.0;
-    if (field) {
-        // Grid spacing is corner-sample to corner-sample, so n-1 intervals.
-        spacing = {((*hi)[0] - (*lo)[0]) / static_cast<double>(field->nx - 1),
-                    ((*hi)[1] - (*lo)[1]) / static_cast<double>(field->ny - 1),
-                    ((*hi)[2] - (*lo)[2]) / static_cast<double>(field->nz - 1)};
-        // Finer than the grid buys nothing -- there is no information between
-        // samples -- and coarser throws away what the script paid to compute.
-        edge = std::min({spacing[0], spacing[1], spacing[2]});
-    }
-    if (const double* e = std::get_if<double>(&params.at("edge"))) {
-        if (*e > 0.0) edge = *e;
-        else ev.warn("levelset(): edge must be positive", &node.position());
-    }
-    if (edge <= 0.0) {
-        // No grid to infer it from. Guessing would silently pick either a
-        // useless mesh or a ten-minute one -- the cost is cubic in this
-        // number, so it is the caller's call to make.
-        ev.warn("levelset(): a function field needs edge= (the sample spacing)", &node.position());
-        return {};
-    }
-
-    // The function form: one closure call per sample. No live EvalContext at
-    // generate time, so a root is built from the closure's own scope -- the
-    // same approach the warp experiment used. $-variables are therefore at
-    // their defaults inside a field function.
-    std::optional<EvalContext> fnCtx;
-    std::array<std::string, 3> fnParams;
-    if (fieldFn) {
-        fnCtx = EvalContext::makeRoot((*fieldFn)->node->scope());
-        for (int a = 0; a < 3; ++a) fnParams[static_cast<size_t>(a)] = (*fieldFn)->node->parameters[static_cast<size_t>(a)]->name->name;
     }
 
     const auto sampleFn = [&](manifold::vec3 p) -> double {
         BoundArgs bound;
         const double xyz[3] = {p.x, p.y, p.z};
-        for (int a = 0; a < 3; ++a) bound.set(fnParams[static_cast<size_t>(a)], Value{xyz[a]});
+        for (int a = 0; a < 3; ++a) bound.set(fnParams2[static_cast<size_t>(a)], Value{xyz[a]});
         const Value out = ev.evalFunctionLiteralFromBound(**fieldFn, std::move(bound), *fnCtx, &node.position());
         const double* d = std::get_if<double>(&out);
         // A field that returns junk at one point must not abort the whole
         // build; treat it as far outside instead.
         const double v = (d && std::isfinite(*d)) ? *d : std::numeric_limits<double>::max();
-        const double diff = v - isovalue;
-        return invert ? diff : -diff;
+        return bandDistance(v, isoLo, isoHi, invert);
     };
 
     // Never dereferenced on the function path, but it must still be a valid
@@ -655,7 +955,7 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     // where the lambda is never called.
     const ScalarField emptyField;
     const ScalarField& f = field ? *field : emptyField;
-    const auto sampleGrid = [&f, origin, spacing, isovalue, invert](manifold::vec3 p) -> double {
+    const auto sampleGrid = [&f, origin, spacing, isoLo, isoHi, invert](manifold::vec3 p) -> double {
         double g[3];
         size_t i0[3];
         double t[3];
@@ -677,10 +977,7 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
             const double w = (di ? t[0] : 1.0 - t[0]) * (dj ? t[1] : 1.0 - t[1]) * (dk ? t[2] : 1.0 - t[2]);
             acc += w * f.at(i0[0] + di, i0[1] + dj, i0[2] + dk);
         }
-        // Manifold takes POSITIVE as inside. A distance field is the other
-        // way round, which is the common case, so the default flips it.
-        const double d = acc - isovalue;
-        return invert ? d : -d;
+        return bandDistance(acc, isoLo, isoHi, invert);
     };
 
     manifold::Box bounds(manifold::vec3(origin[0], origin[1], origin[2]),
