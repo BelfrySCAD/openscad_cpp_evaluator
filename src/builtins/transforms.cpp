@@ -240,4 +240,137 @@ std::vector<ColoredBody> generateTransform(Evaluator&, const CSGParams& params,
     return result;
 }
 
+// -- warp(f) ---------------------------------------------------------------
+//
+// Moves every vertex through an OpenSCAD function. Manifold::WarpBatch does
+// the work; everything here is about getting an OpenSCAD closure called from
+// inside it, and about the one hazard Manifold explicitly refuses to check.
+//
+// Topology is untouched -- no vertices are added -- so a coarse mesh warps
+// coarsely. That is the first thing that surprises people; the docs say so.
+
+namespace {
+
+// numList/allNumericList live in function_builtins.cpp's anonymous
+// namespace, so these are the two-line local equivalents rather than
+// widening that file's interface for one caller.
+Value pointValue(double x, double y, double z) {
+    return Value{std::make_shared<const ValueList>(ValueList{{Value{x}, Value{y}, Value{z}}})};
+}
+
+std::optional<std::vector<double>> numbersOf(const Value& v) {
+    const ListPtr* l = std::get_if<ListPtr>(&v);
+    if (!l || !*l) return std::nullopt;
+    std::vector<double> out;
+    out.reserve((*l)->items.size());
+    for (const Value& item : (*l)->items) {
+        const double* d = std::get_if<double>(&item);
+        if (!d) return std::nullopt;
+        out.push_back(*d);
+    }
+    return out;
+}
+
+// NO per-triangle fold check here, and that is deliberate.
+//
+// The obvious one -- compare each triangle's normal before and after and
+// count the ones that inverted -- DOES NOT WORK: GetMeshGL() gives no
+// guarantee that triangle t before the warp is triangle t after it, so the
+// comparison pairs up unrelated triangles. Measured, not assumed: a rigid
+// rotation about Z, which cannot self-intersect and leaves the volume
+// identical to the digit, reported 7 inverted triangles on a cylinder and 9
+// on a sphere. A warning that fires on provably correct geometry is worse
+// than no warning, because people learn to ignore it.
+//
+// What IS sound is the volume sign: a warp whose Jacobian is negative
+// everywhere (any mirroring) turns the solid inside out, and that shows up
+// exactly, with no false positives. Genuine self-intersection without
+// inversion stays undetected -- Manifold says plainly it does not check
+// (manifold.cpp:560-566), and detecting it properly is far too expensive to
+// run on every warp. The docs say so rather than implying the check is
+// complete.
+
+} // namespace
+
+CSGParams resolveWarp(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    CSGParams params;
+    // Position 0 so `warp(function(p) ...)` reads without a keyword.
+    params["f"] = getArg(args, 0, "f", Value{});
+    ev.evalChildren(node.children, effCtx);
+    return params;
+}
+
+std::vector<ColoredBody> generateWarp(Evaluator& ev, const CSGParams& params,
+                                       const std::vector<std::unique_ptr<CSGNode>>& children,
+                                       const oscad::ASTNode& node) {
+    std::vector<ColoredBody> bodies = flattenCsgTree(children);
+    if (bodies.empty()) return {};
+
+    const Value& fnVal = params.at("f");
+    const ClosurePtr* cp = std::get_if<ClosurePtr>(&fnVal);
+    if (!cp || !*cp || !(*cp)->node) {
+        ev.warn("warp() needs a function, as in warp(function(p) [p.x, p.y, p.z*2])", &node.position());
+        return bodies;
+    }
+    const Closure& closure = **cp;
+    const auto& fnParams = closure.node->parameters;
+    if (fnParams.empty()) {
+        ev.warn("warp()'s function needs one parameter, the point to move", &node.position());
+        return bodies;
+    }
+    const std::string& paramName = fnParams[0]->name->name;
+
+    // The generate pass has no live EvalContext -- the one the call was
+    // resolved in is long gone. A closure carries its own scope and its
+    // captured lets, and evalFunctionLiteralFromBound only reads ctx as a
+    // fallback for the scope, so a fresh root built from that scope is
+    // enough. Consequence worth knowing: $-variables are at their defaults
+    // inside a warp function, not whatever surrounded the call.
+    EvalContext rootCtx = EvalContext::makeRoot(closure.node->scope());
+
+    size_t badPoints = 0, inverted = 0;
+    for (ColoredBody& b : bodies) {
+        if (b.section) {
+            // CrossSection has no Warp, and silently doing nothing would be
+            // worse than saying so.
+            ev.warn("warp() is 3D only; the 2D shape was left alone", &node.position());
+            continue;
+        }
+        if (!b.body) continue;
+
+        b.body = b.body->WarpBatch([&](manifold::VecView<manifold::vec3> verts) {
+            for (manifold::vec3& v : verts) {
+                BoundArgs bound;
+                bound.set(paramName, pointValue(v.x, v.y, v.z));
+                const Value out = ev.evalFunctionLiteralFromBound(closure, std::move(bound), rootCtx,
+                                                                   &node.position());
+                const std::optional<std::vector<double>> p = numbersOf(out);
+                if (!p || p->size() < 3 || !std::isfinite((*p)[0]) || !std::isfinite((*p)[1]) ||
+                    !std::isfinite((*p)[2])) {
+                    ++badPoints;   // leave the vertex where it is
+                    continue;
+                }
+                v.x = (*p)[0];
+                v.y = (*p)[1];
+                v.z = (*p)[2];
+            }
+        });
+        if (b.body->Volume() < 0.0) ++inverted;
+    }
+
+    if (badPoints > 0) {
+        ev.warn("warp(): the function returned something other than a 3-vector for " +
+                    std::to_string(badPoints) + " vertex/vertices; those were left in place",
+                &node.position());
+    }
+    if (inverted > 0) {
+        ev.warn("warp(): " + std::to_string(inverted) +
+                    " body/bodies came out inside-out -- the function mirrors, so it needs an "
+                    "even number of sign flips to stay a solid",
+                &node.position());
+    }
+    return bodies;
+}
+
 } // namespace oscadeval

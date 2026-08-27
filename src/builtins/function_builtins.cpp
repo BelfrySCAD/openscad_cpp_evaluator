@@ -913,6 +913,7 @@ const std::unordered_map<std::string, double>& featureLevels() {
     static const std::unordered_map<std::string, double> levels = {
         {"render-expr", 1.0},        // render() in expression position
         {"linear-solve", 1.0},       // linear_solve(A, b) -> {x, det, singular}
+        {"warp-op", 1.0},            // warp(f) -- per-vertex displacement
         {"polyhedron-vnf", 1.0},     // polyhedron(vnf) / polyhedron(object)
         {"separate-children", 1.0},  // children(..., separate=true)
         {"minkowski-diff", 1.0},     // minkowski_difference()

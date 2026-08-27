@@ -344,3 +344,114 @@ TEST(Color, NoChildrenIsEmpty) {
     Evaluated e = evalSrc("color(\"red\");");
     EXPECT_TRUE(e.bodies.empty());
 }
+
+// -- warp -----------------------------------------------------------------
+//
+// Moves every vertex through an OpenSCAD function. Topology is untouched, so
+// no vertices are added: a coarse mesh warps coarsely.
+
+namespace {
+
+std::vector<std::string> warpWarnings(const std::string& code) {
+    std::vector<std::string> out;
+    evalSrc(code, [&](const std::string& m) {
+        if (m.rfind("WARNING", 0) == 0) out.push_back(m);
+    });
+    return out;
+}
+
+} // namespace
+
+TEST(Warp, IdentityChangesNothing) {
+    Evaluated plain = evalSrc("sphere(d=30, $fn=32);");
+    Evaluated same = evalSrc("warp(function(p) p) sphere(d=30, $fn=32);");
+    ASSERT_EQ(same.bodies.size(), 1u);
+    EXPECT_NEAR(same.bodies[0].body->Volume(), plain.bodies[0].body->Volume(), 1e-9);
+    EXPECT_EQ(same.bodies[0].body->Genus(), plain.bodies[0].body->Genus());
+    EXPECT_EQ(same.bodies[0].body->NumTri(), plain.bodies[0].body->NumTri());
+}
+
+TEST(Warp, AnAffineWarpMatchesTheEquivalentScale) {
+    // The oracle: a warp expressible as a transform must agree with that
+    // transform exactly, not approximately.
+    Evaluated w = evalSrc("warp(function(p) [p.x*2, p.y*3, p.z*4]) cube(10);");
+    Evaluated s = evalSrc("scale([2,3,4]) cube(10);");
+    EXPECT_DOUBLE_EQ(w.bodies[0].body->Volume(), s.bodies[0].body->Volume());
+    manifold::Box bw = w.bodies[0].body->BoundingBox();
+    manifold::Box bs = s.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(bw.max.x, bs.max.x, 1e-9);
+    EXPECT_NEAR(bw.max.y, bs.max.y, 1e-9);
+    EXPECT_NEAR(bw.max.z, bs.max.z, 1e-9);
+}
+
+TEST(Warp, TranslationMovesTheBoxWithoutChangingVolume) {
+    Evaluated e = evalSrc("warp(function(p) [p.x+5, p.y, p.z]) cube(10);");
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-9);
+    manifold::Box b = e.bodies[0].body->BoundingBox();
+    EXPECT_NEAR(b.min.x, 5.0, 1e-9);
+    EXPECT_NEAR(b.max.x, 15.0, 1e-9);
+}
+
+TEST(Warp, TopologyIsPreservedSoNoVerticesAreAdded) {
+    // The caveat users hit first: warp moves what is there and adds nothing.
+    Evaluated plain = evalSrc("cylinder(h=40, d=12, $fn=8);");
+    Evaluated bent = evalSrc(
+        "warp(function(p) let(a = p.z*0.5) [p.x*cos(a)-p.y*sin(a), p.x*sin(a)+p.y*cos(a), p.z]) "
+        "cylinder(h=40, d=12, $fn=8);");
+    EXPECT_EQ(bent.bodies[0].body->NumTri(), plain.bodies[0].body->NumTri());
+    EXPECT_EQ(bent.bodies[0].body->Genus(), plain.bodies[0].body->Genus());
+}
+
+TEST(Warp, AClosureCanCaptureAnOuterVariable) {
+    // How anyone will actually parameterise a warp.
+    Evaluated e = evalSrc("k = 3;\nwarp(function(p) [p.x, p.y, p.z*k]) cube(10);");
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 3000.0, 1e-9);
+}
+
+TEST(Warp, ColourSurvives) {
+    Evaluated e = evalSrc("color(\"red\") warp(function(p) [p.x*2, p.y, p.z]) cube(10);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].color.has_value());
+    EXPECT_NEAR((*e.bodies[0].color)[0], 1.0, 1e-6);
+    EXPECT_NEAR((*e.bodies[0].color)[1], 0.0, 1e-6);
+}
+
+TEST(Warp, AMirroringWarpIsReportedAsInsideOut) {
+    // The one unsoundness that IS cheap to detect exactly: a negative
+    // Jacobian turns the solid inside out, and the volume goes negative.
+    const std::vector<std::string> w = warpWarnings("x = 1;\nwarp(function(p) [-p.x, p.y, p.z]) cube(10);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("inside-out"), std::string::npos) << w[0];
+}
+
+TEST(Warp, ValidGeometryNeverWarns) {
+    // Regression guard for a check that was written and REMOVED. Comparing
+    // each triangle's normal before and after looks like a fold detector,
+    // but GetMeshGL() does not guarantee triangle t is the same triangle
+    // afterwards -- a rigid rotation, which cannot self-intersect and leaves
+    // the volume identical, reported 7 inverted triangles on a cylinder and
+    // 9 on a sphere. Anything that warns here is crying wolf.
+    for (const char* code : {
+             "warp(function(p) p) sphere(d=30, $fn=32);",
+             "warp(function(p) [p.x*cos(30)-p.y*sin(30), p.x*sin(30)+p.y*cos(30), p.z]) cylinder(h=40,d=12,$fn=24);",
+             "warp(function(p) let(a=p.z*0.5) [p.x*cos(a)-p.y*sin(a), p.x*sin(a)+p.y*cos(a), p.z]) cylinder(h=40,d=12,$fn=24);",
+             "warp(function(p) [p.x*2, p.y*3, p.z*4]) cube(10);",
+         }) {
+        EXPECT_TRUE(warpWarnings(code).empty()) << "warned on valid geometry: " << code;
+    }
+}
+
+TEST(Warp, A2dShapeIsLeftAloneWithAWarning) {
+    // CrossSection has no Warp. Silently doing nothing would be worse.
+    const std::vector<std::string> w = warpWarnings("warp(function(p) [p.x*2, p.y, p.z]) square(10);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("3D only"), std::string::npos) << w[0];
+}
+
+TEST(Warp, ANonFunctionArgumentWarnsAndPassesChildrenThrough) {
+    const std::vector<std::string> w = warpWarnings("warp(5) cube(10);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("needs a function"), std::string::npos) << w[0];
+    Evaluated e = evalSrc("warp(5) cube(10);");
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-9);
+}

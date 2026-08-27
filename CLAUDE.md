@@ -460,6 +460,30 @@ grep for `ponytail:`.
   unknown arguments -- `children(separate=true)` renders the wrong shape there with no warning --
   and both read as `undef` in OpenSCAD, so a guard written against them works in both.
 
+- **`warp(f)`** (`src/builtins/transforms.cpp`, feature name `warp-op`) — moves every vertex
+  through an OpenSCAD function: `warp(function(p) [p.x, p.y, p.z + 2*sin(p.x*12)]) child();`
+  Registered like any transform (`registry.cpp`, beside `"scale"`), and modelled on
+  `generateTransform`. Uses `Manifold::WarpBatch`.
+  **Calling a closure from the generate pass**: there is no live `EvalContext` by then, so it
+  builds `EvalContext::makeRoot(closure.node->scope())`. That works because a closure carries its
+  own scope and captured lets, and `evalFunctionLiteralFromBound` only reads `ctx` as a scope
+  fallback. Consequence: `$`-variables are at their DEFAULTS inside a warp function, not whatever
+  surrounded the call.
+  **Topology is untouched — no vertices are added.** A `linear_extrude`d square has 8 vertices, so
+  a ripple applied to it does nothing visible. First thing that surprises people; docs say so.
+  Colour survives free (vertices move, properties don't).
+  **Do not re-add a per-triangle fold check.** The obvious one — compare each triangle's normal
+  before and after — was written, measured, and removed: `GetMeshGL()` gives no guarantee that
+  triangle *t* is the same triangle after a warp, so it pairs unrelated triangles. A **rigid
+  rotation**, which cannot self-intersect and leaves volume identical to the digit, reported 7
+  inverted triangles on a cylinder and 9 on a sphere. `Warp.ValidGeometryNeverWarns` is the
+  regression guard. What IS sound is the volume sign, which catches a mirroring warp exactly with
+  no false positives; genuine self-intersection stays undetected, and Manifold says outright it
+  does not check (`manifold.cpp:560-566`).
+  Cost: a callback into OpenSCAD is **0.96 µs**, linear across 500k–2M calls, so a 100k-vertex
+  mesh warps in ~0.1 s. Batching via `WarpBatch` is worth only **1.3×** (1.57 → 1.21 µs/point) —
+  the arithmetic dominates, not the call overhead, so do not contort the API chasing it.
+
 - **`linear_solve(A, b)`** (`src/builtins/function_builtins.cpp`, feature name `linear-solve`) —
   returns `.x` (solution), `.det`, `.singular`. Dispatches on shape:
 
