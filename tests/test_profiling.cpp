@@ -182,9 +182,30 @@ TEST(ProfilePaths, SameCalleeUnderTwoCallersGetsSeparateNodes) {
     ASSERT_NE(workUnderHeavy, nullptr);
     // Two distinct nodes for the same callee -- the whole point.
     EXPECT_NE(workUnderLight, workUnderHeavy);
-    // ...and the expensive path is attributed the larger share. This is the
-    // fact the aggregated view cannot express at all.
-    EXPECT_GT(workUnderHeavy->cumulativeTime, workUnderLight->cumulativeTime);
+
+    // ...and each carries its OWN attribution, which is the fact the
+    // aggregated view cannot express at all.
+    //
+    // Asserted on call counts, not on elapsed time. The comparison here used
+    // to be EXPECT_GT on cumulativeTime, and it was flaky: the ratio is
+    // normally about 9x but was measured collapsing to 1.79x, and it failed
+    // a macOS CI run outright. Wall-clock on a shared runner is not a thing
+    // to assert an ordering on when an exact quantity is available.
+    //
+    // The recursion folds onto a child node (see RecursionFoldsOntoASingleNode),
+    // and THAT is where the difference in work shows up: 2 recursive calls
+    // under light against 20 under heavy. Exact, identical on both engines.
+    const auto* foldedLight = childNamed(r, *workUnderLight, "work");
+    const auto* foldedHeavy = childNamed(r, *workUnderHeavy, "work");
+    ASSERT_NE(foldedLight, nullptr);
+    ASSERT_NE(foldedHeavy, nullptr);
+    EXPECT_EQ(foldedLight->callCount, 2);
+    EXPECT_EQ(foldedHeavy->callCount, 20);
+
+    // Times are still recorded per path -- just not compared against each
+    // other, since only their existence is deterministic.
+    EXPECT_GT(workUnderLight->cumulativeTime, 0.0);
+    EXPECT_GT(workUnderHeavy->cumulativeTime, 0.0);
 
     // The flat view still totals both, unchanged.
     double siteTotal = 0.0;
