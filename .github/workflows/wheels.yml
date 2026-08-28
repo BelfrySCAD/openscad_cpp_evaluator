@@ -85,9 +85,19 @@ jobs:
           # grammar requires %require "3.8". No newer bison package is
           # available via dnf on this base image, so build one from source
           # (fast: a few seconds) rather than switching manylinux images.
+          # Mirrors first, ftp.gnu.org last: ftp.gnu.org went unreachable
+          # (curl 7, connection timed out on 443) on both architectures for
+          # two consecutive runs of the v0.51.3 release, and it is a single
+          # point of failure for every Linux wheel we ship.
+          # ftpmirror.gnu.org is GNU's own redirector to a nearby mirror.
+          # Every line stays at THIS indent on purpose -- a more-indented
+          # line in a `>-` folded scalar keeps its newline instead of
+          # folding to a space, which would split a URL from its curl.
           CIBW_BEFORE_ALL_LINUX: >-
             dnf install -y flex &&
-            curl -fsSL https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz -o /tmp/bison.tar.gz &&
+            { curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 https://ftpmirror.gnu.org/bison/bison-3.8.2.tar.gz -o /tmp/bison.tar.gz ||
+            curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 https://mirrors.kernel.org/gnu/bison/bison-3.8.2.tar.gz -o /tmp/bison.tar.gz ||
+            curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz -o /tmp/bison.tar.gz ; } &&
             cd /tmp && tar xzf bison.tar.gz && cd bison-3.8.2 &&
             ./configure --prefix=/usr/local && make -j$(nproc) && make install
           # Mirrors ci.yml's macOS step: the hosted runner image ships an
