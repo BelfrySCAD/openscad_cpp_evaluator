@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <deque>
 #include <vector>
 
 namespace oscadeval {
@@ -155,7 +156,16 @@ struct VmFrame {
     std::vector<bool> bound;
     std::vector<std::vector<Value>> accumStack;
     std::vector<IterList> iterLists;
-    std::vector<EvalContext> ctxChain;
+    // std::deque, NOT vector: Evaluator::enterUserCall stores
+    // CallStackFrame::bodyCtx as a pointer to ctxChain.back() (see
+    // pushBracketedCallFrame/pushBracketedModuleFrame), and that pointer is
+    // read LATER, by any checkDebug() that walks the whole call stack to
+    // build per-frame debugger locals. A vector reallocates on the next
+    // push -- which every transform inside a compiled body does, via
+    // Op::PushBuiltinWrap -- leaving bodyCtx pointing at the moved-from
+    // element (null let_) and segfaulting buildDebugFrame. deque never
+    // invalidates references to existing elements on push_back/pop_back.
+    std::deque<EvalContext> ctxChain;
     // Still-open Op::PushBuiltinWrap brackets, LIFO, scoped to THIS frame's
     // own instruction stream -- mirrors accumStack/iterLists' own role for
     // their respective bracket pairs. Normal execution always drains this

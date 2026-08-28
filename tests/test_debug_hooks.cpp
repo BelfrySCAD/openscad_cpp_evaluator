@@ -694,3 +694,45 @@ TEST(DebugHooksParity, BuiltinFunctionCallGetsNoCallSiteStop) {
 TEST(DebugHooksParity, ModifierAndItsWrappedChildBothStop) {
     EXPECT_EQ(recordStops("#cube(1);\n"), (std::vector<Stop>{{1, false, false}, {1, false, false}}));
 }
+
+// An enclosing COMPILED module frame's debugger locals must survive the
+// frame growing its own ctxChain. `enterUserCall` stores
+// CallStackFrame::bodyCtx as a pointer into VmFrame::ctxChain, and any
+// later push onto that chain -- which every transform inside a compiled
+// body does, via Op::PushBuiltinWrap -- used to reallocate the container
+// and leave bodyCtx dangling. buildDebugFrames then read a moved-from
+// EvalContext (null let_) and segfaulted: the crash a user hit by setting
+// a breakpoint inside a module wrapped in translate() and continuing.
+TEST(DebugHooksParity, EnclosingCompiledFrameLocalsSurviveCtxChainGrowth) {
+    ScopedVm vm(true);
+    // The breakpoint is what makes this mixed: `inner` (line 1) is forced
+    // to interpret, while `mid` -- called from inside compiled `top` --
+    // keeps running compiled, so its callStack_ entry's bodyCtx comes from
+    // pushBracketedModuleFrame and points into VmFrame::ctxChain. The
+    // translate() in mid's body then pushes onto that same chain.
+    const std::string src = "module inner(b) { c = b; }\n"
+                             "module mid(a) { translate([a,0,0]) inner(a); }\n"
+                             "module top() { mid(7); }\n"
+                             "top();\n";
+    bool sawMid = false;
+    DebugHooks hooks;
+    hooks.debugHook = [&](int line, int, bool, bool exprLevel, const std::string&,
+                           const std::vector<CallStackFrame>&, const DebugFramesFn& getFrame) {
+        if (exprLevel || line != 1) return DebugAction{};
+        std::vector<DebugFrame> frames = getFrame();
+        for (const DebugFrame& f : frames) {
+            auto it = f.locals.find("a");
+            if (it == f.locals.end()) continue;
+            sawMid = true;
+            EXPECT_EQ(std::get<double>(it->second), 7.0);
+        }
+        return DebugAction{};
+    };
+    Evaluator ev(EchoFn{}, nullptr, nullptr, hooks);
+    ev.setFastContinueBreakpoints(std::unordered_map<std::string, std::set<int>>{{"<string>", {1}}});
+    auto ast = parseSrc(src);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    ev.resolveTree(ast, ctx);
+    EXPECT_TRUE(sawMid) << "mid()'s own frame never appeared in the debugger frames";
+}

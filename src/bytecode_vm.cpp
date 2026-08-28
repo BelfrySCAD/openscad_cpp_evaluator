@@ -270,8 +270,11 @@ void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const osc
     applyCompiledDefaultsToFrame(ev, chunk, *frame);
 
     // enterUserCall's own bodyCtx must point at frame->ctxChain's OWN
-    // storage (stable: this VmFrame lives behind a unique_ptr, so its
-    // address never moves even if vmCallStack_ itself reallocates), not
+    // storage (stable on two counts: this VmFrame lives behind a
+    // unique_ptr, so its address never moves even if vmCallStack_ itself
+    // reallocates, AND ctxChain is a std::deque, so a later push onto it
+    // never moves the element handed over here -- see its own doc comment,
+    // bytecode_vm.hpp, for the segfault a vector caused), not
     // a plain local -- a local `childCtx` here would be destroyed the
     // instant this function returns, but CallStackFrame::bodyCtx is read
     // LATER, by ANY subsequent checkDebug() call (this call's own nested
@@ -328,7 +331,7 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
     frame->logicalName = decl.name->name;
     frame->ownsModuleSplice = true;
     // enterUserCall's own bodyCtx must point at frame->ctxChain's OWN
-    // storage, not the caller's own (about-to-be-destroyed) local
+    // (deque-stable) storage, not the caller's own (about-to-be-destroyed) local
     // `childCtx` -- see pushBracketedCallFrame's own doc comment, above,
     // for the full dangling-pointer hazard this avoids (same fix, same
     // root cause, module side).
