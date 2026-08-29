@@ -31,7 +31,9 @@ std::vector<ColoredBody> generateChildren(Evaluator&, const CSGParams&, const st
 CSGParams resolveRender(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     (void)args;
-    ev.evalChildren(node.children, effCtx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
     return CSGParams{};
 }
 

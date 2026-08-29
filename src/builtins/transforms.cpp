@@ -219,7 +219,9 @@ BuiltinWrapParams computeTransformParams(Evaluator& ev, const oscad::ModularCall
 
 CSGParams resolveTransform(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     BuiltinWrapParams result = computeTransformParams(ev, node, ctx);
-    ev.evalChildren(node.children, result.ctx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(result.ctx);
+    ev.evalChildren(node.children, blockCtx);
     return std::move(result.params);
 }
 

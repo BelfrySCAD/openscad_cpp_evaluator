@@ -687,7 +687,10 @@ enum class Op {
     // just "pop the current ctx level", identical either way.
     CloseExprScope,
 
-    // ModularLet's own (statement-form) child scope -- mirrors
+    // ModularLet's own (statement-form) child scope, ALSO used to bracket
+    // an if/else branch body (see ModularIf/ModularIfElse in
+    // bytecode_compiler.cpp) -- a branch is its own scope in OpenSCAD and
+    // needs exactly this same child ctx, so one opcode covers both -- mirrors
     // Evaluator::evalLetBlock's own `ctx.childCtx(nullptr, std::nullopt,
     // ctx.childrenNodes, ctx.childrenCallerCtx)` call exactly, pushed onto
     // f.ctxChain (Op::CloseExprScope, above, pops it back off once the

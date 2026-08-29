@@ -56,7 +56,9 @@ BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::Modular
 
 CSGParams resolveLinearExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     BuiltinWrapParams result = computeLinearExtrudeParams(ev, node, ctx);
-    ev.evalChildren(node.children, result.ctx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(result.ctx);
+    ev.evalChildren(node.children, blockCtx);
     return std::move(result.params);
 }
 
@@ -107,7 +109,9 @@ BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::Modular
 
 CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     BuiltinWrapParams result = computeRotateExtrudeParams(ev, node, ctx);
-    ev.evalChildren(node.children, result.ctx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(result.ctx);
+    ev.evalChildren(node.children, blockCtx);
     return std::move(result.params);
 }
 
@@ -143,7 +147,9 @@ BuiltinWrapParams computeProjectionParams(Evaluator& ev, const oscad::ModularCal
 
 CSGParams resolveProjection(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     BuiltinWrapParams result = computeProjectionParams(ev, node, ctx);
-    ev.evalChildren(node.children, result.ctx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(result.ctx);
+    ev.evalChildren(node.children, blockCtx);
     return std::move(result.params);
 }
 
@@ -209,7 +215,9 @@ BuiltinWrapParams computeOffsetParams(Evaluator& ev, const oscad::ModularCall& n
 
 CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     BuiltinWrapParams result = computeOffsetParams(ev, node, ctx);
-    ev.evalChildren(node.children, result.ctx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(result.ctx);
+    ev.evalChildren(node.children, blockCtx);
     return std::move(result.params);
 }
 

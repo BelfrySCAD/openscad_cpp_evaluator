@@ -584,7 +584,33 @@ grep for `ponytail:`.
   mutable state threaded through recursive evaluation. `dyn`/`let_`/`dynPositions`/`dynExplicit`
   are `shared_ptr`-wrapped, not plain value members — `withScope()` relies on that aliasing to
   give sibling statements in the same block correct assignment visibility (see the header comment
-  before reworking this; it's not an arbitrary choice).
+  before reworking this; it's not an arbitrary choice). **An `if`/`else` branch body is its own
+  scope**: assignments (including `$`-var assignments) inside it are visible for the rest of the
+  branch but must not survive the closing brace, so both engines evaluate a taken branch against
+  `childCtx()` — `branchScope()` in `stmt_eval.cpp`, `Op::OpenLetScope`/`Op::CloseExprScope`
+  around each branch on the compiled path. `let_`/`dyn` open a non-isolated child (the branch
+  reads everything outside, writes only inside) while `dynPositions` opens an **isolated** one, so
+  shadowing an outer name is not mistaken for reassigning it — two assignments to the same name
+  *within* one branch still warn, because they share that fresh level. Getting this wrong is not
+  just a spurious warning: before the fix a branch's writes escaped and silently changed later
+  geometry (BOSL2's `half_of()` reassigns `v` inside an `else if`, clobbering the outer `v`).
+  **A builtin operator's braced child block (`translate() { a = 1; }`) is its own scope by the
+  same rule.** Each builtin resolve function derives one `Evaluator::blockScope()` context for its
+  children (`booleans.cpp` derives ONE spanning both of `resolveCsg`'s passes, since the assignment
+  pass writes what the geometry pass reads); `emitBuiltinWrap`/`emitCsgWrap` bracket their inline
+  children with `Op::OpenLetScope`/`Op::CloseExprScope`. The bracket goes *inside* Push/Pop, because
+  `Op::PopBuiltinWrap` re-resolves the call's arguments and those must still see the OUTER ctx — an
+  assignment in the block must never feed back into the operator's own arguments.
+  **Do not "simplify" this into `resolveCallArgs`** by having it always return a child ctx, however
+  tempting — every builtin's child context does come from there, but so does every *user*-module
+  call's and every pure argument resolution, and the extra dyn level breaks BOSL2's `$`-var
+  propagation outright (`$tags_shown`/`$attach_to`/`$transform`/`$anchor_override` stop resolving).
+  That was tried: the whole unit suite passed and 130 of ~390 BOSL2 doc examples failed. Scope the
+  CHILDREN, not the call. `for`/`let`/`intersection_for` bodies, and a *user* module's child block (evaluated
+  through `childrenCallerCtx`), were already correct. `tests/test_control_flow.cpp`'s
+  `IfBranchScope.*` and `OperatorBlockScope.*` pin every case under both engines. One older test
+  (`RenderExpr.MeasuredSubtreeUsesItsOwnCoordinates`) had encoded the leak by reading a block's
+  variable from outside it, and was corrected.
 - `include/openscad_cpp_evaluator/eval_error.hpp`, `src/eval_error.cpp` — `EvalError` and the
   exact ERROR/TRACE string formatting real OpenSCAD produces. Also the **unexpected-argument
   warnings** (`warnUnexpectedNamedArg`/`warnTooManyPositionalArgs`/`warnUnexpectedArgs`), the port

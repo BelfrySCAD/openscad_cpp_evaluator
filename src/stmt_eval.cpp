@@ -6,6 +6,32 @@
 
 namespace oscadeval {
 
+// A braced block is its own scope in OpenSCAD: assignments (and `$`-var
+// assignments) inside it are visible to the rest of the block and to
+// anything it calls, but must NOT survive the closing brace.
+//
+//     a = 1;
+//     if (true) { a = 2; }
+//     echo(a);            // 1 in OpenSCAD -- was 2 here
+//
+// Evaluating a block against the enclosing ctx let those writes escape,
+// which silently changed geometry (BOSL2's half_of() reassigns `v` inside
+// an `else if`, clobbering the outer `v` for everything after it) and also
+// produced a bogus "assigned on line N but was overwritten" warning for
+// what is really a shadow, not an overwrite. Verified against OpenSCAD
+// 2026.02.01 for values, `$`-vars, nesting, and the same-scope warning
+// that must still fire.
+//
+// This is exactly the child context a let-BLOCK gets (evalLetBlock, and
+// Op::OpenLetScope on the compiled path): let_/dyn open a non-isolated
+// child so the block reads everything outside and writes only inside,
+// while dynPositions opens an ISOLATED one so shadowing an outer name is
+// not mistaken for reassigning it -- two assignments to the same name
+// within the one block still warn, because they share this fresh level.
+EvalContext Evaluator::blockScope(const EvalContext& ctx) const {
+    return ctx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
+}
+
 void Evaluator::evalAssignment(const oscad::Assignment& node, EvalContext& ctx) {
     const std::string& name = node.name->name;
     if (!name.empty() && name[0] == '$') {
@@ -196,7 +222,8 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
             if (truthy(evalExprMaybeCompiled(*n.condition, ctx))) {
                 checkDebug(n.trueBranch.empty() ? node : *n.trueBranch.front(), ctx, /*forced=*/false,
                             /*exprLevel=*/true);
-                evalChildren(n.trueBranch, ctx);
+                EvalContext branchCtx = blockScope(ctx);
+                evalChildren(n.trueBranch, branchCtx);
             }
             return;
         }
@@ -204,7 +231,8 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
             auto& n = static_cast<const oscad::ModularIfElse&>(node);
             const auto& branch = truthy(evalExprMaybeCompiled(*n.condition, ctx)) ? n.trueBranch : n.falseBranch;
             checkDebug(branch.empty() ? node : *branch.front(), ctx, /*forced=*/false, /*exprLevel=*/true);
-            evalChildren(branch, ctx);
+            EvalContext branchCtx = blockScope(ctx);
+            evalChildren(branch, branchCtx);
             return;
         }
         case oscad::NodeKind::ModularFor:

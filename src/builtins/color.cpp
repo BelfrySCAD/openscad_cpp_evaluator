@@ -44,7 +44,9 @@ CSGParams resolveColor(Evaluator& ev, const oscad::ModularCall& node, EvalContex
     // under the color-tagged context -- the returned bodies themselves are
     // unused here; generate reads them back via each child's own .bodies
     // and stamps `rgba` onto all of them. Mirrors _resolve_color.
-    ev.evalChildren(node.children, result.ctx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(result.ctx);
+    ev.evalChildren(node.children, blockCtx);
     return std::move(result.params);
 }
 

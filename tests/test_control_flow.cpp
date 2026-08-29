@@ -144,6 +144,210 @@ TEST(IfElseStatement, PicksCorrectBranch) {
     EXPECT_EQ(e.tree[0]->kind, "sphere");
 }
 
+// An if/else branch body is its own scope in OpenSCAD: assignments inside
+// it are visible for the rest of the branch, but must NOT survive the
+// closing brace. Regression tests for a real bug -- the branch used to be
+// evaluated against the ENCLOSING context, so its writes escaped and
+// silently changed later geometry. BOSL2's half_of() hit exactly this:
+// it reassigns `v` inside an `else if`, which clobbered the outer `v` for
+// everything after it, and also produced a bogus "assigned on line N but
+// was overwritten" warning for what is really a shadow.
+//
+// Every case below was verified against real OpenSCAD 2026.02.01 first.
+// Pinned under both VM states explicitly: evalStatement's ModularIf/
+// ModularIfElse and compileOneStatement's own copies are independent.
+
+namespace {
+
+void checkBranchIsItsOwnScope(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    runScript("a = 1;\n"
+              "if (true) { a = 2; if (true) { a = 3; echo(deep=a); } echo(mid=a); }\n"
+              "echo(outer=a);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    // Each nesting level shadows independently: the inner writes are gone
+    // by the time control leaves each brace.
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: deep = 3", "ECHO: mid = 2", "ECHO: outer = 1"}));
+}
+
+void checkBranchDollarVarDoesNotEscape(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    runScript("$fn = 8;\n"
+              "if (true) { $fn = 64; echo(inside=$fn); }\n"
+              "echo(after=$fn);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    // `$`-vars are scoped by the branch too, not just plain names.
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: inside = 64", "ECHO: after = 8"}));
+}
+
+void checkDoubleAssignmentWithinOneBranchStillWarns(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> messages;
+    runScript("if (true) { z = 1; z = 2; echo(z=z); }\n",
+              [&](const std::string& msg) { messages.push_back(msg); });
+    // The branch gets a FRESH dynPositions level, so shadowing an outer
+    // name is not reported -- but two assignments to the same name inside
+    // the one branch share that level and must still warn, exactly as
+    // OpenSCAD does. Guards against "fixing" the leak by disabling the
+    // check outright.
+    const bool warned = std::any_of(messages.begin(), messages.end(), [](const std::string& m) {
+        return m.find("z was assigned on line 1 but was overwritten") != std::string::npos;
+    });
+    EXPECT_TRUE(warned) << "expected the same-scope reassignment warning";
+    EXPECT_NE(std::find(messages.begin(), messages.end(), "ECHO: z = 2"), messages.end());
+}
+
+void checkShadowingAnOuterNameDoesNotWarn(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> messages;
+    runScript("y = 1;\n"
+              "if (true) { y = 99; }\n",
+              [&](const std::string& msg) { messages.push_back(msg); });
+    const bool warned = std::any_of(messages.begin(), messages.end(), [](const std::string& m) {
+        return m.find("was overwritten") != std::string::npos;
+    });
+    EXPECT_FALSE(warned) << "shadowing an outer name in a branch is not an overwrite";
+}
+
+void checkElseIfBranchIsItsOwnScope(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    // The shape BOSL2's half_of() has: a module-body assignment, then a
+    // reassignment of the same name inside an `else if` branch.
+    runScript("module m(v=1) {\n"
+              "    v = v + 1;\n"
+              "    if (false) { echo(unused=v); } else if (true) { v = v * 10; echo(inner=v); }\n"
+              "    echo(outer=v);\n"
+              "}\n"
+              "m(2);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: inner = 30", "ECHO: outer = 3"}));
+}
+
+} // namespace
+
+TEST(IfBranchScope, BranchIsItsOwnScopeCompiled) { checkBranchIsItsOwnScope(true); }
+TEST(IfBranchScope, BranchIsItsOwnScopeInterpreted) { checkBranchIsItsOwnScope(false); }
+
+TEST(IfBranchScope, DollarVarDoesNotEscapeCompiled) { checkBranchDollarVarDoesNotEscape(true); }
+TEST(IfBranchScope, DollarVarDoesNotEscapeInterpreted) { checkBranchDollarVarDoesNotEscape(false); }
+
+TEST(IfBranchScope, DoubleAssignmentWithinOneBranchStillWarnsCompiled) {
+    checkDoubleAssignmentWithinOneBranchStillWarns(true);
+}
+TEST(IfBranchScope, DoubleAssignmentWithinOneBranchStillWarnsInterpreted) {
+    checkDoubleAssignmentWithinOneBranchStillWarns(false);
+}
+
+TEST(IfBranchScope, ShadowingAnOuterNameDoesNotWarnCompiled) { checkShadowingAnOuterNameDoesNotWarn(true); }
+TEST(IfBranchScope, ShadowingAnOuterNameDoesNotWarnInterpreted) { checkShadowingAnOuterNameDoesNotWarn(false); }
+
+TEST(IfBranchScope, ElseIfBranchIsItsOwnScopeCompiled) { checkElseIfBranchIsItsOwnScope(true); }
+TEST(IfBranchScope, ElseIfBranchIsItsOwnScopeInterpreted) { checkElseIfBranchIsItsOwnScope(false); }
+
+// A builtin operator's braced child block is its own scope too -- the same
+// OpenSCAD rule as an if-branch, on a different code path (the interpreter
+// gets it from resolveCallArgs' child ctx, the compiled path from an
+// Op::OpenLetScope/Op::CloseExprScope bracket inside emitBuiltinWrap /
+// emitCsgWrap). Regression tests for the same class of bug: these writes
+// used to escape into the enclosing scope.
+//
+// User-module child blocks were always correct (their children are
+// evaluated through childrenCallerCtx), and are pinned here so that stays
+// true.
+
+namespace {
+
+void checkOperatorBlockIsItsOwnScope(bool useVm, const std::string& opCall) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    runScript("a = 1;\n" + opCall + " { a = 99; cube(1); }\n" + "echo(after=a);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: after = 1"})) << "in: " << opCall;
+}
+
+void checkOperatorBlockDollarVarDoesNotEscape(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    runScript("$fn = 8;\n"
+              "translate([0,0,0]) { $fn = 64; echo(inside=$fn); cube(1); }\n"
+              "echo(after=$fn);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: inside = 64", "ECHO: after = 8"}));
+}
+
+void checkOperatorBlockAssignmentIsVisibleWithinTheBlock(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    // Scoping the block must not break the ordinary case: a name assigned
+    // in the block is still visible to the rest of it (and, for a CSG
+    // operator, across resolveCsg's assignment/geometry two-pass split).
+    runScript("union() { s = 3; echo(seen=s); cube(s); }\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: seen = 3"}));
+}
+
+void checkBlockAssignmentCannotFeedBackIntoOperatorArguments(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> messages;
+    // The operator's own arguments are resolved against the OUTER ctx,
+    // before the block scope opens -- so this translates by 1, not by 99.
+    // (That is why the compiled bracket sits INSIDE Push/PopBuiltinWrap.)
+    RunResult r = runScript("d = 1;\n"
+                            "translate([d,0,0]) { d = 99; cube(1); }\n",
+                            [&](const std::string& msg) { messages.push_back(msg); });
+    (void)messages;
+    EXPECT_DOUBLE_EQ(asNum(varValue(r, "d")), 1.0);
+}
+
+void checkUserModuleChildBlockIsItsOwnScope(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    runScript("c = 1;\n"
+              "module wrap() { children(); }\n"
+              "wrap() { c = 99; cube(1); }\n"
+              "echo(after=c);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: after = 1"}));
+}
+
+} // namespace
+
+TEST(OperatorBlockScope, TransformBlockIsItsOwnScopeCompiled) {
+    checkOperatorBlockIsItsOwnScope(true, "translate([0,0,0])");
+}
+TEST(OperatorBlockScope, TransformBlockIsItsOwnScopeInterpreted) {
+    checkOperatorBlockIsItsOwnScope(false, "translate([0,0,0])");
+}
+
+TEST(OperatorBlockScope, CsgBlockIsItsOwnScopeCompiled) { checkOperatorBlockIsItsOwnScope(true, "union()"); }
+TEST(OperatorBlockScope, CsgBlockIsItsOwnScopeInterpreted) { checkOperatorBlockIsItsOwnScope(false, "union()"); }
+
+TEST(OperatorBlockScope, ColorBlockIsItsOwnScopeCompiled) { checkOperatorBlockIsItsOwnScope(true, "color(\"red\")"); }
+TEST(OperatorBlockScope, ColorBlockIsItsOwnScopeInterpreted) { checkOperatorBlockIsItsOwnScope(false, "color(\"red\")"); }
+
+TEST(OperatorBlockScope, DollarVarDoesNotEscapeCompiled) { checkOperatorBlockDollarVarDoesNotEscape(true); }
+TEST(OperatorBlockScope, DollarVarDoesNotEscapeInterpreted) { checkOperatorBlockDollarVarDoesNotEscape(false); }
+
+TEST(OperatorBlockScope, AssignmentVisibleWithinTheBlockCompiled) {
+    checkOperatorBlockAssignmentIsVisibleWithinTheBlock(true);
+}
+TEST(OperatorBlockScope, AssignmentVisibleWithinTheBlockInterpreted) {
+    checkOperatorBlockAssignmentIsVisibleWithinTheBlock(false);
+}
+
+TEST(OperatorBlockScope, BlockAssignmentCannotFeedBackIntoArgumentsCompiled) {
+    checkBlockAssignmentCannotFeedBackIntoOperatorArguments(true);
+}
+TEST(OperatorBlockScope, BlockAssignmentCannotFeedBackIntoArgumentsInterpreted) {
+    checkBlockAssignmentCannotFeedBackIntoOperatorArguments(false);
+}
+
+TEST(OperatorBlockScope, UserModuleChildBlockIsItsOwnScopeCompiled) { checkUserModuleChildBlockIsItsOwnScope(true); }
+TEST(OperatorBlockScope, UserModuleChildBlockIsItsOwnScopeInterpreted) { checkUserModuleChildBlockIsItsOwnScope(false); }
+
 // -- let (statement + expression forms) --------------------------------
 
 TEST(LetStatement, BindsVisibleInsideBlockOnly) {

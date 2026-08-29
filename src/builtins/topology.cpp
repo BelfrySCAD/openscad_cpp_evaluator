@@ -23,7 +23,9 @@ static constexpr double kDefaultSimplifyFraction = 0.001;
 CSGParams resolveHull(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     (void)args;
-    ev.evalChildren(node.children, effCtx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
     return CSGParams{};
 }
 
@@ -85,7 +87,9 @@ std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::v
 CSGParams resolveFill(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     (void)args;
-    ev.evalChildren(node.children, effCtx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
     return CSGParams{};
 }
 
@@ -146,7 +150,9 @@ std::vector<ColoredBody> generateFill(Evaluator& ev, const CSGParams&,
 CSGParams resolveMinkowski(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     (void)args;
-    ev.evalChildren(node.children, effCtx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
     return CSGParams{};
 }
 
@@ -334,7 +340,9 @@ std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams&, cons
 CSGParams resolveMinkowskiDifference(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     (void)args;
-    ev.evalChildren(node.children, effCtx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
     return CSGParams{};
 }
 
@@ -394,7 +402,9 @@ CSGParams resolveSimplify(Evaluator& ev, const oscad::ModularCall& node, EvalCon
     CSGParams params;
     // Position 0 so simplify(0.1) reads naturally.
     params["tolerance"] = getArg(args, 0, "tolerance", Value{});
-    ev.evalChildren(node.children, effCtx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
     return params;
 }
 
@@ -715,7 +725,9 @@ CSGParams resolveLevelSet(Evaluator& ev, const oscad::ModularCall& node, EvalCon
     params["isovalue"] = getArg(args, 2, "isovalue", Value{0.0});
     params["invert"] = getArg(args, 3, "invert", Value{false});
     params["edge"] = getArg(args, 4, "edge", Value{});
-    ev.evalChildren(node.children, effCtx);
+    // The child block is its own scope -- see Evaluator::blockScope.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
     return params;
 }
 
