@@ -781,6 +781,14 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
     for (const Value& t : std::get<ListPtr>(params.at("tris"))->items) {
         mesh.triVerts.push_back(static_cast<uint64_t>(std::get<double>(t)));
     }
+    // No faces at all is empty geometry, not a failure. BOSL2's debug_vnf()
+    // passes [verts, []] to draw vertex labels with no surface, and real
+    // OpenSCAD accepts `polyhedron(points=..., faces=[])` silently. Checked
+    // before the status branches below, which would otherwise report the
+    // empty mesh as NotManifold and discard it with a warning.
+    if (mesh.triVerts.empty()) {
+        return {ev.tagGenerated(manifold::Manifold(), node, params.at("color"))};
+    }
     manifold::Manifold body(mesh);
     if (isDrawableFailure(body, mesh)) {
         // An open surface -- faces that don't close the solid. Manifold

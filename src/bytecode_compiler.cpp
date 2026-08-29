@@ -1564,35 +1564,31 @@ public:
                 return;
             }
             case NodeKind::ModularLet: {
-                // Mirrors Evaluator::evalLetBlock exactly (stmt_eval.cpp):
-                // every assignment's RHS is evaluated against the
-                // ORIGINAL (parent) ctx, never an earlier sibling's own
-                // write in THIS SAME let-block (a documented, deliberate
-                // divergence from the let-EXPRESSION form's sequential
-                // visibility) -- so every RHS is compiled+evaluated FIRST,
-                // all left on f.stack, and only written into the freshly-
-                // opened child scope (Op::OpenLetScope) AFTER every one of
-                // them has already run against the still-current PARENT
-                // ctx. No outer statement-level check for the let-block
-                // node itself (matches evalChildren's own ModularLet
-                // exclusion) -- each assignment gets its own instead,
-                // exactly like evalLetBlock's own per-assignment
-                // checkDebug. The body (n.children) compiles inline,
-                // recursively, against the now-current child ctx -- same
-                // Compiler instance, so nested statements get every bit of
-                // this same real-bytecode treatment too.
+                // Mirrors Evaluator::evalLetBlock (stmt_eval.cpp): the
+                // child scope opens FIRST, then each assignment's RHS is
+                // compiled and stored in source order, so a later binding
+                // sees an earlier one -- `let(a=1, b=a+1) ...` binds b to
+                // 2, exactly as the let-EXPRESSION form does.
+                //
+                // This used to compile every RHS before Op::OpenLetScope
+                // and then store them back-to-front, deliberately denying
+                // that visibility. Real OpenSCAD grants it, and BOSL2
+                // depends on it (isosurface.scad chains five bindings where
+                // each uses the previous).
+                //
+                // No outer statement-level check for the let-block node
+                // itself (matches evalChildren's own ModularLet exclusion)
+                // -- each assignment gets its own, exactly like
+                // evalLetBlock's own per-assignment checkDebug. The body
+                // (n.children) compiles inline, recursively, against the
+                // now-current child ctx.
                 auto& n = static_cast<const oscad::ModularLet&>(stmt);
                 CompileScope exprScope;
+                out.push_back({Op::OpenLetScope, 0, 0, nullptr});
                 for (const auto& assign : n.assignments) {
                     out.push_back({Op::CheckDebugStatement, internNativeStatement(assign.get()), 0, nullptr});
                     compileIsolatedExpr(*assign->expr, out, exprScope);
-                }
-                out.push_back({Op::OpenLetScope, 0, 0, nullptr});
-                // Values pop in REVERSE push order (LIFO) -- iterate the
-                // assignment list backwards so each Op::StoreLetVar is
-                // paired with the value that was actually pushed for IT.
-                for (auto it = n.assignments.rbegin(); it != n.assignments.rend(); ++it) {
-                    out.push_back({Op::StoreLetVar, internName((*it)->name->name), 0, &(*it)->position()});
+                    out.push_back({Op::StoreLetVar, internName(assign->name->name), 0, &assign->position()});
                 }
                 compileStatementList(n.children, out);
                 out.push_back({Op::CloseExprScope, 0, 0, nullptr});

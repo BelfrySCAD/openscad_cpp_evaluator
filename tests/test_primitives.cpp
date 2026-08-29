@@ -211,6 +211,32 @@ TEST(Polyhedron, OpenMeshIsKeptForDisplayAndWarns) {
 // The originalID is what maps a picked triangle back to its source line, so
 // a display-only body has to carry one or clicking it would select nothing
 // -- precisely when a user most wants to be shown the offending code.
+// A polyhedron with points but NO faces is empty geometry, not a failure.
+// BOSL2's debug_vnf() passes [verts, []] to draw vertex labels with no
+// surface at all, and real OpenSCAD 2026.02.01 accepts
+// `polyhedron(points=..., faces=[])` silently. This used to report the
+// empty mesh as NotManifold and discard it with a warning, which failed
+// four BOSL2 geometry.scad examples.
+TEST(Polyhedron, NoFacesIsEmptyGeometryAndSilent) {
+    std::string warning;
+    Evaluated e = evalSrc("polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0]], faces=[]);",
+                          [&](const std::string& m) { warning = m; });
+
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_TRUE(e.bodies[0].body->IsEmpty());
+    EXPECT_FALSE(e.bodies[0].isDisplayOnly());   // nothing to display, not an open surface
+    EXPECT_EQ(warning, "") << warning;
+}
+
+TEST(Polyhedron, NoPointsAndNoFacesIsAlsoSilent) {
+    std::string warning;
+    Evaluated e = evalSrc("polyhedron(points=[], faces=[]);",
+                          [&](const std::string& m) { warning = m; });
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_TRUE(e.bodies[0].body->IsEmpty());
+    EXPECT_EQ(warning, "") << warning;
+}
+
 TEST(Polyhedron, OpenMeshCarriesAnOriginalIdForPicking) {
     Evaluated e = evalSrc(kOpenCube);
     ASSERT_EQ(e.bodies.size(), 1u);
