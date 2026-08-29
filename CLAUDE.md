@@ -577,6 +577,17 @@ grep for `ponytail:`.
   profiled is BOSL2's **argument type-checking**: 25–45%, millions of
   `is_finite`/`is_num`/`is_nan` calls.
 
+- **Degree trigonometry is a direct port of OpenSCAD's `src/utils/degree_trig.cc`**
+  (`sinDegrees`/`cosDegrees`/`tanDegrees` and the inverses, `builtins/function_builtins.cpp`), not
+  `std::sin(x * pi / 180)`. The structure is load-bearing: exact values at 30/45/60, the >45 range
+  computed through the COMPLEMENT function, and OpenSCAD's own literal `M_DEG2RAD` constant rather
+  than `pi / 180.0` (which rounds differently). That is what makes `sin(45) == cos(45)` and
+  `cos(30) == sqrt(3)/2` hold EXACTLY, and the exactness matters to real libraries: BOSL2's
+  `rect(rounding=...)` filters corner intersections with an exact `isect != seg[0]`, so one ULP of
+  drift made a shared vertex compare unequal, kept two corner points instead of one, and killed
+  `rect()` on its own `assert(len(cornerpt)==1, "Cannot find corner point to anchor")`. The
+  inverses also snap to a whole number of degrees when the forward function reproduces the input
+  exactly, so `asin(sin(30))` is `30`. Pinned by `DegreeTrig.*` in `tests/test_function_builtins.cpp`.
 - `include/openscad_cpp_evaluator/value.hpp`, `src/value.cpp` — the `Value` variant (OpenSCAD's
   dynamic value type) and its free-function arithmetic/comparison helpers. See the plan's §1 for
   the type-mapping table and why there's no numpy-equivalent library.
@@ -644,6 +655,16 @@ grep for `ponytail:`.
   accordingly; read its doc comment before touching it, it's the second-trickiest mechanism in this
   codebase after the CSG tree stack), `evalUserModule`/`evalUserFunction`/`evalFunctionLiteral`,
   and `builtinChildren` (children()/children(N), deferred evaluation).
+  **A function literal declared in a MODULE body captures that body's bindings**, its own
+  parameters included, and keeps them when it escapes (passed to another module and called there).
+  The interpreter gets this for free — it captures `ctx.let_` wholesale. The VM snapshots only the
+  names it can resolve, and inside a module body it can resolve NONE: module parameters are bound
+  natively into `ctx.let_` rather than slot-addressed, and a module chunk compiles with no
+  enclosing level. So such a literal used to be frozen as a captureless constant whose free names
+  resolved against whatever ctx CALLED it — silently `undef`, which is how BOSL2's
+  `attachable(override=function(anchor) ...)` broke. `ClosureSite::captureDefiningLet` (set
+  whenever the literal's body still contains `Op::LoadFree`) makes `Op::MakeClosure` root the
+  captured trail at the DEFINING `ctx.let_`. Pinned by `EscapingClosure.*` under both engines.
   **`children(..., separate=true)`** is a BelfrySCAD extension handled *before* any of that, by
   `expandChildStatements`: a block is read with each separating forward replaced by one synthetic
   `children(k)` statement per child it selects (`makeChildrenIndexCall`, owned by

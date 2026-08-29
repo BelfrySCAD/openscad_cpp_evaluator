@@ -599,7 +599,15 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 }
                 case Op::MakeClosure: {
                     const CompiledChunk::ClosureSite& site = f.chunk->closureSites[static_cast<size_t>(ins.a)];
-                    auto capturedTrail = TrailView<Value>::makeRoot();
+                    // A child of the DEFINING ctx.let_ when the body still
+                    // has unresolved names (see ClosureSite::
+                    // captureDefiningLet), so they resolve where the closure
+                    // was written rather than wherever it is later called.
+                    // openChild, not ctx.let_ itself: the explicit captures
+                    // below are layered on top and must not leak back into
+                    // the defining scope.
+                    auto capturedTrail = site.captureDefiningLet ? ctx.let_->openChild(/*isolate=*/false)
+                                                                  : TrailView<Value>::makeRoot();
                     std::vector<const std::string*> selfNames;
                     for (const auto& cap : site.captures) {
                         if (cap.isSelfReference) {

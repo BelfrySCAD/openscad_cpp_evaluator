@@ -447,10 +447,12 @@ public:
                 // `ctx.let_`, which callCtxFor roots at this exact closure's
                 // own capturedLet snapshot whenever it's invoked -- the same
                 // snapshot `effectiveCaptures` describes below.
-                if (effectiveCaptures.empty() || !containsLoadFree(literalChunk)) {
+                // Must be read BEFORE literalChunk is moved from below.
+                const bool needsDefiningLet = containsLoadFree(literalChunk);
+                if (effectiveCaptures.empty() || !needsDefiningLet) {
                     chunk_.nestedLiterals.emplace_back(&n, std::move(literalChunk));
                 }
-                if (effectiveCaptures.empty()) {
+                if (effectiveCaptures.empty() && !needsDefiningLet) {
                     // Closes over nothing at all, even transitively -- a
                     // single frozen constant works for every invocation, no
                     // per-call snapshot needed.
@@ -461,7 +463,8 @@ public:
                 }
                 // Escaping-closure support (Op::MakeClosure, bytecode.hpp).
                 int siteIdx = static_cast<int>(chunk_.closureSites.size());
-                chunk_.closureSites.push_back(CompiledChunk::ClosureSite{&n, std::move(effectiveCaptures)});
+                chunk_.closureSites.push_back(
+                    CompiledChunk::ClosureSite{&n, std::move(effectiveCaptures), needsDefiningLet});
                 out.push_back({Op::MakeClosure, siteIdx, 0, nullptr});
                 return;
             }
