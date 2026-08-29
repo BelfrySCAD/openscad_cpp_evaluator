@@ -897,3 +897,71 @@ TEST(LinearSolve, AnExplicitlyUndefRightHandSideCountsAsAbsent) {
     EXPECT_TRUE(isUndef(evalSrc("linear_solve([[2,1],[1,3]], undef).x", ev)));
     EXPECT_TRUE(builtinWarnings("linear_solve([[2,1],[1,3]], undef)").empty());
 }
+
+
+// -- degree trig is bit-exact, not merely close ---------------------------
+//
+// A direct port of real OpenSCAD's src/utils/degree_trig.cc, and these
+// identities are the reason. `std::sin(x * pi / 180)` gets them wrong by an
+// ULP, and that is enough to break real libraries: BOSL2's
+// rect(rounding=...) filters corner intersections with an exact `!=`
+// comparison, so one ULP of drift makes it find two corner points instead
+// of one and die on its own "Cannot find corner point to anchor" assert.
+//
+// Every expectation below was read off OpenSCAD 2026.02.01.
+
+TEST(DegreeTrig, SinAndCosAgreeExactlyAt45) {
+    Evaluator ev;
+    EXPECT_EQ(asNum(evalSrc("sin(45) - cos(45)", ev)), 0.0);
+}
+
+TEST(DegreeTrig, ExactAtThirtyAndSixty) {
+    Evaluator ev;
+    EXPECT_EQ(asNum(evalSrc("sin(30)", ev)), 0.5);
+    EXPECT_EQ(asNum(evalSrc("cos(60)", ev)), 0.5);
+    // cos(30) == sqrt(3)/2 exactly, and sin(60) likewise.
+    EXPECT_EQ(asNum(evalSrc("cos(30) - sqrt(3)/2", ev)), 0.0);
+    EXPECT_EQ(asNum(evalSrc("sin(60) - sqrt(3)/2", ev)), 0.0);
+}
+
+TEST(DegreeTrig, ScalingKeepsTheIdentity) {
+    // The exact form the BOSL2 failure took: polar_to_xy(10, 45).
+    Evaluator ev;
+    EXPECT_EQ(asNum(evalSrc("10*cos(45) - 10*sin(45)", ev)), 0.0);
+}
+
+TEST(DegreeTrig, ExactAtMultiplesOfNinety) {
+    Evaluator ev;
+    EXPECT_EQ(asNum(evalSrc("sin(90)", ev)), 1.0);
+    EXPECT_EQ(asNum(evalSrc("cos(90)", ev)), 0.0);
+    EXPECT_EQ(asNum(evalSrc("sin(180)", ev)), 0.0);
+    EXPECT_EQ(asNum(evalSrc("cos(180)", ev)), -1.0);
+    EXPECT_EQ(asNum(evalSrc("sin(-90)", ev)), -1.0);
+}
+
+TEST(DegreeTrig, TanExactValues) {
+    Evaluator ev;
+    EXPECT_EQ(asNum(evalSrc("tan(45)", ev)), 1.0);
+    EXPECT_EQ(asNum(evalSrc("tan(0)", ev)), 0.0);
+    EXPECT_TRUE(std::isinf(asNum(evalSrc("tan(90)", ev))));
+}
+
+TEST(DegreeTrig, InversesSnapToWholeDegrees) {
+    // asin/acos/atan return a whole number of degrees whenever the forward
+    // function reproduces the input exactly -- so this is 30, not
+    // 29.999999999999996.
+    Evaluator ev;
+    EXPECT_EQ(asNum(evalSrc("asin(sin(30))", ev)), 30.0);
+    EXPECT_EQ(asNum(evalSrc("acos(cos(60))", ev)), 60.0);
+    EXPECT_EQ(asNum(evalSrc("atan(tan(45))", ev)), 45.0);
+    EXPECT_EQ(asNum(evalSrc("atan2(1, 1)", ev)), 45.0);
+    EXPECT_EQ(asNum(evalSrc("atan2(1, 0)", ev)), 90.0);
+}
+
+TEST(DegreeTrig, HugeAnglesAreNaNNotMeaningless) {
+    // Beyond a 52-bit mantissa's reduction range OpenSCAD returns NaN
+    // rather than a meaningless answer; matched deliberately.
+    Evaluator ev;
+    EXPECT_TRUE(std::isnan(asNum(evalSrc("sin(1e30)", ev))));
+    EXPECT_TRUE(std::isnan(asNum(evalSrc("cos(1e30)", ev))));
+}

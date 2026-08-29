@@ -55,28 +55,141 @@ Value numList(const std::vector<double>& xs) {
     return listOf(std::move(items));
 }
 
-double degrees(double rad) { return rad * 180.0 / std::numbers::pi; }
-double radians(double deg) { return deg * std::numbers::pi / 180.0; }
+// Degree trigonometry, a direct port of real OpenSCAD's
+// src/utils/degree_trig.cc. Not `std::sin(x * pi / 180)`: that is off by an
+// ULP from OpenSCAD for most angles, and OpenSCAD's own extra structure --
+// exact values at 30/45/60, and computing the >45 range through the
+// COMPLEMENT function -- is what makes identities like sin(45) == cos(45)
+// and cos(30) == sqrt(3)/2 hold EXACTLY there.
+//
+// That exactness is load-bearing for real libraries, not cosmetic. BOSL2's
+// rect(rounding=...) builds a corner arc and then filters intersections
+// with `isect != seg[0]`, an exact float comparison. One ULP of drift makes
+// the shared vertex of two adjacent segments compare unequal, the filter
+// keeps two corner points instead of one, and rect() dies on its own
+// `assert(len(cornerpt)==1, "Cannot find corner point to anchor")`.
+//
+// The constants are OpenSCAD's own literals, deliberately -- M_DEG2RAD as a
+// single pre-rounded double is not bitwise identical to `pi / 180.0`.
+constexpr double kSqrt3 = 1.73205080756887719318;    // sqrt(3)
+constexpr double kSqrt3_4 = 0.86602540378443859659;  // sqrt(3/4) == sqrt(3)/2
+constexpr double kSqrt1_3 = 0.57735026918962573106;  // sqrt(1/3) == sqrt(3)/3
+constexpr double kSqrt1_2 = 0.70710678118654752440;  // sqrt(1/2)
+constexpr double kRad2Deg = 57.2957795130823208767;  // 180/PI
+constexpr double kDeg2Rad = 0.017453292519943295769; // PI/180
 
-// At exact multiples of 90 degrees, sin/cos/tan use exact table values
-// instead of sin/cos/tan(radians(x)), which accumulate floating-point
-// noise (cos(90) -> 6.12e-17 etc) -- matches real OpenSCAD's degree-based
-// trig. Mirrors _deg_trig.
-constexpr std::array<double, 4> kSin90 = {0.0, 1.0, 0.0, -1.0};
-constexpr std::array<double, 4> kCos90 = {1.0, 0.0, -1.0, 0.0};
-const std::array<double, 4> kTan90 = {0.0, std::numeric_limits<double>::infinity(), 0.0,
-                                       -std::numeric_limits<double>::infinity()};
+// Assumes a 26+26=52-bit mantissa; beyond it, reduction loses all accuracy
+// and OpenSCAD returns NaN rather than a meaningless answer.
+constexpr double kTrigHugeVal = (1L << 26) * 360.0 * (1L << 26);
 
-double degTrig(double x, const std::array<double, 4>& table, double (*fallback)(double)) {
-    if (std::isnan(x) || std::isinf(x)) return std::numeric_limits<double>::quiet_NaN();
-    const double n = x / 90.0;
-    const double rn = std::round(n);
-    if (rn == n) {
-        int idx = static_cast<int>(rn) % 4;
-        if (idx < 0) idx += 4;
-        return table[static_cast<size_t>(idx)];
+double degrees(double rad) { return rad * kRad2Deg; }
+double radians(double deg) { return deg * kDeg2Rad; }
+
+double sinDegrees(double x) {
+    // Positive tests, so Inf/NaN fall through to the domain check.
+    if (x < 360.0 && x >= 0.0) {
+        // already reduced
+    } else if (x < kTrigHugeVal && x > -kTrigHugeVal) {
+        x -= 360.0 * std::floor(x / 360.0);
+    } else {
+        return std::numeric_limits<double>::quiet_NaN();
     }
-    return fallback(radians(x));
+    bool oppose = x >= 180.0;
+    if (oppose) x -= 180.0;
+    if (x > 90.0) x = 180.0 - x;
+    if (x < 45.0) {
+        x = (x == 30.0) ? 0.5 : std::sin(radians(x));
+    } else if (x == 45.0) {
+        x = kSqrt1_2;
+    } else if (x == 60.0) {
+        x = kSqrt3_4;
+    } else { // Inf/NaN would fall here
+        x = std::cos(radians(90.0 - x));
+    }
+    return oppose ? -x : x;
+}
+
+double cosDegrees(double x) {
+    if (x < 360.0 && x >= 0.0) {
+        // already reduced
+    } else if (x < kTrigHugeVal && x > -kTrigHugeVal) {
+        x -= 360.0 * std::floor(x / 360.0);
+    } else {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    bool oppose = x >= 180.0;
+    if (oppose) x -= 180.0;
+    if (x > 90.0) {
+        x = 180.0 - x;
+        oppose = !oppose;
+    }
+    if (x > 45.0) {
+        x = (x == 60.0) ? 0.5 : std::sin(radians(90.0 - x));
+    } else if (x == 45.0) {
+        x = kSqrt1_2;
+    } else if (x == 30.0) {
+        x = kSqrt3_4;
+    } else { // Inf/NaN would fall here
+        x = std::cos(radians(x));
+    }
+    return oppose ? -x : x;
+}
+
+double tanDegrees(double x) {
+    const double cycles = std::floor(x / 180.0);
+    if (x < 180.0 && x >= 0.0) {
+        // already reduced
+    } else if (x < kTrigHugeVal && x > -kTrigHugeVal) {
+        x -= 180.0 * cycles;
+    } else {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const bool evenCycle = std::fmod(cycles, 2.0) == 0.0;
+    bool oppose = x > 90.0;
+    if (oppose) x = 180.0 - x;
+    if (x == 0.0) {
+        x = evenCycle ? 0.0 : -0.0;
+    } else if (x == 30.0) {
+        x = kSqrt1_3;
+    } else if (x == 45.0) {
+        x = 1.0;
+    } else if (x == 60.0) {
+        x = kSqrt3;
+    } else if (x == 90.0) {
+        x = evenCycle ? std::numeric_limits<double>::infinity()
+                      : -std::numeric_limits<double>::infinity();
+    } else {
+        x = std::tan(radians(x));
+    }
+    return oppose ? -x : x;
+}
+
+// The inverses snap to a whole number of degrees whenever the forward
+// function reproduces the input exactly, so asin(sin(30)) is 30 and not
+// 29.999999999999996.
+double asinDegrees(double x) {
+    const double degs = degrees(std::asin(x));
+    const double whole = std::round(degs);
+    return sinDegrees(whole) == x ? whole : degs;
+}
+
+double acosDegrees(double x) {
+    const double degs = degrees(std::acos(x));
+    const double whole = std::round(degs);
+    return cosDegrees(whole) == x ? whole : degs;
+}
+
+double atanDegrees(double x) {
+    const double degs = degrees(std::atan(x));
+    const double whole = std::round(degs);
+    return tanDegrees(whole) == x ? whole : degs;
+}
+
+// atan2 snaps on a tolerance rather than a round-trip: OpenSCAD's own rule.
+double atan2Degrees(double y, double x) {
+    const double degs = degrees(std::atan2(y, x));
+    const double whole = std::round(degs);
+    return std::fabs(degs - whole) < 3.0E-14 ? whole : degs;
 }
 
 // UTF-8 encode/decode for chr()/ord() -- OpenSCAD strings are unicode text,
@@ -1183,20 +1296,21 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
             return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log10(x)};
         }
         case BuiltinFnId::Exp: return Value{std::exp(toDoubleLenient(getArg(args, 0, "x", Value{})))};
-        case BuiltinFnId::Sin: return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kSin90, &std::sin)};
-        case BuiltinFnId::Cos: return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kCos90, &std::cos)};
-        case BuiltinFnId::Tan: return Value{degTrig(toDoubleLenient(getArg(args, 0, "x", Value{})), kTan90, &std::tan)};
+        case BuiltinFnId::Sin: return Value{sinDegrees(toDoubleLenient(getArg(args, 0, "x", Value{})))};
+        case BuiltinFnId::Cos: return Value{cosDegrees(toDoubleLenient(getArg(args, 0, "x", Value{})))};
+        case BuiltinFnId::Tan: return Value{tanDegrees(toDoubleLenient(getArg(args, 0, "x", Value{})))};
         case BuiltinFnId::Asin: {
             const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-            return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : degrees(std::asin(x))};
+            return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : asinDegrees(x)};
         }
         case BuiltinFnId::Acos: {
             const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-            return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : degrees(std::acos(x))};
+            return Value{std::fabs(x) > 1 ? std::numeric_limits<double>::quiet_NaN() : acosDegrees(x)};
         }
-        case BuiltinFnId::Atan: return Value{degrees(std::atan(toDoubleLenient(getArg(args, 0, "x", Value{}))))};
+        case BuiltinFnId::Atan: return Value{atanDegrees(toDoubleLenient(getArg(args, 0, "x", Value{})))};
         case BuiltinFnId::Atan2:
-            return Value{degrees(std::atan2(toDoubleLenient(getArg(args, 0, "y", Value{})), toDoubleLenient(getArg(args, 1, "x", Value{}))))};
+            return Value{atan2Degrees(toDoubleLenient(getArg(args, 0, "y", Value{})),
+                                       toDoubleLenient(getArg(args, 1, "x", Value{})))};
         case BuiltinFnId::Max: return builtinMinMax(args, true);
         case BuiltinFnId::Min: return builtinMinMax(args, false);
         case BuiltinFnId::Pow: return builtinPow(toDoubleLenient(getArg(args, 0, "x", Value{})), toDoubleLenient(getArg(args, 1, "y", Value{})));

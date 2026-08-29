@@ -845,6 +845,21 @@ struct CompiledChunk {
     struct ClosureSite {
         const oscad::FunctionLiteral* node = nullptr;
         std::vector<UpvalueRef> captures;
+        // True when the literal's body still contains Op::LoadFree -- a name
+        // the compiler could not resolve to a slot or an upvalue. Such a
+        // closure is NOT self-contained: LoadFree resolves against whatever
+        // ctx is current when the closure is CALLED, so if it escapes the
+        // scope that defined it, those names silently resolve to the
+        // caller's bindings (or to undef).
+        //
+        // That is exactly what happens to a function literal declared in a
+        // MODULE body: module parameters are bound natively into ctx.let_
+        // rather than slot-addressed, and a module chunk is compiled with no
+        // enclosing level, so the compiler can resolve none of them. With
+        // this set, Op::MakeClosure roots the captured trail at the DEFINING
+        // ctx.let_ -- which is what the interpreter has always done
+        // unconditionally (see the FunctionLiteral case in expr_eval.cpp).
+        bool captureDefiningLet = false;
     };
 
     // One echo() expression form's own argument names, in source order --

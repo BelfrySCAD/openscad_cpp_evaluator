@@ -348,6 +348,84 @@ TEST(OperatorBlockScope, BlockAssignmentCannotFeedBackIntoArgumentsInterpreted) 
 TEST(OperatorBlockScope, UserModuleChildBlockIsItsOwnScopeCompiled) { checkUserModuleChildBlockIsItsOwnScope(true); }
 TEST(OperatorBlockScope, UserModuleChildBlockIsItsOwnScopeInterpreted) { checkUserModuleChildBlockIsItsOwnScope(false); }
 
+// A function literal declared in a MODULE body captures that body's
+// bindings, including the module's own parameters, and keeps them when it
+// escapes -- passed to another module and called there.
+//
+// The interpreter always did this (it captures ctx.let_ wholesale). The VM
+// tries to snapshot only the names it can resolve, and inside a module body
+// it can resolve none: module parameters are bound natively into ctx.let_
+// rather than slot-addressed, and a module chunk compiles with no enclosing
+// level. So the literal was frozen as a captureless constant and its free
+// names resolved against whatever ctx CALLED it -- silently undef.
+//
+// Verified against real OpenSCAD 2026.02.01: every case below echoes 20.
+
+namespace {
+
+void checkEscapingClosureKeepsItsDefiningScope(bool useVm, const std::string& body) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    runScript(body, [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: r = 20"})) << "in: " << body;
+}
+
+} // namespace
+
+TEST(EscapingClosure, CapturesModuleParameterCompiled) {
+    checkEscapingClosureKeepsItsDefiningScope(true,
+        "module callee(fn) { echo(r = fn(2)); }\n"
+        "module caller(s=100) { f = function (x) s / 8 * x; callee(f); }\n"
+        "caller(80);\n");
+}
+TEST(EscapingClosure, CapturesModuleParameterInterpreted) {
+    checkEscapingClosureKeepsItsDefiningScope(false,
+        "module callee(fn) { echo(r = fn(2)); }\n"
+        "module caller(s=100) { f = function (x) s / 8 * x; callee(f); }\n"
+        "caller(80);\n");
+}
+
+// BOSL2's attachable(override=...) shape: the closure travels inside a list.
+TEST(EscapingClosure, SurvivesInsideAListCompiled) {
+    checkEscapingClosureKeepsItsDefiningScope(true,
+        "module callee(spec) { echo(r = spec[0](2)); }\n"
+        "module caller(s=100) { f = function (x) s / 8 * x; callee([f]); }\n"
+        "caller(80);\n");
+}
+TEST(EscapingClosure, SurvivesInsideAListInterpreted) {
+    checkEscapingClosureKeepsItsDefiningScope(false,
+        "module callee(spec) { echo(r = spec[0](2)); }\n"
+        "module caller(s=100) { f = function (x) s / 8 * x; callee([f]); }\n"
+        "caller(80);\n");
+}
+
+// The callee has its OWN `s`. The closure must still see the one it was
+// written next to -- this is what proves it captures rather than merely
+// resolving late.
+TEST(EscapingClosure, IsNotCapturedByTheCallersOwnBindingCompiled) {
+    checkEscapingClosureKeepsItsDefiningScope(true,
+        "module callee(fn, s=999) { echo(r = fn(2)); }\n"
+        "module caller(s=100) { f = function (x) s / 8 * x; callee(f); }\n"
+        "caller(80);\n");
+}
+TEST(EscapingClosure, IsNotCapturedByTheCallersOwnBindingInterpreted) {
+    checkEscapingClosureKeepsItsDefiningScope(false,
+        "module callee(fn, s=999) { echo(r = fn(2)); }\n"
+        "module caller(s=100) { f = function (x) s / 8 * x; callee(f); }\n"
+        "caller(80);\n");
+}
+
+// A literal closing over nothing keeps the cheap frozen-constant path.
+TEST(EscapingClosure, CapturelessLiteralStillWorksCompiled) {
+    ScopedVm vm(true);
+    std::vector<std::string> echoed;
+    runScript("module callee(fn) { echo(r = fn(4)); }\n"
+              "module caller() { callee(function (x) x * 5); }\n"
+              "caller();\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: r = 20"}));
+}
+
 // -- let (statement + expression forms) --------------------------------
 
 TEST(LetStatement, BindsVisibleInsideBlockOnly) {
