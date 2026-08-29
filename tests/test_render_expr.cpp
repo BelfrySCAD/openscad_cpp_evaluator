@@ -260,8 +260,15 @@ TEST(RenderExpr, MeasuredSubtreeUsesItsOwnCoordinates) {
     // An enclosing transform applies to what is DRAWN, not to what a
     // render() expression measures -- the expression resolves its own
     // children in its own frame.
-    Measured r = runScript("translate([5,0,0]) { o = render() { cube(2); }; cube(o.volume); }\n"
-                "echo(o.boundingbox);");
+    //
+    // The echo is INSIDE the braces deliberately: an operator's child block
+    // is its own scope, so `o` does not exist after the closing brace. This
+    // test used to read it from outside and pass, which was only possible
+    // because assignments in such a block leaked into the enclosing scope
+    // (fixed in resolveCallArgs / emitBuiltinWrap -- see IfBranchScope and
+    // OperatorBlockScope in test_control_flow.cpp).
+    Measured r = runScript("translate([5,0,0]) { o = render() { cube(2); }; echo(o.boundingbox); "
+                            "cube(o.volume); }\n");
     ASSERT_EQ(r.echoes.size(), 1u);
     EXPECT_EQ(r.echoes[0], "ECHO: [[0, 0, 0], [2, 2, 2]]");
 }

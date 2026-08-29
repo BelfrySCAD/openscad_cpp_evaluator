@@ -144,6 +144,22 @@ public:
     // sub-groups of an existing children list without needing ownership.
     void evalChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx);
 
+    // The child context a BRACED BLOCK's statements run in. A `{ ... }`
+    // block is a scope in OpenSCAD: assignments (and `$`-var assignments)
+    // inside it are visible for the rest of the block but must not survive
+    // the closing brace. Every builtin operator's resolve function derives
+    // one of these for its children; the compiled path does the same with
+    // an Op::OpenLetScope/Op::CloseExprScope bracket.
+    //
+    // Deliberately NOT folded into resolveCallArgs, though that is the one
+    // place every builtin's child context comes from: resolveCallArgs also
+    // serves user-module calls and pure argument resolution, and giving
+    // those an extra dyn level breaks BOSL2's `$`-var propagation
+    // ($tags_shown/$attach_to/$transform all stop resolving). Measured, not
+    // reasoned: 130 of ~390 BOSL2 doc examples failed that way. Scope the
+    // CHILDREN, not the call.
+    EvalContext blockScope(const EvalContext& ctx) const;
+
     // Top-level entry point: resolveTree() + generateTree(), then the
     // top-level `!` (show_only) filter -- if any returned body has
     // BodyRole::ShowOnly, the result is filtered down to just

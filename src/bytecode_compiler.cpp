@@ -1289,7 +1289,15 @@ public:
         chunk_.builtinWrapSites.push_back(std::move(site));
         const int idx = static_cast<int>(chunk_.builtinWrapSites.size()) - 1;
         out.push_back({Op::PushBuiltinWrap, idx, 0, &wrapperNode.position()});
+        // The child block is its own scope -- same rule as an if-branch, and
+        // the interpreter gets it from resolveCallArgs' child ctx (see
+        // call_args.cpp). Opened INSIDE the Push/Pop bracket so that
+        // Op::PopBuiltinWrap's own resolveCallArgs call still sees the
+        // OUTER ctx: an assignment in the block must not feed back into the
+        // operator's own arguments.
+        out.push_back({Op::OpenLetScope, 0, 0, nullptr});
         compileStatementList(children, out);
+        out.push_back({Op::CloseExprScope, 0, 0, nullptr});
         out.push_back({Op::PopBuiltinWrap, idx, 0, &wrapperNode.position()});
     }
 
@@ -1312,6 +1320,10 @@ public:
         chunk_.csgWrapSites.push_back(std::move(site));
         const int idx = static_cast<int>(chunk_.csgWrapSites.size()) - 1;
         out.push_back({Op::PushCsgWrap, idx, 0, &call.position()});
+        // One scope around BOTH passes -- see emitBuiltinWrap's own note.
+        // The assignment pass must write into the same block scope the
+        // geometry pass then reads from, so it cannot be bracketed per-pass.
+        out.push_back({Op::OpenLetScope, 0, 0, nullptr});
 
         std::vector<const oscad::ASTNode*> assignNodes;
         std::vector<const oscad::ASTNode*> geoNodes;
@@ -1335,6 +1347,7 @@ public:
             compileStatementList(std::vector<const oscad::ASTNode*>{geoNode}, out);
             out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});
         }
+        out.push_back({Op::CloseExprScope, 0, 0, nullptr});
         out.push_back({Op::PopCsgWrap, idx, 0, &call.position()});
     }
 
@@ -1688,13 +1701,25 @@ public:
                 emitBuiltinWrap(CompiledChunk::BuiltinWrapSite::Kind::Modifier, "show_only", n, {n.child.get()}, out);
                 return;
             }
+            // Both if-forms bracket the taken branch in Op::OpenLetScope /
+            // Op::CloseExprScope. An if-branch body is its own scope in
+            // OpenSCAD -- assignments inside must not survive the closing
+            // brace -- and the child ctx a let-BLOCK gets is exactly the
+            // one a branch needs, so the same opcode serves both (see
+            // branchScope, stmt_eval.cpp, for the interpreter's identical
+            // rule and the full reasoning). The scope is opened INSIDE the
+            // conditional jump's target range, so a branch that is not
+            // taken never opens one, and each branch's own Close is the
+            // last thing before the jump past its sibling.
             case NodeKind::ModularIf: {
                 auto& n = static_cast<const oscad::ModularIf&>(stmt);
                 const int jumpFalseIdx = static_cast<int>(out.size());
                 out.push_back({Op::NativeCondJumpIfFalse, internNativeExpr(n.condition.get()), 0, &n.condition->position()});
                 const oscad::ASTNode* marker = n.trueBranch.empty() ? &stmt : n.trueBranch.front().get();
                 out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(marker), 0, nullptr});
+                out.push_back({Op::OpenLetScope, 0, 0, nullptr});
                 compileStatementList(n.trueBranch, out);
+                out.push_back({Op::CloseExprScope, 0, 0, nullptr});
                 out[static_cast<size_t>(jumpFalseIdx)].b = static_cast<int>(out.size());
                 return;
             }
@@ -1704,13 +1729,17 @@ public:
                 out.push_back({Op::NativeCondJumpIfFalse, internNativeExpr(n.condition.get()), 0, &n.condition->position()});
                 const oscad::ASTNode* trueMarker = n.trueBranch.empty() ? &stmt : n.trueBranch.front().get();
                 out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(trueMarker), 0, nullptr});
+                out.push_back({Op::OpenLetScope, 0, 0, nullptr});
                 compileStatementList(n.trueBranch, out);
+                out.push_back({Op::CloseExprScope, 0, 0, nullptr});
                 const int jumpEndIdx = static_cast<int>(out.size());
                 out.push_back({Op::Jump, 0, 0, nullptr});
                 out[static_cast<size_t>(jumpFalseIdx)].b = static_cast<int>(out.size());
                 const oscad::ASTNode* falseMarker = n.falseBranch.empty() ? &stmt : n.falseBranch.front().get();
                 out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(falseMarker), 0, nullptr});
+                out.push_back({Op::OpenLetScope, 0, 0, nullptr});
                 compileStatementList(n.falseBranch, out);
+                out.push_back({Op::CloseExprScope, 0, 0, nullptr});
                 out[static_cast<size_t>(jumpEndIdx)].a = static_cast<int>(out.size());
                 return;
             }

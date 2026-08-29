@@ -228,7 +228,9 @@ Value Evaluator::evalRenderExpr(const oscad::RenderExpression& node, EvalContext
     treeStack_.emplace_back();
     std::vector<std::unique_ptr<CSGNode>> sub;
     try {
-        evalChildren(node.children, effCtx);
+        // The child block is its own scope -- see blockScope.
+        EvalContext blockCtx = blockScope(effCtx);
+        evalChildren(node.children, blockCtx);
         sub = std::move(treeStack_.back());
         treeStack_.pop_back();
     } catch (...) {

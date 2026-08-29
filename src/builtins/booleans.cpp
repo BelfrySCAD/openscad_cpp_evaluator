@@ -91,22 +91,27 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     (void)args;
 
+    // ONE scope around both passes -- see Evaluator::blockScope. The
+    // assignment pass writes into the same block scope the geometry pass
+    // then reads from, so it cannot be scoped per-pass.
+    EvalContext blockCtx = ev.blockScope(effCtx);
+
     std::vector<const oscad::ASTNode*> assignNodes;
     std::vector<const oscad::ASTNode*> geoNodes;
-    for (const oscad::ASTNode* c : ev.expandChildStatements(node.children, effCtx)) {
+    for (const oscad::ASTNode* c : ev.expandChildStatements(node.children, blockCtx)) {
         if (c->kind() == oscad::NodeKind::Assignment) {
             assignNodes.push_back(c);
         } else if (c->kind() != oscad::NodeKind::ModuleDeclaration && c->kind() != oscad::NodeKind::FunctionDeclaration) {
             geoNodes.push_back(c);
         }
     }
-    if (!assignNodes.empty()) ev.evalChildren(assignNodes, effCtx);
+    if (!assignNodes.empty()) ev.evalChildren(assignNodes, blockCtx);
 
     std::vector<Value> groupSizes;
     groupSizes.reserve(geoNodes.size());
     for (const oscad::ASTNode* geoNode : geoNodes) {
         const size_t before = ev.currentTreeFrameSize();
-        ev.evalChildren(std::vector<const oscad::ASTNode*>{geoNode}, effCtx);
+        ev.evalChildren(std::vector<const oscad::ASTNode*>{geoNode}, blockCtx);
         groupSizes.push_back(Value{static_cast<double>(ev.currentTreeFrameSize() - before)});
     }
 
