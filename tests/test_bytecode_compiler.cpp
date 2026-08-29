@@ -1889,15 +1889,21 @@ TEST(ModuleBodyCompiles, AssertStatementCompiledFormFailsWithNamedMessage) {
     }
 }
 
-TEST(ModuleBodyCompiles, LetBlockStatementDoesNotSeeItsOwnEarlierSiblingAssignment) {
+TEST(ModuleBodyCompiles, LetBlockStatementSeesItsOwnEarlierSiblingAssignment) {
     ScopedVm vm(true);
-    // The statement form's own documented divergence from let-EXPRESSION
-    // sequential visibility: b's RHS must see the OUTER a (1), not this
-    // same let-block's own a=2 -- b should be 2, not 3.
+    // b's RHS sees THIS let-block's own a=2, not the outer a=1, so b is 3.
+    // The statement form has the same sequential visibility the expression
+    // form does, and the binding still does not escape the block.
+    //
+    // This test previously asserted "ECHO: 2, 2" -- b seeing the outer a --
+    // and called that a documented divergence. It was not: real OpenSCAD
+    // 2026.02.01 echoes "2, 3" then "1", which is what both engines now
+    // produce. BOSL2 depends on the sequential form (isosurface.scad chains
+    // five bindings where each uses the previous).
     EXPECT_EQ(runCapturingEcho("a = 1;\n"
                                "let (a = 2, b = a + 1) { echo(a, b); }\n"
                                "echo(a);\n"),
-              "ECHO: 2, 2\nECHO: 1");
+              "ECHO: 2, 3\nECHO: 1");
 }
 
 TEST(ModuleBodyCompiles, LetBlockStatementIsolatesDollarVarOverrideFromLaterStatements) {

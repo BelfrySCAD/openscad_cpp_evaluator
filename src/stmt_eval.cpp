@@ -155,20 +155,20 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
 
 void Evaluator::evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx) {
     EvalContext childCtx = ctx.childCtx(nullptr, std::nullopt, ctx.childrenNodes, ctx.childrenCallerCtx);
-    // ponytail/port-fidelity note: each assignment's RHS is evaluated
-    // against the ORIGINAL `ctx`, not the growing `childCtx` -- unlike the
-    // let() *expression* form's documented sequential visibility
-    // (`let(a=1, b=a+1) expr` sees `a` while evaluating `b`), the
-    // *statement* form `let(a=1, b=a+1) { ... }` does NOT: `b`'s `a+1`
-    // looks `a` up in `ctx`, which doesn't have this let's own `a` binding
-    // yet. This is a direct, deliberate port of the reference's
-    // _eval_let_block, not an oversight -- it evaluates every RHS against
-    // `ctx` in the loop, only ever writing into `child_ctx`.
+    // Each RHS is evaluated against the GROWING childCtx, so a later
+    // binding sees an earlier one -- `let(a=1, b=a+1) ...` binds b to 2.
+    // The statement form behaves exactly like the expression form here.
+    //
+    // This used to evaluate every RHS against the original `ctx` instead,
+    // described in a comment as a deliberate port of the reference's
+    // _eval_let_block. That reference was this project's own earlier
+    // implementation, which had the same bug; real OpenSCAD 2026.02.01
+    // echoes 2, and BOSL2 depends on it heavily -- isosurface.scad chains
+    // five bindings where each uses the previous, and rounding.scad's
+    // join_prism examples do the same.
     for (const auto& assign : node.assignments) {
-        // Checked against the ORIGINAL ctx (like the RHS eval below), not
-        // childCtx -- mirrors _eval_let_block's `_check_debug(assign, ctx)`.
-        checkDebug(*assign, ctx);
-        Value v = evalExprMaybeCompiled(*assign->expr, ctx);
+        checkDebug(*assign, childCtx);
+        Value v = evalExprMaybeCompiled(*assign->expr, childCtx);
         const std::string& name = assign->name->name;
         if (!name.empty() && name[0] == '$') {
             childCtx.dyn->set(name, v);

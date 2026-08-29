@@ -428,6 +428,59 @@ TEST(EscapingClosure, CapturelessLiteralStillWorksCompiled) {
 
 // -- let (statement + expression forms) --------------------------------
 
+// The let STATEMENT form has the same sequential visibility as the
+// expression form: a later binding sees an earlier one. Verified against
+// real OpenSCAD 2026.02.01, which echoes 2 for both forms below.
+//
+// This was wrong for a long time, described in-source as a deliberate port
+// of "the reference's _eval_let_block" -- that reference being this
+// project's own earlier implementation, which had the same bug. BOSL2 leans
+// on it: isosurface.scad chains five bindings where each uses the previous,
+// and rounding.scad's join_prism examples do too.
+
+namespace {
+
+void checkLetStatementIsSequential(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    runScript("let (a = 1, b = a + 1) echo(b = b);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: b = 2"}));
+}
+
+void checkLetStatementShadowsWithoutEscaping(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    // The inner a=2 is what b sees, and it does not survive the block.
+    runScript("a = 1;\n"
+              "let (a = 2, b = a + 1) echo(inside_a = a, inside_b = b);\n"
+              "echo(after_a = a);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: inside_a = 2, inside_b = 3",
+                                                 "ECHO: after_a = 1"}));
+}
+
+void checkLetStatementChainsSeveralBindings(bool useVm) {
+    ScopedVm vm(useVm);
+    std::vector<std::string> echoed;
+    // The isosurface.scad shape: each binding built from the previous.
+    runScript("let (a = 2, b = a * 3, c = b + a, d = c * b) echo(d = d);\n",
+              [&](const std::string& msg) { echoed.push_back(msg); });
+    EXPECT_EQ(echoed, (std::vector<std::string>{"ECHO: d = 48"}));
+}
+
+} // namespace
+
+TEST(LetStatementScope, IsSequentialCompiled) { checkLetStatementIsSequential(true); }
+TEST(LetStatementScope, IsSequentialInterpreted) { checkLetStatementIsSequential(false); }
+
+TEST(LetStatementScope, ShadowsWithoutEscapingCompiled) { checkLetStatementShadowsWithoutEscaping(true); }
+TEST(LetStatementScope, ShadowsWithoutEscapingInterpreted) { checkLetStatementShadowsWithoutEscaping(false); }
+
+TEST(LetStatementScope, ChainsSeveralBindingsCompiled) { checkLetStatementChainsSeveralBindings(true); }
+TEST(LetStatementScope, ChainsSeveralBindingsInterpreted) { checkLetStatementChainsSeveralBindings(false); }
+
+
 TEST(LetStatement, BindsVisibleInsideBlockOnly) {
     Evaluated e = evalSrc("let(s=3) cube(s);");
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
