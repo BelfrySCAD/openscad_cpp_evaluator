@@ -318,10 +318,13 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         const MeshDiagnosis d = checkMesh(mesh);
         std::string why = d.summary();
         if (why.empty()) why = manifoldErrorName(body.Status());
-        ev.warn("import: mesh is not a closed solid (" + why +
-                    "); drawing it as a surface, but it cannot take part in any CSG "
-                    "operation" + (repair ? "" : ". Try import(..., repair=true)"),
-                &node.position());
+        if (!ev.insideHull) {
+            ev.warn("import: mesh is not a closed solid (" + why +
+                        "); drawing it as a surface. hull() can still use its points, but "
+                        "it cannot take part in union/difference/intersection" +
+                        std::string(repair ? "" : ". Try import(..., repair=true)"),
+                    &node.position());
+        }
         // tagDisplayOnly carries a raw triangle soup for the renderer to
         // draw, and the renderer is float either way, so narrowing here
         // costs nothing this mesh will ever be measured on.

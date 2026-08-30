@@ -64,7 +64,13 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             std::vector<CSGNode*> childPtrs;
             childPtrs.reserve(node.children.size());
             for (const std::unique_ptr<CSGNode>& c : node.children) childPtrs.push_back(c.get());
+            // Saved and restored rather than left set, exactly as
+            // generateWarnEntry is: a sibling generated afterwards is not
+            // inside this hull.
+            const bool savedInsideHull = insideHull;
+            if (node.isBuiltin && node.kind == "hull") insideHull = true;
             generateTreeImpl(childPtrs);
+            insideHull = savedInsideHull;
 
             applyDimensionRules(node);
 

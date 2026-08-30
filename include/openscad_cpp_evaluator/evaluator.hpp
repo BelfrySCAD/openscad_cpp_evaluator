@@ -294,6 +294,15 @@ public:
     // depth-first on one thread.
     const oscad::Position* generateWarnEntry = nullptr;
 
+    // Set while generating anything beneath a hull(). An open mesh there is
+    // not a mistake to report: a convex hull needs only points, so BOSL2's
+    // hull_points(pts, fast=true) hands polyhedron() a deliberately garbage
+    // face list purely to carry the vertices in. The reference says nothing
+    // about it, and spheroid(circum=true, style="icosa") goes through that
+    // path -- warning would fire on an everyday BOSL2 call. Covers the whole
+    // subtree, not just direct children, since hull() consumes all of it.
+    bool insideHull = false;
+
     ColoredBody tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue);
 
     // tagGenerated()'s counterpart for a mesh Manifold refused to build --

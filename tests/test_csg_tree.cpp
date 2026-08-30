@@ -314,3 +314,81 @@ TEST(WarningTrace, FromClauseNamesOutermostFrameNotImmediateCaller) {
     EXPECT_NE(warning.find("from <string>, line 3"), std::string::npos) << warning;
     EXPECT_EQ(warning.find("from <string>, line 2"), std::string::npos) << warning;
 }
+
+// -- hull() over an open mesh ------------------------------------------
+//
+// A convex hull needs only its input's POINTS; whether the mesh that
+// carried them is closed is irrelevant. BOSL2 leans on this hard:
+// hull_points(pts, fast=true) hands polyhedron() a deliberately garbage
+// face list purely as a vehicle for the vertices, and
+// spheroid(circum=true, style="icosa") goes through that path. Treating
+// the open mesh as display-only left the loose triangles to fall out of
+// hull() un-hulled -- the model rendered as a scatter of shards where the
+// reference produced a solid.
+
+TEST(HullOpenMesh, HullsThePointsOfAMeshThatDoesNotClose) {
+    Evaluated e = evalSrc(
+        "pts = [[0,0,0],[10,0,0],[10,10,0],[0,10,0],\n"
+        "       [0,0,10],[10,0,10],[10,10,10],[0,10,10]];\n"
+        "hull() polyhedron(points=pts, faces=[[0,1,2],[3,4,5],[6,7,0]]);\n");
+
+    ASSERT_EQ(e.bodies.size(), 1u) << "the open mesh must be consumed, not passed through";
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_FALSE(e.bodies[0].isDisplayOnly());
+    EXPECT_EQ(e.bodies[0].body->Status(), manifold::Manifold::Error::NoError);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-6);
+}
+
+TEST(HullOpenMesh, AnOpenMeshAndASolidHullTogether) {
+    // The solid's own vertices must survive the switch to the point-based
+    // hull: hulling only the loose points would silently shrink the result.
+    Evaluated e = evalSrc(
+        "hull() {\n"
+        "  polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0]], faces=[[0,1,2]]);\n"
+        "  translate([0,0,10]) cube(10);\n"
+        "}\n");
+
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_EQ(e.bodies[0].body->Status(), manifold::Manifold::Error::NoError);
+    // Hull of the z=0 square and the 10..20 cube: a prism, strictly larger
+    // than the cube alone.
+    EXPECT_GT(e.bodies[0].body->Volume(), 1000.0);
+}
+
+TEST(HullOpenMesh, AnOpenMeshOutsideAHullStillPassesThroughUntouched) {
+    Evaluated e = evalSrc(
+        "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0]], faces=[[0,1,2]]);\n");
+
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_TRUE(e.bodies[0].isDisplayOnly()) << "only hull() may consume it";
+}
+
+TEST(HullOpenMesh, NoWarningForAnOpenMeshInsideAHull) {
+    // The reference is silent here, and BOSL2 reaches this on an everyday
+    // spheroid(circum=true, style="icosa") -- warning would cry wolf.
+    std::string warning;
+    evalSrc("hull() polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],\n"
+            "                          [0,0,10],[10,0,10],[10,10,10],[0,10,10]],\n"
+            "                  faces=[[0,1,2],[3,4,5],[6,7,0]]);\n",
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+    EXPECT_EQ(warning, "") << warning;
+}
+
+TEST(HullOpenMesh, SuppressionCoversTheWholeSubtreeNotJustDirectChildren) {
+    std::string warning;
+    evalSrc("hull() { translate([0,0,1]) polyhedron(\n"
+            "    points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0]], faces=[[0,1,2]]); cube(1); }\n",
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+    EXPECT_EQ(warning, "") << warning;
+}
+
+TEST(HullOpenMesh, ASiblingAfterAHullStillWarns) {
+    // The flag is restored on the way out; an open mesh that is NOT hulled
+    // is still a real mistake.
+    std::string warning;
+    evalSrc("hull() cube(1);\n"
+            "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0]], faces=[[0,1,2]]);\n",
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+    EXPECT_NE(warning.find("mesh is not closed"), std::string::npos) << warning;
+}
