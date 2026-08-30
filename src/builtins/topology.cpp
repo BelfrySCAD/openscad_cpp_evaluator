@@ -35,19 +35,51 @@ CSGParams resolveHull(Evaluator& ev, const oscad::ModularCall& node, EvalContext
 // matching the reference's own `if bodies_3d: ... else: sections...`
 // either/or dispatch). background/highlight/show_only bodies pass through
 // untouched, same as union/difference/intersection.
+// Vertex positions out of a MeshGL, whatever else it carries per vertex.
+// Only the first three properties are the position; numProp may be larger.
+static void appendVertices(const manifold::MeshGL& mesh, std::vector<manifold::vec3>& out) {
+    const size_t stride = mesh.numProp;
+    if (stride < 3) return;
+    for (size_t i = 0; i + 2 < mesh.vertProperties.size(); i += stride)
+        out.push_back({mesh.vertProperties[i], mesh.vertProperties[i + 1],
+                       mesh.vertProperties[i + 2]});
+}
+
 std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::vector<std::unique_ptr<CSGNode>>& children,
                                        const oscad::ASTNode&) {
     const std::vector<ColoredBody> bodies = flattenCsgTree(children);
     if (bodies.empty()) return {};
     const RoleSplit split = splitByRole(bodies);
 
+    // An open mesh has no Manifold, but a convex hull only ever needed its
+    // POINTS -- closedness is irrelevant to one. BOSL2 depends on this:
+    // hull_points(pts, fast=true) hands polyhedron() a deliberately garbage
+    // face list purely to carry the vertices into hull(), and
+    // spheroid(circum=true, style="icosa") goes through it. Dropping those
+    // children left the loose triangles to fall through un-hulled, which is
+    // what the reference does not do.
+    std::vector<manifold::vec3> loosePoints;
+    for (const ColoredBody& c : split.displayOnly) {
+        if (c.rawMesh) appendVertices(*c.rawMesh, loosePoints);
+    }
+
     std::optional<ColoredBody> hullResult;
-    if (!split.foreground.empty()) {
+    if (!split.foreground.empty() || !loosePoints.empty()) {
         std::vector<manifold::Manifold> bodies3d;
         for (const ColoredBody& c : split.foreground) {
             if (c.body) bodies3d.push_back(*c.body);
         }
-        if (!bodies3d.empty()) {
+        if (!loosePoints.empty()) {
+            // Hulling points and bodies together has to go through the
+            // point overload, so the solids contribute their vertices too.
+            for (const manifold::Manifold& m : bodies3d)
+                appendVertices(m.GetMeshGL(), loosePoints);
+            ColoredBody cb;
+            cb.body = manifold::Manifold::Hull(loosePoints);
+            cb.color = split.foreground.empty() ? split.displayOnly.front().color
+                                                : split.foreground.front().color;
+            hullResult = std::move(cb);
+        } else if (!bodies3d.empty()) {
             ColoredBody cb;
             cb.body = manifold::Manifold::Hull(bodies3d);
             cb.color = split.foreground.front().color;
@@ -71,7 +103,10 @@ std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::v
     result.insert(result.end(), split.background.begin(), split.background.end());
     result.insert(result.end(), split.highlight.begin(), split.highlight.end());
     result.insert(result.end(), split.showOnly.begin(), split.showOnly.end());
-    result.insert(result.end(), split.displayOnly.begin(), split.displayOnly.end());
+    // Only pass the open meshes through if they were NOT hulled; hull()
+    // consumes its children, so re-adding them would draw them twice.
+    if (loosePoints.empty())
+        result.insert(result.end(), split.displayOnly.begin(), split.displayOnly.end());
     return result;
 }
 

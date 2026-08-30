@@ -802,10 +802,12 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
         // closed mesh with reversed winding, non-manifold vertices or
         // self-intersections builds perfectly well, and only an OPEN one
         // reaches this branch. The count points straight at the problem.
-        ev.warn("polyhedron: mesh is not closed -- " + std::to_string(countBoundaryEdges(mesh)) +
-                    " boundary edge(s); drawing it as a surface, but it cannot "
-                    "take part in any CSG operation",
-                &node.position());
+        if (!ev.insideHull) {
+            ev.warn("polyhedron: mesh is not closed -- " + std::to_string(countBoundaryEdges(mesh)) +
+                        " boundary edge(s); drawing it as a surface. hull() can still "
+                        "use its points, but it cannot take part in union/difference/intersection",
+                    &node.position());
+        }
         manifold::MeshGL soup;
         soup.numProp = 3;
         soup.vertProperties.assign(mesh.vertProperties.begin(), mesh.vertProperties.end());
