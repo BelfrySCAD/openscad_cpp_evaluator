@@ -44,7 +44,15 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
         // re-deriving results that would just be discarded. Mirrors
         // generate_tree()'s own cache check exactly.
         std::optional<std::string> key;
-        if (manifoldCache_ && !node.uncacheable) key = cacheKey(node);
+        if (manifoldCache_ && !node.uncacheable) {
+            key = cacheKey(node);
+            // A key that serialized a function literal is not a pure
+            // function of content -- it embeds a raw AST address that the
+            // next parse can hand out again. Dropping the key here forces
+            // both the get() below and the put() further down to be
+            // skipped. See CSGNode::keyHasClosure.
+            if (node.keyHasClosure) key.reset();
+        }
         std::optional<std::vector<ColoredBody>> cached = key ? manifoldCache_->get(*key) : std::nullopt;
         if (cached) {
             node.bodies = std::move(*cached);

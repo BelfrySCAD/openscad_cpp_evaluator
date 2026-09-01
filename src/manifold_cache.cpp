@@ -93,6 +93,32 @@ std::string canonValue(const Value& v) {
         v);
 }
 
+// True if `v` is a function literal, or a list/object holding one at any
+// depth. Drives CSGNode::keyHasClosure -- see its doc comment for why a
+// closure cannot be keyed.
+bool valueHasClosure(const Value& v) {
+    return std::visit(
+        [](const auto& val) -> bool {
+            using T = std::decay_t<decltype(val)>;
+            if constexpr (std::is_same_v<T, ClosurePtr>) {
+                return true;
+            } else if constexpr (std::is_same_v<T, ListPtr>) {
+                if (!val) return false;
+                for (const Value& item : val->items)
+                    if (valueHasClosure(item)) return true;
+                return false;
+            } else if constexpr (std::is_same_v<T, ObjectPtr>) {
+                if (!val) return false;
+                for (const auto& [k, vv] : val->items)
+                    if (valueHasClosure(vv)) return true;
+                return false;
+            } else {
+                return false;
+            }
+        },
+        v);
+}
+
 std::string canonParams(const CSGParams& params) {
     std::vector<std::pair<std::string, std::string>> entries;
     entries.reserve(params.size());
@@ -120,13 +146,24 @@ std::string canonParams(const CSGParams& params) {
 std::string cacheKey(CSGNode& node) {
     if (node.cachedKey) return *node.cachedKey;
 
+    bool hasClosure = false;
+    for (const auto& [k, v] : node.params) {
+        if (valueHasClosure(v)) { hasClosure = true; break; }
+    }
+
     std::string out = "N(";
     appendLenPrefixed(out, node.kind);
     out += node.isBuiltin ? "1" : "0";
     appendLenPrefixed(out, canonParams(node.params));
     out += std::to_string(node.children.size()) + "[";
-    for (const auto& c : node.children) appendLenPrefixed(out, cacheKey(*c));
+    for (const auto& c : node.children) {
+        appendLenPrefixed(out, cacheKey(*c));
+        // A closure anywhere below poisons this key too: it is built from
+        // the children's keys.
+        hasClosure = hasClosure || c->keyHasClosure;
+    }
     out += "])";
+    node.keyHasClosure = hasClosure;
     node.cachedKey = out;
     return *node.cachedKey;
 }
