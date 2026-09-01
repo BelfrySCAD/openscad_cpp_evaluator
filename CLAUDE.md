@@ -699,6 +699,17 @@ grep for `ponytail:`.
   permanent cache miss for any subtree that called `rands()` while resolving, since such a
   subtree's resolved params aren't a pure function of its own content anymore (the actual `rands()`
   output also depends on every earlier `rands()` call's position in the whole evaluation's order).
+  A second, separate taint — `CSGNode::keyHasClosure`, set by `cacheKey()` itself rather than at
+  resolve time — does the same for any subtree holding a **function literal** in its params (the
+  `levelset(function (x,y,z) ..., ...)` shape). `canonValue()` can only key a closure by its AST
+  node's raw address, which is meaningful for exactly one parse: the next render frees that AST and
+  a fresh closure over *different* captured values can be allocated at the very same address, so
+  the key silently hits the previous render's geometry — the GUI symptom was an edited script
+  rendering its **old** shape until saved a second time. (The address also ignores the captured
+  values themselves, so two closures over one literal collide within a single render, which is what
+  `tests/test_manifold_cache.cpp` pins down deterministically.) Keying a closure honestly means
+  canonicalizing its captured `let_` trail, which is type-erased (`Closure::capturedLet` is a
+  `shared_ptr<void>`); until that exists such a subtree simply does not participate in the cache.
   Builtins are registered in `src/builtins/registry.cpp` as `(name string) -> (ResolveFn,
   GenerateFn)` pairs — `dispatch.hpp` has the exact reasoning for `GenerateFn`'s `Evaluator&`
   parameter (provenance-table writes only, no `EvalContext`/dynamic-scope access, so the

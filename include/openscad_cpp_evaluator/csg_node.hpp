@@ -72,6 +72,21 @@ struct CSGNode {
     // on first cacheKey() call; every node here is always reached through a
     // non-const CSGNode&, so no `mutable` is needed to write it.
     std::optional<std::string> cachedKey;
+
+    // Set by the same cacheKey() pass that fills cachedKey: true if this
+    // node's own params, or any descendant's, hold a function literal.
+    //
+    // canonValue() can only key a closure by its AST node's raw address,
+    // and that address is meaningful for exactly one parse: the next
+    // render frees that AST, and a fresh closure over different captured
+    // values can be allocated at the very same address -- so the key
+    // silently hits the PREVIOUS render's geometry. (It also ignores the
+    // captured values themselves, so two closures over one literal share a
+    // key within a single render.) Keying a closure honestly would mean
+    // canonicalising its captured `let_` trail, which is type-erased; until
+    // that exists, such a subtree just does not participate in the cache.
+    // See csg_generate.cpp's lookup.
+    bool keyHasClosure = false;
 };
 
 

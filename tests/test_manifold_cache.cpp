@@ -121,6 +121,65 @@ TEST(ManifoldCacheUncacheable, RandsBeforeGeometryInModuleBodyTaintsSplicedSibli
     EXPECT_TRUE(e.tree[0]->uncacheable);
 }
 
+// -- closure taint ---------------------------------------------------------
+
+TEST(ManifoldCacheClosure, PlainNodeHasNoClosureTaint) {
+    Evaluated e = evalSrc("cube(5);");
+    ASSERT_EQ(e.tree.size(), 1u);
+    cacheKey(*e.tree[0]);
+    EXPECT_FALSE(e.tree[0]->keyHasClosure);
+}
+
+TEST(ManifoldCacheClosure, FunctionLiteralParamTaintsTheNode) {
+    Evaluated e = evalSrc(
+        "levelset(function (x,y,z) x*x+y*y+z*z-100,"
+        "         bounds=[[-15,-15,-15],[15,15,15]], edge=5);");
+    ASSERT_EQ(e.tree.size(), 1u);
+    cacheKey(*e.tree[0]);
+    EXPECT_TRUE(e.tree[0]->keyHasClosure);
+}
+
+TEST(ManifoldCacheClosure, TaintPropagatesUpThroughATransform) {
+    // The parent's key is built from the child's, so a closure below is
+    // just as unusable there.
+    Evaluated e = evalSrc(
+        "translate([1,0,0]) levelset(function (x,y,z) x*x+y*y+z*z-100,"
+        "         bounds=[[-15,-15,-15],[15,15,15]], edge=5);");
+    ASSERT_EQ(e.tree.size(), 1u);
+    EXPECT_EQ(e.tree[0]->kind, "translate");
+    cacheKey(*e.tree[0]);
+    EXPECT_TRUE(e.tree[0]->keyHasClosure);
+}
+
+// The bug this taint exists for, at full size: both closures come from the
+// SAME function literal (so canonValue's "F<pointer>" is byte-identical)
+// but capture different `r`. Every other cache-key input matches too, so
+// before the taint the second levelset() was served the first one's
+// geometry and both spheres came out radius 10.
+//
+// Deterministic on purpose: one evaluation, one AST, so the two closures
+// genuinely share a node address rather than relying on the allocator
+// handing back a freed one.
+TEST(ManifoldCacheClosure, TwoClosuresOverOneLiteralAreNotServedEachOthersGeometry) {
+    auto cache = std::make_shared<ManifoldCache>();
+    Evaluated e = evalSrcWithCache(
+        "function mk(r) = function (x,y,z) x*x+y*y+z*z-r*r;\n"
+        "levelset(mk(10), bounds=[[-15,-15,-15],[15,15,15]], edge=2);\n"
+        "translate([40,0,0])\n"
+        "  levelset(mk(5), bounds=[[-15,-15,-15],[15,15,15]], edge=2);\n",
+        cache);
+
+    ASSERT_EQ(e.bodies.size(), 2u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    ASSERT_TRUE(e.bodies[1].body.has_value());
+    const double volBig = e.bodies[0].body->Volume();
+    const double volSmall = e.bodies[1].body->Volume();
+    // Coarse sampling, so compare the two against each other rather than
+    // against 4/3*pi*r^3: r=10 vs r=5 is an 8x volume ratio.
+    EXPECT_GT(volBig, 2.0 * volSmall)
+        << "the second closure was served the first one's cached geometry";
+}
+
 // -- cache reuse -----------------------------------------------------------
 
 TEST(ManifoldCache, CacheHitSkipsRegeneratingTheSubtree) {
