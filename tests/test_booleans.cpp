@@ -651,6 +651,44 @@ TEST(MixedDimensions, ExportKeepsTheFlatSlabWhenItIsTheOnlyGeometry) {
     EXPECT_EQ(objects.size(), 1u);
 }
 
+TEST(MixedDimensions, ATranslatedTwoDeeShapeKeepsItsZ) {
+    // A CrossSection is purely 2D, so `translate([0,0,-1]) square(10)` had
+    // nowhere to put the -1 and dropped it. Two 2D shapes meant to be
+    // layered then came out exactly coplanar, z-fought, and whichever drew
+    // last hid the other -- BOSL2's isosurface contour() Example 1 renders a
+    // green contour over a blue backdrop pushed down by 1, and the backdrop
+    // covered the contour completely.
+    Evaluated e = evalSrc("translate([0,0,-1]) square(10, center=true);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_DOUBLE_EQ(e.bodies[0].sectionZ, -1.0);
+
+    const std::vector<ColoredBody> renderable = toRenderableBodies(e.bodies);
+    ASSERT_EQ(renderable.size(), 1u);
+    ASSERT_TRUE(renderable[0].body.has_value());
+    const manifold::Box box = renderable[0].body->BoundingBox();
+    EXPECT_NEAR(box.min.z, -1.0, 1e-9) << "the extruded slab sits where it was moved to";
+}
+
+TEST(MixedDimensions, TwoDeeZOffsetsAccumulateAndDefaultToZero) {
+    Evaluated flat = evalSrc("square(10);");
+    ASSERT_EQ(flat.bodies.size(), 1u);
+    EXPECT_DOUBLE_EQ(flat.bodies[0].sectionZ, 0.0);
+
+    Evaluated stacked = evalSrc(
+        "translate([0,0,2]) translate([0,0,3]) square(10);");
+    ASSERT_EQ(stacked.bodies.size(), 1u);
+    EXPECT_DOUBLE_EQ(stacked.bodies[0].sectionZ, 5.0);
+
+    // x/y still go into the CrossSection itself, not the offset.
+    Evaluated moved = evalSrc("translate([4,5,6]) square(10);");
+    ASSERT_EQ(moved.bodies.size(), 1u);
+    EXPECT_DOUBLE_EQ(moved.bodies[0].sectionZ, 6.0);
+    const manifold::Rect r = moved.bodies[0].section->Bounds();
+    EXPECT_NEAR(r.min.x, 4.0, 1e-9);
+    EXPECT_NEAR(r.min.y, 5.0, 1e-9);
+}
+
 TEST(MixedDimensions, UniformChildrenAreUntouched) {
     EXPECT_TRUE(dimWarnings("union() { cube(1); cube(2); }").empty());
     EXPECT_TRUE(dimWarnings("union() { square(1); square(2); }").empty());

@@ -233,6 +233,10 @@ std::vector<ColoredBody> generateTransform(Evaluator&, const CSGParams& params,
     std::vector<ColoredBody> result;
     for (ColoredBody b : flattenCsgTree(children)) {
         if (b.section) {
+            // The CrossSection takes x/y; z has nowhere to go in it, so it
+            // rides along on the body until the section is extruded. See
+            // ColoredBody::sectionZ.
+            if (name == "translate") b.sectionZ += toVec3(getArg(args, 0, "v", Value{})).z;
             b.section = applyTransform2d(name, args, std::move(*b.section));
         } else if (b.body) {
             b.body = applyTransform3d(name, args, std::move(*b.body));
