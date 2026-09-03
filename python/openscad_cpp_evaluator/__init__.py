@@ -213,7 +213,8 @@ def _summarize_param(value, max_items: int = 6, max_len: int = 40) -> str:
 # Params keys never shown in format_csg_tree's per-node summary, regardless
 # of kind -- pure internal bookkeeping or already represented structurally
 # elsewhere in the tree. Mirrors the reference's _DUMP_HIDDEN_PARAM_KEYS.
-_DUMP_HIDDEN_PARAM_KEYS = frozenset({"color", "op", "name", "group_sizes"})
+_DUMP_HIDDEN_PARAM_KEYS = frozenset(
+    {"color", "op", "name", "group_sizes", "empty_is_a_group"})
 
 # Auto-generated tessellation data (not user-authored) for every kind except
 # polyhedron, where the equivalent data *is* the user's own points/faces.
