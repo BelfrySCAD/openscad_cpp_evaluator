@@ -25,6 +25,7 @@
 // losing how the author wrote it (1.500 -> 1.5, 1e3 -> 1000).
 
 #include "openscad_cpp_parser/api.hpp"
+#include "openscad_cpp_parser/pretty_print.hpp"
 #include "openscad_cpp_parser/ast/ast_node.hpp"
 #include "openscad_cpp_parser/ast/comments.hpp"
 #include "openscad_cpp_parser/ast/declarations.hpp"
@@ -321,6 +322,13 @@ nb::list parseAstFromFile(const std::string& path, bool includeComments) {
 
 nb::list parseAstFromString(const std::string& code, bool includeComments) {
     return astToPy(oscad::getASTFromString(code, includeComments));
+}
+
+// The parser already has a pretty-printer -- comment-preserving, idempotent
+// and covered by its own tests -- so an editor's "reformat" needs no second
+// implementation guessing at the same grammar from a token stream.
+std::string formatSourceString(const std::string& code, int indentWidth, bool includeComments) {
+    return oscad::toOpenscad(oscad::getASTFromString(code, includeComments), indentWidth);
 }
 
 } // namespace oscadbind

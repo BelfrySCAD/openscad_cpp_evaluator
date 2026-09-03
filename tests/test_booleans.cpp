@@ -1,4 +1,6 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/colored_body.hpp"
+#include "openscad_cpp_evaluator/export.hpp"
 
 #include "test_helpers.hpp"
 
@@ -576,8 +578,11 @@ TEST(MixedDimensions, TransformsAndControlFlowAreGroupsToo) {
     EXPECT_EQ(dimWarnings("translate([0,0,0]) { square(4); cube(1); }"), expected);
     EXPECT_EQ(dimWarnings("scale(2) { square(4); cube(1); }"), expected);
     EXPECT_EQ(dimWarnings("color(\"red\") { square(4); cube(1); }"), expected);
-    EXPECT_EQ(dimWarnings("for (i = [0:0]) { square(4); cube(1); }"), expected);
-    EXPECT_EQ(dimWarnings("if (true) { square(4); cube(1); }"), expected);
+    // for/if are transparent -- their children land at the top level, so
+    // they get the top level's keep-both treatment rather than a group's.
+    const std::vector<std::string> topLevel{"WARNING: Mixing 2D and 3D objects is not supported"};
+    EXPECT_EQ(dimWarnings("for (i = [0:0]) { square(4); cube(1); }"), topLevel);
+    EXPECT_EQ(dimWarnings("if (true) { square(4); cube(1); }"), topLevel);
     EXPECT_EQ(dimWarnings("hull() { square(4); cube(1); }"), expected);
 }
 
@@ -603,14 +608,47 @@ TEST(MixedDimensions, RoofWarnsForNeither) {
     EXPECT_TRUE(dimWarnings("roof() { square(4); cube(1); }").empty());
 }
 
-TEST(MixedDimensions, TopLevelIsAGroupAsWell) {
-    // The top level is an implicit union, and gets the same treatment.
+TEST(MixedDimensions, TopLevelWarnsButKeepsBothDimensions) {
+    // The top level warns like any other group, but drops NOTHING. A real
+    // group has to pick one dimension because generateCsg builds a single
+    // result from it; the top level just hands back a list, and the
+    // reference's own preview draws 2D and 3D side by side. Dropping here
+    // silently lost the whole of a BOSL2 debug overlay (debug_bezier() of a
+    // 2D bezier is entirely 2D) whenever a 3D shape shared the script.
     EXPECT_EQ(dimWarnings("square(4); cube(1);"),
-              (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation",
-                                        "WARNING: Mixing 2D and 3D objects is not supported"}));
+              (std::vector<std::string>{"WARNING: Mixing 2D and 3D objects is not supported"}));
     Evaluated e = evalSrc("square(4); cube(1);");
-    ASSERT_EQ(e.bodies.size(), 1u);
-    EXPECT_TRUE(e.bodies[0].section.has_value());
+    ASSERT_EQ(e.bodies.size(), 2u);
+    EXPECT_TRUE(e.bodies[0].section.has_value()) << "the 2D shape survived";
+    EXPECT_TRUE(e.bodies[1].body.has_value()) << "and so did the 3D one";
+}
+
+TEST(MixedDimensions, ExportDropsTheFlatSlabWhenRealSolidsArePresent) {
+    // The top level keeps a 2D shape so it can be SEEN, thin-extruded by
+    // toRenderableBodies. A mesh export must not smuggle that 1e-3-tall slab
+    // in beside the real solids -- the reference drops it there too.
+    Evaluated e = evalSrc("square(4); cube(1);");
+    const std::vector<ColoredBody> renderable = toRenderableBodies(e.bodies);
+    ASSERT_EQ(renderable.size(), 2u) << "both are still drawn";
+
+    const std::vector<ExportObject> objects = splitBodiesForExport(renderable, nullptr);
+    ASSERT_EQ(objects.size(), 1u) << "but only the cube is exported";
+    // The cube is a unit tall; the dropped slab would have been 1e-3.
+    float zmin = 1e9f, zmax = -1e9f;
+    for (size_t i = 2; i < objects[0].verts.size(); i += 3) {
+        zmin = std::min(zmin, objects[0].verts[i]);
+        zmax = std::max(zmax, objects[0].verts[i]);
+    }
+    EXPECT_NEAR(zmax - zmin, 1.0f, 1e-5f);
+}
+
+TEST(MixedDimensions, ExportKeepsTheFlatSlabWhenItIsTheOnlyGeometry) {
+    // A 2D-only script has nothing else to write, so its slab still exports
+    // -- unchanged behaviour, and the only reason the filter is conditional.
+    Evaluated e = evalSrc("square(4);");
+    const std::vector<ExportObject> objects =
+        splitBodiesForExport(toRenderableBodies(e.bodies), nullptr);
+    EXPECT_EQ(objects.size(), 1u);
 }
 
 TEST(MixedDimensions, UniformChildrenAreUntouched) {
