@@ -21,7 +21,13 @@ std::optional<std::array<float, 4>> valueToColor(const Value& v) {
 }
 
 namespace {
-constexpr double kTopLevel2dHeight = 1e-3;
+// The reference extrudes a 2D shape to exactly 1 unit for preview -- measured
+// against OpenSCAD at three camera tilts (60/70/80 degrees), which put it at
+// 0.92/1.00/0.99, the 60 being pixel-rounding on the shallowest angle. Ours
+// was 1e-3, which reads as a flat silhouette with no visible edge and, more
+// annoyingly, gives --viewall a different bounding box to fit, so every 2D
+// docs image came out at a different scale from the published one.
+constexpr double kTopLevel2dHeight = 1.0;
 } // namespace
 
 std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodies) {

@@ -625,7 +625,7 @@ TEST(MixedDimensions, TopLevelWarnsButKeepsBothDimensions) {
 
 TEST(MixedDimensions, ExportDropsTheFlatSlabWhenRealSolidsArePresent) {
     // The top level keeps a 2D shape so it can be SEEN, thin-extruded by
-    // toRenderableBodies. A mesh export must not smuggle that 1e-3-tall slab
+    // toRenderableBodies. A mesh export must not smuggle that 1-unit-tall slab
     // in beside the real solids -- the reference drops it there too.
     Evaluated e = evalSrc("square(4); cube(1);");
     const std::vector<ColoredBody> renderable = toRenderableBodies(e.bodies);
@@ -633,7 +633,7 @@ TEST(MixedDimensions, ExportDropsTheFlatSlabWhenRealSolidsArePresent) {
 
     const std::vector<ExportObject> objects = splitBodiesForExport(renderable, nullptr);
     ASSERT_EQ(objects.size(), 1u) << "but only the cube is exported";
-    // The cube is a unit tall; the dropped slab would have been 1e-3.
+    // Only the cube survives, so the height is the cube's own.
     float zmin = 1e9f, zmax = -1e9f;
     for (size_t i = 2; i < objects[0].verts.size(); i += 3) {
         zmin = std::min(zmin, objects[0].verts[i]);

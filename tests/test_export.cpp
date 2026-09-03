@@ -91,7 +91,7 @@ TEST(ExportStl, NoGeometryThrows) {
 TEST(ToRenderableBodies, ThinExtrudesABareTopLevel2dShapeSoItCanExportAsStl) {
     // A bare `circle();` (no `body`, only `section`) would make writeStl
     // throw "No geometry to export" -- toRenderableBodies() converts it
-    // into a thin (1e-3 unit tall) Manifold first, mirroring the reference
+    // into a 1-unit-tall Manifold first, mirroring the reference
     // CLI's own to_renderable_bodies() call right before export. Without
     // this step, no top-level 2D-only script could ever export a mesh.
     std::vector<ColoredBody> bodies = evalToBodies("circle(2, $fn=32);");
@@ -104,7 +104,9 @@ TEST(ToRenderableBodies, ThinExtrudesABareTopLevel2dShapeSoItCanExportAsStl) {
     ASSERT_TRUE(renderable[0].body.has_value());
     EXPECT_TRUE(renderable[0].flatPreview);
     manifold::Box bbox = renderable[0].body->BoundingBox();
-    EXPECT_NEAR(bbox.max.z - bbox.min.z, 1e-3, 1e-9);
+    // 1 unit, matching what the reference extrudes a 2D preview to --
+    // measured against OpenSCAD at three camera tilts.
+    EXPECT_NEAR(bbox.max.z - bbox.min.z, 1.0, 1e-9);
 
     const std::string path = tempPath("flat_preview.stl").string();
     writeStl(path, renderable);

@@ -75,7 +75,7 @@ Value colorToValue(const std::optional<std::array<double, 4>>& color);
 std::optional<std::array<float, 4>> valueToColor(const Value& v);
 
 // Converts every top-level 2D-only result (`body` unset, `section` set --
-// e.g. a bare `circle();`) into a thin-extruded (1e-3 units tall) Manifold
+// e.g. a bare `circle();`) into a 1-unit-tall extruded Manifold
 // tagged `flatPreview = true`, so a mesh exporter/renderer that only
 // understands 3D Manifolds (writeStl/writeObj/writeOff/writeThreeMf) can
 // still show a 2D top-level result instead of silently dropping it. 3D
