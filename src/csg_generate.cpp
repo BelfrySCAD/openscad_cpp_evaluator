@@ -171,9 +171,10 @@ void Evaluator::applyDimensionRules(CSGNode& node) {
     applyDimensionRulesTo(kids, static_cast<int>(rule));
 }
 
-// The top level is an implicit union, and the reference treats it as one for
-// this too: `square(4); cube(1);` warns and keeps only the square.
-void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int ruleValue) {
+// `keepMixed` warns about a mixed group but drops nothing -- the top level's
+// behaviour, see generateTree.
+void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int ruleValue,
+                                       bool keepMixed) {
     const DimRule rule = static_cast<DimRule>(ruleValue);
     int target = rule == DimRule::Only2D ? 2 : rule == DimRule::Only3D ? 3 : 0;
     bool warnedMixing = false;
@@ -202,6 +203,16 @@ void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int
                 warn("Mixing 2D and 3D objects is not supported", pos);
                 warnedMixing = true;
             }
+            if (keepMixed) {
+                // Kept, not dropped: at the top level there is no single
+                // result to build, so nothing downstream can be confused by
+                // the other dimension, and the reference's own preview shows
+                // both. The warning above still stands -- an export cannot
+                // represent the mix -- but silently losing the 2D geometry
+                // from the picture is worse than showing it.
+                kept.push_back(std::move(b));
+                continue;
+            }
             warn(std::string("Ignoring ") + (dim == 3 ? "3D" : "2D") + " child object for " +
                      (target == 3 ? "3D" : "2D") + " operation",
                  pos);
@@ -216,9 +227,19 @@ std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_p
     ptrs.reserve(tree.size());
     for (const std::unique_ptr<CSGNode>& n : tree) ptrs.push_back(n.get());
     std::vector<ColoredBody> bodies = generateTreeImpl(ptrs);
-    // The top level is an implicit union; give it the same Group treatment
-    // every other group node gets, then re-collect what survived.
-    applyDimensionRulesTo(ptrs, static_cast<int>(DimRule::Group));
+    // The top level is an implicit union, so it gets the same Group warning
+    // every other group node gets -- but it KEEPS both dimensions.
+    //
+    // A real group has to pick one: generateCsg builds a single result and
+    // switches on whether it holds a body or a section, so a group that
+    // changed dimension part-way used to take the process down. The top
+    // level builds no such result; it just hands back a list. Dropping there
+    // only lost geometry, and it lost it from the picture: the reference's
+    // preview draws top-level 2D and 3D side by side (a 2D shape as a thin
+    // slab), which is exactly what BOSL2's debug_bezier() of a 2D bezier
+    // relies on -- every curve and control arrow it draws is 2D, so beside
+    // a 3D sphere the whole debug overlay vanished.
+    applyDimensionRulesTo(ptrs, static_cast<int>(DimRule::Group), /*keepMixed=*/true);
     bodies.clear();
     for (CSGNode* n : ptrs) {
         for (const ColoredBody& b : n->bodies) bodies.push_back(b);

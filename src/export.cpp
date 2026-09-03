@@ -429,10 +429,23 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
     std::vector<Solid> solids;
     std::vector<ExportObject> loose;
 
+    // A `flatPreview` body is a top-level 2D shape thin-extruded so it can be
+    // SEEN (toRenderableBodies). The top level keeps 2D and 3D side by side
+    // for exactly that reason -- but a mesh export of a mixed script must
+    // not smuggle a 1e-3-tall slab in beside the real solids, which is what
+    // the reference drops there too. A 2D-ONLY script still exports its
+    // slab, unchanged: that is the only geometry there is, and dropping it
+    // would leave nothing to write.
+    bool hasRealSolid = false;
+    for (const ColoredBody& cb : bodies) {
+        if (!cb.flatPreview && isExportable(cb)) { hasRealSolid = true; break; }
+    }
+
     int index = 0;
     for (const ColoredBody& cb : bodies) {
         ++index;
         if (!isExportable(cb)) continue;
+        if (cb.flatPreview && hasRealSolid) continue;
         if (cb.isDisplayOnly()) {
             // Manifold rejected this one -- an open shell is not a solid --
             // so it can join no boolean. Its triangles are real geometry the
