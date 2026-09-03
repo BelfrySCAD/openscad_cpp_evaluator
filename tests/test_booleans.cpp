@@ -40,11 +40,76 @@ TEST(Intersection, KeepsOnlyOverlappingVolume) {
     EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-6);
 }
 
-TEST(Intersection, DisabledStatementIsTrulyEmptyAndDiscardsResult) {
+TEST(Intersection, ADisabledStatementIsNotAnOperandAtAll) {
+    // `*cube(1)` produces no CSGNode, so it is not an operand -- the
+    // intersection has one child and returns it. This used to assert an
+    // EMPTY result on the reasoning that a statement contributing no bodies
+    // is "intersection with nothing"; checking against OpenSCAD showed that
+    // is wrong (it gives volume 8, the cube(2)), and the same mistake is
+    // what made BOSL2's hirth() render nothing at all: its geometry is
+    // `intersection(){ ...; if (crop) tube(...); }` and crop defaults false.
     Evaluated e = evalSrc("intersection() { cube(2); *cube(1); }");
-    // *cube(1) produces no CSGNode at all -> its "statement" contributes a
-    // group of size 0 -- flattening an empty group yields no bodies, which
-    // intersection() treats as "intersection with nothing" -> empty result.
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
+}
+
+TEST(Intersection, AnUntakenIfIsNotAnOperandEither) {
+    // The reported case, reduced. Verified against OpenSCAD: volume 1000.
+    Evaluated e = evalSrc("intersection() { cube(10); if (false) sphere(6); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-6);
+}
+
+TEST(Intersection, EmptyStatementsFollowTheReferenceExactly) {
+    // Every row checked against OpenSCAD, not reasoned about. The rule that
+    // falls out: a module instantiation or a loop builds a node whatever it
+    // contains, so an empty one is an empty operand and annihilates; an
+    // `if` with no branch taken, a bare block and a `*`-disabled statement
+    // build no node at all and are not operands.
+    struct Case { const char* stmt; bool keepsTheCube; };
+    const Case cases[] = {
+        {"if (false) sphere(6);",            true},
+        {"{ }",                              true},
+        {"*cube(1);",                        true},
+        {"for (i = [1:0]) sphere(6);",       false},
+        {"union() { }",                      false},
+        {"group() { }",                      false},
+        {"let(x = 1) { }",                   false},
+        {"#union() { }",                     false},
+    };
+    for (const Case& c : cases) {
+        const std::string src =
+            std::string("intersection() { cube(10, center=true); ") + c.stmt + " }";
+        Evaluated e = evalSrc(src);
+        if (c.keepsTheCube) {
+            ASSERT_EQ(e.bodies.size(), 1u) << src;
+            EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-6) << src;
+        } else {
+            const bool anyVolume = std::any_of(
+                e.bodies.begin(), e.bodies.end(),
+                [](const ColoredBody& b) { return b.body && !b.body->IsEmpty(); });
+            EXPECT_FALSE(anyVolume) << src;
+        }
+    }
+}
+
+TEST(Intersection, AnEmptyUserModuleIsStillAnOperand) {
+    // The reference builds a node for a module instantiation whatever the
+    // module's body does, so calling one that draws nothing empties the
+    // intersection. Verified against OpenSCAD (writes no STL).
+    Evaluated e = evalSrc("module m() { } intersection() { cube(10); m(); }");
+    const bool anyVolume = std::any_of(
+        e.bodies.begin(), e.bodies.end(),
+        [](const ColoredBody& b) { return b.body && !b.body->IsEmpty(); });
+    EXPECT_FALSE(anyVolume);
+}
+
+TEST(Intersection, AnEmptyForLoopIsStillAnOperand) {
+    // The one empty statement that DOES annihilate: the reference builds a
+    // group node for a for-loop however many times it iterates, so an empty
+    // one is an empty operand. Verified against OpenSCAD, which writes no
+    // STL at all for this.
+    Evaluated e = evalSrc("intersection() { cube(10); for (i = [1:0]) sphere(6); }");
     EXPECT_TRUE(e.bodies.empty());
 }
 
@@ -73,14 +138,19 @@ TEST(Union, MultipleBodiesInFirstStatementAllSurvive) {
     EXPECT_NEAR(e.bodies[0].body->Volume(), 20.0, 1e-6);
 }
 
-TEST(Intersection, EmptyFirstOperandGivesEmpty) {
+TEST(Intersection, ADisabledFirstStatementLetsTheNextOneLead) {
+    // Verified against OpenSCAD: volume 8, not empty.
     Evaluated e = evalSrc("intersection() { *cube(10); cube(2); }");
-    EXPECT_TRUE(e.bodies.empty());
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
 }
 
-TEST(Difference, EmptyFirstOperandGivesEmpty) {
+TEST(Difference, ADisabledFirstStatementLetsTheNextOneBecomeTheBase) {
+    // Verified against OpenSCAD: volume 8 -- cube(2) becomes the base
+    // rather than the difference collapsing to nothing.
     Evaluated e = evalSrc("difference() { *cube(10); cube(2); }");
-    EXPECT_TRUE(e.bodies.empty());
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
 }
 
 TEST(Difference, EmptySubtractorLeavesBaseUnchanged) {
