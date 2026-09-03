@@ -18,7 +18,8 @@ from ._openscad_cpp_evaluator import FastContinueSignal, ManifoldCache
 __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
-    "FastContinueSignal", "parse_ast", "parse_ast_string", "check_mesh", "strip_slivers",
+    "FastContinueSignal", "parse_ast", "parse_ast_string", "format_source",
+    "check_mesh", "strip_slivers",
     "export_model", "export_extensions",
 ]
 
@@ -372,6 +373,24 @@ def parse_ast_string(code: str, include_comments: bool = False) -> list:
     "<string>" for every node. Raises ParseError on a syntax error."""
     try:
         return _ext.parse_ast_string(code, include_comments)
+    except Exception as e:
+        raise ParseError(str(e)) from e
+
+
+def format_source(code: str, indent: int = 4, include_comments: bool = True) -> str:
+    """Reformat OpenSCAD source: parse it and print the AST back out.
+
+    Wraps over-long argument lists and vector literals, puts a modifier's
+    children on their own indented line, and preserves comments. Idempotent
+    -- formatting already-formatted source returns it unchanged. Raises
+    ParseError on a syntax error.
+
+    This is the parser's own printer (`oscad::toOpenscad`), so an editor
+    reformatting a selection does not need a second implementation guessing
+    at the same grammar from a token stream.
+    """
+    try:
+        return _ext.format_source(code, indent, include_comments)
     except Exception as e:
         raise ParseError(str(e)) from e
 

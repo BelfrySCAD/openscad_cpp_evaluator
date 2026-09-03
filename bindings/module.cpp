@@ -49,6 +49,7 @@ namespace nb = nanobind;
 namespace oscadbind {
 nb::list parseAstFromFile(const std::string& path, bool includeComments);
 nb::list parseAstFromString(const std::string& code, bool includeComments);
+std::string formatSourceString(const std::string& code, int indentWidth, bool includeComments);
 } // namespace oscadbind
 
 namespace {
@@ -809,6 +810,13 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "safe to keep, share across threads, and outlive the parse.");
     m.def("parse_ast_string", &oscadbind::parseAstFromString, nb::arg("code"), nb::arg("include_comments") = false,
           "As parse_ast(), but parses a source string instead of a file.");
+    m.def("format_source", &oscadbind::formatSourceString, nb::arg("code"),
+          nb::arg("indent") = 4, nb::arg("include_comments") = true,
+          "Reformat OpenSCAD source: parse it and print the AST back out. "
+          "Wraps over-long argument lists and vectors, puts a modifier's "
+          "children on their own indented line, and preserves comments. "
+          "Idempotent -- formatting formatted source returns it unchanged. "
+          "Raises ParseError if the source does not parse.");
     m.def("debug_evaluate", &debugEvaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("debug_hook"),
           nb::arg("error_break"), nb::arg("echo_fn"), nb::arg("manifold_cache") = nullptr,
           nb::arg("return_hook") = nb::none(), nb::arg("fast_continue_signal") = nullptr,

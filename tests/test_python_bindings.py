@@ -351,6 +351,43 @@ def test_parse_ast_raises_parse_error_on_bad_syntax():
     raise AssertionError("expected ParseError")
 
 
+def test_format_source_round_trips_and_is_idempotent():
+    from openscad_cpp_evaluator import format_source
+
+    out = format_source("module thing(a=1,b=[1,2,3]){translate([0,0,1])cube([a,a,a]);}\n")
+    assert "module thing(a=1, b=[1, 2, 3])" in out, out
+    # A modifier's children go on their own indented line.
+    assert "translate([0, 0, 1])\n        cube([a, a, a]);" in out, out
+    # Formatting formatted source changes nothing: the printer is the
+    # parser's own, so its output parses back to the same tree.
+    assert format_source(out) == out
+
+
+def test_format_source_keeps_comments():
+    from openscad_cpp_evaluator import format_source
+
+    out = format_source("// keep me\ncube(1);\n")
+    assert "// keep me" in out, out
+    # ...and can be told not to.
+    assert "// keep me" not in format_source("// keep me\ncube(1);\n", include_comments=False)
+
+
+def test_format_source_honours_the_indent_width():
+    from openscad_cpp_evaluator import format_source
+
+    two = format_source("module m(){cube(1);}\n", indent=2)
+    assert "\n  cube(1);" in two, two
+
+
+def test_format_source_raises_parse_error_on_bad_input():
+    from openscad_cpp_evaluator import ParseError, format_source
+    try:
+        format_source("module {{{")
+    except ParseError:
+        return
+    raise AssertionError("expected ParseError")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = []
