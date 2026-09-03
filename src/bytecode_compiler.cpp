@@ -1348,7 +1348,21 @@ public:
             }
             out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
             compileStatementList(std::vector<const oscad::ASTNode*>{geoNode}, out);
-            out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});
+            // `a` = whether a group that turns out EMPTY is still an
+            // operand: a module instantiation or a loop builds a node
+            // whatever it contains, an `if`/block/`*` does not. Mirrors
+            // resolveCsg's own "empty_is_a_group" (booleans.cpp), where the
+            // full reasoning and the OpenSCAD checks live.
+            const oscad::NodeKind k = geoNode->kind();
+            const int emptyIsAGroup = (
+                                       k == oscad::NodeKind::ModularCall ||
+                                       k == oscad::NodeKind::ModularFor ||
+                                       k == oscad::NodeKind::ModularIntersectionFor ||
+                                       k == oscad::NodeKind::ModularLet ||
+                                       k == oscad::NodeKind::ModularModifierShowOnly ||
+                                       k == oscad::NodeKind::ModularModifierHighlight ||
+                                       k == oscad::NodeKind::ModularModifierBackground) ? 1 : 0;
+            out.push_back({Op::CsgGroupEnd, emptyIsAGroup, 0, nullptr});
         }
         out.push_back({Op::CloseExprScope, 0, 0, nullptr});
         out.push_back({Op::PopCsgWrap, idx, 0, &call.position()});

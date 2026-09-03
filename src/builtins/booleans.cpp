@@ -108,16 +108,43 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
     if (!assignNodes.empty()) ev.evalChildren(assignNodes, blockCtx);
 
     std::vector<Value> groupSizes;
+    std::vector<Value> emptyIsAGroup;
     groupSizes.reserve(geoNodes.size());
+    emptyIsAGroup.reserve(geoNodes.size());
     for (const oscad::ASTNode* geoNode : geoNodes) {
         const size_t before = ev.currentTreeFrameSize();
         ev.evalChildren(std::vector<const oscad::ASTNode*>{geoNode}, blockCtx);
         groupSizes.push_back(Value{static_cast<double>(ev.currentTreeFrameSize() - before)});
+        // Whether a statement that produced NOTHING still counts as an
+        // operand.
+        //
+        // The reference builds a node for a module instantiation and for a
+        // loop whatever they contain, so an empty one is an empty operand
+        // and annihilates an intersection. An `if` that takes no branch, a
+        // bare block, and a `*`-disabled statement build no node at all, so
+        // they are not operands and must be skipped.
+        //
+        // Every line of this was checked against OpenSCAD rather than
+        // reasoned about -- `intersection(){ cube(10); X; }` keeps the cube
+        // for `if(false) sphere(6)`, `{ }` and `*cube(1)`, and comes out
+        // empty for `for(i=[1:0]) sphere(6)`, `union(){}`, `group(){}` and
+        // a call to an empty user module.
+        const oscad::NodeKind k = geoNode->kind();
+        emptyIsAGroup.push_back(Value{
+                                       k == oscad::NodeKind::ModularCall ||
+                                       k == oscad::NodeKind::ModularFor ||
+                                       k == oscad::NodeKind::ModularIntersectionFor ||
+                                       k == oscad::NodeKind::ModularLet ||
+                                       k == oscad::NodeKind::ModularModifierShowOnly ||
+                                       k == oscad::NodeKind::ModularModifierHighlight ||
+                                       k == oscad::NodeKind::ModularModifierBackground});
     }
 
     CSGParams params;
     params["op"] = Value{op};
     params["group_sizes"] = Value{std::make_shared<const ValueList>(ValueList{std::move(groupSizes)})};
+    params["empty_is_a_group"] =
+        Value{std::make_shared<const ValueList>(ValueList{std::move(emptyIsAGroup)})};
     return params;
 }
 
@@ -180,15 +207,35 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
                                       const oscad::ASTNode&) {
     const std::string& op = std::get<std::string>(params.at("op"));
     const auto& groupSizes = std::get<ListPtr>(params.at("group_sizes"))->items;
+    const auto emptyIsAGroupIt = params.find("empty_is_a_group");
+    const std::vector<Value>* emptyIsAGroup =
+        emptyIsAGroupIt == params.end()
+            ? nullptr
+            : &std::get<ListPtr>(emptyIsAGroupIt->second)->items;
 
     std::vector<ColoredBody> allBg, allHi, allSo, allDo;
     std::optional<ColoredBody> csgResult;
     size_t idx = 0;
 
+    size_t stmtIndex = 0;
     for (const Value& sizeVal : groupSizes) {
         const size_t size = static_cast<size_t>(std::get<double>(sizeVal));
+        const size_t thisStmt = stmtIndex++;
         std::vector<ColoredBody> stmtBodies = flattenCsgTree(children, idx, size);
         idx += size;
+
+        // A statement that built no CSG node at all is not an operand --
+        // an `if` whose branch was not taken, or an empty block. Only a
+        // for-loop still counts as one when it produced nothing, matching
+        // the group node the reference builds for it regardless. Without
+        // this, `intersection(){ X; if (crop) Y; }` -- BOSL2's hirth()
+        // among others -- came out empty whenever the condition was false.
+        if (size == 0) {
+            const bool isGroup = emptyIsAGroup && thisStmt < emptyIsAGroup->size() &&
+                                  std::holds_alternative<bool>((*emptyIsAGroup)[thisStmt]) &&
+                                  std::get<bool>((*emptyIsAGroup)[thisStmt]);
+            if (!isGroup) continue;
+        }
 
         RoleSplit split = splitByRole(stmtBodies);
         allBg.insert(allBg.end(), split.background.begin(), split.background.end());

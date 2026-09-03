@@ -845,15 +845,15 @@ TEST(ExprEvalFunctionCall, CallingANonFunctionVariableWarnsAndIsUndef) {
     EXPECT_NE(warnings.back().find("Ignoring unknown function 'x'"), std::string::npos);
 }
 
-TEST(Intersection, EchoInDisabledFirstStatementStillFiresDespiteEmptyResult) {
-    // A deliberate resolve/generate-split consequence: resolve can't yet
-    // know the whole intersection() will end up geometrically empty (that
-    // isn't known until generate time), so echo()'s side effect during
-    // resolve still fires even though the final result has zero bodies.
+TEST(Intersection, EchoInADisabledStatementStillFires) {
+    // echo() runs during resolve, so its side effect happens whatever the
+    // geometry does. The result is the cube(2): neither the disabled
+    // statement nor the echo statement is an operand.
     std::string captured;
     Evaluated e = evalSrc("intersection() { *cube(10); echo(\"fired\"); cube(2); }", [&](const std::string& msg) { captured = msg; });
     EXPECT_EQ(captured, "ECHO: \"fired\"");
-    EXPECT_TRUE(e.bodies.empty());
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
 }
 
 TEST(ListComprehension, IfClauseWithNestedListLiteralBody) {

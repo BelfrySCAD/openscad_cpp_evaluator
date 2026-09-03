@@ -68,6 +68,9 @@ struct PendingCsgWrap {
     std::uint64_t randsBefore = 0;
     int siteIdx = -1;
     std::vector<Value> groupSizes;
+    // Parallel to groupSizes: whether a group that came out EMPTY is still
+    // an operand. See Op::CsgGroupEnd's `a`.
+    std::vector<Value> emptyIsAGroup;
     size_t groupStartSize = 0;
 };
 
