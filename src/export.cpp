@@ -432,7 +432,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
     // A `flatPreview` body is a top-level 2D shape thin-extruded so it can be
     // SEEN (toRenderableBodies). The top level keeps 2D and 3D side by side
     // for exactly that reason -- but a mesh export of a mixed script must
-    // not smuggle a 1e-3-tall slab in beside the real solids, which is what
+    // not smuggle a 1-unit-tall slab in beside the real solids, which is what
     // the reference drops there too. A 2D-ONLY script still exports its
     // slab, unchanged: that is the only geometry there is, and dropping it
     // would leave nothing to write.

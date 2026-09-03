@@ -231,6 +231,15 @@ top-level 2D primitive/projection() script had been silently unexportable via th
 Fixed by porting `toRenderableBodies()` (`colored_body.hpp`/`.cpp`) and calling it from the CLI right
 before export, matching the reference's own call site exactly.
 
+`ColoredBody::sectionZ` rides alongside for the same reason. A `manifold::CrossSection` is purely
+2D, so `down(1) square(10)` had nowhere to put the `-1` and silently dropped it — and that is not
+cosmetic: BOSL2 layers 2D overlays by pushing one down (isosurface's `contour()` Example 1 puts a
+blue backdrop below a green contour), and with the offset lost the two slabs became exactly
+coplanar, z-fought, and whichever drew last covered the other completely. `generateTransform`
+accumulates the z of any `translate` applied to a section, and `toRenderableBodies()` translates the
+extruded slab by it. Only translation is carried — a 2D shape under a 3D *rotation* still loses it,
+which would need a full matrix per section and nothing has asked for that yet.
+
 **Font support**: a `FontProvider` abstract interface (`font_provider.hpp`: `resolveFont`/
 `metrics`/`shapeText`/`glyphInkBounds`/`glyphOutline`) with `FreetypeFontProvider` as the built-in
 implementation everything here actually uses. `Evaluator`'s constructor takes an optional

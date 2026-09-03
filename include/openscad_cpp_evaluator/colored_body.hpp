@@ -24,6 +24,21 @@ struct ColoredBody {
     std::optional<std::array<float, 4>> color; // RGBA; nullopt = "no explicit color() -- follow the live theme"
     std::optional<manifold::CrossSection> section;
     bool flatPreview = false;
+
+    // Where a 2D `section` sits along Z. Only meaningful while `section` is
+    // set, and applied when toRenderableBodies() extrudes it.
+    //
+    // A manifold::CrossSection is purely 2D, so `down(1) square(10)` had
+    // nowhere to put the -1 and silently dropped it. That is not merely
+    // cosmetic: BOSL2 layers 2D overlays by pushing one down (isosurface's
+    // contour() Example 1 puts a blue backdrop below a green contour), and
+    // with the offset lost the two slabs became exactly coplanar, z-fought,
+    // and whichever was drawn last covered the other completely.
+    //
+    // Only translation is carried. A 2D shape under a 3D ROTATION still
+    // loses it -- representing that needs a full matrix per section, which
+    // nothing has asked for yet.
+    double sectionZ = 0.0;
     BodyRole role = BodyRole::Normal;
     std::optional<std::vector<std::array<float, 4>>> triColors; // per-triangle RGBA, multi-color CSG merges only
 
@@ -60,7 +75,7 @@ Value colorToValue(const std::optional<std::array<double, 4>>& color);
 std::optional<std::array<float, 4>> valueToColor(const Value& v);
 
 // Converts every top-level 2D-only result (`body` unset, `section` set --
-// e.g. a bare `circle();`) into a thin-extruded (1e-3 units tall) Manifold
+// e.g. a bare `circle();`) into a 1-unit-tall extruded Manifold
 // tagged `flatPreview = true`, so a mesh exporter/renderer that only
 // understands 3D Manifolds (writeStl/writeObj/writeOff/writeThreeMf) can
 // still show a 2D top-level result instead of silently dropping it. 3D
