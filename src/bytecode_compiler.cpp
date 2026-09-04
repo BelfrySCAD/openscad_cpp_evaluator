@@ -1501,15 +1501,17 @@ public:
                 // form's own compile case (AssertOp's sibling, above in
                 // compileExpr) -- already statement-shaped (no value
                 // pushed, straight fall-through), so nothing new is needed
-                // there. `.children` is deliberately never read here,
-                // matching evalStatement's own ModularEcho case (doEcho
-                // only ever takes `.arguments` -- an echo statement's
-                // trailing children, if the grammar even produces any, are
-                // not evaluated today; this mirrors that exactly rather
-                // than silently changing behavior).
+                // there. `.children` IS read: `echo("x") cube();` renders the
+                // cube in the reference, and the grammar does produce those
+                // children. They used to be dropped on the assumption that it
+                // never did, which silently lost the geometry -- BOSL2's
+                // debug_region() draws its whole region through
+                // `for(...) echo(...) linear_extrude(...) region(...)` and came
+                // out as labels with nothing under them.
                 auto& n = static_cast<const oscad::ModularEcho&>(stmt);
                 out.push_back({Op::CheckDebugStatement, internNativeStatement(&stmt), 0, nullptr});
                 CompiledChunk::EchoSite site;
+                site.node = &n;          // statement form: it can have children
                 CompileScope exprScope;
                 for (const auto& argPtr : n.arguments) {
                     if (argPtr->kind() == NodeKind::NamedArgument) {

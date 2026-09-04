@@ -83,6 +83,15 @@ manifold::Manifold applyRotate(manifold::Manifold body, const Value& aArg, const
     return body.Transform(axisAngleMatrix(axis, angle * std::numbers::pi / 180.0));
 }
 
+// `a` applied after `b`, both as Manifold's column-major 3x4 affines.
+manifold::mat3x4 compose3x4(const manifold::mat3x4& a, const manifold::mat3x4& b) {
+    manifold::mat3x4 out;
+    for (int c = 0; c < 3; ++c)
+        out[c] = a[0] * b[c].x + a[1] * b[c].y + a[2] * b[c].z;
+    out[3] = a[0] * b[3].x + a[1] * b[3].y + a[2] * b[3].z + a[3];
+    return out;
+}
+
 // Converts a user-supplied 4x4/4x3 nested-list matrix (row-major, like
 // every OpenSCAD-facing representation) to Manifold's column-major 3x4
 // transform. Mirrors _to_matrix4x3.
@@ -115,6 +124,121 @@ manifold::mat2x3 toMat2x3(const Value& m) {
     const manifold::vec2 col1(rowAt(0, 1), rowAt(1, 1));
     const manifold::vec2 col2(rowAt(0, 3), rowAt(1, 3));
     return manifold::mat2x3(col0, col1, col2);
+}
+
+// The affine matrix a transform applies, for geometry Manifold cannot hold.
+//
+// A mesh Manifold rejected (an open surface -- a height field, a partial
+// `vnf_vertex_array`) survives only as ColoredBody::rawMesh, raw triangles
+// with no Manifold to transform. Those triangles were left where they were
+// built, so `grid_copies(...) vnf_polyhedron(<open surface>)` stacked every
+// copy at the origin and BOSL2's skin() style figure showed one shape where
+// the reference shows seven.
+//
+// nullopt for `resize`, which is not a fixed map at all: its scale comes
+// from the body's own bounding box, and a display-only body has no Manifold
+// to measure. Verified against Manifold's own operators by
+// TransformMatrix3d tests rather than assumed -- the Euler order especially.
+// True if `m` is a pure translation: nothing has rotated, scaled or
+// mirrored the section, so a further translation commutes with it.
+bool hasIdentityLinearPart(const manifold::mat3x4& m) {
+    for (int c = 0; c < 3; ++c) {
+        const manifold::vec3 want(c == 0 ? 1.0 : 0.0, c == 1 ? 1.0 : 0.0, c == 2 ? 1.0 : 0.0);
+        if (m[c] != want) return false;
+    }
+    return true;
+}
+
+bool isIdentity3x4(const manifold::mat3x4& m) {
+    for (int c = 0; c < 4; ++c) {
+        const manifold::vec3 want(c == 0 ? 1.0 : 0.0, c == 1 ? 1.0 : 0.0, c == 2 ? 1.0 : 0.0);
+        if (m[c] != want) return false;
+    }
+    return true;
+}
+
+// True if `m` maps the XY plane onto itself, so a CrossSection can hold it:
+// nothing leaves the plane (no Z from x or y, no Z offset) and Z maps to Z.
+bool preservesXYPlane(const manifold::mat3x4& m) {
+    return m[0].z == 0.0 && m[1].z == 0.0 && m[3].z == 0.0 &&
+           m[2].x == 0.0 && m[2].y == 0.0;
+}
+
+// Applies `m` to a raw mesh's vertex POSITIONS in place. Any further
+// per-vertex properties (normals and the like) are left alone: nothing
+// reads them off a display-only body, which is drawn from its triangles.
+void transformMeshInPlace(manifold::MeshGL& mesh, const manifold::mat3x4& m) {
+    const uint32_t stride = mesh.numProp;
+    if (stride < 3) return;
+    for (size_t i = 0; i + 2 < mesh.vertProperties.size(); i += stride) {
+        const double x = mesh.vertProperties[i];
+        const double y = mesh.vertProperties[i + 1];
+        const double z = mesh.vertProperties[i + 2];
+        const manifold::vec3 p = m[0] * x + m[1] * y + m[2] * z + m[3];
+        mesh.vertProperties[i] = static_cast<float>(p.x);
+        mesh.vertProperties[i + 1] = static_cast<float>(p.y);
+        mesh.vertProperties[i + 2] = static_cast<float>(p.z);
+    }
+}
+
+std::optional<manifold::mat3x4> transformMatrix3d(const std::string& name, const CallArgs& args) {
+    const manifold::mat3x4 ident(manifold::vec3(1, 0, 0), manifold::vec3(0, 1, 0),
+                                  manifold::vec3(0, 0, 1), manifold::vec3(0, 0, 0));
+    if (name == "translate") {
+        manifold::mat3x4 m = ident;
+        m[3] = toVec3(getArg(args, 0, "v", Value{}));
+        return m;
+    }
+    if (name == "rotate") {
+        const Value aArg = getArg(args, 0, "a", Value{0.0});
+        const Value vArg = getArg(args, 1, "v", Value{});
+        if (std::holds_alternative<ListPtr>(aArg)) {
+            const manifold::vec3 a = toVec3(aArg);
+            const double d2r = std::numbers::pi / 180.0;
+            // X, then Y, then Z -- the order Manifold::Rotate uses, which
+            // applyTransform3d hands the same angles to.
+            const manifold::mat3x4 rx = axisAngleMatrix(manifold::vec3(1, 0, 0), a.x * d2r);
+            const manifold::mat3x4 ry = axisAngleMatrix(manifold::vec3(0, 1, 0), a.y * d2r);
+            const manifold::mat3x4 rz = axisAngleMatrix(manifold::vec3(0, 0, 1), a.z * d2r);
+            return compose3x4(rz, compose3x4(ry, rx));
+        }
+        const double angle = toDoubleLenient(aArg);
+        const manifold::vec3 axis =
+            std::holds_alternative<std::monostate>(vArg) ? manifold::vec3(0, 0, 1) : toVec3(vArg);
+        return axisAngleMatrix(axis, angle * std::numbers::pi / 180.0);
+    }
+    if (name == "scale") {
+        Value v = getArg(args, 0, "v", Value{1.0});
+        manifold::vec3 sv = std::get_if<double>(&v)
+                                ? manifold::vec3(*std::get_if<double>(&v), *std::get_if<double>(&v),
+                                                  *std::get_if<double>(&v))
+                                : toVec3(v, 1.0, 1.0, 1.0);
+        manifold::mat3x4 m = ident;
+        m[0] = manifold::vec3(sv.x, 0, 0);
+        m[1] = manifold::vec3(0, sv.y, 0);
+        m[2] = manifold::vec3(0, 0, sv.z);
+        return m;
+    }
+    if (name == "mirror") {
+        manifold::vec3 n = toVec3(getArg(args, 0, "v", Value{}), 1.0, 0.0, 0.0);
+        const double len2 = n.x * n.x + n.y * n.y + n.z * n.z;
+        if (len2 <= 0.0) return ident;
+        manifold::mat3x4 m = ident;
+        // I - 2 n n^T / |n|^2, written column by column.
+        for (int c = 0; c < 3; ++c) {
+            const double nc = c == 0 ? n.x : (c == 1 ? n.y : n.z);
+            m[c] = manifold::vec3((c == 0 ? 1.0 : 0.0) - 2.0 * n.x * nc / len2,
+                                   (c == 1 ? 1.0 : 0.0) - 2.0 * n.y * nc / len2,
+                                   (c == 2 ? 1.0 : 0.0) - 2.0 * n.z * nc / len2);
+        }
+        return m;
+    }
+    if (name == "multmatrix") {
+        Value m = getArg(args, 0, "m", Value{});
+        if (std::holds_alternative<std::monostate>(m)) return ident;
+        return toMat3x4(m);
+    }
+    return std::nullopt;
 }
 
 manifold::Manifold applyTransform3d(const std::string& name, const CallArgs& args, manifold::Manifold body) {
@@ -233,13 +357,40 @@ std::vector<ColoredBody> generateTransform(Evaluator&, const CSGParams& params,
     std::vector<ColoredBody> result;
     for (ColoredBody b : flattenCsgTree(children)) {
         if (b.section) {
-            // The CrossSection takes x/y; z has nowhere to go in it, so it
-            // rides along on the body until the section is extruded. See
-            // ColoredBody::sectionZ.
-            if (name == "translate") b.sectionZ += toVec3(getArg(args, 0, "v", Value{})).z;
-            b.section = applyTransform2d(name, args, std::move(*b.section));
+            // A 2D-representable transform goes into the CrossSection, so
+            // 2D booleans and offset() keep operating on real 2D geometry.
+            // Anything else -- a Z translation, a rotation out of the XY
+            // plane -- has nowhere to go there and rides along on the body
+            // until the section is extruded. Once one of those has been
+            // seen, every LATER (outer) transform must ride along too, or
+            // it would be applied in the wrong order. See
+            // ColoredBody::sectionXform.
+            const std::optional<manifold::mat3x4> m = transformMatrix3d(name, args);
+            if (isIdentity3x4(b.sectionXform) && (!m || preservesXYPlane(*m))) {
+                b.section = applyTransform2d(name, args, std::move(*b.section));
+            } else if (name == "translate" && hasIdentityLinearPart(b.sectionXform)) {
+                // A translate SPLITS while nothing has rotated or scaled the
+                // section yet: x/y into the CrossSection, z into the carried
+                // transform. Translations commute, so the order is safe --
+                // and keeping x/y in the section is what lets a later 2D
+                // boolean or offset() still see real 2D geometry after a
+                // `down(1) square(10)`.
+                b.section = applyTransform2d(name, args, std::move(*b.section));
+                b.sectionXform[3].z += toVec3(getArg(args, 0, "v", Value{})).z;
+            } else if (m) {
+                b.sectionXform = compose3x4(*m, b.sectionXform);
+            }
+            // No `m` and already carrying a transform: only resize(), which
+            // the reference passes 2D children through unchanged anyway.
         } else if (b.body) {
             b.body = applyTransform3d(name, args, std::move(*b.body));
+            // A display-only body's real geometry is its raw triangles --
+            // the Manifold above is empty and moving it moves nothing. See
+            // transformMatrix3d.
+            if (b.rawMesh) {
+                if (std::optional<manifold::mat3x4> m = transformMatrix3d(name, args))
+                    transformMeshInPlace(*b.rawMesh, *m);
+            }
         }
         result.push_back(std::move(b));
     }

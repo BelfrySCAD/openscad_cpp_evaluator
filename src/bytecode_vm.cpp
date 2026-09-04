@@ -981,6 +981,12 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         f.stack.pop_back();
                     }
                     ev.emitEcho(pairs);
+                    // The STATEMENT form can carry children and the
+                    // reference renders them; same tail as
+                    // Op::AssertStatement below. Null node = the expression
+                    // form (`echo(...) 1+1`), which has none.
+                    if (site.node && !site.node->children.empty())
+                        ev.evalChildren(site.node->children, ctx);
                     ++f.pc;
                     break;
                 }

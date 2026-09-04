@@ -845,6 +845,38 @@ TEST(ExprEvalFunctionCall, CallingANonFunctionVariableWarnsAndIsUndef) {
     EXPECT_NE(warnings.back().find("Ignoring unknown function 'x'"), std::string::npos);
 }
 
+TEST(EchoStatement, RendersItsChildren) {
+    // `echo("x") cube();` -- echo used as a statement PREFIX. The reference
+    // echoes and then renders the child; we echoed and dropped it, on the
+    // stated assumption that the grammar never produced children here. It
+    // does. BOSL2's debug_region() draws its whole region through
+    // `for(...) echo(...) linear_extrude(...) region(...)` and came out as
+    // labels with nothing under them.
+    const char* cases[] = {
+        "echo(\"hi\") cube(10);",
+        "echo(\"hi\") { cube(10); }",
+        "echo(\"a\") echo(\"b\") cube(10);",
+        "for (i = [0:1]) echo(\"hi\") translate([i*20,0,0]) cube(10);",
+        "union() { echo(\"hi\") cube(10); }",
+    };
+    for (const char* src : cases) {
+        Evaluated e = evalSrc(src);
+        const bool anyVolume = std::any_of(
+            e.bodies.begin(), e.bodies.end(),
+            [](const ColoredBody& b) { return b.body && !b.body->IsEmpty(); });
+        EXPECT_TRUE(anyVolume) << src;
+    }
+}
+
+TEST(EchoStatement, StillEchoesAndKeepsArgumentsSeparateFromChildren) {
+    std::string captured;
+    Evaluated e = evalSrc("echo(\"fired\") cube(2);",
+                          [&](const std::string& msg) { captured = msg; });
+    EXPECT_EQ(captured, "ECHO: \"fired\"");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
+}
+
 TEST(Intersection, EchoInADisabledStatementStillFires) {
     // echo() runs during resolve, so its side effect happens whatever the
     // geometry does. The result is the cube(2): neither the disabled
@@ -1760,4 +1792,5 @@ TEST(RangeDirection, EveryRangeBuildingConstructWarns) {
     EXPECT_TRUE(hasWarning(warningsFrom("function f() = [5:0];\nx = f();"), kGreater))
         << "returned from a function";
 }
+
 

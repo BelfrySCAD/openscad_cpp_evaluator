@@ -241,9 +241,17 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
         case oscad::NodeKind::ModularLet:
             evalLetBlock(static_cast<const oscad::ModularLet&>(node), ctx);
             return;
-        case oscad::NodeKind::ModularEcho:
-            doEcho(static_cast<const oscad::ModularEcho&>(node).arguments, ctx);
+        case oscad::NodeKind::ModularEcho: {
+            // `echo("x") cube();` echoes AND renders the cube, the way the
+            // reference does and the way ModularAssert already did here.
+            // Dropping the children silently lost geometry: BOSL2's
+            // debug_region() draws its whole region through
+            // `for(...) echo(...) linear_extrude(...) region(...)`.
+            const auto& e = static_cast<const oscad::ModularEcho&>(node);
+            doEcho(e.arguments, ctx);
+            if (!e.children.empty()) evalChildren(e.children, ctx);
             return;
+        }
         case oscad::NodeKind::ModularAssert:
             evalAssertStatement(static_cast<const oscad::ModularAssert&>(node), ctx);
             return;

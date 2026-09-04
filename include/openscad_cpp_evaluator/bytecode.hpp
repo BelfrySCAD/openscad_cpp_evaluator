@@ -15,6 +15,7 @@ class FunctionLiteral;
 class ModuleDeclaration;
 class ModularCall;
 class ModularAssert;
+class ModularEcho;
 class Expression;
 } // namespace oscad
 
@@ -868,6 +869,11 @@ struct CompiledChunk {
     // unused and misleadingly defaulted.
     struct EchoSite {
         std::vector<std::optional<std::string>> argNames;
+        // The ModularEcho statement, when this site came from one -- an
+        // `echo(...) cube();` renders its child after echoing, exactly as
+        // AssertSite::node does for `assert(...) cube();`. Null for the
+        // EXPRESSION form (`echo(...) 1+1`), which has no children.
+        const oscad::ModularEcho* node = nullptr;
     };
 
     // One Op::CallModule site -- a ModularCall statically resolved (at

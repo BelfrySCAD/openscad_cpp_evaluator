@@ -231,14 +231,31 @@ top-level 2D primitive/projection() script had been silently unexportable via th
 Fixed by porting `toRenderableBodies()` (`colored_body.hpp`/`.cpp`) and calling it from the CLI right
 before export, matching the reference's own call site exactly.
 
-`ColoredBody::sectionZ` rides alongside for the same reason. A `manifold::CrossSection` is purely
-2D, so `down(1) square(10)` had nowhere to put the `-1` and silently dropped it — and that is not
-cosmetic: BOSL2 layers 2D overlays by pushing one down (isosurface's `contour()` Example 1 puts a
-blue backdrop below a green contour), and with the offset lost the two slabs became exactly
-coplanar, z-fought, and whichever drew last covered the other completely. `generateTransform`
-accumulates the z of any `translate` applied to a section, and `toRenderableBodies()` translates the
-extruded slab by it. Only translation is carried — a 2D shape under a 3D *rotation* still loses it,
-which would need a full matrix per section and nothing has asked for that yet.
+`ColoredBody::sectionXform` rides alongside for the same reason. A `manifold::CrossSection` is
+purely 2D, so `down(1) square(10)` had nowhere to put the `-1` and `rotate([55,0,25]) text("Foo")`
+had nowhere to put the rotation — both were silently dropped, and neither is cosmetic: BOSL2 layers
+2D overlays by pushing one down (isosurface's `contour()` Example 1 puts a blue backdrop below a
+green contour, and the two slabs became exactly coplanar and z-fought), and turns 2D labels to face
+the camera with `rotate($vpr)` (skin's style figure, which came out lying flat and reading as a blob
+once the preview slab became a full unit tall). `generateTransform` accumulates whatever the
+CrossSection cannot hold into that matrix and `toRenderableBodies()` applies it to the extruded
+slab.
+
+Two rules keep the ordering honest. A transform the CrossSection *can* hold still goes into it, so
+2D booleans and `offset()` keep operating on real 2D geometry — but only while the carried matrix is
+still identity, since applying an outer transform to the section after an out-of-plane one would
+silently reorder them. A pure `translate` is the one exception: while nothing has yet rotated or
+scaled the section, its x/y goes into the section and only its z rides along, because translations
+commute and that keeps `down(1) square(10)` a real 2D shape. `resize()` is carried by neither — the
+reference passes 2D children through it unchanged.
+
+The same "geometry Manifold cannot hold" problem applies to `ColoredBody::rawMesh`, the raw triangles
+of a mesh Manifold rejected (an open surface — a height field, a partial `vnf_vertex_array`). Those
+were left where they were built, so `grid_copies(...) vnf_polyhedron(<open surface>)` stacked every
+copy at the origin and BOSL2's skin() style figure showed one shape where the reference shows seven.
+`transformMatrix3d` (transforms.cpp) gives the affine matrix for a transform and
+`generateTransform` applies it to those vertices too; `resize` returns nullopt there, being a
+function of a bounding box a display-only body does not have.
 
 **Font support**: a `FontProvider` abstract interface (`font_provider.hpp`: `resolveFont`/
 `metrics`/`shapeText`/`glyphInkBounds`/`glyphOutline`) with `FreetypeFontProvider` as the built-in
