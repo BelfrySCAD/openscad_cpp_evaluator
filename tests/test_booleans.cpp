@@ -731,7 +731,6 @@ TEST(MixedDimensions, ATranslatedTwoDeeShapeKeepsItsZ) {
     Evaluated e = evalSrc("translate([0,0,-1]) square(10, center=true);");
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_DOUBLE_EQ(e.bodies[0].sectionZ, -1.0);
 
     const std::vector<ColoredBody> renderable = toRenderableBodies(e.bodies);
     ASSERT_EQ(renderable.size(), 1u);
@@ -740,23 +739,115 @@ TEST(MixedDimensions, ATranslatedTwoDeeShapeKeepsItsZ) {
     EXPECT_NEAR(box.min.z, -1.0, 1e-9) << "the extruded slab sits where it was moved to";
 }
 
-TEST(MixedDimensions, TwoDeeZOffsetsAccumulateAndDefaultToZero) {
-    Evaluated flat = evalSrc("square(10);");
-    ASSERT_EQ(flat.bodies.size(), 1u);
-    EXPECT_DOUBLE_EQ(flat.bodies[0].sectionZ, 0.0);
+TEST(MixedDimensions, ARotatedTwoDeeShapeLeavesTheXYPlane) {
+    // `rotate([90,0,0]) square(10)` stands the square up. A CrossSection
+    // cannot hold that either, and dropping it left BOSL2's `rotate($vpr)`
+    // labels lying flat -- which read as blobs once the preview slab became
+    // a full unit tall rather than a 1e-3 sliver.
+    Evaluated e = evalSrc("rotate([90,0,0]) square(10);");
+    const std::vector<ColoredBody> renderable = toRenderableBodies(e.bodies);
+    ASSERT_EQ(renderable.size(), 1u);
+    const manifold::Box box = renderable[0].body->BoundingBox();
+    // Standing up: 10 tall in Z, and flat (the slab thickness) in Y.
+    EXPECT_NEAR(box.max.z - box.min.z, 10.0, 1e-6);
+    EXPECT_NEAR(box.max.y - box.min.y, 1.0, 1e-6) << "the 1-unit slab is now the Y extent";
+    EXPECT_NEAR(box.max.x - box.min.x, 10.0, 1e-6);
+}
 
-    Evaluated stacked = evalSrc(
-        "translate([0,0,2]) translate([0,0,3]) square(10);");
-    ASSERT_EQ(stacked.bodies.size(), 1u);
-    EXPECT_DOUBLE_EQ(stacked.bodies[0].sectionZ, 5.0);
+TEST(MixedDimensions, TwoDeeTransformsComposeInSourceOrder) {
+    // The outer translate must act AFTER the rotation, not before it: with
+    // the rotation carried separately, applying a later transform to the
+    // CrossSection would silently reorder them.
+    Evaluated e = evalSrc("translate([0,0,7]) rotate([90,0,0]) square(10);");
+    const std::vector<ColoredBody> renderable = toRenderableBodies(e.bodies);
+    ASSERT_EQ(renderable.size(), 1u);
+    const manifold::Box box = renderable[0].body->BoundingBox();
+    EXPECT_NEAR(box.min.z, 7.0, 1e-6) << "lifted after standing up";
+    EXPECT_NEAR(box.max.z, 17.0, 1e-6);
+}
 
-    // x/y still go into the CrossSection itself, not the offset.
+TEST(MixedDimensions, PlanarTransformsStillGoIntoTheCrossSection) {
+    // Anything the CrossSection CAN hold still goes there, so 2D booleans
+    // and offset() keep working on real 2D geometry.
     Evaluated moved = evalSrc("translate([4,5,6]) square(10);");
     ASSERT_EQ(moved.bodies.size(), 1u);
-    EXPECT_DOUBLE_EQ(moved.bodies[0].sectionZ, 6.0);
+    ASSERT_TRUE(moved.bodies[0].section.has_value());
     const manifold::Rect r = moved.bodies[0].section->Bounds();
-    EXPECT_NEAR(r.min.x, 4.0, 1e-9);
+    EXPECT_NEAR(r.min.x, 4.0, 1e-9) << "x/y went into the section itself";
     EXPECT_NEAR(r.min.y, 5.0, 1e-9);
+
+    // ...and the z rode along, so the extruded slab still lands at 6.
+    const std::vector<ColoredBody> renderable = toRenderableBodies(moved.bodies);
+    EXPECT_NEAR(renderable[0].body->BoundingBox().min.z, 6.0, 1e-9);
+
+    // Two stacked z offsets accumulate rather than the last one winning.
+    Evaluated stacked = evalSrc("translate([0,0,2]) translate([0,0,3]) square(10);");
+    const std::vector<ColoredBody> r2 = toRenderableBodies(stacked.bodies);
+    EXPECT_NEAR(r2[0].body->BoundingBox().min.z, 5.0, 1e-9);
+}
+
+// -- transforms on a display-only (open surface) body ---------------------
+
+namespace {
+// A cube with one face left off: Manifold rejects it, so it survives only
+// as ColoredBody::rawMesh -- the shape that ignored every transform.
+constexpr const char* kOpenBox =
+    "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],"
+    "                   [0,0,10],[10,0,10],[10,10,10],[0,10,10]],"
+    " faces=[[0,1,2,3],[4,5,1,0],[5,6,2,1],[6,7,3,2],[7,4,0,3]]);";
+
+std::array<double, 6> rawBounds(const Evaluated& e) {
+    std::array<double, 6> b{1e30, 1e30, 1e30, -1e30, -1e30, -1e30};
+    for (const ColoredBody& cb : e.bodies) {
+        if (!cb.rawMesh) continue;
+        const auto& mesh = *cb.rawMesh;
+        for (size_t i = 0; i + 2 < mesh.vertProperties.size(); i += mesh.numProp) {
+            for (int k = 0; k < 3; ++k) {
+                b[static_cast<size_t>(k)] = std::min(b[static_cast<size_t>(k)],
+                                                      static_cast<double>(mesh.vertProperties[i + static_cast<size_t>(k)]));
+                b[static_cast<size_t>(k + 3)] = std::max(b[static_cast<size_t>(k + 3)],
+                                                         static_cast<double>(mesh.vertProperties[i + static_cast<size_t>(k)]));
+            }
+        }
+    }
+    return b;
+}
+} // namespace
+
+TEST(DisplayOnlyTransforms, RawTrianglesFollowTheSameTransformAsASolid) {
+    // The open box and a closed cube occupy the same 10-cube, so after the
+    // SAME transform their bounding boxes must still agree. They did not:
+    // the raw triangles were left where they were built, so every copy of
+    // an open surface stacked at the origin -- BOSL2's skin() style figure
+    // showed one shape where the reference shows seven.
+    const char* xforms[] = {
+        "translate([5,-3,2])",
+        "rotate([30,40,50])",
+        "scale([2,0.5,1.5])",
+        "mirror([1,1,0])",
+        "multmatrix([[1,0.2,0,4],[0,1,0,5],[0,0,1,6]])",
+        "rotate(35, v=[1,2,3])",
+    };
+    for (const char* x : xforms) {
+        Evaluated open = evalSrc(std::string(x) + " " + kOpenBox);
+        Evaluated solid = evalSrc(std::string(x) + " cube(10);");
+        ASSERT_EQ(solid.bodies.size(), 1u) << x;
+        const manifold::Box want = solid.bodies[0].body->BoundingBox();
+        const std::array<double, 6> got = rawBounds(open);
+        EXPECT_NEAR(got[0], want.min.x, 1e-4) << x;
+        EXPECT_NEAR(got[1], want.min.y, 1e-4) << x;
+        EXPECT_NEAR(got[2], want.min.z, 1e-4) << x;
+        EXPECT_NEAR(got[3], want.max.x, 1e-4) << x;
+        EXPECT_NEAR(got[4], want.max.y, 1e-4) << x;
+        EXPECT_NEAR(got[5], want.max.z, 1e-4) << x;
+    }
+}
+
+TEST(DisplayOnlyTransforms, EachCopyLandsSomewhereDifferent) {
+    Evaluated e = evalSrc(std::string("for (i = [0:2]) translate([20*i, 0, 0]) ") + kOpenBox);
+    const std::array<double, 6> b = rawBounds(e);
+    EXPECT_NEAR(b[0], 0.0, 1e-6);
+    EXPECT_NEAR(b[3], 50.0, 1e-6) << "three copies 20 apart span 0..50, not one box";
 }
 
 TEST(MixedDimensions, UniformChildrenAreUntouched) {

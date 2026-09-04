@@ -37,10 +37,10 @@ std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodi
         if (!cb.body && cb.section) {
             ColoredBody flat;
             flat.body = manifold::Manifold::Extrude(cb.section->ToPolygons(), kTopLevel2dHeight);
-            // Put it back where a 3D translate moved it -- the CrossSection
-            // could not hold that. See ColoredBody::sectionZ.
-            if (cb.sectionZ != 0.0)
-                flat.body = flat.body->Translate(manifold::vec3(0, 0, cb.sectionZ));
+            // Put it back where the transforms a CrossSection could not
+            // hold would have placed it -- a Z offset, a rotation out of
+            // the plane. See ColoredBody::sectionXform.
+            flat.body = flat.body->Transform(cb.sectionXform);
             flat.color = cb.color;
             flat.flatPreview = true;
             flat.role = cb.role;
