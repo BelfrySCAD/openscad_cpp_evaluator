@@ -165,9 +165,13 @@ jobs:
   publish-pypi:
     needs: [publish-testpypi]
     runs-on: ubuntu-latest
-    # Requires a "pypi" GitHub Environment with a required-reviewer
-    # protection rule, so this job pauses for manual approval after the
-    # TestPyPI publish above has been verified.
+    # The "pypi" environment carries no protection rules, so a tag runs
+    # straight through TestPyPI to PyPI with nothing to stop it -- and a
+    # PyPI upload cannot be undone or replaced at the same version. Adding
+    # a required reviewer to the environment reinstates that brake; GitHub
+    # permits approving your own deployment unless "Prevent self-review"
+    # is ticked. Kept regardless of rules: token auth aside, the
+    # environment is where a publishing credential would be scoped.
     environment: pypi
     steps:
       - uses: actions/download-artifact@v8
