@@ -373,7 +373,8 @@ nb::list exportModelPy(const std::string& path, const Geometry& geom, const std:
 }
 
 nb::object evaluate(const std::string& path, nb::dict viewportParams,
-                     std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile) {
+                     std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile,
+                     bool generate) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
@@ -391,9 +392,12 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, logFn);
             oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
-            bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
+            bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp, generate));
             collectIdSpans(ev, idSpans);
-            csgTree = std::move(ev.csgTree);
+            // Only moved out when it will actually be converted below --
+            // csgTreeToPy() walks the whole tree building Python objects,
+            // which a resolve-only caller has no use for.
+            if (generate) csgTree = std::move(ev.csgTree);
             profileResult = std::move(ev.profileResult);
             {
                 nb::gil_scoped_acquire g; // building Python objects needs the GIL back
@@ -792,8 +796,11 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "rather than restated here, so the Python side cannot drift from what can actually be written.");
 
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
-          nb::arg("profile") = false,
-          "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).");
+          nb::arg("profile") = false, nb::arg("generate") = true,
+          "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).\n"
+          "generate=False stops after the resolve pass: the script runs and reports everything "
+          "it normally would, but no Manifold geometry is built, and neither bodies nor csg_tree "
+          "are populated.");
     m.def("parse_decls", &parseDecls, nb::arg("path"),
           "Parse a .scad file; return top-level declaration (namespace, name, start, end, line, column, origin) tuples.");
     m.def("strip_slivers", &stripSliversPy, nb::arg("verts"), nb::arg("tris"),

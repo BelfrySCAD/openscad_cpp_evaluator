@@ -178,15 +178,24 @@ public:
     // forcing it to expose a separate `_root_ctx` escape hatch for this)
     // this port's `ctx` is always caller-owned already. Mirrors the
     // reference's `evaluate(nodes, root_scope, viewport_params=None)`.
+    //
+    // `generate = false` stops after the resolve pass: the CSG tree is built
+    // and stashed in `csgTree` as usual, but no Manifold work happens and an
+    // empty body list comes back. For a caller that only wants to know
+    // whether a script RUNS -- a docs check, a syntax/semantics smoke test --
+    // that skips the geometry without skipping the language. Mirrors what the
+    // reference does for `openscad -o out.term`.
     std::vector<ColoredBody> evaluate(const std::vector<std::unique_ptr<oscad::ASTNode>>& nodes, EvalContext& ctx,
-                                       const std::unordered_map<std::string, Value>& viewportParams = {});
+                                       const std::unordered_map<std::string, Value>& viewportParams = {},
+                                       bool generate = true);
     // Same, but over a non-owning pointer list -- needed by `use <file>`
     // resolution (eval_use.hpp/.cpp), whose "processed nodes" list combines
     // declarations owned by more than one independently-owned AST vector,
     // so it can't be represented as a single vector<unique_ptr<ASTNode>>.
     // Mirrors evalChildren's existing dual-overload shape.
     std::vector<ColoredBody> evaluate(const std::vector<const oscad::ASTNode*>& nodes, EvalContext& ctx,
-                                       const std::unordered_map<std::string, Value>& viewportParams = {});
+                                       const std::unordered_map<std::string, Value>& viewportParams = {},
+                                       bool generate = true);
 
     // Resolve pass: resets idToNode/idToColor and the tree-build stack,
     // then walks `nodes` via evalChildren(), returning the completed (but
@@ -654,7 +663,8 @@ private:
     std::vector<std::unique_ptr<CSGNode>> resolveTreeImpl(const NodeList& nodes, EvalContext& ctx);
     template <typename NodeList>
     std::vector<ColoredBody> evaluateImpl(const NodeList& nodes, EvalContext& ctx,
-                                           const std::unordered_map<std::string, Value>& viewportParams);
+                                           const std::unordered_map<std::string, Value>& viewportParams,
+                                           bool generate);
 
     // Shared bottom-up generate walk behind generateTree()/generatePartialTree()
     // -- see generatePartialTree()'s own doc comment and this function's

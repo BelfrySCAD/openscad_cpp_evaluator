@@ -492,7 +492,19 @@ class Evaluator:
         self.dyn = {}
         self.dyn_explicit = set()
 
-    def evaluate(self, source_path: str, viewport_params: Optional[dict] = None):
+    def evaluate(self, source_path: str, viewport_params: Optional[dict] = None,
+                 generate: bool = True):
+        """Run `source_path` and return (bodies, id_to_node).
+
+        `generate=False` stops after the resolve pass. The script still runs
+        in full, so everything it echoes, warns or errors about is reported
+        exactly as usual -- but no Manifold geometry is built, and `bodies`
+        and `csg_tree` both come back empty. For a caller that only wants to
+        know whether a script RUNS (a docs check, a smoke test) that skips
+        the geometry without skipping the language.
+
+        Ignored on the debugger path, which has no geometry handle anyway.
+        """
         vp = viewport_params or {}
         try:
             if self._debug_hook is not None:
@@ -512,7 +524,7 @@ class Evaluator:
             else:
                 (body_dicts, echoes, id_spans, csg_tree, profile_result, dyn,
                  dyn_explicit, geometry) = _ext.evaluate(
-                    source_path, vp, self._manifold_cache, self._profile)
+                    source_path, vp, self._manifold_cache, self._profile, generate)
                 # The evaluated bodies, still on the C++ side. Stashed like
                 # csg_tree/profile_result rather than returned, so
                 # evaluate()'s own 2-tuple result is unchanged -- callers

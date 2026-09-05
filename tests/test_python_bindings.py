@@ -405,3 +405,47 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_evaluate_generate_false_skips_geometry(tmp_path):
+    """generate=False runs the script but builds no Manifold geometry.
+
+    The point of the flag is a docs/smoke check that answers "does this
+    script run?" without paying for the solids, matching what the reference
+    does for `openscad -o out.term`.
+    """
+    from openscad_cpp_evaluator import Evaluator
+
+    src = tmp_path / "m.scad"
+    src.write_text("echo(\"ran\");\ndifference() { cube(10, center=true); sphere(6.4); }\n")
+
+    echoes = []
+    ev = Evaluator(echo_fn=echoes.append)
+    bodies, _ids = ev.evaluate(str(src), {}, generate=False)
+
+    # The language ran: the echo came out.
+    assert any("ran" in e for e in echoes)
+    # The geometry did not.
+    assert list(bodies) == []
+    assert ev.csg_tree == []
+
+    # And the same file with generate left alone still produces geometry,
+    # so the flag is what made the difference, not the script.
+    echoes2 = []
+    ev2 = Evaluator(echo_fn=echoes2.append)
+    bodies2, _ids2 = ev2.evaluate(str(src), {})
+    assert any("ran" in e for e in echoes2)
+    assert len(list(bodies2)) > 0
+    assert ev2.csg_tree != []
+
+
+def test_evaluate_generate_false_still_reports_script_errors(tmp_path):
+    """Resolve-only is still a real check: a script that fails, fails."""
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError
+
+    src = tmp_path / "bad.scad"
+    src.write_text("assert(false, \"nope\");\ncube(1);\n")
+
+    with pytest.raises(EvalError):
+        Evaluator(echo_fn=lambda _m: None).evaluate(str(src), {}, generate=False)

@@ -244,7 +244,8 @@ std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTree(const std::vector<c
 
 template <typename NodeList>
 std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalContext& ctx,
-                                                  const std::unordered_map<std::string, Value>& viewportParams) {
+                                                  const std::unordered_map<std::string, Value>& viewportParams,
+                                                  bool generate) {
     // Seeds ctx.dyn directly, deliberately not touching ctx.dynExplicit --
     // see this method's own doc comment in evaluator.hpp for why that
     // distinction matters to a caller.
@@ -260,7 +261,10 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     std::vector<std::unique_ptr<CSGNode>> tree = resolveTreeImpl(nodes, ctx);
     rerootAtShowOnly(tree);
     const Clock::time_point resolveEnd = profiling_ ? Clock::now() : Clock::time_point{};
-    std::vector<ColoredBody> result = generateTree(tree);
+    // generate = false is the resolve-only path: the language has run and
+    // the tree is built, so anything the script itself gets wrong has already
+    // been reported -- only the Manifold work is skipped.
+    std::vector<ColoredBody> result = generate ? generateTree(tree) : std::vector<ColoredBody>{};
     const Clock::time_point generateEnd = profiling_ ? Clock::now() : Clock::time_point{};
     csgTree = std::move(tree); // stash for caller inspection -- see the member's own doc comment
 
@@ -332,13 +336,15 @@ void Evaluator::rerootAtShowOnly(std::vector<std::unique_ptr<CSGNode>>& tree) {
 }
 
 std::vector<ColoredBody> Evaluator::evaluate(const std::vector<std::unique_ptr<oscad::ASTNode>>& nodes, EvalContext& ctx,
-                                              const std::unordered_map<std::string, Value>& viewportParams) {
-    return evaluateImpl(nodes, ctx, viewportParams);
+                                              const std::unordered_map<std::string, Value>& viewportParams,
+                                              bool generate) {
+    return evaluateImpl(nodes, ctx, viewportParams, generate);
 }
 
 std::vector<ColoredBody> Evaluator::evaluate(const std::vector<const oscad::ASTNode*>& nodes, EvalContext& ctx,
-                                              const std::unordered_map<std::string, Value>& viewportParams) {
-    return evaluateImpl(nodes, ctx, viewportParams);
+                                              const std::unordered_map<std::string, Value>& viewportParams,
+                                              bool generate) {
+    return evaluateImpl(nodes, ctx, viewportParams, generate);
 }
 
 } // namespace oscadeval
