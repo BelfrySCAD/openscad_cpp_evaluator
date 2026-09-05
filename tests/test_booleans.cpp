@@ -618,41 +618,53 @@ std::vector<std::string> dimWarnings(const std::string& code) {
 }
 } // namespace
 
-TEST(MixedDimensions, ThreeDeeFirstUnionDoesNotCrash) {
-    // The regression that started this: a body-then-section group.
-    Evaluated e = evalSrc("union() { cube(1); square(4); }");
-    ASSERT_EQ(e.bodies.size(), 1u);
-    ASSERT_TRUE(e.bodies[0].body.has_value());
-    EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-9);
+// Both dimensions survive a union or a transform, in either order, because
+// the reference keeps both -- `translate([9,3]) { cube(10); text("hi"); }`
+// renders the cube AND the flat text there, which is how BOSL2's joiners
+// figure annotates a part. Checked by running the reference, not assumed.
+TEST(MixedDimensions, UnionKeepsBothDimensions) {
+    for (const char* src : {"union() { cube(1); square(4); }",
+                            "union() { square(4); cube(1); }"}) {
+        Evaluated e = evalSrc(src);
+        ASSERT_EQ(e.bodies.size(), 2u) << src;
+        const ColoredBody* solid = nullptr;
+        const ColoredBody* flat = nullptr;
+        for (const ColoredBody& b : e.bodies) {
+            if (b.body) solid = &b;
+            if (b.section) flat = &b;
+        }
+        ASSERT_TRUE(solid) << src;
+        ASSERT_TRUE(flat) << src;
+        EXPECT_NEAR(solid->body->Volume(), 1.0, 1e-9) << src;
+        EXPECT_NEAR(flat->section->Area(), 16.0, 1e-9) << src;
+    }
 }
 
-TEST(MixedDimensions, TwoDeeFirstKeepsTheTwoDeeChild) {
-    Evaluated e = evalSrc("union() { square(4); cube(1); }");
-    ASSERT_EQ(e.bodies.size(), 1u);
-    ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 16.0, 1e-9);
+TEST(MixedDimensions, TransformKeepsBothDimensions) {
+    // The transform maps over its bodies rather than combining them, so the
+    // mix reaches nothing that has to choose.
+    Evaluated e = evalSrc("translate([0,0,0]) { square(4); cube(1); }");
+    ASSERT_EQ(e.bodies.size(), 2u);
 }
 
-TEST(MixedDimensions, GroupWarnsTwice) {
-    EXPECT_EQ(dimWarnings("union() { square(4); cube(1); }"),
-              (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation",
-                                        "WARNING: Mixing 2D and 3D objects is not supported"}));
-    EXPECT_EQ(dimWarnings("union() { cube(1); square(4); }"),
-              (std::vector<std::string>{"WARNING: Ignoring 2D child object for 3D operation",
-                                        "WARNING: Mixing 2D and 3D objects is not supported"}));
+TEST(MixedDimensions, KeepingBothIsSilent) {
+    // The reference warns for none of these -- verified by running it.
+    EXPECT_TRUE(dimWarnings("union() { square(4); cube(1); }").empty());
+    EXPECT_TRUE(dimWarnings("union() { cube(1); square(4); }").empty());
+    EXPECT_TRUE(dimWarnings("translate([0,0,0]) { square(4); cube(1); }").empty());
+    EXPECT_TRUE(dimWarnings("scale(2) { square(4); cube(1); }").empty());
+    EXPECT_TRUE(dimWarnings("color(\"red\") { square(4); cube(1); }").empty());
+    EXPECT_TRUE(dimWarnings("for (i = [0:0]) { square(4); cube(1); }").empty());
+    EXPECT_TRUE(dimWarnings("if (true) { square(4); cube(1); }").empty());
 }
 
-TEST(MixedDimensions, TransformsAndControlFlowAreGroupsToo) {
+TEST(MixedDimensions, CombiningOperationsStillPickOne) {
+    // These collapse to a single result, so a mix has no meaning and the
+    // odd child is still dropped, with both warnings.
     const std::vector<std::string> expected{"WARNING: Ignoring 3D child object for 2D operation",
                                             "WARNING: Mixing 2D and 3D objects is not supported"};
-    EXPECT_EQ(dimWarnings("translate([0,0,0]) { square(4); cube(1); }"), expected);
-    EXPECT_EQ(dimWarnings("scale(2) { square(4); cube(1); }"), expected);
-    EXPECT_EQ(dimWarnings("color(\"red\") { square(4); cube(1); }"), expected);
-    // for/if are transparent -- their children land at the top level, so
-    // they get the top level's keep-both treatment rather than a group's.
-    const std::vector<std::string> topLevel{"WARNING: Mixing 2D and 3D objects is not supported"};
-    EXPECT_EQ(dimWarnings("for (i = [0:0]) { square(4); cube(1); }"), topLevel);
-    EXPECT_EQ(dimWarnings("if (true) { square(4); cube(1); }"), topLevel);
+    EXPECT_EQ(dimWarnings("difference() { square(4); cube(1); }"), expected);
+    EXPECT_EQ(dimWarnings("intersection() { square(4); cube(1); }"), expected);
     EXPECT_EQ(dimWarnings("hull() { square(4); cube(1); }"), expected);
 }
 
@@ -678,15 +690,16 @@ TEST(MixedDimensions, RoofWarnsForNeither) {
     EXPECT_TRUE(dimWarnings("roof() { square(4); cube(1); }").empty());
 }
 
-TEST(MixedDimensions, TopLevelWarnsButKeepsBothDimensions) {
-    // The top level warns like any other group, but drops NOTHING. A real
-    // group has to pick one dimension because generateCsg builds a single
-    // result from it; the top level just hands back a list, and the
-    // reference's own preview draws 2D and 3D side by side. Dropping here
+TEST(MixedDimensions, TopLevelKeepsBothDimensionsSilently) {
+    // The top level drops NOTHING, and says nothing either: the reference
+    // is silent for `square(4); cube(1);` -- verified by running it -- and
+    // it draws 2D and 3D side by side in its own preview. Dropping here
     // silently lost the whole of a BOSL2 debug overlay (debug_bezier() of a
-    // 2D bezier is entirely 2D) whenever a 3D shape shared the script.
-    EXPECT_EQ(dimWarnings("square(4); cube(1);"),
-              (std::vector<std::string>{"WARNING: Mixing 2D and 3D objects is not supported"}));
+    // 2D bezier is entirely 2D) whenever a 3D shape shared the script; the
+    // warning went when union and the transforms learned to keep both, so
+    // that a docs figure annotating a 3D part with 2D text is not reported
+    // as a mistake.
+    EXPECT_TRUE(dimWarnings("square(4); cube(1);").empty());
     Evaluated e = evalSrc("square(4); cube(1);");
     ASSERT_EQ(e.bodies.size(), 2u);
     EXPECT_TRUE(e.bodies[0].section.has_value()) << "the 2D shape survived";
