@@ -129,6 +129,20 @@ enum class DimRule {
     None,    // no dimension diagnostics at all
 };
 
+// Nodes that hand their children on as a list instead of combining them
+// into one result, so a mixed 2D/3D list reaches nothing that has to pick a
+// single dimension. generateTransform and generateColor map over the
+// bodies; generateCsg's union keeps a 3D and a 2D accumulator side by side.
+//
+// difference and intersection are deliberately absent: subtracting or
+// intersecting across dimensions has no meaning, and they still collapse to
+// one result. hull and minkowski likewise build a single hull.
+bool keepsMixedDimensions(const std::string& kind) {
+    return kind == "union" || kind == "color" || kind == "translate" ||
+           kind == "rotate" || kind == "scale" || kind == "mirror" ||
+           kind == "multmatrix" || kind == "resize";
+}
+
 DimRule dimRuleFor(const std::string& kind) {
     if (kind == "linear_extrude" || kind == "rotate_extrude" || kind == "offset") return DimRule::Only2D;
     if (kind == "projection") return DimRule::Only3D;
@@ -168,7 +182,11 @@ void Evaluator::applyDimensionRules(CSGNode& node) {
     std::vector<CSGNode*> kids;
     kids.reserve(node.children.size());
     for (const std::unique_ptr<CSGNode>& c : node.children) kids.push_back(c.get());
-    applyDimensionRulesTo(kids, static_cast<int>(rule));
+    // Only a Group-rule node can keep a mix. linear_extrude and friends take
+    // one dimension by definition, so a wrong-dimension child there is still
+    // dropped with its warning.
+    const bool keepMixed = rule == DimRule::Group && keepsMixedDimensions(node.kind);
+    applyDimensionRulesTo(kids, static_cast<int>(rule), keepMixed);
 }
 
 // `keepMixed` warns about a mixed group but drops nothing -- the top level's
@@ -199,7 +217,12 @@ void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int
                 continue;
             }
             const oscad::Position* pos = child->node ? &child->node->position() : nullptr;
-            if (rule == DimRule::Group && !warnedMixing) {
+            // Silent when both are kept: the reference says nothing for
+            // `cube(1); square(4);`, `translate(...) { ... }` or `union()
+            // { ... }` -- checked by running it -- and a warning here would
+            // fail any docs example that legitimately draws a 2D annotation
+            // beside a 3D part.
+            if (rule == DimRule::Group && !keepMixed && !warnedMixing) {
                 warn("Mixing 2D and 3D objects is not supported", pos);
                 warnedMixing = true;
             }

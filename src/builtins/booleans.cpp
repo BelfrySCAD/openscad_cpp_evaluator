@@ -214,7 +214,15 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
             : &std::get<ListPtr>(emptyIsAGroupIt->second)->items;
 
     std::vector<ColoredBody> allBg, allHi, allSo, allDo;
-    std::optional<ColoredBody> csgResult;
+    // Two accumulators, one per dimension. union() may legitimately carry
+    // both -- `translate(...) { part(); text("label"); }` is how a docs
+    // figure annotates a 3D part, and the reference draws both -- and a
+    // single optional that switched between body and section is exactly
+    // what used to be dereferenced empty when a group changed dimension
+    // part-way. difference and intersection still see one dimension only:
+    // applyDimensionRules drops the mismatch before it gets here, so for
+    // them just one of these is ever populated.
+    std::optional<ColoredBody> res3d, res2d;
     size_t idx = 0;
 
     size_t stmtIndex = 0;
@@ -273,50 +281,56 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
             // discards while no positive operand has been established yet;
             // union just skips the empty contributor and keeps going.
             if (op == "intersection") {
-                csgResult.reset();
+                res3d.reset();
+                res2d.reset();
                 break;
             }
-            if (op == "difference" && !csgResult) break;
+            if (op == "difference" && !res3d && !res2d) break;
             continue;
         }
 
+        // Each dimension accumulates on its own, so a statement holding
+        // both contributes to both rather than the 2D half falling off the
+        // end of an if/else.
         if (!bodies3d.empty()) {
             manifold::Manifold grp = *bodies3d.front().body;
             for (size_t i = 1; i < bodies3d.size(); ++i) grp = grp + *bodies3d[i].body;
-            if (!csgResult) {
+            if (!res3d) {
                 ColoredBody cb;
                 cb.body = std::move(grp);
                 cb.color = bodies3d.front().color;
-                csgResult = std::move(cb);
+                res3d = std::move(cb);
             } else if (op == "union") {
-                csgResult->body = *csgResult->body + grp;
+                res3d->body = *res3d->body + grp;
             } else if (op == "difference") {
-                csgResult->body = *csgResult->body - grp;
+                res3d->body = *res3d->body - grp;
             } else if (op == "intersection") {
-                csgResult->body = *csgResult->body ^ grp;
+                res3d->body = *res3d->body ^ grp;
             }
-        } else {
+        }
+        if (!sections2d.empty()) {
             manifold::CrossSection grp = *sections2d.front().section;
             for (size_t i = 1; i < sections2d.size(); ++i) grp = grp + *sections2d[i].section;
-            if (!csgResult) {
+            if (!res2d) {
                 ColoredBody cb;
                 cb.section = std::move(grp);
                 cb.color = sections2d.front().color;
-                csgResult = std::move(cb);
+                res2d = std::move(cb);
             } else if (op == "union") {
-                csgResult->section = *csgResult->section + grp;
+                res2d->section = *res2d->section + grp;
             } else if (op == "difference") {
-                csgResult->section = *csgResult->section - grp;
+                res2d->section = *res2d->section - grp;
             } else if (op == "intersection") {
-                csgResult->section = *csgResult->section ^ grp;
+                res2d->section = *res2d->section ^ grp;
             }
         }
     }
 
-    if (csgResult && csgResult->body) attachTriColors(ev, *csgResult);
+    if (res3d && res3d->body) attachTriColors(ev, *res3d);
 
     std::vector<ColoredBody> result;
-    if (csgResult) result.push_back(std::move(*csgResult));
+    if (res3d) result.push_back(std::move(*res3d));
+    if (res2d) result.push_back(std::move(*res2d));
     result.insert(result.end(), allBg.begin(), allBg.end());
     result.insert(result.end(), allHi.begin(), allHi.end());
     result.insert(result.end(), allSo.begin(), allSo.end());
