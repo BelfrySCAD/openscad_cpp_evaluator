@@ -622,7 +622,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         if (!v) v = ctx.let_->find(cap.name);
                         capturedTrail->set(cap.name, v ? *v : Value{});
                     }
-                    auto closure = std::make_shared<const Closure>(Closure{site.node, capturedTrail});
+                    auto closure = std::make_shared<const Closure>(Closure{site.node, capturedTrail, ctx.scopeOf(*site.node)});
                     for (const std::string* selfName : selfNames) {
                         capturedTrail->set(*selfName, Value{closure});
                     }
@@ -810,7 +810,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
                         if (calleeChunk) {
-                            const oscad::Scope* fnScope = site.decl->scope() ? site.decl->scope() : ctx.scope;
+                            const oscad::Scope* fnScope = ctx.scopeOf(*site.decl) ? ctx.scopeOf(*site.decl) : ctx.scope;
                             pushBracketedCallFrame(ev, *calleeChunk, *site.decl, *site.decl->expr, site.calleeName,
                                                     std::move(bound), ctx, fnScope, nullptr, &site.callNode->position());
                             // f.pc deliberately NOT advanced -- resumes when the
@@ -841,7 +841,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, funcNode.parameters);
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupCompiledLiteralChunk(funcNode) : nullptr;
                         if (calleeChunk) {
-                            const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
+                            const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
                             pushBracketedCallFrame(ev, *calleeChunk, funcNode, *funcNode.body, "<function literal>",
                                                     std::move(bound), ctx, fnScope, capturedLetTrail(closure), ins.pos);
                         } else {
@@ -906,7 +906,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         const CompiledChunk* fallbackChunk =
                             ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
                         if (fallbackChunk) {
-                            const oscad::Scope* fnScope = site.decl->scope() ? site.decl->scope() : ctx.scope;
+                            const oscad::Scope* fnScope = ctx.scopeOf(*site.decl) ? ctx.scopeOf(*site.decl) : ctx.scope;
                             pushBracketedCallFrame(ev, *fallbackChunk, *site.decl, *site.decl->expr, site.calleeName,
                                                     std::move(bound), ctx, fnScope, nullptr, &site.callNode->position());
                         } else {
@@ -956,7 +956,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                             const CompiledChunk* fallbackChunk =
                                 ev.useBytecodeVm() ? ev.lookupCompiledLiteralChunk(funcNode) : nullptr;
                             if (fallbackChunk) {
-                                const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
+                                const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
                                 pushBracketedCallFrame(ev, *fallbackChunk, funcNode, *funcNode.body, "<function literal>",
                                                         std::move(bound), ctx, fnScope, capturedLetTrail(closure), ins.pos);
                             } else {
@@ -1040,7 +1040,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     // unobservable).
                     const auto* callNode =
                         static_cast<const oscad::ModularCall*>(f.chunk->nativeStatements[static_cast<size_t>(ins.a)]);
-                    EvalContext scopedCtx = ctx.withScope(callNode->scope() ? callNode->scope() : ctx.scope);
+                    EvalContext scopedCtx = ctx.withScope(ctx.scopeOf(*callNode) ? ctx.scopeOf(*callNode) : ctx.scope);
                     ev.checkDebug(*callNode, scopedCtx);
                     // Same order as evalModularCall's own (csg_resolve.cpp):
                     // warn, then resolve. Without this a children() typo
@@ -1398,7 +1398,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 }
                 case Op::NativeStatement: {
                     const oscad::ASTNode* stmt = f.chunk->nativeStatements[static_cast<size_t>(ins.a)];
-                    EvalContext childCtx = ctx.withScope(stmt->scope() ? stmt->scope() : ctx.scope);
+                    EvalContext childCtx = ctx.withScope(ctx.scopeOf(*stmt) ? ctx.scopeOf(*stmt) : ctx.scope);
                     // Mirrors evalChildren's own per-statement loop exactly
                     // -- no ModularLet exclusion needed here (unlike that
                     // loop's own): ModularLet has its own compiled form now

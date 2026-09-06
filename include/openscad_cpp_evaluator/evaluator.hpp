@@ -132,6 +132,16 @@ public:
     // fallback.
     Value evalExprMaybeCompiled(const oscad::Expression& node, EvalContext& ctx);
 
+    // The run's ScopeTable, latched from the EvalContext handed to
+    // evaluate()/resolveTree(). A handful of chunk-compile helpers below
+    // need a node's scope but are reached from the VM without an
+    // EvalContext in hand; they read it here instead of every caller
+    // growing a parameter. Null outside a run, which reads the same as the
+    // unset ASTNode::scope() this replaced.
+    const oscad::Scope* scopeOfNode(const oscad::ASTNode& node) const {
+        return scopeTable_ ? scopeTable_->get(node) : nullptr;
+    }
+
     // Evaluates a block's statements in OpenSCAD's assignment-before-
     // geometry order (all Assignment nodes first, then everything else,
     // each group preserving source order), each against its own lexical
@@ -1191,6 +1201,7 @@ private:
     // this exists. Not a reentrancy guard (resolveTreeImpl is never called
     // while another one is already active), just an on/off switch for
     // whether evalExprMaybeCompiled's cache is safe to touch right now.
+    const oscad::ScopeTable* scopeTable_ = nullptr;
     bool inResolvePass_ = false;
 
     // True only while evalRenderExpr (or the VM's Kind::Measure bracket) is

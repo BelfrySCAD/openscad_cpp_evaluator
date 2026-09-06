@@ -291,7 +291,7 @@ void Evaluator::evalChildren(const std::vector<const oscad::ASTNode*>& children,
 
     auto runAll = [&](const std::vector<const oscad::ASTNode*>& nodes) {
         for (const oscad::ASTNode* child : nodes) {
-            const oscad::Scope* childScope = child->scope() ? child->scope() : ctx.scope;
+            const oscad::Scope* childScope = ctx.scopeOf(*child) ? ctx.scopeOf(*child) : ctx.scope;
             EvalContext childCtx = ctx.withScope(childScope);
             // Safe despite childCtx's own scope ending at this iteration's
             // close: lastCtx_ is only ever read (by error()) synchronously

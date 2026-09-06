@@ -12,6 +12,7 @@
 
 namespace oscad {
 class FunctionLiteral;
+class Scope;
 } // namespace oscad
 
 namespace oscadeval {
@@ -75,6 +76,14 @@ using Value = std::variant<std::monostate, // undef
 struct Closure {
     const oscad::FunctionLiteral* node = nullptr;
     std::shared_ptr<void> capturedLet;
+    // The literal's own lexical scope, captured when the closure is made.
+    // A node no longer carries its scope (one parsed tree is shared
+    // between evaluations -- see oscad::ScopeTable), and a closure can be
+    // called from generate time, where there is no EvalContext left to
+    // look it up through. Not part of identity: operator== still compares
+    // `node`, since the same literal always resolves to the same scope
+    // within one run.
+    const oscad::Scope* scope = nullptr;
 
     friend bool operator==(const Closure& a, const Closure& b) { return a.node == b.node; }
 };
