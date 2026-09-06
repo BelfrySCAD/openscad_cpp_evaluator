@@ -1,4 +1,5 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/utf8.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/eval_error.hpp"
@@ -803,8 +804,13 @@ Value Evaluator::applyIndexAccess(const Value& obj, const Value& idx) {
     if (const std::string* s = std::get_if<std::string>(&obj)) {
         if (const double* d = std::get_if<double>(&idx)) {
             const int i = static_cast<int>(*d);
-            if (i < 0 || static_cast<size_t>(i) >= s->size()) return Value{};
-            return Value{std::string(1, (*s)[static_cast<size_t>(i)])};
+            if (i < 0) return Value{};
+            // The i-th CHARACTER. Taking byte i split a multi-byte one and
+            // handed back half of it, which then failed to decode at the
+            // boundary -- an error, not merely a wrong answer.
+            std::string ch = utf8CharAt(*s, static_cast<size_t>(i));
+            if (ch.empty()) return Value{};
+            return Value{std::move(ch)};
         }
         return Value{};
     }

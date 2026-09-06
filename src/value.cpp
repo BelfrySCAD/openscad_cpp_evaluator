@@ -1,6 +1,7 @@
 #include "openscad_cpp_evaluator/value.hpp"
 
 #include "openscad_cpp_evaluator/format_closure.hpp"
+#include "openscad_cpp_evaluator/utf8.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -524,8 +525,9 @@ IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany) {
         return IterableValues{std::move(out)};
     }
     if (const std::string* s = std::get_if<std::string>(&v)) {
+        // Characters, not bytes -- `[for (c = "aé—z") c]` yields four.
         std::vector<Value> out;
-        for (char c : *s) out.push_back(Value{std::string(1, c)});
+        for (std::string& ch : utf8Chars(*s)) out.push_back(Value{std::move(ch)});
         return IterableValues{std::move(out)};
     }
     if (const ListPtr* l = std::get_if<ListPtr>(&v)) {

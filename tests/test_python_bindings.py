@@ -560,3 +560,43 @@ def test_each_expands_strings_and_ranges(tmp_path):
         echo([each undef]);
     ''')
     assert got == ['["1", "2"]', "[0, 1, 2]", "[1, [2, 3]]", "[5]", "[true]", "[]"], got
+
+
+def test_strings_are_characters_not_bytes(tmp_path):
+    """A string is a sequence of characters to a script. "aé—z" is 8 bytes
+    and 4 characters, and the reference reports 4 everywhere -- len, index,
+    for, each and search. Indexing used to hand back half of a multi-byte
+    character, which then failed to decode: an error, not a wrong answer.
+    """
+    got = _echoes(tmp_path, '''
+        s = "aé—z";
+        echo(len(s));
+        echo([s[0], s[1], s[2], s[3]]);
+        echo([for (c = s) c]);
+        echo([each s]);
+        echo(ord(s[1]));
+        echo(search("é", s));
+        echo(s[4]);
+        echo(len("plain ascii"));
+    ''')
+    assert got == [
+        "4",
+        '["a", "é", "—", "z"]',
+        '["a", "é", "—", "z"]',
+        '["a", "é", "—", "z"]',
+        "233",
+        "[1]",
+        "undef",
+        "11",
+    ], got
+
+
+def test_chr_of_a_multibyte_codepoint_has_length_one(tmp_path):
+    """chr(8199) is a figure space -- three bytes, one character. BOSL2's
+    echo_matrix pads with it and asserts len(char) == 1."""
+    got = _echoes(tmp_path, '''
+        echo(len(chr(8199)));
+        echo(len(chr(0x2014)));
+        echo(len(chr(65)));
+    ''')
+    assert got == ["1", "1", "1"], got

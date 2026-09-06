@@ -6,6 +6,7 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/segments.hpp"
 #include "openscad_cpp_evaluator/text_metrics.hpp"
+#include "openscad_cpp_evaluator/utf8.hpp"
 
 #include "openscad_cpp_parser/ast/ast_node.hpp"
 
@@ -668,11 +669,17 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
     if (const std::string* needle = std::get_if<std::string>(&matchArg)) {
         std::vector<Value> out;
         if (const std::string* hay = std::get_if<std::string>(&tableArg)) {
-            for (size_t i = 0; i < needle->size(); ++i) {
+            // Both sides walked as CHARACTERS, and the indices reported are
+            // character indices. Comparing bytes made a multi-byte needle
+            // search once per byte -- search("é", "aé—z") answered [1, 2]
+            // where the reference answers [1].
+            const std::vector<std::string> needleChars = utf8Chars(*needle);
+            const std::vector<std::string> hayChars = utf8Chars(*hay);
+            for (size_t i = 0; i < needleChars.size(); ++i) {
                 unsigned matchCount = 0;
                 std::vector<Value> resultvec;
-                for (size_t j = 0; j < hay->size(); ++j) {
-                    if ((*needle)[i] != (*hay)[j]) continue;
+                for (size_t j = 0; j < hayChars.size(); ++j) {
+                    if (needleChars[i] != hayChars[j]) continue;
                     ++matchCount;
                     if (numReturns == 1) {
                         out.push_back(num(j));
@@ -689,7 +696,10 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
         // with more than index_col elements. A single bad entry aborts the
         // WHOLE call with an empty result, not just that row -- which is
         // why `search("a", ["a","b"])` is [] and not [0].
-        for (size_t i = 0; i < needle->size(); ++i) {
+        // Character-wise here too: a needle character is what gets looked
+        // up in each row, so a multi-byte one must not be split.
+        const std::vector<std::string> needleChars = utf8Chars(*needle);
+        for (size_t i = 0; i < needleChars.size(); ++i) {
             unsigned matchCount = 0;
             std::vector<Value> resultvec;
             for (size_t j = 0; j < table.size(); ++j) {
@@ -703,7 +713,10 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
                 }
                 const std::string* entry = std::get_if<std::string>(&entryVec[indexCol]);
                 // A type mismatch just doesn't match, exactly as `==` would.
-                if (!entry || entry->empty() || (*entry)[0] != (*needle)[i]) continue;
+                // First CHARACTER of the entry against the needle character:
+                // comparing first bytes made "é" and any other character
+                // sharing a lead byte look equal.
+                if (!entry || entry->empty() || utf8CharAt(*entry, 0) != needleChars[i]) continue;
                 ++matchCount;
                 if (numReturns == 1) {
                     out.push_back(num(j));
@@ -1381,7 +1394,8 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
         case BuiltinFnId::Len: {
             const Value x = getArg(args, 0, "x", Value{});
             if (const ListPtr* l = std::get_if<ListPtr>(&x); l && *l) return Value{static_cast<double>((*l)->items.size())};
-            if (const std::string* s = std::get_if<std::string>(&x)) return Value{static_cast<double>(s->size())};
+            // Characters, not bytes: the reference reports len("aé—z") as 4.
+            if (const std::string* s = std::get_if<std::string>(&x)) return Value{static_cast<double>(utf8Length(*s))};
             if (const ObjectPtr* o = std::get_if<ObjectPtr>(&x); o && *o) return Value{static_cast<double>((*o)->items.size())};
             return Value{};
         }
