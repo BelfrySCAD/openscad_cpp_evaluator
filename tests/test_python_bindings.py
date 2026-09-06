@@ -600,3 +600,36 @@ def test_chr_of_a_multibyte_codepoint_has_length_one(tmp_path):
         echo(len(chr(65)));
     ''')
     assert got == ["1", "1", "1"], got
+
+
+def test_degenerate_ranges_do_not_overflow_the_element_count(tmp_path):
+    """A NaN range yields nothing, silently. An unbounded one is rejected with
+    the reference's own count.
+
+    Both used to go through a cast of an out-of-range double to size_t, which
+    is undefined and which the platforms disagreed about: x86_64 wrapped to
+    2^63 and warned "too many elements (9223372036854775809)", while arm64
+    produced a small enough number that an infinite range iterated forever.
+    BOSL2 reaches the NaN case through list_rotate() on an empty list, where
+    ((n % 0) + 0) % 0 is NaN -- so this failed on Linux CI while passing on a
+    developer's Mac.
+    """
+    from openscad_cpp_evaluator import Evaluator
+    src = tmp_path / "r.scad"
+    src.write_text('''
+        n = 0/0;
+        echo([for (i = [n : 1 : -1]) i]);
+        echo([for (i = [0 : 1 : n]) i]);
+        echo([for (i = [0 : 1 : 1/0]) 1]);
+        echo([for (i = [0 : 1 : 1e300]) 1]);
+        echo([for (i = [0 : 1 : 3]) i]);
+    ''')
+    msgs = []
+    Evaluator(echo_fn=msgs.append).evaluate(str(src), {})
+    echoes = [m[len("ECHO: "):] for m in msgs if m.startswith("ECHO: ")]
+    warnings = [m for m in msgs if m.startswith("WARNING:")]
+
+    assert echoes == ["[]", "[]", "[]", "[]", "[0, 1, 2, 3]"], echoes
+    # Silent for NaN; the unbounded pair warn, with the reference's number.
+    assert len(warnings) == 2, warnings
+    assert all("too many elements (4294967295)" in w for w in warnings), warnings

@@ -493,10 +493,27 @@ std::string fmtValue(const Value& v) {
 // nullopt for a step of 0 or a direction that disagrees with start/end (a
 // naturally-empty range -- 0 elements, never "too many").
 std::optional<size_t> rangeElementCount(const OscRange& r) {
-    if (r.step == 0.0) return std::nullopt;
-    const double n = (r.end - r.start) / r.step;
-    if (n < -1e-10) return std::nullopt; // wrong direction -- naturally empty
-    return static_cast<size_t>(std::floor(n + 1e-10)) + 1;
+    // Zero step, wrong direction, or a NaN anywhere: nothing to iterate, and
+    // the reference says nothing about it -- `[for (i = [nan:1:-1]) i]` is
+    // [] with no warning there. BOSL2 reaches exactly that through
+    // list_rotate() on an empty list, where ((n % 0) + 0) % 0 is NaN.
+    if (r.isEmpty()) return std::nullopt;
+
+    const double count = std::floor((r.end - r.start) / r.step + 1e-10) + 1.0;
+
+    // Casting a double past size_t's range is undefined, and the platforms
+    // disagree about it in opposite directions: x86_64 wraps to 2^63 -- the
+    // "too many elements (9223372036854775809)" a CI run reported -- while
+    // arm64 produced something small enough that an INFINITE range iterated
+    // forever instead of being rejected. Neither is a wrong number so much
+    // as an unpredictable one.
+    //
+    // Clamp to what the reference reports for such a range, its own uint32
+    // ceiling: `[0:1:1/0]` warns "too many elements (4294967295)" there and
+    // yields [].
+    constexpr double kCap = 4294967295.0;
+    if (!(count < kCap)) return static_cast<size_t>(kCap);
+    return static_cast<size_t>(count);
 }
 
 IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany) {
