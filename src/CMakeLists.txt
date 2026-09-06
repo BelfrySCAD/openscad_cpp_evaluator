@@ -1,5 +1,6 @@
 add_library(openscad_cpp_evaluator STATIC
   value.cpp
+  format_closure.cpp
   eval_error.cpp
   eval_context.cpp
   expr_eval.cpp

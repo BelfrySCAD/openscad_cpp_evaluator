@@ -1,5 +1,7 @@
 #include "openscad_cpp_evaluator/value.hpp"
 
+#include "openscad_cpp_evaluator/format_closure.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -475,7 +477,13 @@ std::string fmtValue(const Value& v) {
         return s + "}";
     }
     if (const std::string* s = std::get_if<std::string>(&v)) return "\"" + *s + "\"";
-    return "<function-literal>"; // OscRange handled above; ClosurePtr has no meaningful textual form either
+    if (const ClosurePtr* c = std::get_if<ClosurePtr>(&v)) {
+        // The reference prints a function literal as its own source. Falling
+        // back only when the closure has no node, which nothing constructs
+        // today but the field is a pointer.
+        if (*c && (*c)->node) return formatFunctionLiteral(*(*c)->node);
+    }
+    return "<function-literal>"; // OscRange handled above
 }
 
 // (Range::numValues()'s own count, closed-form) -- 1 + floor((end-start)/step),

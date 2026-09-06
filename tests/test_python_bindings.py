@@ -449,3 +449,57 @@ def test_evaluate_generate_false_still_reports_script_errors(tmp_path):
 
     with pytest.raises(EvalError):
         Evaluator(echo_fn=lambda _m: None).evaluate(str(src), {}, generate=False)
+
+
+def test_str_of_a_function_literal_is_its_source(tmp_path):
+    """The reference prints a function literal as its own source, with every
+    binary operator and ternary parenthesised. BOSL2's fnliterals tests
+    compare these strings exactly, so each case here is a shape whose
+    expected text was copied from the reference's own echo output.
+    """
+    from openscad_cpp_evaluator import Evaluator
+
+    cases = [
+        ("function(x) x",                          "function(x) x"),
+        ("function(x, y) x + y",                   "function(x, y) (x + y)"),
+        ("function() 42",                          "function() 42"),
+        ("function(x) x + 1 * 2",                  "function(x) (x + (1 * 2))"),
+        ("function(x) (x + 1) * 2",                "function(x) ((x + 1) * 2)"),
+        # Unary is never wrapped, though its operand still is.
+        ("function(x) -x",                         "function(x) -x"),
+        ("function(a, b) -(a + b)",                "function(a, b) -(a + b)"),
+        # Even as a call argument.
+        ("function(a, b) f(a + b)",                "function(a, b) f((a + b))"),
+        ("function(x) x[0]",                       "function(x) x[0]"),
+        ("function(x) x.y",                        "function(x) x.y"),
+        ("function(x) [1, 2, x]",                  "function(x) [1, 2, x]"),
+        ("function(x) x ? 1 : 2",                  "function(x) (x ? 1 : 2)"),
+        ("function(x, y = 3) x",                   "function(x, y = 3) x"),
+        ("function(x) f(x, y = 2)",                "function(x) f(x, y = 2)"),
+        ("function(x) let(a = 1) a + x",           "function(x) let(a = 1) (a + x)"),
+        # A written step prints; an implicit one does not.
+        ("function(x) [1:2:9]",                    "function(x) [1 : 2 : 9]"),
+        ("function(a) [0:a]",                      "function(a) [0 : a]"),
+        # A comprehension body is wrapped; a plain vector element is not.
+        ("function(a) [for (i = [0:a]) i + 1]",    "function(a) [for(i = [0 : a]) ((i + 1))]"),
+        ("function(a) [1, 2 + 3, a]",              "function(a) [1, (2 + 3), a]"),
+        ("function(a) [each [a, 1]]",              "function(a) [each ([a, 1])]"),
+        ("function(a) [for (i = [0:a]) if (i > 1) i else -i]",
+         "function(a) [for(i = [0 : a]) (if((i > 1)) (i) else (-i))]"),
+        # The C-style for is the odd one out: no space after the semicolons,
+        # and its body is NOT wrapped.
+        ("function(a) [for (i = 0; i < a; i = i + 1) i]",
+         "function(a) [for(i = 0;(i < a);i = (i + 1)) i]"),
+        ("function(a) assert(a > 0) a",            "function(a) assert((a > 0)) a"),
+        ("function(a) echo(a) a",                  "function(a) echo(a) a"),
+    ]
+    src = tmp_path / "f.scad"
+    src.write_text("\n".join(f"echo(str({expr}));" for expr, _ in cases) + "\n")
+
+    echoes = []
+    Evaluator(echo_fn=echoes.append).evaluate(str(src), {})
+    got = [e[len("ECHO: "):] if e.startswith("ECHO: ") else e for e in echoes]
+
+    assert len(got) == len(cases)
+    for (expr, want), actual in zip(cases, got):
+        assert actual == f'"{want}"', f"{expr}\n  want {want!r}\n  got  {actual!r}"
