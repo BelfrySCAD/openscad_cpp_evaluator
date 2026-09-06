@@ -496,3 +496,109 @@ TEST(StringEscapes, BothEvaluationPathsCookTheLiteral) {
     ASSERT_EQ(echoed.size(), 1u);
     EXPECT_EQ(echoed[0], "ECHO: 3") << "line continuation, compiled path";
 }
+
+// Every expectation below was read off OpenSCAD 2026.02.01 rather than a
+// spec, because the rules are narrow and not guessable:
+//
+//   \xNN     two hex digits, ASCII ONLY -- \x80..\xff are REFUSED, since a
+//            raw high byte is not valid UTF-8 and the rest of the string is
+//   \uXXXX   exactly four hex digits; there is no \u{...} form
+//   an unencodable code point (zero, or a lone surrogate) becomes a SPACE
+//   anything else after a backslash is an "undefined escape": the
+//   backslash is dropped and the rest stands for itself
+//
+// The reference also emits "WARNING: Undefined escape sequence" for that
+// last case, at PARSE time (once per literal, not once per evaluation --
+// checked with a literal inside a for loop). This port has no parse-time
+// warning channel, so it produces the same STRING without the warning.
+TEST(StringEscapes, DecodesFourDigitUnicodeEscapes) {
+    EXPECT_EQ(unescapeStringLiteral("\\u03a9"), "Ω");   // len() of this is 1, not 5
+    EXPECT_EQ(unescapeStringLiteral("a\\u03a9b"), "aΩb");
+    EXPECT_EQ(unescapeStringLiteral("\\u0041"), "A");
+    EXPECT_EQ(unescapeStringLiteral("\\u00a9"), "©");
+    EXPECT_EQ(unescapeStringLiteral("\\uffff"), "￿");
+    EXPECT_EQ(unescapeStringLiteral("\\uFFFF"), "￿");   // hex digits are case-insensitive
+}
+
+TEST(StringEscapes, DecodesAsciiHexEscapesOnly) {
+    EXPECT_EQ(unescapeStringLiteral("\\x41"), "A");
+    EXPECT_EQ(unescapeStringLiteral("\\x7e"), "~");
+    EXPECT_EQ(unescapeStringLiteral("\\x7f"), "\x7f");
+    // Above 0x7F the reference refuses and the text stands for itself.
+    EXPECT_EQ(unescapeStringLiteral("\\x80"), "x80");
+    EXPECT_EQ(unescapeStringLiteral("\\xa9"), "xa9");
+    EXPECT_EQ(unescapeStringLiteral("\\xff"), "xff");
+}
+
+TEST(StringEscapes, AnUnencodableCodePointBecomesASpace) {
+    // Confirmed by equality on the reference, since the bytes are hard to
+    // read back: " " == " ", "\ud83d" == " " and "\x00" == " "
+    // are all true there. chr() does NOT agree -- chr(55357) is the empty
+    // string -- so the two paths differ deliberately.
+    EXPECT_EQ(unescapeStringLiteral("\\u0000"), " ");
+    EXPECT_EQ(unescapeStringLiteral("\\x00"), " ");
+    EXPECT_EQ(unescapeStringLiteral("\\ud83d"), " ");   // lone high surrogate
+    EXPECT_EQ(unescapeStringLiteral("\\udfff"), " ");   // lone low surrogate
+}
+
+TEST(StringEscapes, AnUndefinedEscapeDropsOnlyItsBackslash) {
+    EXPECT_EQ(unescapeStringLiteral("\\q"), "q");
+    EXPECT_EQ(unescapeStringLiteral("\\u12"), "u12");       // too few digits
+    EXPECT_EQ(unescapeStringLiteral("\\uZZZZ"), "uZZZZ");   // not hex
+    EXPECT_EQ(unescapeStringLiteral("\\u{41}"), "u{41}");   // no brace form
+    EXPECT_EQ(unescapeStringLiteral("\\x4"), "x4");
+    EXPECT_EQ(unescapeStringLiteral("\\xg1"), "xg1");
+}
+
+TEST(StringEscapes, LeavesTheAlreadyHandledEscapesAlone) {
+    EXPECT_EQ(unescapeStringLiteral("\\n"), "\n");
+    EXPECT_EQ(unescapeStringLiteral("\\t"), "\t");
+    EXPECT_EQ(unescapeStringLiteral("\\r"), "\r");
+    EXPECT_EQ(unescapeStringLiteral("\\\\"), "\\");
+    EXPECT_EQ(unescapeStringLiteral("\\\""), "\"");
+    EXPECT_EQ(unescapeStringLiteral("plain"), "plain");
+}
+
+TEST(StringEscapes, ATruncatedEscapeDoesNotReadPastTheEnd) {
+    // \u and \x look ahead four and two characters; one cut short at the
+    // end of the literal must stop rather than run off the buffer.
+    EXPECT_EQ(unescapeStringLiteral("\\u"), "u");
+    EXPECT_EQ(unescapeStringLiteral("\\u0"), "u0");
+    EXPECT_EQ(unescapeStringLiteral("\\u03a"), "u03a");
+    EXPECT_EQ(unescapeStringLiteral("\\x"), "x");
+    EXPECT_EQ(unescapeStringLiteral("\\x4"), "x4");
+    EXPECT_EQ(unescapeStringLiteral("\\"), "\\");
+}
+
+TEST(StringEscapes, ARawNewlineInsideALiteralContributesNothing) {
+    // Writing a string across two source lines joins them, keeping the
+    // second line's indentation -- this is how OpenSCAD lets a long string
+    // be wrapped, and it is NOT a backslash continuation.
+    //
+    //     s = "abcd
+    //         efgh";       // -> "abcd    efgh", 12 characters
+    EXPECT_EQ(unescapeStringLiteral("abcd\n    efgh"), "abcd    efgh");
+    EXPECT_EQ(unescapeStringLiteral("x\ny"), "xy");
+    EXPECT_EQ(unescapeStringLiteral("x\n\ny"), "xy");
+    EXPECT_EQ(unescapeStringLiteral("x\n  \n  y"), "x    y");
+}
+
+TEST(StringEscapes, ARawCarriageReturnStandsForItself) {
+    // Only the LF is special. A CRLF file therefore leaves the CR in the
+    // string: "x<CR><LF>y" is three characters, not two.
+    EXPECT_EQ(unescapeStringLiteral("x\ry"), "x\ry");
+    EXPECT_EQ(unescapeStringLiteral("x\r\ny"), "x\ry");
+}
+
+TEST(StringEscapes, ABackslashBeforeANewlineTakesTheWholeLineEnding) {
+    // The reference has no line-continuation escape at all: it calls the
+    // backslash an undefined escape, drops only it, then applies the
+    // ordinary newline rules -- so "x\\<CR><LF>y" is 3 characters there,
+    // the CR surviving. This port takes the whole line ending instead, on
+    // purpose, so a string wrapped in a Windows-line-ending file does not
+    // pick up a stray CR. Same reasoning as
+    // BackslashNewlineContributesNothing above.
+    EXPECT_EQ(unescapeStringLiteral("x\\\ny"), "xy");
+    EXPECT_EQ(unescapeStringLiteral("x\\\r\ny"), "xy");   // reference keeps the CR
+    EXPECT_EQ(unescapeStringLiteral("x\\\ry"), "x\ry");
+}

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,11 @@ namespace oscadeval {
 // IS character i, and every function here takes that path first. Only a
 // string that actually holds non-ASCII pays, and those are short in
 // practice.
+
+// One code point as UTF-8. The caller decides which code points are
+// legal -- chr() drops an invalid one, a \uXXXX escape substitutes a space
+// -- so this encodes whatever it is given.
+std::string utf8Encode(uint32_t cp);
 
 // True when every byte is < 0x80, so byte offsets and character offsets are
 // the same thing.
