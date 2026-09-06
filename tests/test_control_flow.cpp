@@ -537,11 +537,14 @@ TEST(Echo, FormatsEmptyObjectValue) {
 }
 
 TEST(Echo, FormatsFunctionLiteralValue) {
-    // fmtValue's own final fallback -- a FunctionLiteral* value has no
-    // meaningful textual form (matches the reference exactly).
+    // The reference prints a function literal as its own source, and this
+    // used to assert "<function-literal>" while claiming that matched it.
+    // It does not: `echo(function(x) x);` run through the real binary
+    // prints `ECHO: function(x) x`, byte for byte what is expected here.
+    // See format_closure.cpp.
     std::string captured;
     runScript("echo(function(x) x);", [&](const std::string& msg) { captured = msg; });
-    EXPECT_EQ(captured, "ECHO: <function-literal>");
+    EXPECT_EQ(captured, "ECHO: function(x) x");
 }
 
 TEST(AssertStatement, PassingAssertionIsANoOp) {

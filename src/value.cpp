@@ -1,5 +1,8 @@
 #include "openscad_cpp_evaluator/value.hpp"
 
+#include "openscad_cpp_evaluator/format_closure.hpp"
+#include "openscad_cpp_evaluator/utf8.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -475,7 +478,13 @@ std::string fmtValue(const Value& v) {
         return s + "}";
     }
     if (const std::string* s = std::get_if<std::string>(&v)) return "\"" + *s + "\"";
-    return "<function-literal>"; // OscRange handled above; ClosurePtr has no meaningful textual form either
+    if (const ClosurePtr* c = std::get_if<ClosurePtr>(&v)) {
+        // The reference prints a function literal as its own source. Falling
+        // back only when the closure has no node, which nothing constructs
+        // today but the field is a pointer.
+        if (*c && (*c)->node) return formatFunctionLiteral(*(*c)->node);
+    }
+    return "<function-literal>"; // OscRange handled above
 }
 
 // (Range::numValues()'s own count, closed-form) -- 1 + floor((end-start)/step),
@@ -516,8 +525,9 @@ IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany) {
         return IterableValues{std::move(out)};
     }
     if (const std::string* s = std::get_if<std::string>(&v)) {
+        // Characters, not bytes -- `[for (c = "aé—z") c]` yields four.
         std::vector<Value> out;
-        for (char c : *s) out.push_back(Value{std::string(1, c)});
+        for (std::string& ch : utf8Chars(*s)) out.push_back(Value{std::move(ch)});
         return IterableValues{std::move(out)};
     }
     if (const ListPtr* l = std::get_if<ListPtr>(&v)) {
@@ -529,9 +539,23 @@ IterableValues expandIterable(const Value& v, const RangeTooManyFn& onTooMany) {
 void appendEachInto(std::vector<Value>& out, const Value& v) {
     if (const ListPtr* l = std::get_if<ListPtr>(&v); l && *l) {
         for (const Value& x : (*l)->items) out.push_back(x);
-    } else if (!std::holds_alternative<std::monostate>(v)) {
-        out.push_back(v);
+        return;
     }
+    // A string and a range expand too, not just a list: the reference gives
+    // ["1", "2"] for `[each "12"]` and [0, 1, 2] for `[each [0:2]]`, where
+    // this used to hand back the string and the range whole. Reusing the
+    // expansion `for` already does keeps the two agreeing -- `[for (x = c)
+    // x]` was right over a string while `[each c]` was not, which is what
+    // broke BOSL2's str_strip(): _str_count_leading tests
+    // `in_list(s[i], [each c])` and so never matched a character.
+    //
+    // A number, a boolean and an object stay whole (`[each 5]` is [5]), and
+    // undef contributes nothing.
+    if (std::holds_alternative<std::string>(v) || std::holds_alternative<OscRange>(v)) {
+        for (const Value& x : expandIterable(v, nullptr)) out.push_back(x);
+        return;
+    }
+    if (!std::holds_alternative<std::monostate>(v)) out.push_back(v);
 }
 
 } // namespace oscadeval

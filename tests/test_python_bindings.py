@@ -449,3 +449,154 @@ def test_evaluate_generate_false_still_reports_script_errors(tmp_path):
 
     with pytest.raises(EvalError):
         Evaluator(echo_fn=lambda _m: None).evaluate(str(src), {}, generate=False)
+
+
+def test_str_of_a_function_literal_is_its_source(tmp_path):
+    """The reference prints a function literal as its own source, with every
+    binary operator and ternary parenthesised. BOSL2's fnliterals tests
+    compare these strings exactly, so each case here is a shape whose
+    expected text was copied from the reference's own echo output.
+    """
+    from openscad_cpp_evaluator import Evaluator
+
+    cases = [
+        ("function(x) x",                          "function(x) x"),
+        ("function(x, y) x + y",                   "function(x, y) (x + y)"),
+        ("function() 42",                          "function() 42"),
+        ("function(x) x + 1 * 2",                  "function(x) (x + (1 * 2))"),
+        ("function(x) (x + 1) * 2",                "function(x) ((x + 1) * 2)"),
+        # Unary is never wrapped, though its operand still is.
+        ("function(x) -x",                         "function(x) -x"),
+        ("function(a, b) -(a + b)",                "function(a, b) -(a + b)"),
+        # Even as a call argument.
+        ("function(a, b) f(a + b)",                "function(a, b) f((a + b))"),
+        ("function(x) x[0]",                       "function(x) x[0]"),
+        ("function(x) x.y",                        "function(x) x.y"),
+        ("function(x) [1, 2, x]",                  "function(x) [1, 2, x]"),
+        ("function(x) x ? 1 : 2",                  "function(x) (x ? 1 : 2)"),
+        ("function(x, y = 3) x",                   "function(x, y = 3) x"),
+        ("function(x) f(x, y = 2)",                "function(x) f(x, y = 2)"),
+        ("function(x) let(a = 1) a + x",           "function(x) let(a = 1) (a + x)"),
+        # A written step prints; an implicit one does not.
+        ("function(x) [1:2:9]",                    "function(x) [1 : 2 : 9]"),
+        ("function(a) [0:a]",                      "function(a) [0 : a]"),
+        # A comprehension body is wrapped; a plain vector element is not.
+        ("function(a) [for (i = [0:a]) i + 1]",    "function(a) [for(i = [0 : a]) ((i + 1))]"),
+        ("function(a) [1, 2 + 3, a]",              "function(a) [1, (2 + 3), a]"),
+        ("function(a) [each [a, 1]]",              "function(a) [each ([a, 1])]"),
+        ("function(a) [for (i = [0:a]) if (i > 1) i else -i]",
+         "function(a) [for(i = [0 : a]) (if((i > 1)) (i) else (-i))]"),
+        # The C-style for is the odd one out: no space after the semicolons,
+        # and its body is NOT wrapped.
+        ("function(a) [for (i = 0; i < a; i = i + 1) i]",
+         "function(a) [for(i = 0;(i < a);i = (i + 1)) i]"),
+        ("function(a) assert(a > 0) a",            "function(a) assert((a > 0)) a"),
+        ("function(a) echo(a) a",                  "function(a) echo(a) a"),
+    ]
+    src = tmp_path / "f.scad"
+    src.write_text("\n".join(f"echo(str({expr}));" for expr, _ in cases) + "\n")
+
+    echoes = []
+    Evaluator(echo_fn=echoes.append).evaluate(str(src), {})
+    got = [e[len("ECHO: "):] if e.startswith("ECHO: ") else e for e in echoes]
+
+    assert len(got) == len(cases)
+    for (expr, want), actual in zip(cases, got):
+        assert actual == f'"{want}"', f"{expr}\n  want {want!r}\n  got  {actual!r}"
+
+
+def _echoes(tmp_path, script):
+    from openscad_cpp_evaluator import Evaluator
+    src = tmp_path / "s.scad"
+    src.write_text(script)
+    out = []
+    Evaluator(echo_fn=out.append).evaluate(str(src), {})
+    return [e[len("ECHO: "):] if e.startswith("ECHO: ") else e for e in out]
+
+
+def test_search_uses_the_documented_parameter_names(tmp_path):
+    """BOSL2's in_list() passes num_returns_per_match and index_col_num --
+    the names the manual documents. These used to be num_returns/index_col,
+    which nothing binds, so both silently took their defaults."""
+    got = _echoes(tmp_path, '''
+        t = [[2,"foo"],[4,"bar"],[3,"baz"]];
+        echo(search(["bar"], t, num_returns_per_match=1, index_col_num=1));
+        echo(search(["bar"], t, 1, 1));
+    ''')
+    assert got == ["[1]", "[1]"], got
+
+
+def test_two_empty_ranges_are_equal(tmp_path):
+    """The reference compares element counts first, so any two empty ranges
+    are equal whatever their bounds, and a NaN-stepped range counts as
+    empty. BOSL2 defines is_nan(x) = (x != x), so a range that was not equal
+    to itself made typeof() answer "nan" instead of "invalid".
+
+    NaN itself is untouched: it is still unequal to itself, bare or in a
+    list, exactly as the reference has it.
+    """
+    got = _echoes(tmp_path, '''
+        n = 0/0;
+        echo([5:1:0] == [10:1:0]);
+        echo([0:n:1/0] == [5:1:0]);
+        echo([0:1:5] == [0:1:5]);
+        echo([0:1:5] == [0:1:6]);
+        echo([5:1:0] == [0:1:5]);
+        echo(n == n);
+        echo([n] == [n]);
+    ''')
+    assert got == ["true", "true", "true", "false", "false", "false", "false"], got
+
+
+def test_each_expands_strings_and_ranges(tmp_path):
+    """`for` already expanded both; `each` handed them back whole. BOSL2's
+    str_strip() tests `in_list(s[i], [each c])`, which never matched."""
+    got = _echoes(tmp_path, '''
+        echo([each "12"]);
+        echo([each [0:2]]);
+        echo([each [1,[2,3]]]);
+        echo([each 5]);
+        echo([each true]);
+        echo([each undef]);
+    ''')
+    assert got == ['["1", "2"]', "[0, 1, 2]", "[1, [2, 3]]", "[5]", "[true]", "[]"], got
+
+
+def test_strings_are_characters_not_bytes(tmp_path):
+    """A string is a sequence of characters to a script. "aé—z" is 8 bytes
+    and 4 characters, and the reference reports 4 everywhere -- len, index,
+    for, each and search. Indexing used to hand back half of a multi-byte
+    character, which then failed to decode: an error, not a wrong answer.
+    """
+    got = _echoes(tmp_path, '''
+        s = "aé—z";
+        echo(len(s));
+        echo([s[0], s[1], s[2], s[3]]);
+        echo([for (c = s) c]);
+        echo([each s]);
+        echo(ord(s[1]));
+        echo(search("é", s));
+        echo(s[4]);
+        echo(len("plain ascii"));
+    ''')
+    assert got == [
+        "4",
+        '["a", "é", "—", "z"]',
+        '["a", "é", "—", "z"]',
+        '["a", "é", "—", "z"]',
+        "233",
+        "[1]",
+        "undef",
+        "11",
+    ], got
+
+
+def test_chr_of_a_multibyte_codepoint_has_length_one(tmp_path):
+    """chr(8199) is a figure space -- three bytes, one character. BOSL2's
+    echo_matrix pads with it and asserts len(char) == 1."""
+    got = _echoes(tmp_path, '''
+        echo(len(chr(8199)));
+        echo(len(chr(0x2014)));
+        echo(len(chr(65)));
+    ''')
+    assert got == ["1", "1", "1"], got
