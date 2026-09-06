@@ -17,8 +17,19 @@ ResolvedUseScopes resolveUseScopes(const std::vector<std::unique_ptr<oscad::ASTN
     return resolveUseScopes(borrowed, currentFile, logFn);
 }
 
-ResolvedUseScopes resolveUseScopes(const std::vector<const oscad::ASTNode*>& ownNodes,
-                                    const std::string& currentFile, const std::function<void(const std::string&)>& logFn) {
+namespace {
+
+// The recursion. `table` is threaded through every level rather than each
+// level building its own: `use <file>` gives each used file its own root
+// Scope, but one evaluation reads all of them back, so every node's scope
+// has to land in ONE table. A table per level meant the outer evaluation
+// could not see anything a nested resolution recorded -- every node of a
+// used file read back as having no scope, and `use` silently resolved to
+// undef. BelfrySCAD's own suite caught that; this repo's did not.
+ResolvedUseScopes resolveUseScopesInto(const std::vector<const oscad::ASTNode*>& ownNodes,
+                                        const std::string& currentFile,
+                                        const std::function<void(const std::string&)>& logFn,
+                                        oscad::ScopeTable& table) {
     ResolvedUseScopes result;
 
     std::vector<const oscad::ASTNode*> injected;
@@ -56,7 +67,10 @@ ResolvedUseScopes resolveUseScopes(const std::vector<const oscad::ASTNode*>& own
         result.usedFileAsts.push_back(std::move(lib.ast));
         const std::vector<std::unique_ptr<oscad::ASTNode>>& libAst = result.usedFileAsts.back();
 
-        ResolvedUseScopes nested = resolveUseScopes(libAst, lib.resolvedPath, logFn);
+        std::vector<const oscad::ASTNode*> libBorrowed;
+        libBorrowed.reserve(libAst.size());
+        for (const auto& n : libAst) libBorrowed.push_back(n.get());
+        ResolvedUseScopes nested = resolveUseScopesInto(libBorrowed, lib.resolvedPath, logFn, table);
 
         std::vector<const oscad::ASTNode*> libInjected;
         for (const oscad::ASTNode* n : nested.ownNodesFiltered) {
@@ -92,17 +106,28 @@ ResolvedUseScopes resolveUseScopes(const std::vector<const oscad::ASTNode*>& own
     std::vector<oscad::ASTNode*> mutableProcessed;
     mutableProcessed.reserve(result.processedNodes.size());
     for (const oscad::ASTNode* n : result.processedNodes) mutableProcessed.push_back(const_cast<oscad::ASTNode*>(n));
-    result.rootScope = oscad::buildScopes(mutableProcessed);
+    result.rootScope = oscad::buildScopesInto(mutableProcessed, table);
 
     {
-        // Re-anchoring writes scopes too, into the same table buildScopes()
-        // just filled -- which the root scope now owns.
-        oscad::ScopeTableScope recording(*const_cast<oscad::ScopeTable*>(result.rootScope->table()));
+        // Re-anchoring writes scopes too, into the same shared table.
+        oscad::ScopeTableScope recording(table);
         for (const auto& [libInjected, libRootScope] : reanchor) {
             for (const oscad::ASTNode* n : libInjected) const_cast<oscad::ASTNode*>(n)->buildScope(*libRootScope);
         }
     }
 
+    return result;
+}
+
+} // namespace
+
+ResolvedUseScopes resolveUseScopes(const std::vector<const oscad::ASTNode*>& ownNodes, const std::string& currentFile,
+                                    const std::function<void(const std::string&)>& logFn) {
+    // One table for the whole resolution, handed to the root scope at the
+    // end so it lives exactly as long as the scopes it points into.
+    auto table = std::make_unique<oscad::ScopeTable>();
+    ResolvedUseScopes result = resolveUseScopesInto(ownNodes, currentFile, logFn, *table);
+    if (result.rootScope) result.rootScope->adoptTable(std::move(table));
     return result;
 }
 
