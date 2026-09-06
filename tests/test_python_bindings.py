@@ -503,3 +503,60 @@ def test_str_of_a_function_literal_is_its_source(tmp_path):
     assert len(got) == len(cases)
     for (expr, want), actual in zip(cases, got):
         assert actual == f'"{want}"', f"{expr}\n  want {want!r}\n  got  {actual!r}"
+
+
+def _echoes(tmp_path, script):
+    from openscad_cpp_evaluator import Evaluator
+    src = tmp_path / "s.scad"
+    src.write_text(script)
+    out = []
+    Evaluator(echo_fn=out.append).evaluate(str(src), {})
+    return [e[len("ECHO: "):] if e.startswith("ECHO: ") else e for e in out]
+
+
+def test_search_uses_the_documented_parameter_names(tmp_path):
+    """BOSL2's in_list() passes num_returns_per_match and index_col_num --
+    the names the manual documents. These used to be num_returns/index_col,
+    which nothing binds, so both silently took their defaults."""
+    got = _echoes(tmp_path, '''
+        t = [[2,"foo"],[4,"bar"],[3,"baz"]];
+        echo(search(["bar"], t, num_returns_per_match=1, index_col_num=1));
+        echo(search(["bar"], t, 1, 1));
+    ''')
+    assert got == ["[1]", "[1]"], got
+
+
+def test_two_empty_ranges_are_equal(tmp_path):
+    """The reference compares element counts first, so any two empty ranges
+    are equal whatever their bounds, and a NaN-stepped range counts as
+    empty. BOSL2 defines is_nan(x) = (x != x), so a range that was not equal
+    to itself made typeof() answer "nan" instead of "invalid".
+
+    NaN itself is untouched: it is still unequal to itself, bare or in a
+    list, exactly as the reference has it.
+    """
+    got = _echoes(tmp_path, '''
+        n = 0/0;
+        echo([5:1:0] == [10:1:0]);
+        echo([0:n:1/0] == [5:1:0]);
+        echo([0:1:5] == [0:1:5]);
+        echo([0:1:5] == [0:1:6]);
+        echo([5:1:0] == [0:1:5]);
+        echo(n == n);
+        echo([n] == [n]);
+    ''')
+    assert got == ["true", "true", "true", "false", "false", "false", "false"], got
+
+
+def test_each_expands_strings_and_ranges(tmp_path):
+    """`for` already expanded both; `each` handed them back whole. BOSL2's
+    str_strip() tests `in_list(s[i], [each c])`, which never matched."""
+    got = _echoes(tmp_path, '''
+        echo([each "12"]);
+        echo([each [0:2]]);
+        echo([each [1,[2,3]]]);
+        echo([each 5]);
+        echo([each true]);
+        echo([each undef]);
+    ''')
+    assert got == ['["1", "2"]', "[0, 1, 2]", "[1, [2, 3]]", "[5]", "[true]", "[]"], got

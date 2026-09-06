@@ -613,10 +613,24 @@ Value builtinRands(double minv, double maxv, double nArg, const Value& seedArg) 
 // a sequence of characters -- a `search(["a"], "abc")` vector needle sees
 // that same string as an empty table, not as characters.
 Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* pos) {
-    const Value matchArg = getArg(args, 0, "match", Value{});
-    const Value tableArg = getArg(args, 1, "vector", Value{});
-    const double nrRaw = toDoubleLenient(getArg(args, 2, "num_returns", Value{1.0}));
-    const double icRaw = toDoubleLenient(getArg(args, 3, "index_col", Value{0.0}));
+    // The reference's own documented parameter names. These used to be
+    // "match"/"vector"/"num_returns"/"index_col", which are not names
+    // OpenSCAD ever documented, so a script written against the manual --
+    // BOSL2's in_list(), which passes num_returns_per_match and
+    // index_col_num -- bound neither and silently got the defaults.
+    //
+    // Worth knowing, though deliberately NOT copied: the reference ignores
+    // these names altogether and binds search() purely by position.
+    // `search(zzz=m, qqq=t, www=1, eee=1)` returns the right answer there,
+    // while the correct names in the wrong order return the wrong one.
+    // CallArgs keeps positional and named arguments apart and does not
+    // record where a named one was written, so matching that would mean
+    // changing how every call collects its arguments -- for a quirk no
+    // script relies on deliberately.
+    const Value matchArg = getArg(args, 0, "match_value", Value{});
+    const Value tableArg = getArg(args, 1, "string_or_vector", Value{});
+    const double nrRaw = toDoubleLenient(getArg(args, 2, "num_returns_per_match", Value{1.0}));
+    const double icRaw = toDoubleLenient(getArg(args, 3, "index_col_num", Value{0.0}));
     // Both are `unsigned int` in the reference, so a negative argument wraps
     // to a huge positive rather than meaning "unlimited"/"column 0".
     const unsigned numReturns = static_cast<unsigned>(static_cast<long long>(nrRaw));
