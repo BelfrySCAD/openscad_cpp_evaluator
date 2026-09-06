@@ -130,3 +130,32 @@ TEST(IncludeCache, ADerivedContextKeepsTheScopeTable) {
     ev.evaluate(used.processedNodes, ctx, {}, /*generate=*/false);
     for (const std::string& m : logs) EXPECT_EQ(m.find("Recursion"), std::string::npos) << m;
 }
+
+
+TEST(IncludeCache, NestedUseKeepsItsScopesInTheSharedTable) {
+    // `use <file>` gives each used file its own root Scope, and a used file
+    // may itself `use` another. All of them are read back by ONE
+    // evaluation, so every node's scope has to land in ONE ScopeTable.
+    //
+    // The version of this that built a table per recursion level threw the
+    // nested ones away: the outer evaluation then saw no scope at all for a
+    // used file's nodes, and combo() below resolved to undef instead of
+    // 107. Every C++ test here passed anyway -- BelfrySCAD's suite is what
+    // caught it -- so this is that case, kept where the code lives.
+    writeFile("inner.scad", "inner_val = 100;\nfunction get_inner() = inner_val;\n");
+    writeFile("lib2.scad",
+              "use <oscad_inccache_inner.scad>\n"
+              "lib2_val = 7;\n"
+              "function combo() = get_inner() + lib2_val;\n");
+    const auto main2 = writeFile("main2.scad",
+                                  "use <oscad_inccache_lib2.scad>\n"
+                                  "echo(combo());\n"
+                                  "echo(is_undef(inner_val));\n");
+
+    const std::vector<std::string> echoes = echoesOf(main2);
+    ASSERT_EQ(echoes.size(), 2u);
+    // combo() reaches through lib2's own nested use into inner.scad.
+    EXPECT_EQ(echoes[0], "ECHO: 107");
+    // ...while inner.scad's own declarations stay invisible to main2.
+    EXPECT_EQ(echoes[1], "ECHO: true");
+}
