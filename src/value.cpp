@@ -374,17 +374,60 @@ Value matmul(const Value& a, const Value& b, std::string* error) {
                             " and " + oscTypeName(e2));
 }
 
+namespace {
+
+// `count` hex digits starting at `at`, into `out`. False (leaving `out`
+// untouched) if any of them is not a hex digit.
+bool hexDigits(const std::string& s, size_t at, size_t count, std::uint32_t& out) {
+    std::uint32_t v = 0;
+    for (size_t k = 0; k < count; ++k) {
+        const char c = s[at + k];
+        std::uint32_t d;
+        if (c >= '0' && c <= '9') d = static_cast<std::uint32_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') d = static_cast<std::uint32_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = static_cast<std::uint32_t>(c - 'A' + 10);
+        else return false;
+        v = (v << 4) | d;
+    }
+    out = v;
+    return true;
+}
+
+// What a well-formed \x/\u escape contributes. A code point that cannot
+// be encoded -- zero, or a lone surrogate -- becomes a SPACE rather than
+// nothing or invalid UTF-8. That is the reference's behaviour, checked by
+// equality since the bytes are hard to see: "\u0000" == " ", "\ud83d" ==
+// " ", and "\x00" == "\u0000", all true on 2026.02.01. Note chr() does
+// NOT agree -- chr(55357) is the empty string -- so the two paths differ
+// deliberately.
+std::string encodeEscapedCodePoint(std::uint32_t cp) {
+    if (cp == 0 || (cp >= 0xD800u && cp <= 0xDFFFu) || cp > 0x10FFFFu) return " ";
+    return utf8Encode(cp);
+}
+
+} // namespace
+
 std::string unescapeStringLiteral(const std::string& raw) {
-    // Most strings carry no escape at all, and this runs on every
-    // evaluation of a literal on the tree-walking path -- so don't build a
-    // second copy of the string unless there is something to change.
-    const size_t first = raw.find('\\');
+    // Most strings need no work at all, and this runs on every evaluation
+    // of a literal on the tree-walking path -- so don't build a second copy
+    // unless there is something to change. A bare newline counts as
+    // something to change (see the loop), so it has to open the scan too.
+    const size_t first = raw.find_first_of("\\\n");
     if (first == std::string::npos) return raw;
 
     std::string out;
     out.reserve(raw.size());
     out.append(raw, 0, first);
     for (size_t i = first; i < raw.size(); ++i) {
+        // A raw LF inside a string literal contributes NOTHING -- writing a
+        // string across two source lines joins them, keeping the second
+        // line's indentation:
+        //     s = "abcd
+        //         efgh";      // -> "abcd    efgh", 12 characters
+        // A raw CR is not special and stands for itself, so a CRLF file
+        // leaves the CR behind (len 3 for "x<CR><LF>y"). Both verified on
+        // 2026.02.01.
+        if (raw[i] == '\n') continue;
         if (raw[i] != '\\' || i + 1 >= raw.size()) {
             out.push_back(raw[i]);  // a trailing lone backslash stands for itself
             continue;
@@ -394,10 +437,44 @@ std::string unescapeStringLiteral(const std::string& raw) {
             case 'n': out.push_back('\n'); ++i; break;
             case 't': out.push_back('\t'); ++i; break;
             case 'r': out.push_back('\r'); ++i; break;
-            case '\n': ++i; break;  // line continuation: contributes nothing
+            case 'x': {
+                // \xNN, exactly two hex digits, and ASCII ONLY. The
+                // reference rejects anything above 0x7F -- a raw high byte
+                // would not be valid UTF-8, and the rest of the string is
+                // -- leaving the text to stand for itself: "\xff" is the
+                // three characters x, f, f. Verified against 2026.02.01,
+                // which takes \x00..\x7f and refuses \x80..\xff.
+                std::uint32_t cp = 0;
+                if (i + 3 < raw.size() && hexDigits(raw, i + 2, 2, cp) && cp <= 0x7Fu) {
+                    out += encodeEscapedCodePoint(cp);
+                    i += 3;
+                    break;
+                }
+                out.push_back(next);
+                ++i;
+                break;
+            }
+            case 'u': {
+                // \uXXXX, exactly four hex digits. No \u{...} form: the
+                // reference calls that an undefined escape.
+                std::uint32_t cp = 0;
+                if (i + 5 < raw.size() && hexDigits(raw, i + 2, 4, cp)) {
+                    out += encodeEscapedCodePoint(cp);
+                    i += 5;
+                    break;
+                }
+                out.push_back(next);
+                ++i;
+                break;
+            }
+            case '\n': ++i; break;  // backslash + LF: both go
             case '\r':
-                // Only a CRLF pair is a line continuation; a lone CR is an
-                // ordinary escaped character like any other.
+                // A backslash before CRLF takes the whole line ending.
+                // Deliberately unlike the reference, which treats the
+                // backslash as an undefined escape and keeps the CR --
+                // leaving a stray control character in any string wrapped
+                // in a file written on Windows. See this suite's
+                // BackslashNewlineContributesNothing.
                 if (i + 2 < raw.size() && raw[i + 2] == '\n') { i += 2; break; }
                 out.push_back('\r');
                 ++i;

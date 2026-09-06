@@ -193,29 +193,8 @@ double atan2Degrees(double y, double x) {
     return std::fabs(degs - whole) < 3.0E-14 ? whole : degs;
 }
 
-// UTF-8 encode/decode for chr()/ord() -- OpenSCAD strings are unicode text,
-// not byte arrays, so a codepoint above U+007F needs real multi-byte
-// handling, not a raw byte cast.
-std::string utf8Encode(uint32_t cp) {
-    std::string out;
-    if (cp <= 0x7F) {
-        out.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0xFFFF) {
-        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-    return out;
-}
-
+// utf8Encode lives in utf8.cpp -- the string-literal escape decoder
+// (\uXXXX) needs it too.
 uint32_t utf8DecodeFirst(const std::string& s) {
     if (s.empty()) return 0;
     const auto b = [&](size_t i) { return static_cast<unsigned char>(s[i]); };
