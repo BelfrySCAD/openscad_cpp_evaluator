@@ -388,8 +388,8 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
         nb::gil_scoped_release rel;
         auto logFn = [&echoes](const std::string& m) { echoes.push_back(m); };
         try {
-            std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
-            oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, logFn);
+            oscad::ParsedProgram program = oscad::getProgramFromFile(path);
+            oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(program.nodes, path, logFn);
             oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp, generate));
@@ -693,8 +693,8 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             };
         }
         try {
-            std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
-            oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, echoCpp);
+            oscad::ParsedProgram program = oscad::getProgramFromFile(path);
+            oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(program.nodes, path, echoCpp);
             oscadeval::Evaluator ev(echoCpp, nullptr, manifoldCache, hooks, false);
             evPtr = &ev;
             if (fastContinueSignal) ev.setFastContinueInterruptFlag(fastContinueSignal->flag());
@@ -729,8 +729,8 @@ nb::list parseDecls(const std::string& path) {
     std::vector<Decl> decls;
     {
         nb::gil_scoped_release rel;
-        std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(path);
-        oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(ast, path, [](const std::string&) {});
+        oscad::ParsedProgram program = oscad::getProgramFromFile(path);
+        oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(program.nodes, path, [](const std::string&) {});
         for (const oscad::ASTNode* n : used.processedNodes) {
             const oscad::Position& p = n->position();
             const char* ns = nullptr;

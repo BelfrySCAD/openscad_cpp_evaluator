@@ -873,7 +873,7 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     std::optional<EvalContext> fnCtx;
     std::vector<std::string> fnParams2;
     if (fieldFn) {
-        fnCtx = EvalContext::makeRoot((*fieldFn)->node->scope());
+        fnCtx = EvalContext::makeRoot((*fieldFn)->scope);
         for (const auto& prm : (*fieldFn)->node->parameters) fnParams2.push_back(prm->name->name);
     }
 

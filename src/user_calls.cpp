@@ -11,7 +11,7 @@ namespace oscadeval {
 const CompiledChunk* Evaluator::lookupOrCompileChunk(const oscad::FunctionDeclaration& decl) {
     auto it = chunkCache_.find(&decl);
     if (it == chunkCache_.end()) {
-        it = chunkCache_.emplace(&decl, tryCompileFunction(decl)).first;
+        it = chunkCache_.emplace(&decl, tryCompileFunction(decl, scopeTable_)).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second) return nullptr;
@@ -33,7 +33,7 @@ const CompiledChunk* Evaluator::lookupCompiledLiteralChunk(const oscad::Function
 const CompiledChunk* Evaluator::lookupOrCompileModuleChunk(const oscad::ModuleDeclaration& decl) {
     auto it = moduleChunkCache_.find(&decl);
     if (it == moduleChunkCache_.end()) {
-        it = moduleChunkCache_.emplace(&decl, tryCompileModuleBody(decl)).first;
+        it = moduleChunkCache_.emplace(&decl, tryCompileModuleBody(decl, scopeTable_)).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second) return nullptr;
@@ -52,7 +52,7 @@ Value Evaluator::evalExprMaybeCompiled(const oscad::Expression& node, EvalContex
     if (!useBytecodeVm() || !inResolvePass_) return evalExpr(node, ctx);
     auto it = stmtExprChunkCache_.find(&node);
     if (it == stmtExprChunkCache_.end()) {
-        it = stmtExprChunkCache_.emplace(&node, tryCompileStatementExpr(node, node.scope())).first;
+        it = stmtExprChunkCache_.emplace(&node, tryCompileStatementExpr(node, scopeOfNode(node), scopeTable_)).first;
         // A zero-capture closure literal (e.g. `x = function(y) y + 1;`)
         // still reaches chunk.nestedLiterals even though it never touches
         // closureSites (see tryCompileStatementExpr's own doc comment: only
@@ -74,7 +74,7 @@ bool Evaluator::tryRunCompiledAssignmentBlock(const std::vector<const oscad::AST
         std::vector<const oscad::Assignment*> assigns;
         assigns.reserve(assignments.size());
         for (const oscad::ASTNode* n : assignments) assigns.push_back(static_cast<const oscad::Assignment*>(n));
-        it = assignBlockChunkCache_.emplace(first, tryCompileAssignmentBlock(assigns, first->scope())).first;
+        it = assignBlockChunkCache_.emplace(first, tryCompileAssignmentBlock(assigns, scopeTable_, scopeOfNode(*first))).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second || !chunkEligibleNow(*it->second)) return false;
@@ -102,7 +102,7 @@ const CompiledChunk* Evaluator::lookupOrCompileChildrenListChunk(const std::vect
     const auto key = std::make_pair(first, children.size());
     auto it = childrenListChunkCache_.find(key);
     if (it == childrenListChunkCache_.end()) {
-        it = childrenListChunkCache_.emplace(key, tryCompileChildrenList(children, first->scope())).first;
+        it = childrenListChunkCache_.emplace(key, tryCompileChildrenList(children, scopeTable_, scopeOfNode(*first))).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second || !chunkEligibleNow(*it->second)) return nullptr;
@@ -277,7 +277,7 @@ std::optional<EvalContext> Evaluator::isolatedCallCtxFor(const oscad::ASTNode& d
     // scope to walk outward from -- the caller's scope at the call site
     // has no relation to it at all.
     bool usedChildCtx = false;
-    const oscad::Scope* declScope = declNode.scope() ? declNode.scope() : ctx.scope;
+    const oscad::Scope* declScope = ctx.scopeOf(declNode) ? ctx.scopeOf(declNode) : ctx.scope;
     EvalContext result = callCtxFor(declNode, ctx, declScope, nullptr, nullptr, &usedChildCtx, capturedLet);
     if (usedChildCtx) return std::nullopt;
     return result;
@@ -337,7 +337,7 @@ void Evaluator::bindCallArgsInto(const std::vector<std::unique_ptr<oscad::Parame
 
 EvalContext Evaluator::buildModuleChildCtx(const oscad::ModuleDeclaration& decl, const oscad::ModularCall& call,
                                             EvalContext& ctx, BoundArgs bound) {
-    const oscad::Scope* childScope = decl.scope() ? decl.scope() : ctx.scope;
+    const oscad::Scope* childScope = ctx.scopeOf(decl) ? ctx.scopeOf(decl) : ctx.scope;
 
     // Expanded, so a children(..., separate=true) in this block becomes one
     // real statement per child it selects -- which is what makes $children
@@ -459,7 +459,7 @@ std::optional<Evaluator::TailStep> Evaluator::tryTailStepFor(
     bool hasCompiledChunk, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
     const oscad::Position& callPos, const std::shared_ptr<TrailView<Value>>& capturedLet) {
     if (hasCompiledChunk) return std::nullopt;
-    const oscad::Scope* fnScope = declNode.scope() ? declNode.scope() : ctx.scope;
+    const oscad::Scope* fnScope = ctx.scopeOf(declNode) ? ctx.scopeOf(declNode) : ctx.scope;
     bool usedChildCtx = false;
     EvalContext childCtx = callCtxFor(declNode, ctx, fnScope, nullptr, nullptr, &usedChildCtx, capturedLet);
     if (usedChildCtx) return std::nullopt;
@@ -769,7 +769,7 @@ void Evaluator::exitUserCallException(const UserCallHandle& handle) {
 Value Evaluator::evalUserFunction(const std::string& name, const oscad::FunctionDeclaration& decl,
                                    const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                                    const oscad::ASTNode* callNode) {
-    const oscad::Scope* fnScope = decl.scope() ? decl.scope() : ctx.scope;
+    const oscad::Scope* fnScope = ctx.scopeOf(decl) ? ctx.scopeOf(decl) : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;
     EvalContext childCtx = callCtxFor(decl, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
@@ -794,7 +794,7 @@ Value Evaluator::evalUserFunction(const std::string& name, const oscad::Function
 
 Value Evaluator::evalUserFunctionFromBound(const std::string& name, const oscad::FunctionDeclaration& decl,
                                             BoundArgs bound, EvalContext& ctx, const oscad::Position* callPos) {
-    const oscad::Scope* fnScope = decl.scope() ? decl.scope() : ctx.scope;
+    const oscad::Scope* fnScope = ctx.scopeOf(decl) ? ctx.scopeOf(decl) : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;
     EvalContext childCtx = callCtxFor(decl, ctx, fnScope, nullptr, nullptr, &usedChildCtx);
@@ -814,7 +814,7 @@ Value Evaluator::evalFunctionLiteral(const Closure& closure,
                                       const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                                       const oscad::ASTNode* callNode) {
     const oscad::FunctionLiteral& funcNode = *closure.node;
-    const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
+    const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;
     EvalContext childCtx =
@@ -850,7 +850,7 @@ Value Evaluator::evalFunctionLiteral(const Closure& closure,
 Value Evaluator::evalFunctionLiteralFromBound(const Closure& closure, BoundArgs bound,
                                                EvalContext& ctx, const oscad::Position* callPos) {
     const oscad::FunctionLiteral& funcNode = *closure.node;
-    const oscad::Scope* fnScope = funcNode.scope() ? funcNode.scope() : ctx.scope;
+    const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
     const int callerFrameIdx = callStack_.empty() ? -1 : static_cast<int>(callStack_.size()) - 1;
     bool usedChildCtx = false;
     EvalContext childCtx =

@@ -6,6 +6,7 @@
 #include "openscad_cpp_parser/ast/ast_node.hpp"
 #include "openscad_cpp_parser/position.hpp"
 #include "openscad_cpp_parser/scope.hpp"
+#include "openscad_cpp_parser/scope_table.hpp"
 
 #include <array>
 #include <memory>
@@ -74,11 +75,25 @@ struct EvalContext {
     // one that sees it.
     bool viaChildren = false;
 
+    // Where every node's lexical Scope lives, since it cannot live in the
+    // node itself -- one parsed tree is shared by every script that
+    // includes it, and `include` puts those nodes in the INCLUDER's scope.
+    // Owned by the Evaluator for the length of a run; aliased, never
+    // copied, by every derived context.
+    const oscad::ScopeTable* scopeTable = nullptr;
+
+    // This node's own lexical scope, or null if none was recorded. Reads
+    // like the old ASTNode::scope() it replaces.
+    const oscad::Scope* scopeOf(const oscad::ASTNode& node) const {
+        return scopeTable ? scopeTable->get(node) : nullptr;
+    }
+
     // The one genuinely fresh construction: seeds `dyn` with OpenSCAD's
     // built-in $-variable defaults ($fn=0, $fa=12, $fs=2, $t=0,
     // $parent_modules=0). Every other EvalContext in a run is derived
     // from this one via the methods below.
-    static EvalContext makeRoot(const oscad::Scope* rootScope);
+    static EvalContext makeRoot(const oscad::Scope* rootScope,
+                                const oscad::ScopeTable* scopeTable = nullptr);
 
     // Mirrors _eval_children's direct EvalContext(...) construction: swaps
     // only `scope` (to a sibling statement's own lexical scope from

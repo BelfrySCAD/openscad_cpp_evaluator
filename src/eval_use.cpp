@@ -8,6 +8,17 @@ namespace oscadeval {
 
 ResolvedUseScopes resolveUseScopes(const std::vector<std::unique_ptr<oscad::ASTNode>>& ownNodes,
                                     const std::string& currentFile, const std::function<void(const std::string&)>& logFn) {
+    // Borrow, then share the one implementation: nothing here needs
+    // ownership, and the cached-include path (ParsedProgram) only ever has
+    // borrowed nodes to offer.
+    std::vector<const oscad::ASTNode*> borrowed;
+    borrowed.reserve(ownNodes.size());
+    for (const auto& n : ownNodes) borrowed.push_back(n.get());
+    return resolveUseScopes(borrowed, currentFile, logFn);
+}
+
+ResolvedUseScopes resolveUseScopes(const std::vector<const oscad::ASTNode*>& ownNodes,
+                                    const std::string& currentFile, const std::function<void(const std::string&)>& logFn) {
     ResolvedUseScopes result;
 
     std::vector<const oscad::ASTNode*> injected;
@@ -16,7 +27,7 @@ ResolvedUseScopes resolveUseScopes(const std::vector<std::unique_ptr<oscad::ASTN
     // is built -- mirrors the reference's `reanchor` list exactly.
     std::vector<std::pair<std::vector<const oscad::ASTNode*>, oscad::Scope*>> reanchor;
 
-    for (const auto& nodePtr : ownNodes) {
+    for (const oscad::ASTNode* nodePtr : ownNodes) {
         if (nodePtr->kind() != oscad::NodeKind::UseStatement) continue;
         const auto& useNode = static_cast<const oscad::UseStatement&>(*nodePtr);
 
@@ -64,8 +75,8 @@ ResolvedUseScopes resolveUseScopes(const std::vector<std::unique_ptr<oscad::ASTN
         if (!libInjected.empty()) reanchor.emplace_back(std::move(libInjected), result.usedFileScopes.back().get());
     }
 
-    for (const auto& nodePtr : ownNodes) {
-        if (nodePtr->kind() != oscad::NodeKind::UseStatement) result.ownNodesFiltered.push_back(nodePtr.get());
+    for (const oscad::ASTNode* nodePtr : ownNodes) {
+        if (nodePtr->kind() != oscad::NodeKind::UseStatement) result.ownNodesFiltered.push_back(nodePtr);
     }
 
     result.processedNodes = injected;
@@ -83,8 +94,13 @@ ResolvedUseScopes resolveUseScopes(const std::vector<std::unique_ptr<oscad::ASTN
     for (const oscad::ASTNode* n : result.processedNodes) mutableProcessed.push_back(const_cast<oscad::ASTNode*>(n));
     result.rootScope = oscad::buildScopes(mutableProcessed);
 
-    for (const auto& [libInjected, libRootScope] : reanchor) {
-        for (const oscad::ASTNode* n : libInjected) const_cast<oscad::ASTNode*>(n)->buildScope(*libRootScope);
+    {
+        // Re-anchoring writes scopes too, into the same table buildScopes()
+        // just filled -- which the root scope now owns.
+        oscad::ScopeTableScope recording(*const_cast<oscad::ScopeTable*>(result.rootScope->table()));
+        for (const auto& [libInjected, libRootScope] : reanchor) {
+            for (const oscad::ASTNode* n : libInjected) const_cast<oscad::ASTNode*>(n)->buildScope(*libRootScope);
+        }
     }
 
     return result;

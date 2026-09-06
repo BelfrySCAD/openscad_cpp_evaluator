@@ -2,9 +2,12 @@
 
 namespace oscadeval {
 
-EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope) {
+EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope, const oscad::ScopeTable* scopeTable) {
+    // Default: the table buildScopes() attached to this scope tree's root.
+    if (!scopeTable && rootScope) scopeTable = rootScope->rootTable();
     EvalContext ctx;
     ctx.scope = rootScope;
+    ctx.scopeTable = scopeTable;
     // dyn/dynExplicit share one underlying trail -- see scope_trail.hpp's
     // own doc comment on DynValueView/DynExplicitView.
     auto dynTrail = IndexedTrailView<DynEntry>::makeRoot(std::make_shared<DynNameIntern>());
@@ -66,6 +69,10 @@ EvalContext EvalContext::childCtx(const oscad::Scope* newScope, std::optional<st
                                    std::shared_ptr<const ChildrenNodeList> newChildrenNodes,
                                    const EvalContext* newChildrenCallerCtx) const {
     EvalContext result;
+    // Constant for the whole run; a derived context must never lose it, or
+    // a node's scope reads back as null and name resolution silently falls
+    // back to the enclosing scope.
+    result.scopeTable = scopeTable;
     result.scope = newScope ? newScope : scope;
     auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false);
     result.dyn = DynValueView(newDynTrail);
@@ -83,6 +90,10 @@ EvalContext EvalContext::callCtx(const oscad::Scope* newScope, std::optional<std
                                   std::shared_ptr<const ChildrenNodeList> newChildrenNodes,
                                   const EvalContext* newChildrenCallerCtx) const {
     EvalContext result;
+    // Constant for the whole run; a derived context must never lose it, or
+    // a node's scope reads back as null and name resolution silently falls
+    // back to the enclosing scope.
+    result.scopeTable = scopeTable;
     result.scope = newScope ? newScope : scope;
     auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false); // stays dynamically scoped through
     result.dyn = DynValueView(newDynTrail);
@@ -101,6 +112,10 @@ EvalContext EvalContext::callCtxFromCapturedLet(const std::shared_ptr<TrailView<
                                                  std::shared_ptr<const ChildrenNodeList> newChildrenNodes,
                                                  const EvalContext* newChildrenCallerCtx) const {
     EvalContext result;
+    // Constant for the whole run; a derived context must never lose it, or
+    // a node's scope reads back as null and name resolution silently falls
+    // back to the enclosing scope.
+    result.scopeTable = scopeTable;
     result.scope = newScope ? newScope : scope;
     auto newDynTrail = dyn.trail()->openChild(/*isolate=*/false); // stays dynamically scoped through the CALL SITE
     result.dyn = DynValueView(newDynTrail);

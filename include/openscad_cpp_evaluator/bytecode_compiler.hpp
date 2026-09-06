@@ -20,7 +20,8 @@ namespace oscadeval {
 // yet -- the caller falls back to the ordinary AST interpreter for that
 // whole function, unconditionally correct since nothing about this
 // function's behavior changes based on whether it happened to compile.
-std::optional<CompiledChunk> tryCompileFunction(const oscad::FunctionDeclaration& decl);
+std::optional<CompiledChunk> tryCompileFunction(const oscad::FunctionDeclaration& decl,
+                                                 const oscad::ScopeTable* scopeTable);
 
 // Compiles a bare STATEMENT-context expression -- an assignment's RHS, an
 // if/for condition, a module-call or echo()/assert() argument -- rather
@@ -48,7 +49,8 @@ std::optional<CompiledChunk> tryCompileFunction(const oscad::FunctionDeclaration
 // always set by buildScope() regardless of node kind) -- needed to resolve
 // any callee inside it statically, the same way a function body's call
 // sites are.
-std::optional<CompiledChunk> tryCompileStatementExpr(const oscad::Expression& expr, const oscad::Scope* scope);
+std::optional<CompiledChunk> tryCompileStatementExpr(const oscad::Expression& expr, const oscad::Scope* scope,
+                                                      const oscad::ScopeTable* scopeTable);
 
 // Compiles a run of SIBLING assignment statements sharing one scope --
 // exactly Evaluator::evalChildren's own `assignments` sub-list (stmt_eval.
@@ -82,6 +84,7 @@ std::optional<CompiledChunk> tryCompileStatementExpr(const oscad::Expression& ex
 //   contained by, so it would leak into the caller's ctx.dyn permanently
 //   instead of just for that one assignment's own RHS.
 std::optional<CompiledChunk> tryCompileAssignmentBlock(const std::vector<const oscad::Assignment*>& assigns,
+                                                        const oscad::ScopeTable* scopeTable,
                                                         const oscad::Scope* scope);
 
 // Attempts to compile `decl`'s parameter defaults + STATEMENT-list body
@@ -97,7 +100,8 @@ std::optional<CompiledChunk> tryCompileAssignmentBlock(const std::vector<const o
 // construct does for tryCompileFunction; only a genuinely unsupported
 // EXPRESSION (inside an if-condition/for-range/argument) can still bail
 // (via tryCompileStatementExpr's own NotCompilable, propagated up).
-std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration& decl);
+std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration& decl,
+                                                   const oscad::ScopeTable* scopeTable);
 
 // Same compilation (assignment/if/for/resolved-module-call get real
 // bytecode, everything else a native passthrough), but for an ARBITRARY
@@ -121,6 +125,7 @@ std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration
 // resolving a call site's callee -- callers pass `children.front()->
 // scope()`, mirroring tryRunCompiledAssignmentBlock's own convention.
 std::optional<CompiledChunk> tryCompileChildrenList(const std::vector<const oscad::ASTNode*>& children,
+                                                     const oscad::ScopeTable* scopeTable,
                                                      const oscad::Scope* scope);
 
 } // namespace oscadeval

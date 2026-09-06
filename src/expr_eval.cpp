@@ -456,7 +456,7 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             // time, matching real OpenSCAD), and the lexical scope is
             // static AST data already reachable via the node itself.
             return Value{std::make_shared<const Closure>(
-                Closure{static_cast<const oscad::FunctionLiteral*>(&node), ctx.let_})};
+                Closure{static_cast<const oscad::FunctionLiteral*>(&node), ctx.let_, ctx.scopeOf(node)})};
         case NodeKind::PrimaryCall:
             return evalFunctionCall(static_cast<const oscad::PrimaryCall&>(node), ctx);
         case NodeKind::LetOp:

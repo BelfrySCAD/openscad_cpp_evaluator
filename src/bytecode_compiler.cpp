@@ -216,7 +216,7 @@ class Compiler;
 // Returns false (chunk left partially populated, discarded by the caller)
 // for any NotCompilable thrown while compiling.
 bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, const oscad::ASTNode* selfDecl,
-                          std::vector<EnclosingLevel> enclosing,
+                          const oscad::ScopeTable* scopeTable, std::vector<EnclosingLevel> enclosing,
                           const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
                           const oscad::Expression& bodyExpr);
 
@@ -238,8 +238,16 @@ public:
     // when compiling a FunctionLiteral nested inside another compile --
     // see the FunctionLiteral case in compileExpr).
     Compiler(CompiledChunk& chunk, const oscad::Scope* scope, const oscad::ASTNode* selfDecl,
-              std::vector<EnclosingLevel> enclosing)
-        : chunk_(chunk), scope_(scope), selfDecl_(selfDecl), enclosing_(std::move(enclosing)) {}
+              const oscad::ScopeTable* scopeTable, std::vector<EnclosingLevel> enclosing)
+        : chunk_(chunk), scope_(scope), selfDecl_(selfDecl), scopeTable_(scopeTable),
+          enclosing_(std::move(enclosing)) {}
+
+    // A node's own lexical scope, or null. Replaces ASTNode::scope(),
+    // which is gone: one parsed tree is shared between evaluations, so a
+    // node's scope lives in the run's ScopeTable, not the node.
+    const oscad::Scope* scopeOf(const oscad::ASTNode& node) const {
+        return scopeTable_ ? scopeTable_->get(node) : nullptr;
+    }
 
     int nextSlot() const { return nextSlot_; }
     int nextIterList() const { return nextIterList_; }
@@ -408,7 +416,7 @@ public:
                 std::vector<EnclosingLevel> childEnclosing = enclosing_;
                 childEnclosing.push_back({selfDecl_, &scope});
                 CompiledChunk literalChunk;
-                if (!compileFunctionLike(literalChunk, n.scope(), &n, std::move(childEnclosing), n.parameters,
+                if (!compileFunctionLike(literalChunk, scopeOf(n), &n, scopeTable_, std::move(childEnclosing), n.parameters,
                                           *n.body)) {
                     throw NotCompilable{};
                 }
@@ -1461,11 +1469,12 @@ public:
         struct ScopeGuard {
             const oscad::Scope*& scope;
             const oscad::Scope* saved;
-            ScopeGuard(const oscad::Scope*& s, const oscad::ASTNode& node) : scope(s), saved(s) {
-                if (const oscad::Scope* stmtScope = node.scope()) scope = stmtScope;
+            ScopeGuard(const oscad::Scope*& s, const oscad::ASTNode& node, const oscad::ScopeTable* table)
+                : scope(s), saved(s) {
+                if (const oscad::Scope* stmtScope = table ? table->get(node) : nullptr) scope = stmtScope;
             }
             ~ScopeGuard() { scope = saved; }
-        } scopeGuard(scope_, stmt);
+        } scopeGuard(scope_, stmt, scopeTable_);
         switch (stmt.kind()) {
             // Pure declarations, no-ops at statement-eval time (already
             // hoisted into scope by buildScopes()) -- matches evalStatement's
@@ -1612,7 +1621,7 @@ public:
             }
             case NodeKind::ModularCall: {
                 auto& call = static_cast<const oscad::ModularCall&>(stmt);
-                const oscad::Scope* lookupScope = stmt.scope() ? stmt.scope() : scope_;
+                const oscad::Scope* lookupScope = scopeOf(stmt) ? scopeOf(stmt) : scope_;
                 const oscad::ASTNode* resolved = lookupScope ? lookupScope->lookupModule(call.name->name) : nullptr;
                 if (resolved && resolved->kind() == NodeKind::ModuleDeclaration) {
                     CompiledChunk::ModuleCallSite site;
@@ -1842,17 +1851,18 @@ private:
     CompiledChunk& chunk_;
     const oscad::Scope* scope_;
     const oscad::ASTNode* selfDecl_;
+    const oscad::ScopeTable* scopeTable_ = nullptr;
     std::vector<EnclosingLevel> enclosing_;
     int nextSlot_ = 0;
     int nextIterList_ = 0;
 };
 
 bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, const oscad::ASTNode* selfDecl,
-                          std::vector<EnclosingLevel> enclosing,
+                          const oscad::ScopeTable* scopeTable, std::vector<EnclosingLevel> enclosing,
                           const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
                           const oscad::Expression& bodyExpr) {
     chunk.selfDecl = selfDecl;
-    Compiler compiler(chunk, staticScope, selfDecl, std::move(enclosing));
+    Compiler compiler(chunk, staticScope, selfDecl, scopeTable, std::move(enclosing));
     CompileScope bodyScope;
     bodyScope.push();
     for (const auto& p : params) {
@@ -1888,16 +1898,20 @@ bool compileFunctionLike(CompiledChunk& chunk, const oscad::Scope* staticScope, 
 
 } // namespace
 
-std::optional<CompiledChunk> tryCompileFunction(const oscad::FunctionDeclaration& decl) {
+std::optional<CompiledChunk> tryCompileFunction(const oscad::FunctionDeclaration& decl,
+                                                 const oscad::ScopeTable* scopeTable) {
     CompiledChunk chunk;
-    if (!compileFunctionLike(chunk, decl.scope(), &decl, {}, decl.parameters, *decl.expr)) return std::nullopt;
+    if (!compileFunctionLike(chunk, scopeTable ? scopeTable->get(decl) : nullptr, &decl, scopeTable, {},
+                             decl.parameters, *decl.expr))
+        return std::nullopt;
     return chunk;
 }
 
-std::optional<CompiledChunk> tryCompileStatementExpr(const oscad::Expression& expr, const oscad::Scope* scope) {
+std::optional<CompiledChunk> tryCompileStatementExpr(const oscad::Expression& expr, const oscad::Scope* scope,
+                                                      const oscad::ScopeTable* scopeTable) {
     static const std::vector<std::unique_ptr<oscad::ParameterDeclaration>> kNoParams;
     CompiledChunk chunk;
-    if (!compileFunctionLike(chunk, scope, nullptr, {}, kNoParams, expr)) return std::nullopt;
+    if (!compileFunctionLike(chunk, scope, nullptr, scopeTable, {}, kNoParams, expr)) return std::nullopt;
     // See this function's own doc comment (bytecode_compiler.hpp) for why a
     // captures-having nested closure can't be supported by this bare
     // wrapper -- selfDecl is nullptr and enclosing is empty above, so its
@@ -1910,6 +1924,7 @@ std::optional<CompiledChunk> tryCompileStatementExpr(const oscad::Expression& ex
 }
 
 std::optional<CompiledChunk> tryCompileAssignmentBlock(const std::vector<const oscad::Assignment*>& assigns,
+                                                        const oscad::ScopeTable* scopeTable,
                                                          const oscad::Scope* scope) {
     // Reassignment-warning fidelity (see this function's own doc comment,
     // bytecode_compiler.hpp) -- cheap, one-time scan before touching the
@@ -1926,7 +1941,7 @@ std::optional<CompiledChunk> tryCompileAssignmentBlock(const std::vector<const o
     }
 
     CompiledChunk chunk;
-    Compiler compiler(chunk, scope, nullptr, {});
+    Compiler compiler(chunk, scope, nullptr, scopeTable, {});
     CompileScope compileScope;
     compileScope.push();
     try {
@@ -1964,7 +1979,8 @@ std::optional<CompiledChunk> tryCompileAssignmentBlock(const std::vector<const o
     return chunk;
 }
 
-std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration& decl) {
+std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration& decl,
+                                                   const oscad::ScopeTable* scopeTable) {
     CompiledChunk chunk;
     chunk.isModule = true;
     chunk.selfDecl = &decl;
@@ -1978,7 +1994,7 @@ std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration
     // compile path, just scoped to that one statement's own sub-
     // expression -- see this file's own module-chunk doc comment
     // (bytecode.hpp) for the full reasoning.
-    Compiler compiler(chunk, decl.scope(), nullptr, {});
+    Compiler compiler(chunk, scopeTable ? scopeTable->get(decl) : nullptr, nullptr, scopeTable, {});
     try {
         compiler.compileStatementList(decl.children, chunk.bodyCode);
     } catch (const NotCompilable&) {
@@ -1990,6 +2006,7 @@ std::optional<CompiledChunk> tryCompileModuleBody(const oscad::ModuleDeclaration
 }
 
 std::optional<CompiledChunk> tryCompileChildrenList(const std::vector<const oscad::ASTNode*>& children,
+                                                     const oscad::ScopeTable* scopeTable,
                                                      const oscad::Scope* scope) {
     CompiledChunk chunk;
     // Same completion semantics as a module chunk (no return value, its
@@ -2001,7 +2018,7 @@ std::optional<CompiledChunk> tryCompileChildrenList(const std::vector<const osca
     // ever resolved against it either way; module bodies don't create
     // escaping closures).
     chunk.isModule = true;
-    Compiler compiler(chunk, scope, nullptr, {});
+    Compiler compiler(chunk, scope, nullptr, scopeTable, {});
     try {
         compiler.compileStatementList(children, chunk.bodyCode);
     } catch (const NotCompilable&) {

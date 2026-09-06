@@ -205,6 +205,9 @@ void Evaluator::evalIntersectionForNode(const oscad::ModularIntersectionFor& nod
 
 template <typename NodeList>
 std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTreeImpl(const NodeList& nodes, EvalContext& ctx) {
+    // Latch the run's ScopeTable for the helpers the VM reaches without an
+    // EvalContext -- see Evaluator::scopeOfNode.
+    scopeTable_ = ctx.scopeTable;
     idToNode.clear();
     idToColor.clear();
     syntheticNodes_.clear();
@@ -246,6 +249,9 @@ template <typename NodeList>
 std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalContext& ctx,
                                                   const std::unordered_map<std::string, Value>& viewportParams,
                                                   bool generate) {
+    // Latch the run's ScopeTable for the helpers the VM reaches without an
+    // EvalContext -- see Evaluator::scopeOfNode.
+    scopeTable_ = ctx.scopeTable;
     // Seeds ctx.dyn directly, deliberately not touching ctx.dynExplicit --
     // see this method's own doc comment in evaluator.hpp for why that
     // distinction matters to a caller.

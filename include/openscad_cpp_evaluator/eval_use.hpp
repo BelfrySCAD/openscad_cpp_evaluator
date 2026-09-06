@@ -29,6 +29,8 @@ struct ResolvedUseScopes {
     // these (not anything currentFile itself pulled in via `use`; "nested
     // use has no effect on the base file's environment").
     std::vector<const oscad::ASTNode*> ownNodesFiltered;
+    // Owns the ScopeTable holding every node's lexical scope -- see
+    // oscad::ScopeTable for why that cannot live in the nodes themselves.
     std::unique_ptr<oscad::Scope> rootScope;
 };
 
@@ -47,5 +49,12 @@ struct ResolvedUseScopes {
 // other failure (e.g. a syntax error in the used file) via `logFn`.
 ResolvedUseScopes resolveUseScopes(const std::vector<std::unique_ptr<oscad::ASTNode>>& ownNodes,
                                     const std::string& currentFile, const std::function<void(const std::string&)>& logFn);
+
+// Same, for a statement list that is BORROWED rather than owned -- what
+// oscad::ParsedProgram hands back when includes come from the shared AST
+// cache. The caller must keep that ParsedProgram alive alongside the
+// result, exactly as it must keep an owned AST alive.
+ResolvedUseScopes resolveUseScopes(const std::vector<const oscad::ASTNode*>& ownNodes, const std::string& currentFile,
+                                    const std::function<void(const std::string&)>& logFn);
 
 } // namespace oscadeval
