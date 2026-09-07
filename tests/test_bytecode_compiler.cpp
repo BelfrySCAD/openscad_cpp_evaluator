@@ -2059,3 +2059,38 @@ TEST(ModuleBodyCompiles, NestedModuleClosureStillWorksAfterADeepUnrelatedRecursi
     ev.resolveTree(ast, ctx);
     EXPECT_EQ(captured, "ECHO: 6"); // 3*2, seen via inner's own closure over outer's reassigned edges
 }
+
+// Op::Call* read their arguments straight off the calling frame's operand
+// stack rather than copying them into a std::vector first, and truncate that
+// stack once they have been moved out. Every case below is one where getting
+// the truncation point wrong (off by the callee, off by an argument, or done
+// too early) silently corrupts a value that is NOT part of the call:
+// operands of the surrounding expression sitting underneath it, a
+// zero-argument call whose only stack entry is the callee, and a call whose
+// own arguments are themselves calls (so the inner call truncates while the
+// outer one's earlier arguments are still on the stack below).
+TEST(BytecodeCompiler, CallsTruncateExactlyTheirOwnOperandStackEntries) {
+    ScopedVm vm(true);
+    const std::string defs = "function add(a, b) = a + b;\n"
+                             "function one() = 1;\n"
+                             "g = function(a, b) a * 10 + b;\n"
+                             "z = function() 99;\n";
+
+    // Arguments that are themselves calls, and a surrounding list whose
+    // earlier elements are still on the stack while the later ones run.
+    EXPECT_EQ(runCapturingEcho(defs + "echo([one(), add(add(1, 2), one()), 7]);"),
+              "ECHO: [1, 4, 7]");
+    // Named and positional mixed, still exactly two stack entries to drop.
+    EXPECT_EQ(runCapturingEcho(defs + "echo([5, add(b = 2, a = 3), 6]);"), "ECHO: [5, 5, 6]");
+    // Closure call: the callee sits UNDER its arguments and goes with them.
+    EXPECT_EQ(runCapturingEcho(defs + "echo([4, g(1, 2), 8]);"), "ECHO: [4, 12, 8]");
+    // Zero-argument closure call -- the callee is the only entry to drop.
+    EXPECT_EQ(runCapturingEcho(defs + "echo([4, z(), 8]);"), "ECHO: [4, 99, 8]");
+    // An unknown callee still has to drop its arguments and its callee.
+    EXPECT_EQ(runCapturingEcho(defs + "nope = undef;\necho([4, nope(1, 2), 8]);"),
+              "WARNING: Ignoring unknown function 'nope' in file <string>, line 6\n"
+              "ECHO: [4, undef, 8]");
+    // Builtins take the same path (buildCallArgs off the same stack slots).
+    EXPECT_EQ(runCapturingEcho(defs + "echo([4, max(1, 9, 2), min([3, 1]), 8]);"),
+              "ECHO: [4, 9, 1, 8]");
+}

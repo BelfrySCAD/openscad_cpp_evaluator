@@ -65,6 +65,30 @@ TEST(ScopeTrailStorage, PopLevelAfterManySameLevelSetsRestoresParentValue) {
     EXPECT_EQ(*storage.lookup("i", parentLevel), -1);
 }
 
+TEST(ScopeTrailStorage, PoppedLevelTerminatesADescendantsAncestryWalk) {
+    // Pins the two invariants the level->parent table has to keep, whatever
+    // it is implemented with (it is a vector indexed by level, not a map, for
+    // allocation reasons -- see ScopeTrailStorage::parent_): a popped level
+    // stops an ancestry walk dead rather than forwarding it to the
+    // grandparent, and level numbers are never reused afterwards.
+    ScopeTrailStorage<int> storage;
+    const int grandParent = storage.openLevel(0);
+    storage.set("x", 7, grandParent);
+    const int parent = storage.openLevel(grandParent);
+    const int child = storage.openLevel(parent);
+    ASSERT_NE(storage.lookup("x", child), nullptr);
+    EXPECT_EQ(*storage.lookup("x", child), 7);
+
+    storage.popLevel(parent); // child is still live (an escaping closure)
+    EXPECT_EQ(storage.lookup("x", child), nullptr);
+    EXPECT_NE(storage.openLevel(0), parent); // levels are never renumbered
+
+    // The grandparent's own binding is untouched -- only the walk THROUGH
+    // the popped level is cut.
+    ASSERT_NE(storage.lookup("x", grandParent), nullptr);
+    EXPECT_EQ(*storage.lookup("x", grandParent), 7);
+}
+
 TEST(IndexedScopeTrailStorage, SetAtSameLevelDoesNotAccumulateEntries) {
     auto intern = std::make_shared<DynNameIntern>();
     IndexedScopeTrailStorage<int> storage(intern);

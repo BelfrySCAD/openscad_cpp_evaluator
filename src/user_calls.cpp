@@ -685,7 +685,7 @@ void Evaluator::recordTailCallHop(const std::string& calleeName, const oscad::AS
     // here too, or it would count the OLD declaration as active forever
     // and never see the NEW one at all.
     noteActiveDeclExit(frame.declNode);
-    ++activeDeclRefcount_[&calleeDecl];
+    noteActiveDeclEnter(&calleeDecl);
     frame.name = calleeName;
     frame.declNode = &calleeDecl;
     frame.declPosition = &calleeDecl.position();
@@ -736,16 +736,22 @@ Evaluator::UserCallHandle Evaluator::enterUserCall(const std::string& name, cons
     callStack_.push_back(CallStackFrame{kind, name, callPos, &declNode.position(), &declNode, nullptr, upvalueParent});
     callStack_.back().bodyCtx = &childCtx; // per-frame locals for the debugger
     if (isModule) ++moduleCallDepth_;
-    ++activeDeclRefcount_[&declNode];
+    noteActiveDeclEnter(&declNode);
     if (bodyExpr) checkDebug(*bodyExpr, childCtx);
     lastCtx_ = &childCtx;
     return h;
 }
 
 void Evaluator::noteActiveDeclExit(const oscad::ASTNode* declNode) {
-    auto it = activeDeclRefcount_.find(declNode);
-    if (it == activeDeclRefcount_.end()) return; // defensive; should always be found
-    if (--it->second <= 0) activeDeclRefcount_.erase(it);
+    for (auto it = activeDeclRefcount_.begin(); it != activeDeclRefcount_.end(); ++it) {
+        if (it->first != declNode) continue;
+        if (--it->second <= 0) {
+            *it = activeDeclRefcount_.back(); // order is not meaningful
+            activeDeclRefcount_.pop_back();
+        }
+        return;
+    }
+    // not found: defensive; should always be present
 }
 
 void Evaluator::exitUserCallSuccess(const std::string& name, const UserCallHandle& handle, const Value& result,

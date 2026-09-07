@@ -97,4 +97,14 @@ const oscad::Expression* argExpr(const oscad::Argument& arg);
 // positional argument, not a fixed named slot.
 std::vector<Value> allPositional(const CallArgs& args);
 
+// allPositional()'s size and element access, without building the vector.
+// The argument CHECKERS (function_builtins.cpp) only ever ask how many
+// positional slots there are and look at a couple of them, so they used to
+// pay a heap allocation plus a Value copy per slot on every builtin call
+// that has a check entry -- 1.97M of the 16.6M allocations in one
+// Anklet.scad render. positionalAt() answers undef for a gap, exactly as
+// allPositional() pads one.
+size_t positionalCount(const CallArgs& args);
+const Value& positionalAt(const CallArgs& args, size_t pos);
+
 } // namespace oscadeval

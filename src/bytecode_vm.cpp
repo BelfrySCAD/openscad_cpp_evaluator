@@ -20,10 +20,18 @@ namespace {
 
 // Shared by Op::CallFn's isBuiltin (evalBuiltinFunction) and isImport
 // (importAsValue) branches -- both take the same pre-resolved CallArgs
-// shape resolveArgs would build for the interpreter path. `args` is
-// consumed (each element moved out).
-CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount) {
-    CallArgs callArgs;
+// shape resolveArgs would build for the interpreter path. `args` points
+// AT THE CALLER FRAME'S OPERAND STACK, not at a copy: the arguments are
+// already sitting there contiguously and in order, so every Op::Call*
+// hands over `f.stack.data() + argBase` and truncates the stack once the
+// arguments have been moved out. Building a `std::vector<Value>` for them
+// instead was the single largest allocation site in the whole evaluator --
+// 2.57M of one Anklet.scad render's 12.7M allocations, one per function
+// call, builtins included. `args` is consumed (each element moved out), and
+// nothing may push to that stack until it has been.
+CallArgs& buildCallArgs(const CompiledChunk::CallSite& site, Value* args, size_t argCount, CallArgs& callArgs) {
+    callArgs.positional.clear();
+    callArgs.named.clear();
     int positionalIdx = 0;
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
@@ -41,7 +49,7 @@ CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& 
 // LIST is `paramNames` (in declared order -- a FunctionDeclaration's
 // parameters or a FunctionLiteral's). Shared by CallFn/CallFnTail (a
 // site.decl callee) and CallDynamic/CallDynamicTail (a closure callee).
-BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount,
+BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, Value* args, size_t argCount,
                           const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& paramNames) {
     BoundArgs bound;
     bound.reserve(argCount);
@@ -176,7 +184,7 @@ void applyCompiledDefaultsToFrame(Evaluator& ev, const CompiledChunk& chunk, VmF
         if (!chunk.defaultCode[i].empty()) {
             auto defaultFrame = ev.acquireVmFrame();
             defaultFrame->chunk = &chunk;
-            defaultFrame->code = &chunk.defaultCode[i];
+            defaultFrame->setCode(chunk.defaultCode[i]);
             defaultFrame->pc = 0;
             defaultFrame->slots = frame.slots; // defaults may read earlier SIBLING slots? no -- compiled with an
                                                  // isolated (zero-frame) scope, see bytecode_compiler.cpp's
@@ -213,7 +221,7 @@ void pushBareFrame(Evaluator& ev, const CompiledChunk& chunk, const std::vector<
                     EvalContext ctx) {
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &code;
+    frame->setCode(code);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -254,7 +262,7 @@ void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const osc
 
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -314,7 +322,7 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
     }
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     // See runCompiledModuleBody's own doc comment (below) for why this is
     // .assign(numSlots) now, not .clear() -- a nested let-expression
@@ -369,7 +377,7 @@ void pushChildrenForwardFrame(Evaluator& ev, const CompiledChunk& chunk, EvalCon
     }
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -491,7 +499,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
         }
         while (ev.vmCallStack_.size() > floor) {
             VmFrame& f = *ev.vmCallStack_.back();
-            if (f.pc >= f.code->size()) {
+            if (f.pc >= f.codeSize) {
                 // A module chunk produces nothing on the stack at all --
                 // its whole effect already landed in treeStack_ as a side
                 // effect of running its own body (Op::CallModule/
@@ -528,7 +536,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 continue;
             }
 
-            const Instruction& ins = (*f.code)[f.pc];
+            const Instruction& ins = f.code[f.pc];
             EvalContext& ctx = f.ctxChain.back();
             switch (ins.op) {
                 case Op::PushConst:
@@ -787,27 +795,28 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallFn: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
                     if (site.isImport) {
-                        CallArgs callArgs = buildCallArgs(site, args, argCount);
+                        CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
+                        f.stack.resize(argBase);
                         f.stack.push_back(importAsValue(ev, callArgs, *site.callNode));
                         ++f.pc;
                     } else if (site.isBuiltin && site.calleeName == "object") {
                         std::vector<std::pair<std::optional<std::string>, Value>> pairs;
                         pairs.reserve(argCount);
                         for (size_t i = 0; i < argCount; ++i) pairs.emplace_back(site.argNames[i], std::move(args[i]));
+                        f.stack.resize(argBase);
                         f.stack.push_back(mergeObjectArgs(ev, pairs, &site.callNode->position()));
                         ++f.pc;
                     } else if (site.isBuiltin) {
-                        CallArgs callArgs = buildCallArgs(site, args, argCount);
+                        CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
+                        f.stack.resize(argBase);
                         f.stack.push_back(evalBuiltinFunction(ev, site.calleeName, callArgs, *site.callNode));
                         ++f.pc;
                     } else {
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
+                        f.stack.resize(argBase);
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
                         if (calleeChunk) {
                             const oscad::Scope* fnScope = ctx.scopeOf(*site.decl) ? ctx.scopeOf(*site.decl) : ctx.scope;
@@ -828,17 +837,14 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallDynamic: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
-                    Value callee = std::move(f.stack.back());
-                    f.stack.pop_back();
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
+                    Value callee = std::move(f.stack[argBase - 1]);
                     if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
                         const Closure& closure = **closurePtr;
                         const oscad::FunctionLiteral& funcNode = *closure.node;
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, funcNode.parameters);
+                        f.stack.resize(argBase - 1); // also drops the callee
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupCompiledLiteralChunk(funcNode) : nullptr;
                         if (calleeChunk) {
                             const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
@@ -851,6 +857,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                     } else {
                         if (!site.calleeName.empty()) ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
+                        f.stack.resize(argBase - 1); // arguments and callee both go
                         f.stack.push_back(Value{});
                         ++f.pc;
                     }
@@ -859,12 +866,10 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallFnTail: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
                     BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
+                    f.stack.resize(argBase);
                     // Tail-hop-in-place requires f.hopEligible -- a frame
                     // that's call-boundary-free (statement expression,
                     // assignment block, parameter default) has no
@@ -890,7 +895,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     if (calleeChunk) {
                         ev.recordTailCallHop(site.calleeName, *site.decl, &site.callNode->position(), f.tailHopGuard);
                         f.chunk = calleeChunk;
-                        f.code = &calleeChunk->bodyCode;
+                        f.setCode(calleeChunk->bodyCode);
                         f.pc = 0;
                         f.slots.assign(static_cast<size_t>(calleeChunk->numSlots), Value{});
                         f.stack.clear();
@@ -921,17 +926,14 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallDynamicTail: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
-                    Value callee = std::move(f.stack.back());
-                    f.stack.pop_back();
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
+                    Value callee = std::move(f.stack[argBase - 1]);
                     if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
                         const Closure& closure = **closurePtr;
                         const oscad::FunctionLiteral& funcNode = *closure.node;
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, funcNode.parameters);
+                        f.stack.resize(argBase - 1); // also drops the callee
                         const bool thisFrameBracketed = f.hopEligible;
                         std::optional<EvalContext> hopCtx = thisFrameBracketed
                                                                  ? ev.isolatedCallCtxFor(funcNode, ctx, capturedLetTrail(closure))
@@ -942,7 +944,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         if (calleeChunk) {
                             ev.recordTailCallHop("<function literal>", funcNode, ins.pos, f.tailHopGuard);
                             f.chunk = calleeChunk;
-                            f.code = &calleeChunk->bodyCode;
+                            f.setCode(calleeChunk->bodyCode);
                             f.pc = 0;
                             f.slots.assign(static_cast<size_t>(calleeChunk->numSlots), Value{});
                             f.stack.clear();
@@ -967,6 +969,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                     } else {
                         if (!site.calleeName.empty()) ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
+                        f.stack.resize(argBase - 1); // arguments and callee both go
                         f.stack.push_back(Value{});
                         ++f.pc;
                     }
@@ -1559,7 +1562,7 @@ Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
                           EvalContext& childCtx) {
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -1585,7 +1588,7 @@ Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, co
                                     EvalContext& childCtx) {
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -1644,7 +1647,7 @@ void runCompiledModuleBody(Evaluator& ev, const CompiledChunk& chunk, EvalContex
     // exactly (VmFrame::ownsModuleSplice's own doc comment, bytecode_vm.hpp).
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     // .assign, not .clear() -- a module chunk's own bodyCode has no
     // PARAMETER slots (module params are always bound natively, see this

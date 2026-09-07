@@ -152,7 +152,20 @@ struct IterList {
 // (pre-redesign) behavior exactly.
 struct VmFrame {
     const CompiledChunk* chunk = nullptr;
-    const std::vector<Instruction>* code = nullptr;
+    // This frame's instruction stream, pre-decomposed into data()/size().
+    // driveVm's dispatch loop reads both once per INSTRUCTION; when this was a
+    // `const std::vector<Instruction>*`, that cost a pointer chase plus an
+    // end-minus-begin divided by sizeof(Instruction) (a multiply by a magic
+    // constant) on every opcode. ~11% of a whole Anklet.scad render sat in that
+    // loop preamble. A compiled chunk's code vector is immutable for as long as
+    // any frame runs it, so caching these is free -- but they must only ever be
+    // set together, hence setCode() rather than two public fields to forget.
+    const Instruction* code = nullptr;
+    size_t codeSize = 0;
+    void setCode(const std::vector<Instruction>& c) {
+        code = c.data();
+        codeSize = c.size();
+    }
     size_t pc = 0;
     std::vector<Value> slots;
     std::vector<Value> stack;
@@ -189,6 +202,16 @@ struct VmFrame {
     // brackets first", normally via matched Push/Pop, or via
     // teardownVmCallStackDownTo on the exception path) already covers it.
     std::vector<PendingCsgWrap> csgWrapStack;
+    // Scratch CallArgs for this frame's builtin/import call sites, reused
+    // across calls so its two vectors keep their capacity: building a fresh
+    // one per call was 1.99M of one Anklet.scad render's 10M allocations,
+    // second only to the argument vector this frame's operand stack now
+    // stands in for. One per FRAME rather than one per Evaluator because a
+    // builtin can re-enter the VM -- but only by pushing a new frame, which
+    // brings its own scratch, and a frame never has two call opcodes in
+    // flight at once. Frames themselves are pooled (acquireVmFrame), so the
+    // capacity survives the call that grew it.
+    CallArgs argScratch;
     // The ORIGINAL callee name at push time, used by
     // Evaluator::exitUserCallSuccess's own returnHook call when this frame
     // carries a bracket -- deliberately NOT updated by a later tail hop

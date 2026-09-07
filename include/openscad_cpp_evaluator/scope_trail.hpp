@@ -50,7 +50,7 @@ public:
     // ancestry chain here (an isolating derivation -- see openChild).
     int openLevel(int parentLevel) {
         int level = ++nextLevel_;
-        parent_[level] = parentLevel;
+        parent_.push_back(parentLevel); // index == level; see parent_'s own comment
         return level;
     }
 
@@ -122,7 +122,7 @@ public:
             }
             dirty_.erase(it);
         }
-        parent_.erase(level);
+        parent_[static_cast<size_t>(level)] = 0; // dead: an ancestry walk stops here
     }
 
     // nullptr if `name` has no binding on `myLevel`'s own ancestry chain.
@@ -154,8 +154,7 @@ public:
             } else if (entryLevel == ancestor) {
                 return &vec[static_cast<size_t>(idx)].value;
             } else {
-                auto pit = parent_.find(ancestor);
-                ancestor = pit != parent_.end() ? pit->second : 0;
+                ancestor = parent_[static_cast<size_t>(ancestor)];
             }
         }
         return nullptr;
@@ -194,7 +193,19 @@ private:
     };
     std::unordered_map<std::string, std::vector<Entry>> stacks_;
     std::unordered_map<int, std::vector<std::string>> dirty_;
-    std::unordered_map<int, int> parent_; // level -> parent level (0 = chain terminates here)
+    // level -> parent level (0 = chain terminates here, which is also what a
+    // popped level reads back as). Levels come from `++nextLevel_`, so they are
+    // dense and monotonic and this is a plain vector indexed BY level, with
+    // element 0 the unused stand-in for "no parent" -- push_back in openLevel()
+    // keeps index == level. It used to be an unordered_map<int,int>, which cost
+    // one hash-node allocation per scope derivation (3 of the 10 allocations a
+    // user function call makes, ~2M of them in one Anklet.scad render) and made
+    // lookup()'s ancestry walk -- run on every variable read -- a hash probe per
+    // hop instead of an array index. It never shrinks: 4 bytes per level ever
+    // opened (~2.6MB for Anklet.scad), traded knowingly for the allocation.
+    // Levels are NEVER renumbered or reused -- lookup()'s sorted-merge walk
+    // depends on level numbers being globally monotonic.
+    std::vector<int> parent_{0};
     int nextLevel_ = 0;
 };
 
@@ -249,7 +260,7 @@ public:
     // call returns; ~TrailView() pops ITS bindings from ScopeTrailStorage
     // (erasing the very data the still-alive child's ancestry walk needs)
     // even though the walk can still numerically reach that ancestor level
-    // via ScopeTrailStorage::parent_ (that map entry is untouched -- only
+    // via ScopeTrailStorage::parent_ (that entry is untouched -- only
     // the DATA is gone). Caught by a closure created inside a let()
     // nested one level inside its own enclosing call reading undef for a
     // variable bound at the call's own (now-popped) level, not the let()'s
@@ -344,7 +355,7 @@ public:
 
     int openLevel(int parentLevel) {
         int level = ++nextLevel_;
-        parent_[level] = parentLevel;
+        parent_.push_back(parentLevel); // index == level; see parent_'s own comment
         return level;
     }
 
@@ -395,7 +406,7 @@ public:
             }
             dirty_.erase(it);
         }
-        parent_.erase(level);
+        parent_[static_cast<size_t>(level)] = 0; // dead: an ancestry walk stops here
     }
 
     // Same sorted-merge ancestry walk as ScopeTrailStorage::lookup -- see
@@ -414,8 +425,7 @@ public:
             } else if (entryLevel == ancestor) {
                 return &vec[static_cast<size_t>(idx)].value;
             } else {
-                auto pit = parent_.find(ancestor);
-                ancestor = pit != parent_.end() ? pit->second : 0;
+                ancestor = parent_[static_cast<size_t>(ancestor)];
             }
         }
         return nullptr;
@@ -450,7 +460,7 @@ private:
     std::shared_ptr<DynNameIntern> intern_;
     std::vector<std::vector<Entry>> stacks_;
     std::unordered_map<int, std::vector<int>> dirty_;
-    std::unordered_map<int, int> parent_;
+    std::vector<int> parent_{0}; // see ScopeTrailStorage::parent_
     int nextLevel_ = 0;
 };
 
