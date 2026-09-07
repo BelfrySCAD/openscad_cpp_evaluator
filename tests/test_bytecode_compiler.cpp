@@ -2159,3 +2159,35 @@ TEST(BytecodeCompiler, CompileTimeArgumentPlanMatchesTheNameMatchingRules) {
                                "echo(count(100));"),
               "ECHO: 5050");
 }
+
+// A declaration may repeat a parameter name. BOSL2's regular_prism() declares
+// both `length` and `height` twice, and three of its own documentation
+// examples stopped rendering when the compile-time argument plan bound only
+// the first of them -- the body read undef from whichever slot the repeated
+// name finally resolved to, and asserted. The name-matching path this
+// replaced filled every parameter of that name, because it walked the
+// PARAMETERS asking which argument matched, not the other way round.
+TEST(BytecodeCompiler, ARepeatedParameterNameIsBoundEveryTimeItAppears) {
+    const std::string f = "function f(a, height, b, height) = str(a, \"/\", height, \"/\", b);\n";
+    const std::string g = "function g(height, b, height) = str(height, \"/\", b);\n";
+
+    for (const auto& [src, call] : std::vector<std::pair<std::string, std::string>>{
+             {f, "f(a = 1, height = 20, b = 2)"},   // named
+             {f, "f(1, 20, 2)"},                    // positional landing on the first copy
+             {g, "g(20, 2)"},                       // repeated name in first position
+             {f, "f(a = 1, b = 2, height = 20)"},   // named, out of order
+         }) {
+        std::string compiled, interpreted;
+        {
+            ScopedVm on(true);
+            compiled = runCapturingEcho(src + "echo(" + call + ");");
+        }
+        {
+            ScopedVm off(false);
+            interpreted = runCapturingEcho(src + "echo(" + call + ");");
+        }
+        EXPECT_EQ(compiled, interpreted) << "VM and interpreter disagree for: " << call;
+        EXPECT_NE(compiled.find("20"), std::string::npos)
+            << call << " lost its repeated-name argument: " << compiled;
+    }
+}

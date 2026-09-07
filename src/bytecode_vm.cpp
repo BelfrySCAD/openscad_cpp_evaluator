@@ -151,6 +151,17 @@ void bindPlannedArgsIntoFrame(const CompiledChunk& chunk, const CompiledChunk::C
     for (size_t i = 0; i < argCount; ++i) {
         const CompiledChunk::CallSite::ArgBind& b = site.argBinds[i];
         if (b.paramIndex >= 0) {
+            // The duplicate-name case (alsoParams) needs the value more than
+            // once, so it is copied there and only the last one moves.
+            for (const int extra : b.alsoParams) {
+                const CompiledChunk::Param& e = chunk.params[static_cast<size_t>(extra)];
+                if (e.isDyn) {
+                    ctx.dyn->set(e.name, args[i]);
+                } else {
+                    frame.slots[static_cast<size_t>(e.slot)] = args[i];
+                }
+                frame.bound[static_cast<size_t>(extra)] = true;
+            }
             const CompiledChunk::Param& p = chunk.params[static_cast<size_t>(b.paramIndex)];
             if (p.isDyn) {
                 ctx.dyn->set(p.name, std::move(args[i]));
