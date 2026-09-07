@@ -15,6 +15,10 @@ using Edge = std::pair<Vert, Vert>;
 
 Edge undirected(Vert a, Vert b) { return {std::min(a, b), std::max(a, b)}; }
 
+// An undirected edge as one integer, so a set of them can be a sorted vector
+// searched by binary search rather than a node-per-edge tree.
+uint64_t edgeKey(Edge e) { return (static_cast<uint64_t>(e.first) << 32) | e.second; }
+
 template <typename M>
 size_t triCount(const M& m) { return m.triVerts.size() / 3; }
 
@@ -147,9 +151,16 @@ MeshDiagnosis checkMesh(const M& mesh) {
     // Directed uses per undirected edge. Directions are what distinguish a
     // consistently wound pair (a->b and b->a) from two faces wound the same
     // way (a->b twice), which an undirected count cannot see.
-    std::map<Edge, std::pair<int, int>> uses;   // {forward, backward}
+    // Collected flat and sorted afterwards rather than inserted into a
+    // std::map/std::set, which allocated a tree node per EDGE and per FACE --
+    // on a 295K-triangle model that is ~885,000 plus ~295,000 allocations to
+    // compute a handful of counters. Same reason as stripSlivers' own edge
+    // index below; see its comment for the measurement.
+    std::vector<std::pair<uint64_t, bool>> uses;   // {undirected edge, traversed a->b}
+    uses.reserve(tris * 3);
     std::vector<std::vector<size_t>> vertTris(nVerts);
-    std::set<std::array<Vert, 3>> seenFaces;
+    std::vector<std::array<Vert, 3>> seenFaces;    // sorted-corner triples, deduplicated below
+    seenFaces.reserve(tris);
 
     for (size_t t = 0; t < tris; ++t) {
         if (degenerate(mesh, t)) ++d.degenerateFaces;
@@ -167,26 +178,40 @@ MeshDiagnosis checkMesh(const M& mesh) {
 
         std::array<Vert, 3> sorted{v[0], v[1], v[2]};
         std::sort(sorted.begin(), sorted.end());
-        if (!seenFaces.insert(sorted).second) ++d.duplicateFaces;
+        seenFaces.push_back(sorted);
 
         for (int i = 0; i < 3; ++i) {
             if (v[i] < nVerts) vertTris[v[i]].push_back(t);
             const Vert a = v[i], b = v[(i + 1) % 3];
-            auto& u = uses[undirected(a, b)];
-            (a < b ? u.first : u.second)++;
+            uses.emplace_back(edgeKey(undirected(a, b)), a < b);
         }
     }
 
-    for (const auto& [edge, u] : uses) {
-        const int total = u.first + u.second;
+    // A face seen N times is N-1 duplicates, which is what insert().second
+    // counted one at a time.
+    std::sort(seenFaces.begin(), seenFaces.end());
+    for (size_t i = 1; i < seenFaces.size(); ++i) {
+        if (seenFaces[i] == seenFaces[i - 1]) ++d.duplicateFaces;
+    }
+
+    std::sort(uses.begin(), uses.end());
+    for (size_t i = 0; i < uses.size();) {
+        size_t j = i;
+        int forward = 0, backward = 0;
+        while (j < uses.size() && uses[j].first == uses[i].first) {
+            (uses[j].second ? forward : backward)++;
+            ++j;
+        }
+        const int total = forward + backward;
         if (total == 1) {
             ++d.boundaryEdges;
         } else if (total > 2) {
             ++d.nonManifoldEdges;
-        } else if (u.first != 1 || u.second != 1) {
+        } else if (forward != 1 || backward != 1) {
             // Two faces, but both traverse the edge the same way round.
             ++d.inconsistentEdges;
         }
+        i = j;
     }
 
     d.pinchedVertices = countPinched(mesh, vertTris);
@@ -526,12 +551,53 @@ M stripSlivers(const M& mesh, SliverStripReport& report) {
         if (slivers.empty()) break;
         ++report.passes;
 
-        // Which face owns each edge, so a sliver's long-edge neighbour can
-        // be found. Rebuilt per pass: splitting changes it.
-        std::map<Edge, std::vector<size_t>> owners;
-        for (size_t i = 0; i < tris.size(); ++i) {
-            for (int e = 0; e < 3; ++e) {
-                owners[undirected(tris[i][e], tris[i][(e + 1) % 3])].push_back(i);
+        // Classify every sliver up front, which also says which edges the
+        // neighbour search below will actually ask about: a needle asks about
+        // none, and every other sliver asks about exactly its own long edge.
+        std::vector<char> isNeedle(slivers.size(), 0);
+        std::vector<Vert> keepOf(slivers.size(), 0), dropOf(slivers.size(), 0);
+        std::vector<int> midOf(slivers.size(), -1);
+        std::vector<uint64_t> wanted;
+        wanted.reserve(slivers.size());
+        for (size_t k = 0; k < slivers.size(); ++k) {
+            const auto& f = tris[slivers[k]];
+            Vert keep = 0, drop = 0;
+            if (coincidentPair(mesh, f, keep, drop)) {
+                isNeedle[k] = 1;
+                keepOf[k] = keep;
+                dropOf[k] = drop;
+                continue;
+            }
+            const int mid = middleOfCollinear(mesh, f);
+            midOf[k] = mid;
+            wanted.push_back(edgeKey(undirected(f[(mid + 1) % 3], f[(mid + 2) % 3])));
+        }
+        std::sort(wanted.begin(), wanted.end());
+        wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+
+        // Which face owns each edge, so a sliver's long-edge neighbour can be
+        // found. Rebuilt per pass: splitting changes it.
+        //
+        // Only the edges collected above, NOT all of them. This used to be a
+        // std::map over every edge of every triangle -- three node
+        // allocations per face, ~885,000 of them per pass on a 295K-triangle
+        // model -- to answer a few thousand lookups. It was 23% of the entire
+        // run of a real assembly (snappy-reprap's full_assembly.scad), the
+        // single largest cost in the process, evaluator and CSG included.
+        // A sorted vector of the wanted edges plus one linear scan does the
+        // same job with no per-edge allocation at all. Owners still arrive in
+        // ascending triangle order, which the neighbour choice below depends
+        // on for its result to be reproducible.
+        std::vector<std::vector<size_t>> ownersOf(wanted.size());
+        if (!wanted.empty()) {
+            for (size_t i = 0; i < tris.size(); ++i) {
+                for (int e = 0; e < 3; ++e) {
+                    const uint64_t key = edgeKey(undirected(tris[i][e], tris[i][(e + 1) % 3]));
+                    const auto it = std::lower_bound(wanted.begin(), wanted.end(), key);
+                    if (it != wanted.end() && *it == key) {
+                        ownersOf[static_cast<size_t>(it - wanted.begin())].push_back(i);
+                    }
+                }
             }
         }
 
@@ -541,15 +607,16 @@ M stripSlivers(const M& mesh, SliverStripReport& report) {
         std::vector<char> dead(tris.size(), 0);
         std::vector<std::array<Vert, 3>> added;
         std::map<Vert, Vert> merge;      // needle corners to fold together
-        for (size_t si : slivers) {
+        for (size_t k = 0; k < slivers.size(); ++k) {
+            const size_t si = slivers[k];
             if (dead[si]) continue;
             const auto f = tris[si];
 
             // A needle: two corners at one point. Nothing to restitch --
             // the faces on either side already share an edge positionally,
             // and merging the pair makes them share it by index too.
-            Vert keep = 0, drop = 0;
-            if (coincidentPair(mesh, f, keep, drop)) {
+            if (isNeedle[k]) {
+                const Vert keep = keepOf[k], drop = dropOf[k];
                 dead[si] = 1;
                 if (keep != drop) merge[drop] = keep;
                 ++report.removed;
@@ -557,7 +624,7 @@ M stripSlivers(const M& mesh, SliverStripReport& report) {
                 continue;
             }
 
-            const int mid = middleOfCollinear(mesh, f);
+            const int mid = midOf[k];
             const Vert m = f[mid], a = f[(mid + 1) % 3], b = f[(mid + 2) % 3];
 
             // The neighbour across the long edge a-b, which is the one the
@@ -568,7 +635,13 @@ M stripSlivers(const M& mesh, SliverStripReport& report) {
             // a level-4 Menger sponge has exactly one such pair, and it was
             // what stopped the last two from ever clearing.
             size_t nb = SIZE_MAX, fallback = SIZE_MAX;
-            for (size_t cand : owners[undirected(a, b)]) {
+            const uint64_t longEdge = edgeKey(undirected(a, b));
+            const auto wIt = std::lower_bound(wanted.begin(), wanted.end(), longEdge);
+            static const std::vector<size_t> kNoOwners;
+            const std::vector<size_t>& cands = (wIt != wanted.end() && *wIt == longEdge)
+                                                    ? ownersOf[static_cast<size_t>(wIt - wanted.begin())]
+                                                    : kNoOwners;
+            for (size_t cand : cands) {
                 if (cand == si || dead[cand]) continue;
                 if (isSliver[cand]) {
                     if (fallback == SIZE_MAX) fallback = cand;

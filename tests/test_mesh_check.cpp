@@ -97,6 +97,19 @@ TEST(MeshCheck, DegenerateAndDuplicateFacesAreReportedSeparately) {
     EXPECT_EQ(d.duplicateFaces, 1u) << d.summary();
 }
 
+// duplicateFaces counts REPEATS, not distinct faces that happen to repeat --
+// a face present three times is two duplicates. Worth its own case because
+// the count is no longer produced one insertion at a time (a std::set whose
+// insert() reported "already there"); it now comes from the length of a run
+// in a sorted list, where an off-by-one is easy and silent.
+TEST(MeshCheck, AFacePresentThreeTimesIsTwoDuplicates) {
+    manifold::MeshGL m = tetra();
+    m.triVerts.insert(m.triVerts.end(), {0u, 2u, 1u}); // same as face 0
+    m.triVerts.insert(m.triVerts.end(), {2u, 1u, 0u}); // same again, rotated
+    const MeshDiagnosis d = checkMesh(m);
+    EXPECT_EQ(d.duplicateFaces, 2u) << d.summary();
+}
+
 // A sliver is still a face. Dropping zero-area triangles before building
 // the edge map leaves their edges with one face each, which reads as a hole
 // that is not there -- a level-4 Menger sponge is manifold with every face
