@@ -1,5 +1,6 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/function_builtins.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
 
 #include "openscad_cpp_parser/ast/ast_node.hpp"
@@ -787,6 +788,40 @@ struct CompiledChunk {
         const oscad::FunctionDeclaration* decl = nullptr;
         std::vector<std::optional<std::string>> argNames;
         const oscad::ASTNode* callNode = nullptr;
+        // Everything below is `calleeName` already looked up, once, here at
+        // compile time. The VM used to redo all three on EVERY builtin call:
+        // two std::string hashes into static tables plus a string compare
+        // against "object", for answers that cannot change once this site is
+        // compiled. `declaredParams` points into a function-local static
+        // table with process lifetime, so holding the pointer is safe.
+        BuiltinFnId builtinId = BuiltinFnId::None;
+        const std::vector<std::string>* declaredParams = nullptr;
+        bool isObjectBuiltin = false;
+
+        // Where each argument of this call goes, worked out once at compile
+        // time against `decl`'s parameter list -- see ArgBind. Only filled in
+        // for a static user-function callee (`decl` set); a builtin, an
+        // import or a dynamic/closure callee has no compile-time parameter
+        // list to match against and keeps the name-matching path.
+        //
+        // The names on both sides of that matching are fixed the moment this
+        // site is compiled, but the VM was redoing it on every call, twice:
+        // buildBoundArgs linear-scanned a name-keyed BoundArgs (copying each
+        // name into it), then bindBoundArgsIntoFrame linear-scanned it again
+        // for every parameter, then a third nested loop compared every bound
+        // name against every parameter name. A two-argument call did roughly
+        // ten std::string comparisons and two string copies to reach an
+        // answer that was already known. Binding straight into the frame's
+        // slots also MOVES each argument instead of moving it into BoundArgs
+        // and copying it back out.
+        struct ArgBind {
+            int paramIndex = -1;    // >=0: this argument binds that parameter
+            bool toDyn = false;     // instead bind by name into ctx.dyn ($-named, undeclared)
+            bool warnUnexpectedNamed = false;
+            bool warnTooManyPositional = false;
+        };
+        std::vector<ArgBind> argBinds;
+        bool hasArgPlan = false; // argBinds is authoritative (it is empty for a zero-argument call too)
     };
 
     // An upvalue read (see Op::LoadUpvalue): `targetDecl` is the enclosing

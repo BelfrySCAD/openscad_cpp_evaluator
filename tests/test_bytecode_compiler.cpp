@@ -2094,3 +2094,68 @@ TEST(BytecodeCompiler, CallsTruncateExactlyTheirOwnOperandStackEntries) {
     EXPECT_EQ(runCapturingEcho(defs + "echo([4, max(1, 9, 2), min([3, 1]), 8]);"),
               "ECHO: [4, 9, 1, 8]");
 }
+
+// Op::CallFn/CallFnTail bind arguments to parameters using a plan their call
+// site worked out at COMPILE time (CompiledChunk::CallSite::argBinds) instead
+// of matching names at runtime. Every rule the old name-matching had is
+// pinned here, because a plan that gets one wrong silently passes the wrong
+// value rather than failing loudly.
+TEST(BytecodeCompiler, CompileTimeArgumentPlanMatchesTheNameMatchingRules) {
+    ScopedVm vm(true);
+    const std::string f = "function f(a, b, c = 30) = str(a, \"/\", b, \"/\", c);\n";
+
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2));"), "ECHO: \"1/2/30\"");        // default fills c
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, 3));"), "ECHO: \"1/2/3\"");
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(c = 3, a = 1, b = 2));"), "ECHO: \"1/2/3\""); // all named, out of order
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, c = 3, b = 2));"), "ECHO: \"1/2/3\"");     // positional then named
+    // A named argument overriding a parameter an earlier POSITIONAL already
+    // filled: the later write wins, both before and after this change.
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, a = 9));"), "ECHO: \"9/2/30\"");
+    // Positional index counts only among POSITIONAL arguments: `b = 2` does
+    // not consume a position, so `1` binds a and `5` binds b -- overwriting
+    // the named 2, because the later write wins.
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(b = 2, 1, 5));"), "ECHO: \"1/5/30\"");
+    // An unmatched name is dropped, with a warning naming the CALLER.
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, bogus = 9));"),
+              "WARNING: variable bogus not specified as parameter in file <string>, line 2\n"
+              "ECHO: \"1/2/30\"");
+    // One warning for running past the parameter list, not one per extra.
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, 3, 4, 5));"),
+              "WARNING: Too many unnamed arguments supplied in file <string>, line 2\n"
+              "ECHO: \"1/2/3\"");
+
+    // A $-parameter binds dynamically, and an UNDECLARED $-name still reaches
+    // the callee's dynamic scope rather than being dropped like a plain one.
+    EXPECT_EQ(runCapturingEcho("function g(a, $s = 1) = str(a, \"/\", $s);\necho(g(1, $s = 7));"),
+              "ECHO: \"1/7\"");
+    EXPECT_EQ(runCapturingEcho("function h(a) = str(a, \"/\", $undeclared);\necho(h(1, $undeclared = 5));"),
+              "ECHO: \"1/5\"");
+
+    // The cases above are hand-written expectations; these same shapes are
+    // also checked against the INTERPRETER, which still matches names at
+    // runtime, so the plan is verified against the rule rather than against
+    // this test's own reading of it.
+    for (const std::string& call : {std::string("f(1, 2)"), std::string("f(c = 3, a = 1, b = 2)"),
+                                     std::string("f(1, c = 3, b = 2)"), std::string("f(1, 2, a = 9)"),
+                                     std::string("f(b = 2, 1, 5)")}) {
+        std::string compiled, interpreted;
+        {
+            ScopedVm on(true);
+            compiled = runCapturingEcho(f + "echo(" + call + ");");
+        }
+        {
+            ScopedVm off(false);
+            interpreted = runCapturingEcho(f + "echo(" + call + ");");
+        }
+        EXPECT_EQ(compiled, interpreted) << "VM and interpreter disagree for: " << call;
+    }
+
+    // Tail position takes a different binding path (a hop rebinds the frame
+    // in place) -- same rules, and the recursion must still terminate.
+    EXPECT_EQ(runCapturingEcho("function count(n, acc = 0) = n <= 0 ? acc : count(n - 1, acc + n);\n"
+                               "echo(count(100));"),
+              "ECHO: 5050");
+    EXPECT_EQ(runCapturingEcho("function count(n, acc = 0) = n <= 0 ? acc : count(acc = acc + n, n = n - 1);\n"
+                               "echo(count(100));"),
+              "ECHO: 5050");
+}
