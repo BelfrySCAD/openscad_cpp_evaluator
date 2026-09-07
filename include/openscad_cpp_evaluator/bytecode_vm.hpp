@@ -152,7 +152,20 @@ struct IterList {
 // (pre-redesign) behavior exactly.
 struct VmFrame {
     const CompiledChunk* chunk = nullptr;
-    const std::vector<Instruction>* code = nullptr;
+    // This frame's instruction stream, pre-decomposed into data()/size().
+    // driveVm's dispatch loop reads both once per INSTRUCTION; when this was a
+    // `const std::vector<Instruction>*`, that cost a pointer chase plus an
+    // end-minus-begin divided by sizeof(Instruction) (a multiply by a magic
+    // constant) on every opcode. ~11% of a whole Anklet.scad render sat in that
+    // loop preamble. A compiled chunk's code vector is immutable for as long as
+    // any frame runs it, so caching these is free -- but they must only ever be
+    // set together, hence setCode() rather than two public fields to forget.
+    const Instruction* code = nullptr;
+    size_t codeSize = 0;
+    void setCode(const std::vector<Instruction>& c) {
+        code = c.data();
+        codeSize = c.size();
+    }
     size_t pc = 0;
     std::vector<Value> slots;
     std::vector<Value> stack;

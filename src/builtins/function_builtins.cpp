@@ -1179,15 +1179,15 @@ void warnConversion(Evaluator& ev, const std::string& name, const std::string& w
 // numbers, with a distinct "at least 1 vector element" arity text for the
 // empty-vector case.
 bool checkMinMax(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::Position* pos) {
-    const std::vector<Value> positional = allPositional(args);
-    const size_t count = positional.size() + args.named.size();
+    const size_t nPos = positionalCount(args);
+    const size_t count = nPos + args.named.size();
     if (count < 1) {
         warnArity(ev, name, "at least 1", count, pos);
         return false;
     }
-    if (positional.size() == 1 && std::holds_alternative<ListPtr>(positional[0])) {
+    if (nPos == 1 && std::holds_alternative<ListPtr>(positionalAt(args, 0))) {
         static const std::vector<Value> kEmptyItems;
-        const ListPtr& l = std::get<ListPtr>(positional[0]);
+        const ListPtr& l = std::get<ListPtr>(positionalAt(args, 0));
         const std::vector<Value>& items = l ? l->items : kEmptyItems;
         if (items.empty()) {
             warnArity(ev, name, "at least 1 vector element", 0, pos);
@@ -1201,9 +1201,9 @@ bool checkMinMax(Evaluator& ev, const std::string& name, const CallArgs& args, c
         }
         return true;
     }
-    for (size_t i = 0; i < positional.size(); ++i) {
-        if (!std::holds_alternative<double>(positional[i])) {
-            warnConversion(ev, name, "argument " + std::to_string(i), "number", positional[i], pos);
+    for (size_t i = 0; i < nPos; ++i) {
+        if (!std::holds_alternative<double>(positionalAt(args, i))) {
+            warnConversion(ev, name, "argument " + std::to_string(i), "number", positionalAt(args, i), pos);
             return false;
         }
     }
@@ -1219,8 +1219,8 @@ bool checkBuiltinArgs(Evaluator& ev, const std::string& name, BuiltinFnId id, co
     if (it == checks.end()) return true;
     const BuiltinCheck& c = it->second;
 
-    const std::vector<Value> positional = allPositional(args);
-    const size_t count = positional.size() + args.named.size();
+    const size_t nPos = positionalCount(args);
+    const size_t count = nPos + args.named.size();
     if (c.arityText && (static_cast<int>(count) < c.minArgs || (c.maxArgs >= 0 && static_cast<int>(count) > c.maxArgs))) {
         warnArity(ev, name, c.arityText, count, pos);
         return false;
@@ -1229,9 +1229,10 @@ bool checkBuiltinArgs(Evaluator& ev, const std::string& name, BuiltinFnId id, co
     // flat argument list can't be reconstructed from our split
     // positional/named form, and warning on the wrong index would be worse
     // than staying quiet on a spelling nobody uses for these builtins.
-    for (size_t i = 0; i < c.types.size() && i < positional.size(); ++i) {
-        if (!(typeBit(positional[i]) & c.types[i].allowed)) {
-            warnConversion(ev, name, "argument " + std::to_string(i), c.types[i].expected, positional[i], pos);
+    for (size_t i = 0; i < c.types.size() && i < nPos; ++i) {
+        const Value& v = positionalAt(args, i);
+        if (!(typeBit(v) & c.types[i].allowed)) {
+            warnConversion(ev, name, "argument " + std::to_string(i), c.types[i].expected, v, pos);
             return false;
         }
     }

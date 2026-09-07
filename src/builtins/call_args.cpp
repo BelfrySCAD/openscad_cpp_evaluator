@@ -106,6 +106,18 @@ const oscad::Expression* argExpr(const oscad::Argument& arg) {
     return static_cast<const oscad::PositionalArgument&>(arg).expr.get();
 }
 
+size_t positionalCount(const CallArgs& args) {
+    int maxPos = -1;
+    for (const auto& [idx, v] : args.positional) maxPos = std::max(maxPos, idx);
+    return static_cast<size_t>(maxPos + 1);
+}
+
+const Value& positionalAt(const CallArgs& args, size_t pos) {
+    static const Value kUndef;
+    const Value* v = args.findPositional(static_cast<int>(pos));
+    return v ? *v : kUndef;
+}
+
 std::vector<Value> allPositional(const CallArgs& args) {
     int maxPos = -1;
     for (const auto& [idx, v] : args.positional) maxPos = std::max(maxPos, idx);

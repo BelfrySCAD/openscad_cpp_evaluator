@@ -176,7 +176,7 @@ void applyCompiledDefaultsToFrame(Evaluator& ev, const CompiledChunk& chunk, VmF
         if (!chunk.defaultCode[i].empty()) {
             auto defaultFrame = ev.acquireVmFrame();
             defaultFrame->chunk = &chunk;
-            defaultFrame->code = &chunk.defaultCode[i];
+            defaultFrame->setCode(chunk.defaultCode[i]);
             defaultFrame->pc = 0;
             defaultFrame->slots = frame.slots; // defaults may read earlier SIBLING slots? no -- compiled with an
                                                  // isolated (zero-frame) scope, see bytecode_compiler.cpp's
@@ -213,7 +213,7 @@ void pushBareFrame(Evaluator& ev, const CompiledChunk& chunk, const std::vector<
                     EvalContext ctx) {
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &code;
+    frame->setCode(code);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -254,7 +254,7 @@ void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const osc
 
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -314,7 +314,7 @@ void pushBracketedModuleFrame(Evaluator& ev, const CompiledChunk& chunk, const o
     }
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     // See runCompiledModuleBody's own doc comment (below) for why this is
     // .assign(numSlots) now, not .clear() -- a nested let-expression
@@ -369,7 +369,7 @@ void pushChildrenForwardFrame(Evaluator& ev, const CompiledChunk& chunk, EvalCon
     }
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -491,7 +491,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
         }
         while (ev.vmCallStack_.size() > floor) {
             VmFrame& f = *ev.vmCallStack_.back();
-            if (f.pc >= f.code->size()) {
+            if (f.pc >= f.codeSize) {
                 // A module chunk produces nothing on the stack at all --
                 // its whole effect already landed in treeStack_ as a side
                 // effect of running its own body (Op::CallModule/
@@ -528,7 +528,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 continue;
             }
 
-            const Instruction& ins = (*f.code)[f.pc];
+            const Instruction& ins = f.code[f.pc];
             EvalContext& ctx = f.ctxChain.back();
             switch (ins.op) {
                 case Op::PushConst:
@@ -890,7 +890,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     if (calleeChunk) {
                         ev.recordTailCallHop(site.calleeName, *site.decl, &site.callNode->position(), f.tailHopGuard);
                         f.chunk = calleeChunk;
-                        f.code = &calleeChunk->bodyCode;
+                        f.setCode(calleeChunk->bodyCode);
                         f.pc = 0;
                         f.slots.assign(static_cast<size_t>(calleeChunk->numSlots), Value{});
                         f.stack.clear();
@@ -942,7 +942,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         if (calleeChunk) {
                             ev.recordTailCallHop("<function literal>", funcNode, ins.pos, f.tailHopGuard);
                             f.chunk = calleeChunk;
-                            f.code = &calleeChunk->bodyCode;
+                            f.setCode(calleeChunk->bodyCode);
                             f.pc = 0;
                             f.slots.assign(static_cast<size_t>(calleeChunk->numSlots), Value{});
                             f.stack.clear();
@@ -1559,7 +1559,7 @@ Value runCompiledFunction(Evaluator& ev, const CompiledChunk& chunk,
                           EvalContext& childCtx) {
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -1585,7 +1585,7 @@ Value runCompiledFunctionFromBound(Evaluator& ev, const CompiledChunk& chunk, co
                                     EvalContext& childCtx) {
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     frame->slots.assign(static_cast<size_t>(chunk.numSlots), Value{});
     frame->stack.clear();
@@ -1644,7 +1644,7 @@ void runCompiledModuleBody(Evaluator& ev, const CompiledChunk& chunk, EvalContex
     // exactly (VmFrame::ownsModuleSplice's own doc comment, bytecode_vm.hpp).
     auto frame = ev.acquireVmFrame();
     frame->chunk = &chunk;
-    frame->code = &chunk.bodyCode;
+    frame->setCode(chunk.bodyCode);
     frame->pc = 0;
     // .assign, not .clear() -- a module chunk's own bodyCode has no
     // PARAMETER slots (module params are always bound natively, see this
