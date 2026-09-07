@@ -358,6 +358,33 @@ TEST(SliverStrip, ANeedleIsRemovedWithoutSplittingAnything) {
     EXPECT_TRUE(d.manifold()) << d.summary();
 }
 
+// Three copies of one position is TWO welds, not one, and the survivor is the
+// lowest-numbered of them. Both facts used to fall out of inserting into a
+// std::map and keeping whatever was already there; they now come from run
+// lengths in a sorted list, where an off-by-one or a wrong representative
+// would be silent -- the geometry is identical either way, only the indices
+// differ.
+TEST(MeshCheck, ThreeCoincidentVerticesAreTwoWeldsOntoTheLowestIndex) {
+    manifold::MeshGL m = tetra();
+    const uint32_t a = 4, b = 5;
+    m.vertProperties.insert(m.vertProperties.end(), {0, 0, 0});   // == vertex 0
+    m.vertProperties.insert(m.vertProperties.end(), {0, 0, 0});   // == vertex 0 again
+    bool usedA = false;
+    for (size_t i = 0; i < m.triVerts.size(); ++i) {
+        if (m.triVerts[i] != 0 || i < 6) continue;
+        m.triVerts[i] = usedA ? b : a;                            // spread over both copies
+        usedA = !usedA;
+    }
+
+    MeshRepairReport r;
+    const manifold::MeshGL fixed = repairMesh(m, r);
+    EXPECT_EQ(r.weldedVertices, 2u) << r.summary();
+    for (uint32_t v : fixed.triVerts) {
+        EXPECT_NE(v, a) << "welded away, so no face may still name it";
+        EXPECT_NE(v, b) << "welded away, so no face may still name it";
+    }
+}
+
 // import(repair=true) goes through repairMesh, so it has to deal with
 // slivers too -- an imported STL is exactly where they turn up.
 TEST(MeshRepair, StripsSliversAndRestitchesThem) {

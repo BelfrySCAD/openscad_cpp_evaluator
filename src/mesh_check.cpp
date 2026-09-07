@@ -257,16 +257,40 @@ template <typename M>
 std::vector<Vert> weldMap(const M& m, size_t& welded) {
     const size_t stride = m.numProp ? m.numProp : 3;
     const size_t n = stride ? m.vertProperties.size() / stride : 0;
-    std::map<std::tuple<long long, long long, long long>, Vert> first;
     std::vector<Vert> remap(n);
     welded = 0;
+
+    // Grid key plus the vertex it came from, sorted so that equal positions
+    // land in a run. This was a std::map keyed by the tuple -- one tree node
+    // per VERTEX, ~885,000 of them for a 295K-triangle import -- and sorting
+    // gets the same answer with one allocation. Sorting by (key, vertex)
+    // puts the LOWEST-numbered vertex first in its run, which is the one
+    // emplace() kept as the representative, so the remap is unchanged.
+    struct Keyed {
+        long long x, y, z;
+        Vert v;
+        bool operator<(const Keyed& o) const {
+            if (x != o.x) return x < o.x;
+            if (y != o.y) return y < o.y;
+            if (z != o.z) return z < o.z;
+            return v < o.v;
+        }
+        bool samePos(const Keyed& o) const { return x == o.x && y == o.y && z == o.z; }
+    };
+    std::vector<Keyed> keyed;
+    keyed.reserve(n);
     for (size_t v = 0; v < n; ++v) {
         double p[3];
         pos(m, static_cast<Vert>(v), p);
-        auto key = std::make_tuple(llround(p[0] * 1e6), llround(p[1] * 1e6), llround(p[2] * 1e6));
-        auto [it, fresh] = first.emplace(key, static_cast<Vert>(v));
-        remap[v] = it->second;
-        if (!fresh) ++welded;
+        keyed.push_back({llround(p[0] * 1e6), llround(p[1] * 1e6), llround(p[2] * 1e6), static_cast<Vert>(v)});
+    }
+    std::sort(keyed.begin(), keyed.end());
+    for (size_t i = 0; i < keyed.size();) {
+        size_t j = i + 1;
+        while (j < keyed.size() && keyed[j].samePos(keyed[i])) ++j;
+        for (size_t k = i; k < j; ++k) remap[keyed[k].v] = keyed[i].v;
+        welded += j - i - 1;
+        i = j;
     }
     return remap;
 }
@@ -274,17 +298,28 @@ std::vector<Vert> weldMap(const M& m, size_t& welded) {
 // Boundary loops, as ordered vertex rings. Each boundary edge belongs to
 // exactly one, so following them from any start returns to it.
 std::vector<std::vector<Vert>> boundaryLoops(const std::vector<std::array<Vert, 3>>& tris) {
-    std::map<Edge, int> count;
-    std::multimap<Vert, Vert> next;      // directed, along the boundary
+    // Every edge, sorted, so "used exactly once" is a run of length one --
+    // the same answer the std::map<Edge,int> gave, without a tree node per
+    // edge. `next` stays a multimap: boundary edges are a handful even on a
+    // badly broken mesh, and it is erased from while being traversed.
+    std::vector<uint64_t> edges;
+    edges.reserve(tris.size() * 3);
     for (const auto& t : tris) {
-        for (int i = 0; i < 3; ++i) ++count[undirected(t[i], t[(i + 1) % 3])];
+        for (int i = 0; i < 3; ++i) edges.push_back(edgeKey(undirected(t[i], t[(i + 1) % 3])));
     }
+    std::sort(edges.begin(), edges.end());
+    const auto usedOnce = [&edges](uint64_t key) {
+        const auto lo = std::lower_bound(edges.begin(), edges.end(), key);
+        return lo != edges.end() && *lo == key && (lo + 1 == edges.end() || *(lo + 1) != key);
+    };
+
+    std::multimap<Vert, Vert> next;      // directed, along the boundary
     for (const auto& t : tris) {
         for (int i = 0; i < 3; ++i) {
             const Vert a = t[i], b = t[(i + 1) % 3];
             // A boundary edge is walked backwards to close the hole: the
             // filling faces must wind against the face that owns the edge.
-            if (count[undirected(a, b)] == 1) next.emplace(b, a);
+            if (usedOnce(edgeKey(undirected(a, b)))) next.emplace(b, a);
         }
     }
     std::vector<std::vector<Vert>> loops;
@@ -320,25 +355,45 @@ M repairMesh(const M& mesh, MeshRepairReport& report) {
     const std::vector<Vert> remap = weldMap(mesh, welded);
     report.weldedVertices = welded;
 
-    std::vector<std::array<Vert, 3>> tris;
-    std::set<std::array<Vert, 3>> seen;
-    for (size_t t = 0; t < triCount(mesh); ++t) {
+    // Remap every face, then find the duplicates by sorting rather than by
+    // inserting each into a std::set -- one tree node per face otherwise.
+    // "First occurrence wins" survives because the sort carries the face
+    // index and every later member of a run is what gets marked.
+    const size_t nTris = triCount(mesh);
+    std::vector<std::array<Vert, 3>> remapped(nTris);
+    std::vector<char> isDegenerate(nTris, 0), isDuplicate(nTris, 0);
+    std::vector<std::pair<std::array<Vert, 3>, size_t>> byShape;
+    byShape.reserve(nTris);
+    for (size_t t = 0; t < nTris; ++t) {
         Vert v[3];
         triVerts(mesh, t, v);
         std::array<Vert, 3> f{remap[v[0]], remap[v[1]], remap[v[2]]};
+        remapped[t] = f;
         // 2. Degenerate faces, now that welding has collapsed slivers into
         //    repeated indices.
         if (f[0] == f[1] || f[1] == f[2] || f[0] == f[2]) {
-            ++report.droppedDegenerate;
+            isDegenerate[t] = 1;
             continue;
         }
         std::array<Vert, 3> sorted = f;
         std::sort(sorted.begin(), sorted.end());
-        if (!seen.insert(sorted).second) {
+        byShape.emplace_back(sorted, t);
+    }
+    std::sort(byShape.begin(), byShape.end());
+    for (size_t i = 1; i < byShape.size(); ++i) {
+        if (byShape[i].first == byShape[i - 1].first) isDuplicate[byShape[i].second] = 1;
+    }
+
+    std::vector<std::array<Vert, 3>> tris;
+    tris.reserve(nTris);
+    for (size_t t = 0; t < nTris; ++t) {
+        if (isDegenerate[t]) {
+            ++report.droppedDegenerate;
+        } else if (isDuplicate[t]) {
             ++report.droppedDuplicate;
-            continue;
+        } else {
+            tris.push_back(remapped[t]);
         }
-        tris.push_back(f);
     }
 
     std::vector<size_t> component;
@@ -349,12 +404,19 @@ M repairMesh(const M& mesh, MeshRepairReport& report) {
     //    Before filling, so the new faces are wound against a settled
     //    surface rather than a mixed one.
     {
-        std::map<Edge, std::vector<size_t>> edgeTris;
+        // Every edge really is needed here (the flood fill walks all of
+        // them), so unlike stripSlivers' index this cannot be narrowed --
+        // but it can stop allocating a tree node per edge. Sorted flat, then
+        // searched by equal_range. Faces still come back in ascending index
+        // order within an edge, which the fill's traversal order depends on.
+        std::vector<std::pair<uint64_t, size_t>> edgeTris;
+        edgeTris.reserve(tris.size() * 3);
         for (size_t i = 0; i < tris.size(); ++i) {
             for (int e = 0; e < 3; ++e) {
-                edgeTris[undirected(tris[i][e], tris[i][(e + 1) % 3])].push_back(i);
+                edgeTris.emplace_back(edgeKey(undirected(tris[i][e], tris[i][(e + 1) % 3])), i);
             }
         }
+        std::sort(edgeTris.begin(), edgeTris.end());
         component.assign(tris.size(), SIZE_MAX);
         std::vector<char> done(tris.size(), 0);
         for (size_t seed = 0; seed < tris.size(); ++seed) {
@@ -368,7 +430,11 @@ M repairMesh(const M& mesh, MeshRepairReport& report) {
                 stack.pop_back();
                 for (int e = 0; e < 3; ++e) {
                     const Vert a = tris[i][e], b = tris[i][(e + 1) % 3];
-                    for (size_t j : edgeTris[undirected(a, b)]) {
+                    const uint64_t key = edgeKey(undirected(a, b));
+                    const auto lo = std::lower_bound(edgeTris.begin(), edgeTris.end(),
+                                                      std::make_pair(key, size_t{0}));
+                    for (auto it = lo; it != edgeTris.end() && it->first == key; ++it) {
+                        const size_t j = it->second;
                         if (j == i || done[j]) continue;
                         bool sameDir = false;
                         for (int f = 0; f < 3; ++f) {
@@ -427,22 +493,27 @@ M repairMesh(const M& mesh, MeshRepairReport& report) {
     // component that was turned inside out and then back reports nothing,
     // which is what the user sees.
     {
-        std::set<std::array<Vert, 3>> before;
-        for (size_t t = 0; t < triCount(mesh); ++t) {
-            Vert v[3];
-            triVerts(mesh, t, v);
-            before.insert({remap[v[0]], remap[v[1]], remap[v[2]]});
-        }
         auto rotated = [](std::array<Vert, 3> f) {
             // Winding is defined up to rotation, so compare canonically.
             if (f[1] < f[0] && f[1] <= f[2]) return std::array<Vert, 3>{f[1], f[2], f[0]};
             if (f[2] < f[0] && f[2] <= f[1]) return std::array<Vert, 3>{f[2], f[0], f[1]};
             return f;
         };
-        std::set<std::array<Vert, 3>> canon;
-        for (const auto& f : before) canon.insert(rotated(f));
+        // Was two std::sets over every face -- the incoming windings and
+        // their canonical rotations. One sorted, deduplicated vector answers
+        // the same membership questions with no node allocations. Built from
+        // `remapped`, which is every ORIGINAL face including the degenerate
+        // ones the set also held.
+        std::vector<std::array<Vert, 3>> canon;
+        canon.reserve(remapped.size());
+        for (const auto& f : remapped) canon.push_back(rotated(f));
+        std::sort(canon.begin(), canon.end());
+        canon.erase(std::unique(canon.begin(), canon.end()), canon.end());
+        const auto known = [&canon](const std::array<Vert, 3>& f) {
+            return std::binary_search(canon.begin(), canon.end(), f);
+        };
         for (const auto& f : tris) {
-            if (!canon.count(rotated(f)) && canon.count(rotated({f[0], f[2], f[1]}))) {
+            if (!known(rotated(f)) && known(rotated({f[0], f[2], f[1]}))) {
                 ++report.reversedFaces;
             }
         }
