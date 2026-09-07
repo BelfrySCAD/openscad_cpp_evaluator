@@ -12,37 +12,101 @@
 
 namespace oscadeval {
 
-// A "binding trail" (the classic Prolog/WAM undo-log pattern): each
-// variable name owns a stack of (value, level) entries. Setting a name
-// pushes; entering a new scope opens a fresh `level`; exiting a scope pops
-// every entry tagged with that level, in O(bindings actually made at that
-// level) rather than O(whole-map-size) -- replacing EvalContext's previous
-// copy-the-whole-map-on-every-derivation design. Safe here specifically
-// because this codebase has no escaping closures: a FunctionLiteral value
-// is a bare AST pointer with no captured environment, and callCtxFor()
-// re-derives every call's context from the LIVE call stack -- nothing ever
-// reads a binding after the scope that pushed it has already exited.
+// Recycles the blocks that TrailView/IndexedTrailView's own shared_ptrs are
+// made of. Deriving one EvalContext opens three trail levels -- dyn, let_,
+// dynPositions -- and each was a fresh make_shared: ~2M allocations in one
+// Anklet.scad render, all of them the same size, almost all of them freed in
+// reverse order a few microseconds later. This hands the same block straight
+// back out.
 //
-// Visibility is by TRUE ANCESTRY, not by level-number comparison: each
-// level records its own PARENT level (the level that was current when it
-// was opened, or 0 -- meaning "no parent" -- for an isolating derivation,
-// see TrailView::openChild). A view at level L can see an entry pushed at
-// level E iff E appears on L's own parent chain (L, parent(L), parent(
-// parent(L)), ... down to 0). This was NOT the original design here: an
-// earlier version used a single numeric "ceiling" (visible iff E <= L),
-// which is necessary but not sufficient -- it incorrectly treated any
-// chronologically-earlier-but-still-open level as an ancestor, even an
-// unrelated sibling/isolated scope that happens to still be on the call
-// stack. Caught on a real script (BOSL2's attachable()/trapezoid(), which
-// deep-forwards children() through several more calls while attachable()
-// itself -- an ISOLATED scope with its own same-named "path"/"h"
-// parameters, still open throughout -- sits on the stack): the ceiling-
-// only check found attachable()'s own unbound "path"/"h" (undef) instead
-// of trapezoid()'s real ones, since level-number order alone can't tell
-// "ancestor" from "unrelated open branch." Parent-chain walking fixes this
-// by construction. See eval_context.hpp for how each derivation method
-// picks its own level and (via `isolate`) whether the parent chain
-// continues to the caller or terminates there.
+// It changes WHERE the memory comes from and nothing else: no lifetime, no
+// visibility, no popLevel timing. That is the whole point -- the trail's
+// escaping-closure rules are the most delicate thing in this file, and an
+// allocator cannot get them wrong.
+//
+// One size class, because there is exactly one: every block is the control
+// block plus one view object. Anything else falls through to the global
+// allocator rather than being kept.
+//
+// Worth ~1% of an Anklet.scad render, for 2M allocations removed -- a modest
+// return, and deliberately recorded here as such: macOS's own small-object
+// allocator is already a free list, so swapping it for another one only pays
+// for the bookkeeping either side of it. Removing an allocation that also
+// removed real work (a vector's worth of Value moves, say) has paid far
+// better everywhere it has been tried in this codebase.
+class ViewBlockPool {
+public:
+    ViewBlockPool() { free_.reserve(kMaxKept); }
+    ~ViewBlockPool() {
+        for (void* p : free_) ::operator delete(p);
+    }
+    ViewBlockPool(const ViewBlockPool&) = delete;
+    ViewBlockPool& operator=(const ViewBlockPool&) = delete;
+
+    void* take(std::size_t bytes) {
+        if (bytes == blockSize_ && !free_.empty()) {
+            void* p = free_.back();
+            free_.pop_back();
+            return p;
+        }
+        if (blockSize_ == 0) blockSize_ = bytes;
+        return ::operator new(bytes);
+    }
+    // noexcept is safe: free_ was reserved to kMaxKept up front and is never
+    // pushed past it, so this push_back cannot reallocate and cannot throw.
+    void give(void* p, std::size_t bytes) noexcept {
+        if (bytes != blockSize_ || free_.size() >= kMaxKept) {
+            ::operator delete(p);
+            return;
+        }
+        free_.push_back(p);
+    }
+
+private:
+    static constexpr std::size_t kMaxKept = 512;
+    std::size_t blockSize_ = 0;
+    std::vector<void*> free_;
+};
+
+// A STATELESS allocator over one pool per view type (each type has exactly
+// one block size, so each gets its own single-size-class pool). Stateless
+// matters twice over: std::allocate_shared stores a copy of the allocator
+// inside the very block it allocated, so a stateful one both grows every
+// block and -- if it held a shared_ptr to keep the pool alive past the last
+// view, which a pool owned by the storage would need -- pays an atomic
+// refcount pair per allocation. That version was measured, and it was SLOWER
+// than not pooling at all.
+//
+// thread_local, so no locking and no cross-thread sharing, and it outlives
+// every view on its thread, which is what makes "keep the pool alive for the
+// final deallocate" a non-problem rather than a lifetime puzzle.
+template <typename T>
+class ViewBlockAllocator {
+public:
+    using value_type = T;
+    ViewBlockAllocator() = default;
+    template <typename U>
+    ViewBlockAllocator(const ViewBlockAllocator<U>&) {}
+
+    T* allocate(std::size_t n) { return static_cast<T*>(pool().take(n * sizeof(T))); }
+    void deallocate(T* p, std::size_t n) noexcept { pool().give(p, n * sizeof(T)); }
+
+    template <typename U>
+    bool operator==(const ViewBlockAllocator<U>&) const noexcept {
+        return true;
+    }
+    template <typename U>
+    bool operator!=(const ViewBlockAllocator<U>&) const noexcept {
+        return false;
+    }
+
+private:
+    static ViewBlockPool& pool() {
+        static thread_local ViewBlockPool p;
+        return p;
+    }
+};
+
 template <typename T>
 class ScopeTrailStorage {
 public:
@@ -207,6 +271,7 @@ private:
     // depends on level numbers being globally monotonic.
     std::vector<int> parent_{0};
     int nextLevel_ = 0;
+
 };
 
 // Per-EvalContext handle onto a shared ScopeTrailStorage<T>: this view's
@@ -235,7 +300,8 @@ public:
     static std::shared_ptr<TrailView<T>> makeRoot() {
         auto storage = std::make_shared<ScopeTrailStorage<T>>();
         int level = storage->openLevel(0);
-        return std::make_shared<TrailView<T>>(storage, level);
+        return std::allocate_shared<TrailView<T>>(ViewBlockAllocator<TrailView<T>>(), storage,
+                                                  level);
     }
 
     // Open a fresh level for writes. `isolate=true` terminates the new
@@ -272,7 +338,8 @@ public:
     // changes what happens when something holds an EXTRA reference.
     std::shared_ptr<TrailView<T>> openChild(bool isolate) const {
         int level = storage_->openLevel(isolate ? 0 : level_);
-        auto child = std::make_shared<TrailView<T>>(storage_, level);
+        auto child = std::allocate_shared<TrailView<T>>(ViewBlockAllocator<TrailView<T>>(),
+                                                       storage_, level);
         if (!isolate) child->parentView_ = this->shared_from_this();
         return child;
     }
@@ -462,6 +529,7 @@ private:
     std::unordered_map<int, std::vector<int>> dirty_;
     std::vector<int> parent_{0}; // see ScopeTrailStorage::parent_
     int nextLevel_ = 0;
+
 };
 
 // Per-EvalContext handle onto a shared IndexedScopeTrailStorage<T> -- the
@@ -474,12 +542,14 @@ public:
     static std::shared_ptr<IndexedTrailView<T>> makeRoot(std::shared_ptr<DynNameIntern> intern) {
         auto storage = std::make_shared<IndexedScopeTrailStorage<T>>(std::move(intern));
         int level = storage->openLevel(0);
-        return std::make_shared<IndexedTrailView<T>>(storage, level);
+        return std::allocate_shared<IndexedTrailView<T>>(
+            ViewBlockAllocator<IndexedTrailView<T>>(), storage, level);
     }
 
     std::shared_ptr<IndexedTrailView<T>> openChild(bool isolate) const {
         int level = storage_->openLevel(isolate ? 0 : level_);
-        return std::make_shared<IndexedTrailView<T>>(storage_, level);
+        return std::allocate_shared<IndexedTrailView<T>>(
+            ViewBlockAllocator<IndexedTrailView<T>>(), storage_, level);
     }
 
     IndexedTrailView(std::shared_ptr<IndexedScopeTrailStorage<T>> storage, int level)
