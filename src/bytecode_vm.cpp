@@ -20,10 +20,18 @@ namespace {
 
 // Shared by Op::CallFn's isBuiltin (evalBuiltinFunction) and isImport
 // (importAsValue) branches -- both take the same pre-resolved CallArgs
-// shape resolveArgs would build for the interpreter path. `args` is
-// consumed (each element moved out).
-CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount) {
-    CallArgs callArgs;
+// shape resolveArgs would build for the interpreter path. `args` points
+// AT THE CALLER FRAME'S OPERAND STACK, not at a copy: the arguments are
+// already sitting there contiguously and in order, so every Op::Call*
+// hands over `f.stack.data() + argBase` and truncates the stack once the
+// arguments have been moved out. Building a `std::vector<Value>` for them
+// instead was the single largest allocation site in the whole evaluator --
+// 2.57M of one Anklet.scad render's 12.7M allocations, one per function
+// call, builtins included. `args` is consumed (each element moved out), and
+// nothing may push to that stack until it has been.
+CallArgs& buildCallArgs(const CompiledChunk::CallSite& site, Value* args, size_t argCount, CallArgs& callArgs) {
+    callArgs.positional.clear();
+    callArgs.named.clear();
     int positionalIdx = 0;
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
@@ -41,7 +49,7 @@ CallArgs buildCallArgs(const CompiledChunk::CallSite& site, std::vector<Value>& 
 // LIST is `paramNames` (in declared order -- a FunctionDeclaration's
 // parameters or a FunctionLiteral's). Shared by CallFn/CallFnTail (a
 // site.decl callee) and CallDynamic/CallDynamicTail (a closure callee).
-BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, std::vector<Value>& args, size_t argCount,
+BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, Value* args, size_t argCount,
                           const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& paramNames) {
     BoundArgs bound;
     bound.reserve(argCount);
@@ -787,27 +795,28 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallFn: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
                     if (site.isImport) {
-                        CallArgs callArgs = buildCallArgs(site, args, argCount);
+                        CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
+                        f.stack.resize(argBase);
                         f.stack.push_back(importAsValue(ev, callArgs, *site.callNode));
                         ++f.pc;
                     } else if (site.isBuiltin && site.calleeName == "object") {
                         std::vector<std::pair<std::optional<std::string>, Value>> pairs;
                         pairs.reserve(argCount);
                         for (size_t i = 0; i < argCount; ++i) pairs.emplace_back(site.argNames[i], std::move(args[i]));
+                        f.stack.resize(argBase);
                         f.stack.push_back(mergeObjectArgs(ev, pairs, &site.callNode->position()));
                         ++f.pc;
                     } else if (site.isBuiltin) {
-                        CallArgs callArgs = buildCallArgs(site, args, argCount);
+                        CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
+                        f.stack.resize(argBase);
                         f.stack.push_back(evalBuiltinFunction(ev, site.calleeName, callArgs, *site.callNode));
                         ++f.pc;
                     } else {
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
+                        f.stack.resize(argBase);
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
                         if (calleeChunk) {
                             const oscad::Scope* fnScope = ctx.scopeOf(*site.decl) ? ctx.scopeOf(*site.decl) : ctx.scope;
@@ -828,17 +837,14 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallDynamic: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
-                    Value callee = std::move(f.stack.back());
-                    f.stack.pop_back();
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
+                    Value callee = std::move(f.stack[argBase - 1]);
                     if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
                         const Closure& closure = **closurePtr;
                         const oscad::FunctionLiteral& funcNode = *closure.node;
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, funcNode.parameters);
+                        f.stack.resize(argBase - 1); // also drops the callee
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupCompiledLiteralChunk(funcNode) : nullptr;
                         if (calleeChunk) {
                             const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
@@ -851,6 +857,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                     } else {
                         if (!site.calleeName.empty()) ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
+                        f.stack.resize(argBase - 1); // arguments and callee both go
                         f.stack.push_back(Value{});
                         ++f.pc;
                     }
@@ -859,12 +866,10 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallFnTail: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
                     BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
+                    f.stack.resize(argBase);
                     // Tail-hop-in-place requires f.hopEligible -- a frame
                     // that's call-boundary-free (statement expression,
                     // assignment block, parameter default) has no
@@ -921,17 +926,14 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::CallDynamicTail: {
                     const CompiledChunk::CallSite& site = f.chunk->callSites[static_cast<size_t>(ins.a)];
                     const size_t argCount = static_cast<size_t>(ins.b);
-                    std::vector<Value> args(argCount);
-                    for (size_t i = 0; i < argCount; ++i) {
-                        args[argCount - 1 - i] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
-                    Value callee = std::move(f.stack.back());
-                    f.stack.pop_back();
+                    const size_t argBase = f.stack.size() - argCount;
+                    Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
+                    Value callee = std::move(f.stack[argBase - 1]);
                     if (const auto* closurePtr = std::get_if<ClosurePtr>(&callee); closurePtr && *closurePtr) {
                         const Closure& closure = **closurePtr;
                         const oscad::FunctionLiteral& funcNode = *closure.node;
                         BoundArgs bound = buildBoundArgs(ev, site, args, argCount, funcNode.parameters);
+                        f.stack.resize(argBase - 1); // also drops the callee
                         const bool thisFrameBracketed = f.hopEligible;
                         std::optional<EvalContext> hopCtx = thisFrameBracketed
                                                                  ? ev.isolatedCallCtxFor(funcNode, ctx, capturedLetTrail(closure))
@@ -967,6 +969,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                     } else {
                         if (!site.calleeName.empty()) ev.warn("Ignoring unknown function '" + site.calleeName + "'", ins.pos);
+                        f.stack.resize(argBase - 1); // arguments and callee both go
                         f.stack.push_back(Value{});
                         ++f.pc;
                     }

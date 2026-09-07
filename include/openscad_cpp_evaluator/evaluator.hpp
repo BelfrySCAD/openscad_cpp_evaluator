@@ -1812,7 +1812,26 @@ private:
     // its (possibly many) active occurrences is checked, checking each
     // DISTINCT X once is exactly equivalent to checking every occurrence
     // -- not an approximation.
-    std::unordered_map<const oscad::ASTNode*, int> activeDeclRefcount_;
+    // A flat vector, not a map, for the reason the paragraph above already
+    // establishes: the number of DISTINCT active declarations stays small and
+    // roughly constant, so a linear scan beats hashing -- and an
+    // unordered_map cost one node allocation per user call (595K in one
+    // Anklet.scad render) where this costs none after warmup, while the
+    // every-call containment scan above walks contiguous memory instead of a
+    // hash table's buckets. Same flat-vector-over-small-map trade CallArgs and
+    // BoundArgs already make. Entry order is not meaningful (the scan visits
+    // all of them), so removal swaps with the back.
+    std::vector<std::pair<const oscad::ASTNode*, int>> activeDeclRefcount_;
+    // ++count for `decl`, appending an entry if it has none yet.
+    void noteActiveDeclEnter(const oscad::ASTNode* declNode) {
+        for (auto& entry : activeDeclRefcount_) {
+            if (entry.first == declNode) {
+                ++entry.second;
+                return;
+            }
+        }
+        activeDeclRefcount_.emplace_back(declNode, 1);
+    }
 
     // Shared cap on callStack_'s own size, checked by both
     // evalUserFunctionCore (below) and evalUserModule (user_calls.cpp) --

@@ -202,6 +202,16 @@ struct VmFrame {
     // brackets first", normally via matched Push/Pop, or via
     // teardownVmCallStackDownTo on the exception path) already covers it.
     std::vector<PendingCsgWrap> csgWrapStack;
+    // Scratch CallArgs for this frame's builtin/import call sites, reused
+    // across calls so its two vectors keep their capacity: building a fresh
+    // one per call was 1.99M of one Anklet.scad render's 10M allocations,
+    // second only to the argument vector this frame's operand stack now
+    // stands in for. One per FRAME rather than one per Evaluator because a
+    // builtin can re-enter the VM -- but only by pushing a new frame, which
+    // brings its own scratch, and a frame never has two call opcodes in
+    // flight at once. Frames themselves are pooled (acquireVmFrame), so the
+    // capacity survives the call that grew it.
+    CallArgs argScratch;
     // The ORIGINAL callee name at push time, used by
     // Evaluator::exitUserCallSuccess's own returnHook call when this frame
     // carries a bracket -- deliberately NOT updated by a later tail hop
