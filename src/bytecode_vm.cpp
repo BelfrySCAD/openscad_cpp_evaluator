@@ -49,8 +49,12 @@ CallArgs& buildCallArgs(const CompiledChunk::CallSite& site, Value* args, size_t
 // LIST is `paramNames` (in declared order -- a FunctionDeclaration's
 // parameters or a FunctionLiteral's). Shared by CallFn/CallFnTail (a
 // site.decl callee) and CallDynamic/CallDynamicTail (a closure callee).
+// `emitWarnings=false` is for the one caller that has already emitted them
+// through warnPlannedArgs and only needs the binding -- see Op::CallFnTail's
+// no-hop fallback.
 BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, Value* args, size_t argCount,
-                          const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& paramNames) {
+                          const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& paramNames,
+                          bool emitWarnings = true) {
     BoundArgs bound;
     bound.reserve(argCount);
     size_t positionalIdx = 0;
@@ -59,14 +63,14 @@ BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, Val
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
             const std::string& name = *site.argNames[i];
-            if (!isConfigVariable(name) && !declaresParam(paramNames, name)) {
+            if (emitWarnings && !isConfigVariable(name) && !declaresParam(paramNames, name)) {
                 warnUnexpectedNamedArg(ev, name, pos);
             }
             bound.set(name, std::move(args[i]));
         } else {
             if (positionalIdx < nparams) {
                 bound.set(paramNames[positionalIdx]->name->name, std::move(args[i]));
-            } else if (positionalIdx == nparams) {
+            } else if (emitWarnings && positionalIdx == nparams) {
                 warnTooManyPositionalArgs(ev, pos);
             }
             ++positionalIdx;
@@ -105,6 +109,60 @@ void bindBoundArgsIntoFrame(const CompiledChunk& chunk, const BoundArgs& bound, 
             }
         }
         if (!matched && !k.empty() && k[0] == '$') ctx.dyn->set(k, v);
+    }
+}
+
+// Where a pushed frame's arguments come from: a call site's compile-time plan
+// over the caller's own live operand stack (the hot path), or an
+// already-name-matched BoundArgs (closures and dynamic callees, which have no
+// compile-time parameter list to plan against).
+struct FrameArgs {
+    const CompiledChunk::CallSite* site = nullptr;
+    Value* args = nullptr;
+    size_t argCount = 0;
+    const BoundArgs* bound = nullptr;
+};
+
+// The compile-time counterpart of bindBoundArgsIntoFrame: binds a call's
+// arguments straight from the caller's operand stack into the callee frame,
+// using the plan its call site worked out once (CallSite::argBinds). No name
+// is compared and no BoundArgs is built, and each argument is MOVED into its
+// slot rather than moved into a BoundArgs and copied back out. `args` must
+// still be live -- the caller truncates its stack only after this returns.
+// The argument diagnostics of a planned call, split out of the binder below
+// because WHEN they fire is observable: their "TRACE: called by ..." line
+// names whatever is on top of the call stack, and a tail hop has already
+// replaced that with the CALLEE by the time it binds. buildBoundArgs warned
+// before any of that happened, so this must too -- caught by
+// UnexpectedArgs.NestedUserFunctionCallStillWarns, which compares the VM
+// against the interpreter.
+void warnPlannedArgs(Evaluator& ev, const CompiledChunk::CallSite& site, size_t argCount) {
+    const oscad::Position* pos = site.callNode ? &site.callNode->position() : nullptr;
+    for (size_t i = 0; i < argCount; ++i) {
+        const CompiledChunk::CallSite::ArgBind& b = site.argBinds[i];
+        if (b.warnUnexpectedNamed) warnUnexpectedNamedArg(ev, *site.argNames[i], pos);
+        if (b.warnTooManyPositional) warnTooManyPositionalArgs(ev, pos);
+    }
+}
+
+void bindPlannedArgsIntoFrame(const CompiledChunk& chunk, const CompiledChunk::CallSite& site, Value* args,
+                              size_t argCount, VmFrame& frame) {
+    EvalContext& ctx = frame.ctxChain.back();
+    for (size_t i = 0; i < argCount; ++i) {
+        const CompiledChunk::CallSite::ArgBind& b = site.argBinds[i];
+        if (b.paramIndex >= 0) {
+            const CompiledChunk::Param& p = chunk.params[static_cast<size_t>(b.paramIndex)];
+            if (p.isDyn) {
+                ctx.dyn->set(p.name, std::move(args[i]));
+            } else {
+                frame.slots[static_cast<size_t>(p.slot)] = std::move(args[i]);
+            }
+            frame.bound[static_cast<size_t>(b.paramIndex)] = true;
+        } else if (b.toDyn) {
+            ctx.dyn->set(*site.argNames[i], std::move(args[i]));
+        }
+        // else: an undeclared plain name, or a positional past the end --
+        // dropped, exactly as the name-matching path drops it.
     }
 }
 
@@ -249,7 +307,7 @@ void pushBareFrame(Evaluator& ev, const CompiledChunk& chunk, const std::vector<
 // own parameters exactly (a FunctionDeclaration's decl/*decl.expr, or a
 // FunctionLiteral's funcNode/*funcNode.body).
 void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const oscad::ASTNode& declNode,
-                             const oscad::Expression& bodyExpr, const std::string& name, BoundArgs bound,
+                             const oscad::Expression& bodyExpr, const std::string& name, const FrameArgs& fargs,
                              EvalContext& callerCtx, const oscad::Scope* fnScope,
                              const std::shared_ptr<TrailView<Value>>& capturedLet, const oscad::Position* callPos) {
     if (ev.vmCallStack_.size() >= Evaluator::kMaxVmCallStackDepth) {
@@ -274,7 +332,11 @@ void pushBracketedCallFrame(Evaluator& ev, const CompiledChunk& chunk, const osc
     frame->tailHopGuard = 0;
     frame->logicalName = name;
     frame->hopEligible = true; // just pushed a fresh, correctly-named callStack_ entry
-    bindBoundArgsIntoFrame(chunk, bound, *frame);
+    if (fargs.site) {
+        bindPlannedArgsIntoFrame(chunk, *fargs.site, fargs.args, fargs.argCount, *frame);
+    } else {
+        bindBoundArgsIntoFrame(chunk, *fargs.bound, *frame);
+    }
     applyCompiledDefaultsToFrame(ev, chunk, *frame);
 
     // enterUserCall's own bodyCtx must point at frame->ctxChain's OWN
@@ -802,7 +864,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         f.stack.resize(argBase);
                         f.stack.push_back(importAsValue(ev, callArgs, *site.callNode));
                         ++f.pc;
-                    } else if (site.isBuiltin && site.calleeName == "object") {
+                    } else if (site.isObjectBuiltin) {
                         std::vector<std::pair<std::optional<std::string>, Value>> pairs;
                         pairs.reserve(argCount);
                         for (size_t i = 0; i < argCount; ++i) pairs.emplace_back(site.argNames[i], std::move(args[i]));
@@ -812,24 +874,39 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     } else if (site.isBuiltin) {
                         CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
                         f.stack.resize(argBase);
-                        f.stack.push_back(evalBuiltinFunction(ev, site.calleeName, callArgs, *site.callNode));
+                        f.stack.push_back(evalBuiltinFunctionResolved(ev, site.builtinId, site.declaredParams,
+                                                                      site.calleeName, callArgs, *site.callNode));
                         ++f.pc;
                     } else {
-                        BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
-                        f.stack.resize(argBase);
                         const CompiledChunk* calleeChunk = ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
-                        if (calleeChunk) {
+                        if (calleeChunk && site.hasArgPlan) {
+                            warnPlannedArgs(ev, site, argCount);
+                            // The hot path: bind straight off this frame's own
+                            // stack using the site's compile-time plan, then
+                            // truncate. Truncating FIRST would destroy the very
+                            // values being bound.
                             const oscad::Scope* fnScope = ctx.scopeOf(*site.decl) ? ctx.scopeOf(*site.decl) : ctx.scope;
                             pushBracketedCallFrame(ev, *calleeChunk, *site.decl, *site.decl->expr, site.calleeName,
-                                                    std::move(bound), ctx, fnScope, nullptr, &site.callNode->position());
+                                                    FrameArgs{&site, args, argCount, nullptr}, ctx, fnScope, nullptr,
+                                                    &site.callNode->position());
+                            f.stack.resize(argBase);
                             // f.pc deliberately NOT advanced -- resumes when the
                             // pushed frame completes (see driveVm's own
                             // completion branch, above).
                         } else {
-                            Value result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound), ctx,
-                                                                          &site.callNode->position());
-                            f.stack.push_back(std::move(result));
-                            ++f.pc;
+                            BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
+                            f.stack.resize(argBase);
+                            if (calleeChunk) {
+                                const oscad::Scope* fnScope = ctx.scopeOf(*site.decl) ? ctx.scopeOf(*site.decl) : ctx.scope;
+                                pushBracketedCallFrame(ev, *calleeChunk, *site.decl, *site.decl->expr, site.calleeName,
+                                                        FrameArgs{nullptr, nullptr, 0, &bound}, ctx, fnScope, nullptr,
+                                                        &site.callNode->position());
+                            } else {
+                                Value result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound),
+                                                                              ctx, &site.callNode->position());
+                                f.stack.push_back(std::move(result));
+                                ++f.pc;
+                            }
                         }
                     }
                     break;
@@ -849,7 +926,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         if (calleeChunk) {
                             const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
                             pushBracketedCallFrame(ev, *calleeChunk, funcNode, *funcNode.body, "<function literal>",
-                                                    std::move(bound), ctx, fnScope, capturedLetTrail(closure), ins.pos);
+                                                    FrameArgs{nullptr, nullptr, 0, &bound}, ctx, fnScope, capturedLetTrail(closure), ins.pos);
                         } else {
                             Value result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
                             f.stack.push_back(std::move(result));
@@ -868,8 +945,17 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     const size_t argCount = static_cast<size_t>(ins.b);
                     const size_t argBase = f.stack.size() - argCount;
                     Value* args = f.stack.data() + argBase; // into f.stack; truncated below once consumed
-                    BoundArgs bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
-                    f.stack.resize(argBase);
+                    // A planned site defers both of these: the arguments have
+                    // to stay live on this frame's own stack until they are
+                    // bound, and a tail HOP binds into this very frame.
+                    const bool planned = site.hasArgPlan;
+                    BoundArgs bound;
+                    if (planned) {
+                        warnPlannedArgs(ev, site, argCount); // before recordTailCallHop; see warnPlannedArgs
+                    } else {
+                        bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters);
+                        f.stack.resize(argBase);
+                    }
                     // Tail-hop-in-place requires f.hopEligible -- a frame
                     // that's call-boundary-free (statement expression,
                     // assignment block, parameter default) has no
@@ -898,22 +984,37 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         f.setCode(calleeChunk->bodyCode);
                         f.pc = 0;
                         f.slots.assign(static_cast<size_t>(calleeChunk->numSlots), Value{});
-                        f.stack.clear();
                         f.bound.assign(calleeChunk->params.size(), false);
                         f.accumStack.clear();
                         f.iterLists.assign(static_cast<size_t>(calleeChunk->numIterLists), IterList{});
                         f.ctxChain.push_back(std::move(*hopCtx));
-                        bindBoundArgsIntoFrame(*calleeChunk, bound, f);
+                        // The stack is cleared AFTER binding on the planned
+                        // path: a hop rebinds this same frame, and `args`
+                        // still points into the stack it would have wiped.
+                        if (planned) {
+                            bindPlannedArgsIntoFrame(*calleeChunk, site, args, argCount, f);
+                            f.stack.clear();
+                        } else {
+                            f.stack.clear();
+                            bindBoundArgsIntoFrame(*calleeChunk, bound, f);
+                        }
                         applyCompiledDefaultsToFrame(ev, *calleeChunk, f);
                         // continue via the outer while -- re-fetches this
                         // same (now-mutated) frame from its new pc=0.
                     } else {
+                        if (planned) { // no hop after all -- fall back to name matching
+                            // warnPlannedArgs already emitted these above.
+                            bound = buildBoundArgs(ev, site, args, argCount, site.decl->parameters,
+                                                    /*emitWarnings=*/false);
+                            f.stack.resize(argBase);
+                        }
                         const CompiledChunk* fallbackChunk =
                             ev.useBytecodeVm() ? ev.lookupOrCompileChunk(*site.decl) : nullptr;
                         if (fallbackChunk) {
                             const oscad::Scope* fnScope = ctx.scopeOf(*site.decl) ? ctx.scopeOf(*site.decl) : ctx.scope;
                             pushBracketedCallFrame(ev, *fallbackChunk, *site.decl, *site.decl->expr, site.calleeName,
-                                                    std::move(bound), ctx, fnScope, nullptr, &site.callNode->position());
+                                                    FrameArgs{nullptr, nullptr, 0, &bound}, ctx, fnScope, nullptr,
+                                                    &site.callNode->position());
                         } else {
                             Value result = ev.evalUserFunctionFromBound(site.calleeName, *site.decl, std::move(bound), ctx,
                                                                           &site.callNode->position());
@@ -960,7 +1061,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                             if (fallbackChunk) {
                                 const oscad::Scope* fnScope = ctx.scopeOf(funcNode) ? ctx.scopeOf(funcNode) : ctx.scope;
                                 pushBracketedCallFrame(ev, *fallbackChunk, funcNode, *funcNode.body, "<function literal>",
-                                                        std::move(bound), ctx, fnScope, capturedLetTrail(closure), ins.pos);
+                                                        FrameArgs{nullptr, nullptr, 0, &bound}, ctx, fnScope, capturedLetTrail(closure), ins.pos);
                             } else {
                                 Value result = ev.evalFunctionLiteralFromBound(closure, std::move(bound), ctx, ins.pos);
                                 f.stack.push_back(std::move(result));

@@ -20,6 +20,46 @@
 namespace oscadeval {
 
 namespace {
+// Replays buildBoundArgs' own positional/named matching rule (bytecode_vm.cpp)
+// against a parameter list known at compile time, recording the answer per
+// argument instead of recomputing it per call. The rule, unchanged: a named
+// argument binds the parameter of that name, warning when there is none and
+// the name is not a $-config variable; a positional argument binds the
+// parameter at its own positional index, warning once when it runs past the
+// end; an undeclared $-name still reaches ctx.dyn; anything else is dropped.
+// A later argument writing the same parameter still wins, because both bind
+// the same slot in order.
+void planCallSiteArgs(CompiledChunk::CallSite& site,
+                      const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params) {
+    const size_t nparams = params.size();
+    size_t positionalIdx = 0;
+    site.argBinds.resize(site.argNames.size());
+    for (size_t i = 0; i < site.argNames.size(); ++i) {
+        CompiledChunk::CallSite::ArgBind& b = site.argBinds[i];
+        if (site.argNames[i]) {
+            const std::string& name = *site.argNames[i];
+            int found = -1;
+            for (size_t p = 0; p < nparams; ++p) {
+                if (params[p]->name->name == name) {
+                    found = static_cast<int>(p);
+                    break;
+                }
+            }
+            b.paramIndex = found;
+            b.warnUnexpectedNamed = (found < 0) && !isConfigVariable(name);
+            b.toDyn = (found < 0) && !name.empty() && name[0] == '$';
+        } else {
+            if (positionalIdx < nparams) {
+                b.paramIndex = static_cast<int>(positionalIdx);
+            } else if (positionalIdx == nparams) {
+                b.warnTooManyPositional = true;
+            }
+            ++positionalIdx;
+        }
+    }
+    site.hasArgPlan = true;
+}
+
 
 // Thrown by compileExpr wherever it hits a construct this phase doesn't
 // compile yet -- tryCompileFunction catches it and returns nullopt (falls
@@ -601,6 +641,11 @@ public:
                         // call-site interleaved order, not resolveArgs'
                         // split positional/named CallArgs shape).
                         site.isBuiltin = true;
+                        // Resolve the callee here rather than per call; see
+                        // CallSite's own doc comment (bytecode.hpp).
+                        site.builtinId = builtinFnIdFor(calleeName);
+                        site.declaredParams = builtinParamNames(calleeName);
+                        site.isObjectBuiltin = (calleeName == "object");
                         isStatic = true;
                     }
                     // Anything else stays dynamic: a function-literal value,
@@ -674,6 +719,9 @@ public:
                         }
                     }
                 }
+                // Resolve every argument to its parameter now; see
+                // CallSite::argBinds (bytecode.hpp) for why.
+                if (site.decl) planCallSiteArgs(site, site.decl->parameters);
                 int siteIdx = static_cast<int>(chunk_.callSites.size());
                 chunk_.callSites.push_back(std::move(site));
                 // Builtins and import() never trampoline (matching

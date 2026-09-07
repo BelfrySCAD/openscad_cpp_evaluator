@@ -1007,12 +1007,7 @@ namespace {
 // `if (name == "...")` string-compare chain; the switch below then
 // compiles to a jump table instead of sequential comparisons. No branch's
 // logic changed, only how it's reached.
-enum class BuiltinFnId {
-    TextMetrics, FontMetrics, Abs, Sign, Ceil, Floor, Round, Sqrt, Ln, Log, Exp, Sin, Cos, Tan,
-    Asin, Acos, Atan, Atan2, Max, Min, Pow, Norm, Cross, Rands, Concat, Len, Str, Chr, Ord,
-    IsUndef, IsNum, IsBool, IsString, IsList, IsFunction, IsObject, Search, Lookup, HasKey,
-    Version, VersionNum, ParentModule, DxfDim, DxfCross, SupportedFeature, LinearSolve,
-};
+// BuiltinFnId itself now lives in function_builtins.hpp -- see builtinFnIdFor.
 
 // supported_feature("name") -> the level at which this build implements that
 // feature, or 0 for one it does not implement (and for a name it has never
@@ -1242,18 +1237,26 @@ bool checkBuiltinArgs(Evaluator& ev, const std::string& name, BuiltinFnId id, co
 
 } // namespace
 
-Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::ASTNode& node) {
-
+BuiltinFnId builtinFnIdFor(const std::string& name) {
     const auto& ids = builtinFnIds();
-    const auto idIt = ids.find(name);
+    const auto it = ids.find(name);
+    return it == ids.end() ? BuiltinFnId::None : it->second;
+}
+
+Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::ASTNode& node) {
+    return evalBuiltinFunctionResolved(ev, builtinFnIdFor(name), builtinParamNames(name), name, args, node);
+}
+
+Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vector<std::string>* declaredParams,
+                                   const std::string& name, const CallArgs& args, const oscad::ASTNode& node) {
     // Not one of the names this function handles (e.g. "object", routed
     // elsewhere before reaching here) -- mirrors the old chain's fallthrough.
-    if (idIt == ids.end()) return Value{};
+    if (id == BuiltinFnId::None) return Value{};
 
     // Only textmetrics/fontmetrics have an entry -- every other builtin
     // function reads its arguments positionally upstream and warns about
     // nothing. See builtinParamNames (registry.cpp).
-    if (const std::vector<std::string>* declared = builtinParamNames(name)) {
+    if (const std::vector<std::string>* declared = declaredParams) {
         for (const auto& [argName, _] : args.named) {
             if (!isConfigVariable(argName) &&
                 std::find(declared->begin(), declared->end(), argName) == declared->end()) {
@@ -1265,9 +1268,10 @@ Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs
     // Arity and argument types, with the reference's own two diagnostics.
     // This replaced a silent version of the same gate (scalarNumericArity /
     // numericOnlyNames), which returned undef without ever saying why.
-    if (!checkBuiltinArgs(ev, name, idIt->second, args, &node.position())) return Value{};
+    if (!checkBuiltinArgs(ev, name, id, args, &node.position())) return Value{};
 
-    switch (idIt->second) {
+    switch (id) {
+        case BuiltinFnId::None: return Value{}; // unreachable: handled above
         case BuiltinFnId::TextMetrics: return builtinTextmetrics(ev, args);
         case BuiltinFnId::FontMetrics: return builtinFontmetrics(ev, args);
         case BuiltinFnId::Abs: return Value{std::fabs(toDoubleLenient(getArg(args, 0, "x", Value{})))};

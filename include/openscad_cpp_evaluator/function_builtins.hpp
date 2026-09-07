@@ -26,7 +26,34 @@ bool isBuiltinFunctionName(const std::string& name);
 // accept $-prefixed named-argument overrides). Mirrors the reference's
 // _math_fns dispatch table plus the textmetrics()/fontmetrics() special
 // cases (implemented on top of FontProvider, text_metrics.hpp).
+// One id per name evalBuiltinFunction handles (NOT the same list as
+// isBuiltinFunctionName -- "object" is deliberately absent, since it is
+// special-cased to builtinObject() before this function is reached). Public
+// so a CALL SITE can resolve its callee once, at compile time
+// (CompiledChunk::CallSite::builtinId), instead of hashing the name string
+// on every single call.
+enum class BuiltinFnId {
+    None, // not a name evalBuiltinFunction handles
+    TextMetrics, FontMetrics, Abs, Sign, Ceil, Floor, Round, Sqrt, Ln, Log, Exp, Sin, Cos, Tan,
+    Asin, Acos, Atan, Atan2, Max, Min, Pow, Norm, Cross, Rands, Concat, Len, Str, Chr, Ord,
+    IsUndef, IsNum, IsBool, IsString, IsList, IsFunction, IsObject, Search, Lookup, HasKey,
+    Version, VersionNum, ParentModule, DxfDim, DxfCross, SupportedFeature, LinearSolve,
+};
+
+// `name` -> its id, or None. The one place that hashes the name; everything
+// on a hot path should call this once at compile time and keep the answer.
+BuiltinFnId builtinFnIdFor(const std::string& name);
+
 Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::ASTNode& node);
+
+// The same dispatch with both of its name lookups already done: `id` from
+// builtinFnIdFor and `declaredParams` from builtinParamNames (dispatch.hpp),
+// which for all but a couple of builtins is null. `name` survives only
+// because diagnostics quote it. The string-taking overload above is just
+// this one with the two lookups performed first, and remains the entry point
+// for the AST interpreter, where there is no call site to cache them on.
+Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vector<std::string>* declaredParams,
+                                   const std::string& name, const CallArgs& args, const oscad::ASTNode& node);
 
 // object(a=1, b=2, ...) -- an ordered string-keyed map merging positional
 // (an existing object's entries, or a list of [key,value] pairs) and named
