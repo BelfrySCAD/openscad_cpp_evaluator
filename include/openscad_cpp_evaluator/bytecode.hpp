@@ -816,6 +816,15 @@ struct CompiledChunk {
         // and copying it back out.
         struct ArgBind {
             int paramIndex = -1;    // >=0: this argument binds that parameter
+            // Any FURTHER parameters of the same name. Normally empty, but a
+            // declaration may repeat a parameter name -- BOSL2's
+            // regular_prism() declares both `length` and `height` twice --
+            // and the name-matching path this replaced bound every one of
+            // them, because it walked the parameter list asking "is there a
+            // bound argument called this?" rather than the other way round.
+            // Binding only the first silently left the body reading undef
+            // from whichever slot the duplicate name finally resolved to.
+            std::vector<int> alsoParams;
             bool toDyn = false;     // instead bind by name into ctx.dyn ($-named, undeclared)
             bool warnUnexpectedNamed = false;
             bool warnTooManyPositional = false;

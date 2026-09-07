@@ -20,6 +20,22 @@
 namespace oscadeval {
 
 namespace {
+// Records every parameter called `name`, not just the first. See
+// CompiledChunk::CallSite::ArgBind::alsoParams for why there can be more
+// than one.
+void bindEveryParamNamed(CompiledChunk::CallSite::ArgBind& b,
+                         const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params,
+                         const std::string& name) {
+    for (size_t p = 0; p < params.size(); ++p) {
+        if (params[p]->name->name != name) continue;
+        if (b.paramIndex < 0) {
+            b.paramIndex = static_cast<int>(p);
+        } else {
+            b.alsoParams.push_back(static_cast<int>(p));
+        }
+    }
+}
+
 // Replays buildBoundArgs' own positional/named matching rule (bytecode_vm.cpp)
 // against a parameter list known at compile time, recording the answer per
 // argument instead of recomputing it per call. The rule, unchanged: a named
@@ -38,19 +54,16 @@ void planCallSiteArgs(CompiledChunk::CallSite& site,
         CompiledChunk::CallSite::ArgBind& b = site.argBinds[i];
         if (site.argNames[i]) {
             const std::string& name = *site.argNames[i];
-            int found = -1;
-            for (size_t p = 0; p < nparams; ++p) {
-                if (params[p]->name->name == name) {
-                    found = static_cast<int>(p);
-                    break;
-                }
-            }
-            b.paramIndex = found;
-            b.warnUnexpectedNamed = (found < 0) && !isConfigVariable(name);
-            b.toDyn = (found < 0) && !name.empty() && name[0] == '$';
+            bindEveryParamNamed(b, params, name);
+            const bool found = b.paramIndex >= 0;
+            b.warnUnexpectedNamed = !found && !isConfigVariable(name);
+            b.toDyn = !found && !name.empty() && name[0] == '$';
         } else {
             if (positionalIdx < nparams) {
-                b.paramIndex = static_cast<int>(positionalIdx);
+                // By NAME, not just by index: a positional argument landing on
+                // a repeated name filled every parameter of that name too,
+                // because the old path keyed its bound arguments by name.
+                bindEveryParamNamed(b, params, params[positionalIdx]->name->name);
             } else if (positionalIdx == nparams) {
                 b.warnTooManyPositional = true;
             }
