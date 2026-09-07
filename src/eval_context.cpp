@@ -1,6 +1,20 @@
 #include "openscad_cpp_evaluator/eval_context.hpp"
 
 namespace oscadeval {
+namespace {
+
+// One shared, immutable, empty list. callCtx() and makeRoot() each used to
+// allocate a fresh one per call -- 655K in one Anklet.scad render -- for a
+// value that is read-only at every use site (empty(), range-for,
+// dereference) and compared by identity at none, so one instance serves them
+// all. Stays a shared_ptr, i.e. atomically refcounted: unlike a Value, this
+// really is reachable from a global.
+const std::shared_ptr<const ChildrenNodeList>& emptyChildrenNodes() {
+    static const std::shared_ptr<const ChildrenNodeList> kEmpty = std::make_shared<const ChildrenNodeList>();
+    return kEmpty;
+}
+
+} // namespace
 
 EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope, const oscad::ScopeTable* scopeTable) {
     // Default: the table buildScopes() attached to this scope tree's root.
@@ -54,7 +68,7 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope, const oscad::Sc
                                                                     Value{double{OSCAD_EVAL_VERSION_PATCH}}}})});
     ctx.let_ = TrailView<Value>::makeRoot();
     ctx.dynPositions = TrailView<const oscad::Position*>::makeRoot();
-    ctx.childrenNodes = std::make_shared<const ChildrenNodeList>();
+    ctx.childrenNodes = emptyChildrenNodes();
     ctx.childrenCallerCtx = nullptr;
     return ctx;
 }
@@ -101,7 +115,7 @@ EvalContext EvalContext::callCtx(const oscad::Scope* newScope, std::optional<std
     result.let_ = let_->openChild(/*isolate=*/true); // isolated call scope
     result.dynPositions = dynPositions->openChild(true);
     result.color = newColor.has_value() ? newColor : color;
-    result.childrenNodes = newChildrenNodes ? newChildrenNodes : std::make_shared<const ChildrenNodeList>();
+    result.childrenNodes = newChildrenNodes ? newChildrenNodes : emptyChildrenNodes();
     result.childrenCallerCtx = newChildrenCallerCtx; // not inherited, see header comment
     return result;
 }
@@ -130,7 +144,7 @@ EvalContext EvalContext::callCtxFromCapturedLet(const std::shared_ptr<TrailView<
     result.let_ = capturedLet->openChild(/*isolate=*/false);
     result.dynPositions = dynPositions->openChild(true);
     result.color = newColor.has_value() ? newColor : color;
-    result.childrenNodes = newChildrenNodes ? newChildrenNodes : std::make_shared<const ChildrenNodeList>();
+    result.childrenNodes = newChildrenNodes ? newChildrenNodes : emptyChildrenNodes();
     result.childrenCallerCtx = newChildrenCallerCtx;
     return result;
 }
