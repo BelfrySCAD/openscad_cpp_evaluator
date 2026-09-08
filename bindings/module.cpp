@@ -23,6 +23,7 @@
 #include "openscad_cpp_evaluator/eval_use.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/export.hpp"
+#include "openscad_cpp_evaluator/freetype_font_provider.hpp"
 #include "openscad_cpp_evaluator/mesh_check.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
 #include "openscad_cpp_evaluator/profile.hpp"
@@ -868,6 +869,31 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "show-filename, design-filename, fill, fill-color, stroke, stroke-color, stroke-width, "
           "add-meta-data, title, author, subject, keywords). An unknown key raises rather than "
           "being ignored. .pdf is 2D-only too, and centres the drawing on a fixed paper size.");
+
+    m.def("list_fonts", []() {
+        nb::list out;
+        oscadeval::FreetypeFontProvider provider;
+        for (const oscadeval::FontFace& f : provider.listFonts()) {
+            nb::dict d;
+            d["family"] = f.family;
+            d["style"] = f.style;
+            // The exact string to put in font=. Style included only when
+            // it is not the plain face: "Liberation Sans" is what you
+            // write for Regular, and printing the longer form for it would
+            // teach the wrong habit.
+            const bool plain = f.style.empty() || f.style == "Regular";
+            d["spec"] = plain ? f.family : f.family + ":style=" + f.style;
+            d["path"] = f.path;
+            out.append(d);
+        }
+        return out;
+    },
+          "Every font text()/textmetrics()/fontmetrics() can resolve: family, style, the exact "
+          "`font=` spec that selects it, and the file it comes from (\"<bundled>\" for the "
+          "faces shipped with this package). Read from the same FreeType index those functions "
+          "match against, NOT from the windowing toolkit -- a system font database names faces "
+          "differently, which is the whole reason a list is worth showing. Scans the system font "
+          "directories, so it costs real time on a machine with many fonts.");
 
     m.def("export_extensions", []() { return oscadeval::exportExtensions(); },
           "The file extensions export_model understands, dot-prefixed. Read from the C++ writer table "

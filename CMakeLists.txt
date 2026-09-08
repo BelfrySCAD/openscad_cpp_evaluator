@@ -218,13 +218,30 @@ FetchContent_MakeAvailable(cpp_linenoise)
 # a real installed/packaged build (e.g. the PyPI wheel) has no guarantee the
 # source tree's resources/fonts/ is present or at any predictable path
 # alongside the installed shared library.
-set(BUNDLED_FONT_SRC ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-Regular.ttf)
+# The whole Liberation Sans family, not just Regular: a `style=` that
+# cannot be satisfied silently falls back to the regular face, which is
+# what made fontmetrics(10, "Liberation Sans:style=bold") report Regular's
+# numbers (BelfrySCAD #381). Regular stays FIRST -- it is the default face
+# and the last-resort fallback.
+set(BUNDLED_FONT_SRCS
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-Regular.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-Bold.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-Italic.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-BoldItalic.ttf
+)
 set(BUNDLED_FONT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/openscad_cpp_evaluator/bundled_font_data.hpp)
+# Joined into ONE argument, and quoted. Left as a ";" list,
+# add_custom_command expands it into separate arguments and the font paths
+# land where -P expects the script; joined with "|" but unquoted, make
+# emits a bare pipe and the shell splits the command in two. The separator
+# is "@" for the same reason -- no shell meaning, and no filesystem here
+# puts one in a path.
+string(REPLACE ";" "@" BUNDLED_FONT_SRCS_ARG "${BUNDLED_FONT_SRCS}")
 add_custom_command(
   OUTPUT ${BUNDLED_FONT_HEADER}
-  COMMAND ${CMAKE_COMMAND} -DIN_FILE=${BUNDLED_FONT_SRC} -DOUT_FILE=${BUNDLED_FONT_HEADER}
+  COMMAND ${CMAKE_COMMAND} "-DIN_FILES=${BUNDLED_FONT_SRCS_ARG}" -DOUT_FILE=${BUNDLED_FONT_HEADER}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
-  DEPENDS ${BUNDLED_FONT_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
+  DEPENDS ${BUNDLED_FONT_SRCS} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
   COMMENT "Embedding bundled font bytes into bundled_font_data.hpp"
 )
 add_custom_target(generate_bundled_font DEPENDS ${BUNDLED_FONT_HEADER})

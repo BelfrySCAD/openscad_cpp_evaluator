@@ -1,5 +1,6 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/font_match.hpp"
 #include "openscad_cpp_evaluator/font_provider.hpp"
 
 #include <memory>
@@ -29,6 +30,18 @@ public:
     std::vector<ShapedGlyph> shapeText(FontHandle handle, const std::string& utf8, const ShapeOptions& opts) override;
     std::optional<std::array<double, 4>> glyphInkBounds(FontHandle handle, GlyphId glyph) override;
     GlyphContours glyphOutline(FontHandle handle, GlyphId glyph, int segsPerCurve) override;
+
+    // Every face this provider can resolve: the bundled family first, then
+    // everything installed, sorted by family then style. Forces the system
+    // scan that the rest of the class defers, so it is the one call here
+    // that costs real time on a machine with a few hundred fonts.
+    //
+    // These are the names `font=` actually takes -- the point of showing
+    // them at all (BelfrySCAD #379: "the displayed font name can be
+    // different from the font name needed by OpenSCAD"). A list read from
+    // the windowing toolkit's font database would reproduce exactly that
+    // mismatch.
+    std::vector<FontFace> listFonts();
 
 private:
     struct Impl;

@@ -785,14 +785,21 @@ Value objectOf(std::vector<std::pair<std::string, Value>> items) {
 Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
     const std::string text = asStringOr(getArg(args, 0, "text", Value{std::string("")}), "");
     const double size = toDoubleLenient(getArg(args, 1, "size", Value{10.0}));
-    const std::string halign = asStringOr(getArg(args, std::nullopt, "halign", Value{std::string("left")}), "left");
-    const std::string valign = asStringOr(getArg(args, std::nullopt, "valign", Value{std::string("baseline")}), "baseline");
-    const double spacing = toDoubleLenient(getArg(args, std::nullopt, "spacing", Value{1.0}));
-    const std::string fontSpec = asStringOr(getArg(args, std::nullopt, "font", Value{std::string("")}), "");
+    // Positional indices, all of them: OpenSCAD's own signature is
+    // textmetrics(text, size, font, direction, language, script, halign,
+    // valign, spacing) and it honours every one of those positionally --
+    // verified against the 2026.02.01 binary, not read off a doc page.
+    // `font` being name-only here is what made
+    // `textmetrics("Hi", 10, "Liberation Sans:style=Bold")` silently
+    // measure the default face (BelfrySCAD #381).
+    const std::string halign = asStringOr(getArg(args, 6, "halign", Value{std::string("left")}), "left");
+    const std::string valign = asStringOr(getArg(args, 7, "valign", Value{std::string("baseline")}), "baseline");
+    const double spacing = toDoubleLenient(getArg(args, 8, "spacing", Value{1.0}));
+    const std::string fontSpec = asStringOr(getArg(args, 2, "font", Value{std::string("")}), "");
     ShapeOptions shape;
-    shape.direction = asStringOr(getArg(args, std::nullopt, "direction", Value{std::string("")}), "");
-    shape.language = asStringOr(getArg(args, std::nullopt, "language", Value{std::string("")}), "");
-    shape.script = asStringOr(getArg(args, std::nullopt, "script", Value{std::string("")}), "");
+    shape.direction = asStringOr(getArg(args, 3, "direction", Value{std::string("")}), "");
+    shape.language = asStringOr(getArg(args, 4, "language", Value{std::string("")}), "");
+    shape.script = asStringOr(getArg(args, 5, "script", Value{std::string("")}), "");
 
     FontProvider& fp = ev.fontProvider();
     const FontHandle handle = fp.resolveFont(fontSpec);
@@ -813,7 +820,9 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
 // resolved font, scaled for `size`. Mirrors _builtin_fontmetrics.
 Value builtinFontmetrics(Evaluator& ev, const CallArgs& args) {
     const double size = toDoubleLenient(getArg(args, 0, "size", Value{10.0}));
-    const std::string fontSpec = asStringOr(getArg(args, std::nullopt, "font", Value{std::string("")}), "");
+    // Positional too: fontmetrics(10, "Liberation Sans:style=Bold") is
+    // how the bug report was written, and how the real binary reads it.
+    const std::string fontSpec = asStringOr(getArg(args, 1, "font", Value{std::string("")}), "");
 
     FontProvider& fp = ev.fontProvider();
     const FontHandle handle = fp.resolveFont(fontSpec);

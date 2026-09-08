@@ -1,5 +1,7 @@
 #include "openscad_cpp_evaluator/freetype_font_provider.hpp"
 
+#include <algorithm>
+
 #include "openscad_cpp_evaluator/bundled_font_data.hpp"
 #include "openscad_cpp_evaluator/font_match.hpp"
 
@@ -104,6 +106,11 @@ struct FreetypeFontProvider::Impl {
         FontMetrics metrics;
     };
 
+    //: A FontFace whose `path` is this is already open: its faceIndex IS
+    //: the handle. Real paths cannot collide with it -- no filesystem
+    //: yields a name in angle brackets from findFontFiles().
+    static constexpr const char* kBundledPath = "<bundled>";
+
     std::vector<Face> faces;                                 // handle == index
     std::unordered_map<std::string, FontHandle> bySpec;      // resolved spec -> handle
     std::vector<FontFace> installed;                         // system font index
@@ -160,21 +167,30 @@ struct FreetypeFontProvider::Impl {
         return faces.size() - 1;
     }
 
+    // Every bundled face, in order -- handle 0 is the regular one, the
+    // default and the last-resort fallback. The rest are the other styles
+    // of the same family: a `style=` request that nothing installed can
+    // satisfy used to fall silently back to regular, which is what made
+    // fontmetrics("Liberation Sans:style=bold") report Regular's numbers
+    // (BelfrySCAD #381).
     void openBundled() {
-        Face f;
-        if (FT_New_Memory_Face(lib, reinterpret_cast<const FT_Byte*>(kBundledFontData),
-                               static_cast<FT_Long>(kBundledFontDataSize), 0, &f.ft) != 0) {
-            throw std::runtime_error("FreetypeFontProvider: bundled font failed to load");
+        for (std::size_t i = 0; i < kBundledFontCount; ++i) {
+            const BundledFont& src = kBundledFonts[i];
+            Face f;
+            if (FT_New_Memory_Face(lib, reinterpret_cast<const FT_Byte*>(src.data),
+                                   static_cast<FT_Long>(src.size), 0, &f.ft) != 0) {
+                if (i == 0) throw std::runtime_error("FreetypeFontProvider: bundled font failed to load");
+                continue;  // a spare style is not worth failing every render for
+            }
+            f.blob = hb_blob_create(reinterpret_cast<const char*>(src.data),
+                                    static_cast<unsigned>(src.size), HB_MEMORY_MODE_READONLY, nullptr, nullptr);
+            f.hbFace = hb_face_create(f.blob, 0);
+            f.hbFont = hb_font_create(f.hbFace);
+            hb_ot_font_set_funcs(f.hbFont);
+            f.metrics = readMetrics(f.ft);
+            scaleHbFontToEm(f.hbFont, static_cast<unsigned>(f.metrics.unitsPerEm));
+            faces.push_back(f);
         }
-        f.blob = hb_blob_create(reinterpret_cast<const char*>(kBundledFontData),
-                                static_cast<unsigned>(kBundledFontDataSize), HB_MEMORY_MODE_READONLY, nullptr,
-                                nullptr);
-        f.hbFace = hb_face_create(f.blob, 0);
-        f.hbFont = hb_font_create(f.hbFace);
-        hb_ot_font_set_funcs(f.hbFont);
-        f.metrics = readMetrics(f.ft);
-        scaleHbFontToEm(f.hbFont, static_cast<unsigned>(f.metrics.unitsPerEm));
-        faces.push_back(f);
     }
 
     // Reads family/style out of every face of every installed font file.
@@ -185,6 +201,15 @@ struct FreetypeFontProvider::Impl {
     void scanInstalled() {
         if (scanned) return;
         scanned = true;
+        // The bundled faces go in FIRST, so what a given family+style
+        // resolves to does not depend on what the machine happens to have
+        // installed -- the same script draws the same shapes everywhere.
+        // Their "path" is the sentinel below and their faceIndex is the
+        // already-open handle, so resolveFont skips opening a file at all.
+        for (std::size_t i = 0; i < faces.size() && i < kBundledFontCount; ++i) {
+            installed.push_back(FontFace{std::string(kBundledPath), static_cast<int>(i),
+                                          faces[i].metrics.family, faces[i].metrics.style});
+        }
         for (const std::string& path : findFontFiles()) {
             FT_Face probe = nullptr;
             if (FT_New_Face(lib, path.c_str(), -1, &probe) != 0) continue;
@@ -222,10 +247,28 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
     impl_->scanInstalled();
     FontHandle handle = 0;
     if (const std::optional<FontFace> hit = matchFace(parsed, impl_->installed)) {
-        handle = impl_->openFile(hit->path, hit->faceIndex).value_or(0);
+        handle = hit->path == Impl::kBundledPath ? static_cast<FontHandle>(hit->faceIndex)
+                                                  : impl_->openFile(hit->path, hit->faceIndex).value_or(0);
     }
     impl_->bySpec[spec] = handle;
     return handle;
+}
+
+std::vector<FontFace> FreetypeFontProvider::listFonts() {
+    impl_->scanInstalled();
+    std::vector<FontFace> out = impl_->installed;
+    // A family installed in several files, or listed both bundled and
+    // installed, should appear once per STYLE, not once per file.
+    std::sort(out.begin(), out.end(), [](const FontFace& a, const FontFace& b) {
+        if (a.family != b.family) return a.family < b.family;
+        return a.style < b.style;
+    });
+    out.erase(std::unique(out.begin(), out.end(),
+                           [](const FontFace& a, const FontFace& b) {
+                               return a.family == b.family && a.style == b.style;
+                           }),
+              out.end());
+    return out;
 }
 
 FontMetrics FreetypeFontProvider::metrics(FontHandle handle) {

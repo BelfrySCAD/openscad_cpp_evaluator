@@ -1,4 +1,8 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/freetype_font_provider.hpp"
+
+#include <algorithm>
+#include <array>
 #include "openscad_cpp_evaluator/font_match.hpp"
 
 #include "test_helpers.hpp"
@@ -268,4 +272,110 @@ TEST(FontMatch, StyleIsAPreferenceNotAFilter) {
     const std::optional<FontFace> hit = matchFace(parseFontSpec("Test Sans:style=Black"), faces);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->style, "Regular");
+}
+
+// -- bundled family + font list (BelfrySCAD #381, #379) -------------------
+
+TEST(BundledFonts, EveryStyleOfTheFamilyResolves) {
+    // Only Regular used to be bundled, so `style=Bold` on a machine
+    // without Liberation installed fell silently back to Regular --
+    // fontmetrics() then reported Regular's numbers under the name the
+    // script asked for, which is what #381 saw.
+    FreetypeFontProvider p;
+    const std::array<std::pair<const char*, const char*>, 4> want{{
+        {"Liberation Sans", "Regular"},
+        {"Liberation Sans:style=Bold", "Bold"},
+        {"Liberation Sans:style=Italic", "Italic"},
+        {"Liberation Sans:style=Bold Italic", "Bold Italic"},
+    }};
+    for (const auto& [spec, style] : want) {
+        const FontMetrics m = p.metrics(p.resolveFont(spec));
+        EXPECT_EQ(m.family, "Liberation Sans") << spec;
+        EXPECT_EQ(m.style, style) << spec;
+    }
+}
+
+TEST(BundledFonts, StyleMatchingIsCaseInsensitive) {
+    // The report used lowercase "bold", as fontconfig accepts.
+    FreetypeFontProvider p;
+    EXPECT_EQ(p.metrics(p.resolveFont("Liberation Sans:style=bold")).style, "Bold");
+    EXPECT_EQ(p.metrics(p.resolveFont("Liberation Sans:style=BOLD")).style, "Bold");
+}
+
+TEST(BundledFonts, EachStyleHasItsOwnMetrics) {
+    // The visible half of #381: `max` ascent/descent came back identical
+    // for bold and regular, because they were the same face.
+    FreetypeFontProvider p;
+    const FontMetrics reg = p.metrics(p.resolveFont("Liberation Sans"));
+    const FontMetrics bold = p.metrics(p.resolveFont("Liberation Sans:style=Bold"));
+    EXPECT_NE(reg.yMax, bold.yMax);
+    EXPECT_NE(reg.yMin, bold.yMin);
+}
+
+TEST(BundledFonts, AnUnknownFamilyStillFallsBackRatherThanFailing) {
+    // A render must not die because a font is missing.
+    FreetypeFontProvider p;
+    const FontMetrics m = p.metrics(p.resolveFont("No Such Font At All"));
+    EXPECT_EQ(m.family, "Liberation Sans");
+}
+
+TEST(ListFonts, ReportsTheBundledFamilyWithEveryStyle) {
+    FreetypeFontProvider p;
+    const std::vector<FontFace> faces = p.listFonts();
+    std::vector<std::string> styles;
+    for (const FontFace& f : faces) {
+        if (f.family == "Liberation Sans") styles.push_back(f.style);
+    }
+    for (const char* want : {"Regular", "Bold", "Italic", "Bold Italic"}) {
+        EXPECT_NE(std::find(styles.begin(), styles.end(), want), styles.end()) << want;
+    }
+}
+
+TEST(ListFonts, IsSortedAndHasNoDuplicateFamilyStylePairs) {
+    // A family installed in several files, or bundled AND installed, must
+    // appear once per style -- the list is for reading.
+    FreetypeFontProvider p;
+    const std::vector<FontFace> faces = p.listFonts();
+    ASSERT_FALSE(faces.empty());
+    for (size_t i = 1; i < faces.size(); ++i) {
+        const bool ordered = faces[i - 1].family < faces[i].family ||
+                              (faces[i - 1].family == faces[i].family && faces[i - 1].style < faces[i].style);
+        EXPECT_TRUE(ordered) << faces[i - 1].family << "/" << faces[i - 1].style << " then "
+                              << faces[i].family << "/" << faces[i].style;
+    }
+}
+
+TEST(FontArgs, FontIsPositionalInBothMetricsFunctions) {
+    // fontmetrics(size, font) and
+    // textmetrics(text, size, font, direction, language, script, halign,
+    // valign, spacing) -- every one positional, verified against OpenSCAD
+    // 2026.02.01 itself. `font` used to be name-only, so the spec in the
+    // bug report was read as no font at all and the default face measured
+    // instead (BelfrySCAD #381).
+    std::vector<std::string> echoes;
+    Evaluated e = evalSrc(
+        "a = fontmetrics(10, \"Liberation Sans:style=Bold\").font;\n"
+        "b = fontmetrics(size=10, font=\"Liberation Sans:style=Bold\").font;\n"
+        "c = textmetrics(\"Hi\", 10, \"Liberation Sans:style=Bold\").size;\n"
+        "d = textmetrics(text=\"Hi\", size=10, font=\"Liberation Sans:style=Bold\").size;\n"
+        "e = textmetrics(\"Hi\", 10).size;\n"
+        "echo(a.style, b.style, c == d, c == e);\n", [&](const std::string& m) { echoes.push_back(m); });
+    ASSERT_EQ(echoes.size(), 1u);
+    // Bold both ways, and the positional form measures the same as the
+    // named one -- while differing from the default face.
+    EXPECT_EQ(echoes[0], "ECHO: \"Bold\", \"Bold\", true, false");
+}
+
+TEST(FontArgs, TheLaterPositionalsLineUpToo) {
+    // halign at 6 rather than "wherever": a positional font that shifted
+    // everything after it would be a new bug in place of the old one.
+    std::vector<std::string> echoes;
+    Evaluated e = evalSrc(
+        "p = textmetrics(\"Hi\", 10, \"Liberation Sans\", \"ltr\", \"en\", \"latin\", \"center\").position;\n"
+        "n = textmetrics(\"Hi\", 10, \"Liberation Sans\", halign=\"center\").position;\n"
+        "s = textmetrics(\"Hi\", 10, \"Liberation Sans\", \"ltr\", \"en\", \"latin\", \"left\", \"baseline\", 2).size;\n"
+        "sn = textmetrics(\"Hi\", 10, \"Liberation Sans\", spacing=2).size;\n"
+        "echo(p == n, s == sn);\n", [&](const std::string& m) { echoes.push_back(m); });
+    ASSERT_EQ(echoes.size(), 1u);
+    EXPECT_EQ(echoes[0], "ECHO: true, true");
 }
