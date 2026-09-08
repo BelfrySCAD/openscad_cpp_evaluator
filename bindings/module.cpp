@@ -357,7 +357,7 @@ struct Geometry {
 // exportModel, with the path/format/warnings marshalling. Releases the GIL:
 // a large export is seconds of Manifold work with no Python involved.
 nb::list exportModelPy(const std::string& path, const Geometry& geom, const std::string& format, bool asciiStl,
-                        bool stripSlivers) {
+                        bool stripSlivers, bool splitComponents) {
     std::vector<std::string> warnings;
     {
         nb::gil_scoped_release rel;
@@ -365,6 +365,7 @@ nb::list exportModelPy(const std::string& path, const Geometry& geom, const std:
         opts.format = format;
         opts.asciiStl = asciiStl;
         opts.stripSlivers = stripSlivers;
+        opts.splitComponents = splitComponents;
         warnings = oscadeval::exportModel(path, geom.bodies, opts);
     }
     nb::list out;
@@ -786,10 +787,14 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
 
     m.def("export_model", &exportModelPy, nb::arg("path"), nb::arg("geometry"), nb::arg("format") = std::string(),
           nb::arg("ascii_stl") = false, nb::arg("strip_slivers") = true,
+          nb::arg("split_components") = false,
           "Write `geometry` to `path`, format taken from the extension unless `format` says otherwise. "
           "Returns the warnings to surface (open shells, mesh problems, slivers removed) rather than "
           "logging them. Raises RuntimeError when there is no geometry, the format is unknown, or the "
-          "file cannot be opened.");
+          "file cannot be opened.\n\n"
+          "`split_components` gives every disconnected piece its own object in the multi-object formats "
+          "(3MF, AMF, OBJ, PLY, VRML, X3D). Off by default, matching OpenSCAD, which writes one object "
+          "per colour however many pieces it is in.");
 
     m.def("export_extensions", []() { return oscadeval::exportExtensions(); },
           "The file extensions export_model understands, dot-prefixed. Read from the C++ writer table "
