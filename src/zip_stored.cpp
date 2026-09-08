@@ -251,6 +251,16 @@ std::vector<uint8_t> extractEntry(const std::vector<uint8_t>& file, const std::s
 
 } // namespace
 
+std::vector<uint8_t> zlibCompress(const uint8_t* data, size_t size) {
+    int outLen = 0;
+    unsigned char* z = stbi_zlib_compress(const_cast<unsigned char*>(data), static_cast<int>(size), &outLen,
+                                           /*quality=*/8);
+    if (!z) return {};
+    std::vector<uint8_t> out(z, z + outLen);
+    free(z);
+    return out;
+}
+
 void writeStoredZip(const std::string& path, const std::vector<ZipEntry>& entries) {
     std::vector<PlacedEntry> placed;
     placed.reserve(entries.size());

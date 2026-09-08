@@ -356,13 +356,56 @@ struct Geometry {
 
 // exportModel, with the path/format/warnings marshalling. Releases the GIL:
 // a large export is seconds of Manifold work with no Python involved.
+// The PDF option set is big enough (paper size, orientation, four
+// ruler switches, fill/stroke, four metadata fields) that a dict keyed the
+// way OpenSCAD names its own `-O export-pdf/...` settings is kinder than
+// fourteen keyword arguments. Unknown keys raise rather than being ignored
+// -- a silently dropped "paper-size" would print the wrong page size with
+// nothing to explain it.
+void applyPdfOptions(const nb::dict& d, oscadeval::ExportPdfOptions& pdf) {
+    for (auto item : d) {
+        const std::string key = nb::cast<std::string>(item.first);
+        const nb::handle v = item.second;
+        if (key == "paper-size") {
+            const std::string name = nb::cast<std::string>(v);
+            if (!oscadeval::paperFromName(name, pdf.paper))
+                throw std::runtime_error("unknown paper-size '" + name +
+                                          "' (a6, a5, a4, a3, letter, legal, tabloid)");
+        } else if (key == "orientation") {
+            const std::string name = nb::cast<std::string>(v);
+            if (!oscadeval::orientationFromName(name, pdf.orientation))
+                throw std::runtime_error("unknown orientation '" + name + "' (portrait, landscape, auto)");
+        } else if (key == "show-scale") pdf.showScale = nb::cast<bool>(v);
+        else if (key == "show-scale-message") pdf.showScaleMsg = nb::cast<bool>(v);
+        else if (key == "show-grid") pdf.showGrid = nb::cast<bool>(v);
+        else if (key == "grid-size") pdf.gridSize = nb::cast<double>(v);
+        else if (key == "show-filename") pdf.showFilename = nb::cast<bool>(v);
+        else if (key == "design-filename") pdf.designFilename = nb::cast<std::string>(v);
+        else if (key == "fill") pdf.fill = nb::cast<bool>(v);
+        else if (key == "fill-color") pdf.fillColor = nb::cast<std::string>(v);
+        else if (key == "stroke") pdf.stroke = nb::cast<bool>(v);
+        else if (key == "stroke-color") pdf.strokeColor = nb::cast<std::string>(v);
+        else if (key == "stroke-width") pdf.strokeWidth = nb::cast<double>(v);
+        else if (key == "add-meta-data") pdf.addMetaData = nb::cast<bool>(v);
+        else if (key == "title") pdf.metaTitle = nb::cast<std::string>(v);
+        else if (key == "author") pdf.metaAuthor = nb::cast<std::string>(v);
+        else if (key == "subject") pdf.metaSubject = nb::cast<std::string>(v);
+        else if (key == "keywords") pdf.metaKeywords = nb::cast<std::string>(v);
+        else throw std::runtime_error("unknown pdf option '" + key + "'");
+    }
+}
+
 nb::list exportModelPy(const std::string& path, const Geometry& geom, const std::string& format, bool asciiStl,
                         bool stripSlivers, bool splitComponents, bool svgFill, const std::string& svgFillColor,
-                        bool svgStroke, const std::string& svgStrokeColor, double svgStrokeWidth) {
+                        bool svgStroke, const std::string& svgStrokeColor, double svgStrokeWidth,
+                        nb::object pdfOptions) {
+    oscadeval::ExportPdfOptions pdf;
+    if (!pdfOptions.is_none()) applyPdfOptions(nb::cast<nb::dict>(pdfOptions), pdf);
     std::vector<std::string> warnings;
     {
         nb::gil_scoped_release rel;
         oscadeval::ExportOptions opts;
+        opts.pdf = pdf;
         opts.format = format;
         opts.asciiStl = asciiStl;
         opts.stripSlivers = stripSlivers;
@@ -802,6 +845,7 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           nb::arg("split_components") = false, nb::arg("svg_fill") = false,
           nb::arg("svg_fill_color") = std::string("white"), nb::arg("svg_stroke") = true,
           nb::arg("svg_stroke_color") = std::string("black"), nb::arg("svg_stroke_width") = 0.35,
+          nb::arg("pdf_options") = nb::none(),
           "Write `geometry` to `path`, format taken from the extension unless `format` says otherwise. "
           "Returns the warnings to surface (open shells, mesh problems, slivers removed) rather than "
           "logging them. Raises RuntimeError when there is no geometry, the format is unknown, or the "
@@ -811,7 +855,12 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "per colour however many pieces it is in.\n\n"
           "The svg_* arguments are OpenSCAD's -O export-svg/... set and apply to .svg only. "
           "svg_stroke/svg_stroke_width also pad the page, so they are not purely cosmetic. An .svg "
-          "export needs an all-2D model and raises otherwise, as OpenSCAD does.");
+          "export needs an all-2D model and raises otherwise, as OpenSCAD does.\n\n"
+          "pdf_options is a dict keyed as OpenSCAD names its -O export-pdf/... settings "
+          "(paper-size, orientation, show-scale, show-scale-message, show-grid, grid-size, "
+          "show-filename, design-filename, fill, fill-color, stroke, stroke-color, stroke-width, "
+          "add-meta-data, title, author, subject, keywords). An unknown key raises rather than "
+          "being ignored. .pdf is 2D-only too, and centres the drawing on a fixed paper size.");
 
     m.def("export_extensions", []() { return oscadeval::exportExtensions(); },
           "The file extensions export_model understands, dot-prefixed. Read from the C++ writer table "

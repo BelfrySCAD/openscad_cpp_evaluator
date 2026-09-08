@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/mesh_check.hpp"
 
+#include "openscad_cpp_evaluator/css_colors.hpp"
 #include "openscad_cpp_evaluator/zip_stored.hpp"
 
 #include <manifold/manifold.h>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <fstream>
 #include <optional>
 #include <stdexcept>
@@ -1021,17 +1023,22 @@ manifold::Polygons sectionContours(const ColoredBody& cb) {
     return polys;
 }
 
-} // namespace
+// Every 2D writer's input: the contours of an all-2D model, plus their
+// bounding box. Shared so the 2D rule -- and its refusal -- has ONE
+// implementation: SVG and PDF must agree about what they will draw.
+struct Flat2d {
+    std::vector<manifold::Polygons> perBody;
+    double minx = 0, miny = 0, maxx = 0, maxy = 0;
+};
 
-void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies, const ExportSvgOptions& opts) {
+Flat2d collect2d(const std::vector<ColoredBody>& bodies) {
     // OpenSCAD's own wording, and its rule: 2D export needs an all-2D top
     // level. There is no sane projection to fall back on -- a silhouette
     // would be a different model from the one the script describes -- so
     // refusing is the honest answer.
     const char* kNot2d = "Current top level object is not a 2D object";
 
-    std::vector<manifold::Polygons> perBody;
-    double minx = 0, miny = 0, maxx = 0, maxy = 0;
+    Flat2d out;
     bool any = false;
     for (const ColoredBody& cb : bodies) {
         if (!isExportable(cb)) continue;
@@ -1040,7 +1047,7 @@ void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies, c
         // extruded so a 2D script has something to show, and the contours
         // it came from. Those contours are the real geometry, and the
         // binding hands export that same converted list, so reading `body`
-        // first would make SVG unreachable for every 2D script.
+        // first would make 2D export unreachable for every 2D script.
         if (!cb.section) {
             if (cb.isDisplayOnly()) throw std::runtime_error(kNot2d);
             if (cb.body && !cb.body->IsEmpty()) throw std::runtime_error(kNot2d);
@@ -1050,20 +1057,29 @@ void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies, c
         for (const manifold::SimplePolygon& contour : polys) {
             for (const manifold::vec2& p : contour) {
                 if (!any) {
-                    minx = maxx = p.x;
-                    miny = maxy = p.y;
+                    out.minx = out.maxx = p.x;
+                    out.miny = out.maxy = p.y;
                     any = true;
                 } else {
-                    minx = std::min(minx, p.x);
-                    maxx = std::max(maxx, p.x);
-                    miny = std::min(miny, p.y);
-                    maxy = std::max(maxy, p.y);
+                    out.minx = std::min(out.minx, p.x);
+                    out.maxx = std::max(out.maxx, p.x);
+                    out.miny = std::min(out.miny, p.y);
+                    out.maxy = std::max(out.maxy, p.y);
                 }
             }
         }
-        perBody.push_back(std::move(polys));
+        out.perBody.push_back(std::move(polys));
     }
     if (!any) throw std::runtime_error("No geometry to export");
+    return out;
+}
+
+} // namespace
+
+void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies, const ExportSvgOptions& opts) {
+    const Flat2d flat = collect2d(bodies);
+    const std::vector<manifold::Polygons>& perBody = flat.perBody;
+    const double minx = flat.minx, miny = flat.miny, maxx = flat.maxx, maxy = flat.maxy;
 
     // Page = bounding box, padded by half the stroke (the stroke straddles
     // the contour, so half of it lies outside), rounded outward to whole
@@ -1107,9 +1123,352 @@ void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies, c
     out << "</svg>\n";
 }
 
+namespace {
+
+// PDF's own unit is 1/72 inch; models are millimetres.
+constexpr double kPtPerMm = 72.0 / 25.4;
+// Page margin the ruler is drawn on, in points. OpenSCAD's own MARGIN.
+constexpr double kPdfMargin = 30.0;
+// Ruler tick length, in millimetres of model space.
+constexpr double kTickMm = 5.0;
+// Ticks every 10mm, labels on every second one. Hard-coded in OpenSCAD
+// too: `grid-size` drives the optional grid, not the ruler.
+constexpr double kTickStepMm = 10.0;
+constexpr int kLabelEveryNTicks = 2;
+
+// Width x height in points, indexed by ExportPdfOptions::Paper.
+constexpr int kPaperDims[7][2] = {
+    {298, 420},   // A6
+    {420, 595},   // A5
+    {595, 842},   // A4
+    {842, 1190},  // A3
+    {612, 792},   // Letter
+    {612, 1008},  // Legal
+    {792, 1224},  // Tabloid
+};
+
+std::string lowerCopy(const std::string& s) {
+    std::string out = s;
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+    return out;
+}
+
+// Numbers in a content stream: short, locale-independent, no exponent.
+// PDF has no "1e-05" -- a writer that emits one produces a file readers
+// silently mis-draw.
+std::string pdfNum(double v) {
+    if (!std::isfinite(v)) v = 0.0;
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.4f", v);
+    std::string s(buf);
+    const size_t dot = s.find('.');
+    if (dot != std::string::npos) {
+        size_t last = s.find_last_not_of('0');
+        if (last == dot) last = dot - 1;
+        s.erase(last + 1);
+    }
+    if (s == "-0") s = "0";
+    return s;
+}
+
+// Escapes a PDF literal string's three special bytes. Anything non-ASCII
+// is dropped rather than guessed at: the base-14 fonts are single-byte,
+// and a mangled byte would draw a wrong glyph instead of nothing.
+std::string pdfString(const std::string& text) {
+    std::string out = "(";
+    for (unsigned char c : text) {
+        if (c == '(' || c == ')' || c == '\\') {
+            out += '\\';
+            out += static_cast<char>(c);
+        } else if (c >= 0x20 && c < 0x7f) {
+            out += static_cast<char>(c);
+        }
+    }
+    out += ')';
+    return out;
+}
+
+// "D:YYYYMMDDHHmmSS+00'00'", the only date syntax PDF defines.
+std::string pdfDateNow() {
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc, &now);
+#else
+    gmtime_r(&now, &utc);
+#endif
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "D:%Y%m%d%H%M%S+00'00'", &utc);
+    return buf;
+}
+
+// Grey level that reads like OpenSCAD's translucent black on white paper.
+// Cairo strokes its ruler at alpha 0.6 and its caption at 0.48; on a white
+// page those are indistinguishable from these greys, and a grey needs no
+// ExtGState -- so the file stays one content stream with no transparency
+// group. Over anything but white they would differ, which no page here has.
+constexpr double kAxisGrey = 0.4;   // 1 - 0.6
+constexpr double kTextGrey = 0.52;  // 1 - 0.48
+constexpr double kGridLightGrey = 0.6;
+
+struct PdfText {
+    double x, y, size;
+    std::string text;
+};
+
+void appendMoveLine(std::string& out, double x0, double y0, double x1, double y1) {
+    out += pdfNum(x0) + " " + pdfNum(y0) + " m " + pdfNum(x1) + " " + pdfNum(y1) + " l S\n";
+}
+
+void appendText(std::string& out, const PdfText& t) {
+    out += "BT /F1 " + pdfNum(t.size) + " Tf 1 0 0 1 " + pdfNum(t.x) + " " + pdfNum(t.y) + " Tm " +
+            pdfString(t.text) + " Tj ET\n";
+}
+
+// zlib stream for /FlateDecode -- exactly what stbi_zlib_compress emits
+// (RFC 1950: 2-byte header, DEFLATE data, Adler-32), already vendored for
+// surface()'s PNG writing. Empty on failure, and the caller then writes the
+// stream raw: an uncompressed content stream is just as valid, only bigger.
+std::vector<uint8_t> zlibStream(const std::string& data) {
+    return zlibCompress(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+}
+
+} // namespace
+
+bool paperFromName(const std::string& name, ExportPdfOptions::Paper& out) {
+    const std::string n = lowerCopy(name);
+    if (n == "a6") out = ExportPdfOptions::Paper::A6;
+    else if (n == "a5") out = ExportPdfOptions::Paper::A5;
+    else if (n == "a4") out = ExportPdfOptions::Paper::A4;
+    else if (n == "a3") out = ExportPdfOptions::Paper::A3;
+    else if (n == "letter") out = ExportPdfOptions::Paper::Letter;
+    else if (n == "legal") out = ExportPdfOptions::Paper::Legal;
+    else if (n == "tabloid") out = ExportPdfOptions::Paper::Tabloid;
+    else return false;
+    return true;
+}
+
+bool orientationFromName(const std::string& name, ExportPdfOptions::Orientation& out) {
+    const std::string n = lowerCopy(name);
+    if (n == "portrait") out = ExportPdfOptions::Orientation::Portrait;
+    else if (n == "landscape") out = ExportPdfOptions::Orientation::Landscape;
+    else if (n == "auto") out = ExportPdfOptions::Orientation::Auto;
+    else return false;
+    return true;
+}
+
+std::vector<std::string> writePdf(const std::string& path, const std::vector<ColoredBody>& bodies,
+                                   const ExportPdfOptions& opts) {
+    const Flat2d flat = collect2d(bodies);
+    std::vector<std::string> warnings;
+
+    // -- page ------------------------------------------------------------
+    const int paperIdx = static_cast<int>(opts.paper);
+    const double spanXpt = (flat.maxx - flat.minx) * kPtPerMm;
+    const double spanYpt = (flat.maxy - flat.miny) * kPtPerMm;
+    const bool landscape = opts.orientation == ExportPdfOptions::Orientation::Landscape ||
+                            (opts.orientation == ExportPdfOptions::Orientation::Auto && spanXpt > spanYpt);
+    const double pageW = kPaperDims[paperIdx][landscape ? 1 : 0];
+    const double pageH = kPaperDims[paperIdx][landscape ? 0 : 1];
+
+    if (spanXpt > pageW - 2 * kPdfMargin || spanYpt > pageH - 2 * kPdfMargin) {
+        warnings.push_back("geometry is larger than the printable area of the selected paper size; "
+                            "it is drawn anyway and will run off the page.");
+    }
+
+    // Model mm -> page pt. PDF is Y-up like model space, so this is a
+    // scale and a translation in BOTH axes -- no negation anywhere, unlike
+    // the SVG writer. The model is centred exactly; OpenSCAD's own centring
+    // is off by a fraction of a point because it truncates the span to an
+    // int on the way, which is a bug rather than something to reproduce.
+    const double tx = pageW / 2.0 - (flat.minx + flat.maxx) / 2.0 * kPtPerMm;
+    const double ty = pageH / 2.0 - (flat.miny + flat.maxy) / 2.0 * kPtPerMm;
+    const auto X = [&](double mm) { return mm * kPtPerMm + tx; };
+    const auto Y = [&](double mm) { return mm * kPtPerMm + ty; };
+    // ... and back, for turning a page margin into the model coordinate
+    // the ruler has to label there.
+    const auto mmAtX = [&](double pt) { return (pt - tx) / kPtPerMm; };
+    const auto mmAtY = [&](double pt) { return (pt - ty) / kPtPerMm; };
+
+    const double ml = kPdfMargin, mr = pageW - kPdfMargin;
+    const double mb = kPdfMargin, mt = pageH - kPdfMargin;
+
+    // -- content ----------------------------------------------------------
+    std::string cs;
+    cs.reserve(4096);
+
+    // The model itself.
+    for (const manifold::Polygons& polys : flat.perBody) {
+        std::string path_;
+        for (const manifold::SimplePolygon& contour : polys) {
+            if (contour.empty()) continue;
+            path_ += pdfNum(X(contour[0].x)) + " " + pdfNum(Y(contour[0].y)) + " m\n";
+            for (size_t i = 1; i < contour.size(); ++i) {
+                path_ += pdfNum(X(contour[i].x)) + " " + pdfNum(Y(contour[i].y)) + " l\n";
+            }
+            path_ += "h\n";
+        }
+        if (path_.empty()) continue;
+        cs += "q\n";
+        if (opts.fill) {
+            const std::array<double, 4> c = cssColor(opts.fillColor);
+            cs += pdfNum(c[0]) + " " + pdfNum(c[1]) + " " + pdfNum(c[2]) + " rg\n";
+        }
+        if (opts.stroke) {
+            const std::array<double, 4> c = cssColor(opts.strokeColor);
+            cs += pdfNum(c[0]) + " " + pdfNum(c[1]) + " " + pdfNum(c[2]) + " RG\n";
+            cs += pdfNum(opts.strokeWidth * kPtPerMm) + " w\n";
+        }
+        cs += path_;
+        // Holes come out right under the nonzero winding rule because
+        // Manifold hands back outer contours and holes wound oppositely.
+        if (opts.fill && opts.stroke) cs += "B\n";
+        else if (opts.fill) cs += "f\n";
+        else if (opts.stroke) cs += "S\n";
+        else cs += "n\n";
+        cs += "Q\n";
+    }
+
+    std::vector<PdfText> texts;
+
+    if (opts.showScale) {
+        cs += "q\n";
+        cs += pdfNum(kAxisGrey) + " G\n0.36 w\n";
+        // Two axes, not a frame: the left edge and the bottom edge of the
+        // margin box, which is what OpenSCAD draws.
+        appendMoveLine(cs, ml, mb, ml, mt);
+        appendMoveLine(cs, ml, mb, mr, mb);
+
+        const double tick = kTickMm * kPtPerMm;
+        // Ticks land on model multiples of 10mm, NOT on page divisions --
+        // that is what makes the printed ruler measure the model. The `0`
+        // tick therefore sits exactly on the model origin, and labels run
+        // negative wherever the page extends past it.
+        const long xFirst = static_cast<long>(std::ceil(mmAtX(ml) / kTickStepMm));
+        const long xLast = static_cast<long>(std::floor(mmAtX(mr) / kTickStepMm));
+        for (long i = xFirst; i <= xLast; ++i) {
+            const double px = X(i * kTickStepMm);
+            appendMoveLine(cs, px, mb, px, mb - tick);
+            if (i % kLabelEveryNTicks == 0) {
+                texts.push_back({px + 1.0, mb - tick + 2.0, 6.0, std::to_string(i * (long)kTickStepMm)});
+            }
+        }
+        const long yFirst = static_cast<long>(std::ceil(mmAtY(mb) / kTickStepMm));
+        const long yLast = static_cast<long>(std::floor(mmAtY(mt) / kTickStepMm));
+        for (long i = yFirst; i <= yLast; ++i) {
+            const double py = Y(i * kTickStepMm);
+            appendMoveLine(cs, ml, py, ml - tick, py);
+            if (i % kLabelEveryNTicks == 0) {
+                texts.push_back({ml - tick, py + 3.0, 6.0, std::to_string(i * (long)kTickStepMm)});
+            }
+        }
+
+        if (opts.showGrid) {
+            // The one place gridSize is used. OpenSCAD's own clamp, and its
+            // "major line" rule, which is deliberately asymmetric: below
+            // 10mm every (10/gridSize)th line is heavier, above it every
+            // gridSize'th.
+            double g = opts.gridSize < 1.0 ? 2.0 : opts.gridSize;
+            const long major = static_cast<long>(g > 10.0 ? g : static_cast<long>(10.0 / g));
+            const long gx0 = static_cast<long>(std::ceil(mmAtX(ml) / g));
+            const long gx1 = static_cast<long>(std::floor(mmAtX(mr) / g));
+            for (long i = gx0; i <= gx1; ++i) {
+                const bool heavy = major > 0 && (i % major) == 0;
+                cs += pdfNum(heavy ? kAxisGrey : kGridLightGrey) + " G\n" + (heavy ? "0.36" : "0.24") + " w\n";
+                appendMoveLine(cs, X(i * g), mb, X(i * g), mt);
+            }
+            const long gy0 = static_cast<long>(std::ceil(mmAtY(mb) / g));
+            const long gy1 = static_cast<long>(std::floor(mmAtY(mt) / g));
+            for (long i = gy0; i <= gy1; ++i) {
+                const bool heavy = major > 0 && (i % major) == 0;
+                cs += pdfNum(heavy ? kAxisGrey : kGridLightGrey) + " G\n" + (heavy ? "0.36" : "0.24") + " w\n";
+                appendMoveLine(cs, ml, Y(i * g), mr, Y(i * g));
+            }
+        }
+        cs += "Q\n";
+
+        if (opts.showScaleMsg) {
+            // Without this the ruler is a mystery. It is the instruction
+            // for the job the format exists to do.
+            texts.push_back({ml + 1.0, mb + 2.0, 5.0,
+                              "Scale is to calibrate actual printed dimension. Check both X and Y. "
+                              "Measure between tick 0 and last tick"});
+        }
+    }
+
+    if (opts.showFilename && !opts.designFilename.empty()) {
+        texts.push_back({ml, mb - kTickMm * kPtPerMm - 10.0, 10.0, opts.designFilename});
+    }
+
+    if (!texts.empty()) {
+        cs += "q\n" + pdfNum(kTextGrey) + " g\n";
+        for (const PdfText& t : texts) appendText(cs, t);
+        cs += "Q\n";
+    }
+
+    // -- objects ----------------------------------------------------------
+    std::vector<uint8_t> stream = zlibStream(cs);
+    const bool deflated = !stream.empty() && stream.size() < cs.size();
+    if (!deflated) stream.assign(cs.begin(), cs.end());
+
+    std::string info;
+    if (opts.addMetaData) {
+        info = "<< /Producer " + pdfString("BelfrySCAD (openscad_cpp_evaluator)") + " /CreationDate " +
+                pdfString(pdfDateNow());
+        if (!opts.metaTitle.empty()) info += " /Title " + pdfString(opts.metaTitle);
+        if (!opts.metaAuthor.empty()) info += " /Author " + pdfString(opts.metaAuthor);
+        if (!opts.metaSubject.empty()) info += " /Subject " + pdfString(opts.metaSubject);
+        if (!opts.metaKeywords.empty()) info += " /Keywords " + pdfString(opts.metaKeywords);
+        info += " >>";
+    }
+
+    std::vector<std::string> objects;
+    objects.push_back("<< /Type /Catalog /Pages 2 0 R >>");
+    objects.push_back("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    objects.push_back("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + pdfNum(pageW) + " " + pdfNum(pageH) +
+                       "] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>");
+    objects.push_back("");  // 4: the content stream, assembled below
+    // Base-14 Helvetica: supplied by every PDF reader, so nothing is
+    // embedded and no font metrics are needed to place left-aligned text.
+    objects.push_back("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+    if (!info.empty()) objects.push_back(info);
+
+    std::string body = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+    std::vector<size_t> offsets(objects.size(), 0);
+    for (size_t i = 0; i < objects.size(); ++i) {
+        offsets[i] = body.size();
+        body += std::to_string(i + 1) + " 0 obj\n";
+        if (i == 3) {
+            body += "<< /Length " + std::to_string(stream.size()) +
+                     (deflated ? " /Filter /FlateDecode" : "") + " >>\nstream\n";
+            body.append(reinterpret_cast<const char*>(stream.data()), stream.size());
+            body += "\nendstream\n";
+        } else {
+            body += objects[i] + "\n";
+        }
+        body += "endobj\n";
+    }
+
+    const size_t xrefAt = body.size();
+    body += "xref\n0 " + std::to_string(objects.size() + 1) + "\n0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        body += buf;
+    }
+    body += "trailer\n<< /Size " + std::to_string(objects.size() + 1) + " /Root 1 0 R";
+    if (!info.empty()) body += " /Info " + std::to_string(objects.size()) + " 0 R";
+    body += " >>\nstartxref\n" + std::to_string(xrefAt) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw std::runtime_error("Could not open '" + path + "' for writing");
+    out.write(body.data(), static_cast<std::streamsize>(body.size()));
+    return warnings;
+}
+
 const std::vector<std::string>& exportExtensions() {
-    static const std::vector<std::string> exts = {".3mf", ".amf", ".stl", ".obj", ".off",
-                                                  ".ply", ".svg", ".wrl", ".x3d"};
+    static const std::vector<std::string> exts = {".3mf", ".amf", ".pdf", ".stl", ".obj",
+                                                  ".off", ".ply", ".svg", ".wrl", ".x3d"};
     return exts;
 }
 
@@ -1129,6 +1488,11 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
                                 " is not a closed solid; its surface is written as-is, and most slicers will reject it.");
         }
     };
+
+    if (ext == ".pdf") {
+        // 2D like SVG, and equally outside the mesh pipeline.
+        return writePdf(path, bodies, opts.pdf);
+    }
 
     if (ext == ".svg") {
         // 2D, and nothing the mesh pipeline below does applies: no merge,
