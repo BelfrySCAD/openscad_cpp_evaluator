@@ -661,6 +661,46 @@ def test_export_model_facade_accepts_split_components(tmp_path):
     assert objects_in(tmp_path / "split.3mf", split_components=True) == 3
 
 
+def test_export_model_writes_svg_and_takes_its_options(tmp_path):
+    """.svg through the facade, options included -- the same two-parameter-list
+    trap as test_export_model_facade_accepts_split_components."""
+    from openscad_cpp_evaluator import Evaluator, EvalError, export_extensions, export_model
+
+    assert ".svg" in export_extensions()
+
+    src = tmp_path / "flat.scad"
+    src.write_text("square([70.4, 25.3]);")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+
+    out = tmp_path / "flat.svg"
+    assert export_model(str(out), ev.geometry) == []
+    text = out.read_text()
+    # Page = bounds + half the stroke, rounded outward; matches OpenSCAD's.
+    assert 'width="72mm" height="27mm" viewBox="-1 -26 72 27"' in text
+    assert 'stroke="black" fill="none" stroke-width="0.35"' in text
+
+    styled = tmp_path / "styled.svg"
+    export_model(str(styled), ev.geometry, svg_stroke=False, svg_fill=True, svg_fill_color="red")
+    styled_text = styled.read_text()
+    assert 'stroke="none" fill="red"' in styled_text
+    # No stroke, no stroke padding -- so the page shrinks.
+    assert 'width="71mm" height="26mm"' in styled_text
+
+
+def test_export_model_svg_refuses_a_3d_model(tmp_path):
+    """OpenSCAD's rule, and ours: 2D export needs an all-2D top level."""
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError, export_model
+
+    src = tmp_path / "solid.scad"
+    src.write_text("cube(10);")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+    with pytest.raises(EvalError, match="not a 2D object"):
+        export_model(str(tmp_path / "solid.svg"), ev.geometry)
+
+
 def test_strict_commas_reaches_the_parser(tmp_path):
     """Evaluator.evaluate(strict_commas=True) must survive both hand-written
     parameter lists -- the facade's and the nanobind binding's. The last

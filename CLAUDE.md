@@ -916,8 +916,8 @@ grep for `ponytail:`.
   — skip it and the mesh comes out non-manifold at the seam). Self-contained 2D geometry math here
   (`dot2`/`len2`/`norm2`, the parabola-canonical-frame rotation in `discretizeArc`) exists nowhere
   else in this codebase.
-- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all eight
-  formats `exportExtensions()` lists: 3MF, AMF, STL, OBJ, OFF, PLY, VRML, X3D (3MF via
+- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all nine
+  formats `exportExtensions()` lists: 3MF, AMF, STL, OBJ, OFF, PLY, SVG, VRML, X3D (3MF via
   `zip_stored.hpp`'s `writeDeflateZip`). **`exportExtensions()` is the one source of truth for
   which formats exist** — the Python facade and BelfrySCAD's dialog/CLI all ask it rather than
   restating the list, because three hand-written copies had already drifted far enough that `.off`
@@ -927,11 +927,22 @@ grep for `ponytail:`.
   than the face, so an object whose triangles are not all one colour is written as one volume per
   colour — per-triangle `<color>` is legal in the spec but poorly supported by the slicers that are
   the audience for it.
+  **`writeSvg` is the one 2D writer**, and the only one that reads `ColoredBody::section` rather
+  than `.body`: SVG 1.1, millimetres at 1:1, every contour of a body (holes included) a
+  `M .. L .. z` subpath of that body's single `<path>`. Model space is Y-up and SVG's is Y-down, so
+  the whole point transform is a Y negation; the page is the bounding box padded by **half the
+  stroke width** and rounded outward to whole millimetres, which is why the margin is not a
+  constant and why `stroke=false` shrinks the document. Both rules are OpenSCAD's, read from its
+  `export_svg.cc` — `ExportSvg.MatchesRealOpenscadByteForByte` pins the output against the real
+  binary's, vertex order and 6-vertex line wrap included. A 3D body in the list throws
+  ("Current top level object is not a 2D object"), as OpenSCAD refuses too: there is no projection
+  to fall back on. `ExportOptions::svg` carries OpenSCAD's five `-O export-svg/...` settings.
   `colored_body.hpp`/`.cpp`'s `toRenderableBodies()` (thin-extrudes any top-level 2D-only result to
-  a 1e-3-unit-tall `flatPreview` Manifold) must run on a body list before handing it to any of these
-  writers — none of them look at `ColoredBody::section` at all, only `.body`. `tools/cli/cli_lib.cpp`
-  is the only current caller; a future GUI/renderer caller needs the same call before passing
-  results to its own mesh consumer.
+  a 1-unit-tall `flatPreview` Manifold) must run on a body list before handing it to any of the
+  MESH writers — none of them look at `ColoredBody::section` at all, only `.body`. Not before
+  `writeSvg`, which needs the sections that step throws away, and which says so rather than writing
+  the slab's outline. `tools/cli/cli_lib.cpp` is the only current caller; a future GUI/renderer
+  caller needs the same call before passing results to its own mesh consumer.
 - `include/openscad_cpp_evaluator/function_builtins.hpp`, `src/builtins/function_builtins.cpp` —
   the math/string/list/type-check builtin *function* dispatch (`isBuiltinFunctionName`/
   `evalBuiltinFunction`), a completely separate namespace/table from `dispatch.hpp`'s builtin

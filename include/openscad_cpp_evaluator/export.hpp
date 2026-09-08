@@ -127,6 +127,36 @@ void writeOff(const std::string& path, const std::vector<ColoredBody>& bodies);
 // no geometry to export.
 void writeThreeMf(const std::string& path, const std::vector<ExportObject>& objects);
 
+// -- 2D ------------------------------------------------------------------
+
+// Options for the SVG writer, named and defaulted after OpenSCAD's own
+// `-O export-svg/...` set. `stroke`/`strokeWidth` are not purely cosmetic:
+// half the stroke width pads the page, so turning the stroke off shrinks
+// the document.
+struct ExportSvgOptions {
+    bool fill = false;
+    std::string fillColor = "white";
+    bool stroke = true;
+    std::string strokeColor = "black";
+    double strokeWidth = 0.35;
+};
+
+// SVG 1.1 of a 2D-only model, in millimetres at 1:1 -- so a print of it
+// measures what the script says. Every contour of a body, holes included,
+// becomes a `M .. L .. z` subpath of that body's single `<path>`.
+//
+// Model space is Y-up and SVG's is Y-down, so the whole point transform is
+// a Y negation. The page is the bounding box padded by half the stroke
+// width and rounded OUTWARD to whole millimetres, which is why the margin
+// is not a constant (0 to just under 1mm per side, depending where the
+// bounds fall). Both rules are OpenSCAD's, read from its export_svg.cc and
+// checked against its binary.
+//
+// Throws std::runtime_error if any top-level body is 3D -- OpenSCAD's rule,
+// and the only honest answer, since there is no projection to fall back on.
+void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies,
+              const ExportSvgOptions& opts = {});
+
 // -- one entry point ------------------------------------------------------
 
 struct ExportOptions {
@@ -144,6 +174,8 @@ struct ExportOptions {
     // pieces it is in; see that function's own comment for why the default
     // moved here.
     bool splitComponents = false;
+    // .svg only.
+    ExportSvgOptions svg;
 };
 
 // Writes `bodies` to `path`, choosing the writer from the extension (or

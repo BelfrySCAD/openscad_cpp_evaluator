@@ -16,6 +16,10 @@ enum class BodyRole { Normal, Highlight, Background, ShowOnly };
 // A single piece of evaluated geometry: exactly one of `body` (3D) or
 // `section` (2D) is set, never both -- mirrors the Python reference's
 // ColoredBody (body: Optional[Manifold] XOR section: Optional[CrossSection]).
+// ONE exception, and it is deliberate: toRenderableBodies() leaves the
+// `section` in place on the `flatPreview` body it extrudes, so a 2D writer
+// downstream still has the contours. `flatPreview` is the flag that says
+// so; nothing else sets both.
 // `role`/`triColors` are later-phase fields (modifier tagging -- Phase 3;
 // multi-color CSG merges -- Phase 3/8) included now so the struct shape
 // doesn't need reworking when those land.

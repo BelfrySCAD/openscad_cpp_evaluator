@@ -258,3 +258,185 @@ TEST(ExportAmf, AMultiColouredObjectBecomesOneVolumePerColour) {
     EXPECT_EQ(countOf(xml, "<material id="), 2u);
     std::remove(path.c_str());
 }
+
+// -- SVG (2D) --------------------------------------------------------------
+
+namespace {
+
+std::string readText(const std::string& path) {
+    std::ifstream in(path);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// Write `code` as SVG and return the file's text, deleting the file.
+std::string svgOf(const std::string& code, const std::string& name, const ExportSvgOptions& opts = {}) {
+    const std::string path = tempPath(name).string();
+    writeSvg(path, evalToBodies(code), opts);
+    const std::string text = readText(path);
+    std::remove(path.c_str());
+    return text;
+}
+
+std::string firstLineContaining(const std::string& text, const std::string& needle) {
+    const size_t at = text.find(needle);
+    if (at == std::string::npos) return "";
+    const size_t start = text.rfind('\n', at);
+    const size_t end = text.find('\n', at);
+    return text.substr(start == std::string::npos ? 0 : start + 1,
+                        (end == std::string::npos ? text.size() : end) - (start == std::string::npos ? 0 : start + 1));
+}
+
+} // namespace
+
+// The page rule is NOT a fixed 1mm margin -- it is the bounding box padded
+// by half the stroke width, then rounded outward to whole millimetres. The
+// three cases below are the ones that tell those two rules apart, and each
+// header is what real OpenSCAD 2026.02.01 wrote for the same model.
+TEST(ExportSvg, PageIsStrokePaddedBoundsRoundedOutward) {
+    const std::string text = svgOf("square([70.4, 25.3]);", "page_default.svg");
+    EXPECT_EQ(firstLineContaining(text, "<svg "),
+              "<svg width=\"72mm\" height=\"27mm\" viewBox=\"-1 -26 72 27\" "
+              "xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">");
+}
+
+TEST(ExportSvg, NoStrokeMeansNoStrokePadding) {
+    ExportSvgOptions opts;
+    opts.stroke = false;
+    const std::string text = svgOf("square([70.4, 25.3]);", "page_nostroke.svg", opts);
+    EXPECT_EQ(firstLineContaining(text, "<svg "),
+              "<svg width=\"71mm\" height=\"26mm\" viewBox=\"0 -26 71 26\" "
+              "xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">");
+    EXPECT_NE(text.find("stroke=\"none\""), std::string::npos);
+}
+
+TEST(ExportSvg, WiderStrokeGrowsThePage) {
+    ExportSvgOptions opts;
+    opts.strokeWidth = 4.0;
+    const std::string text = svgOf("square([70.4, 25.3]);", "page_wide.svg", opts);
+    EXPECT_EQ(firstLineContaining(text, "<svg "),
+              "<svg width=\"75mm\" height=\"30mm\" viewBox=\"-2 -28 75 30\" "
+              "xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">");
+}
+
+TEST(ExportSvg, NegatesY) {
+    // Model Y 10..15 must come out as SVG y -15..-10: SVG's Y grows
+    // downward. Getting this backwards mirrors the drawing, and on a
+    // symmetric model it is invisible -- hence an asymmetric one.
+    const std::string text = svgOf("translate([0,10]) square([5,5]);", "negate_y.svg");
+    EXPECT_NE(text.find(",-15"), std::string::npos);
+    EXPECT_NE(text.find(",-10"), std::string::npos);
+    EXPECT_EQ(text.find(",15"), std::string::npos);
+}
+
+TEST(ExportSvg, HoleIsAnotherSubpathOfTheSamePath) {
+    const std::string text =
+        svgOf("difference() { square([40,25]); translate([20,12]) circle(5, $fn=16); }", "hole.svg");
+    EXPECT_EQ(countOf(text, "<path "), 1u);  // one body, one <path>
+    EXPECT_EQ(countOf(text, "M "), 2u);      // outline + hole
+    EXPECT_EQ(countOf(text, " z"), 2u);
+    // fill="none" is why the hole needs no winding rule to show through.
+    EXPECT_NE(text.find("fill=\"none\""), std::string::npos);
+}
+
+TEST(ExportSvg, DisjointShapesShareOneBodyAndOnePath) {
+    const std::string text = svgOf("square(10); translate([20,0]) square(10);", "disjoint.svg");
+    EXPECT_EQ(countOf(text, "M "), 2u);
+    // 0..30 in x, padded by 0.175 and rounded out: -1 .. 31.
+    EXPECT_NE(text.find("<svg width=\"32mm\" height=\"12mm\" viewBox=\"-1 -11 32 12\""), std::string::npos);
+}
+
+TEST(ExportSvg, StrokeAndFillOptionsReachTheFile) {
+    ExportSvgOptions opts;
+    opts.fill = true;
+    opts.fillColor = "#ffcc00";
+    opts.strokeColor = "red";
+    opts.strokeWidth = 0.5;
+    const std::string text = svgOf("square(10);", "styled.svg", opts);
+    EXPECT_NE(text.find("stroke=\"red\""), std::string::npos);
+    EXPECT_NE(text.find("fill=\"#ffcc00\""), std::string::npos);
+    EXPECT_NE(text.find("stroke-width=\"0.5\""), std::string::npos);
+}
+
+TEST(ExportSvg, SectionTransformIsApplied) {
+    // A transform a CrossSection cannot hold -- here a rotation out of the
+    // XY plane -- lives in ColoredBody::sectionXform instead. Ignoring it
+    // drew the unrotated shape. Tilting a 10mm square 45 degrees about X
+    // foreshortens it to 10*cos(45) = 7.07107 on the page.
+    const std::string text = svgOf("rotate([45,0,0]) square([10,10]);", "xform.svg");
+    EXPECT_NE(text.find("-7.07107"), std::string::npos);
+    EXPECT_NE(text.find("<svg width=\"12mm\" height=\"9mm\" viewBox=\"-1 -8 12 9\""), std::string::npos);
+}
+
+TEST(ExportSvg, InPlaneTranslationLandsWhereTheModelIs) {
+    const std::string text = svgOf("translate([3,4]) square([5,5]);", "moved.svg");
+    EXPECT_NE(text.find("M 3,-4"), std::string::npos);
+    EXPECT_NE(text.find("L 8,-9"), std::string::npos);
+}
+
+TEST(ExportSvg, RefusesA3dModel) {
+    std::vector<ColoredBody> bodies = evalToBodies("cube(10);");
+    EXPECT_THROW(writeSvg(tempPath("solid.svg").string(), bodies), std::runtime_error);
+}
+
+TEST(ExportSvg, RefusesMixed2dAnd3d) {
+    std::vector<ColoredBody> bodies = evalToBodies("cube(10); translate([20,0]) square(5);");
+    EXPECT_THROW(writeSvg(tempPath("mixed.svg").string(), bodies), std::runtime_error);
+}
+
+TEST(ExportSvg, WorksOnRenderableBodiesToo) {
+    // The Python binding runs toRenderableBodies() once and hands the SAME
+    // list to the renderer and to export, so a 2D script reaches writeSvg
+    // as a 1-unit slab that still carries its section. The contours are
+    // what gets written -- the slab's own outline would be the same shape
+    // but is not the point; the section is the geometry.
+    std::vector<ColoredBody> renderable = toRenderableBodies(evalToBodies("square([70.4, 25.3]);"));
+    ASSERT_TRUE(renderable[0].flatPreview);
+    ASSERT_TRUE(renderable[0].section.has_value());
+    const std::string path = tempPath("preview.svg").string();
+    writeSvg(path, renderable);
+    const std::string text = readText(path);
+    std::remove(path.c_str());
+    EXPECT_NE(text.find("<svg width=\"72mm\" height=\"27mm\" viewBox=\"-1 -26 72 27\""), std::string::npos);
+    EXPECT_EQ(countOf(text, "M "), 1u);
+}
+
+TEST(ExportSvg, NoGeometryThrows) {
+    std::vector<ColoredBody> empty;
+    EXPECT_THROW(writeSvg(tempPath("empty.svg").string(), empty), std::runtime_error);
+}
+
+TEST(ExportSvg, ReachableThroughExportModelAndListedAsAnExtension) {
+    const std::vector<std::string>& exts = exportExtensions();
+    EXPECT_NE(std::find(exts.begin(), exts.end(), ".svg"), exts.end());
+
+    const std::string path = tempPath("via_export_model.svg").string();
+    const std::vector<std::string> warnings = exportModel(path, evalToBodies("circle(5, $fn=8);"), ExportOptions{});
+    EXPECT_TRUE(warnings.empty());  // none of the mesh checks apply to contours
+    const std::string text = readText(path);
+    EXPECT_NE(text.find("<svg "), std::string::npos);
+    EXPECT_EQ(countOf(text, "M "), 1u);
+    std::remove(path.c_str());
+}
+
+// Byte-for-byte against real OpenSCAD 2026.02.01's own `-o out.svg` for the
+// same script -- header, vertex order, the 6-vertex line wrap and the "-0"
+// that a negated zero prints as. Contour ORDER (outline before hole) and
+// winding come from Manifold rather than CGAL, so agreeing here is worth
+// pinning: it is the part that could drift without anything else noticing.
+TEST(ExportSvg, MatchesRealOpenscadByteForByte) {
+    const std::string expected =
+        R"SVG(<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="42mm" height="27mm" viewBox="-1 -26 42 27" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<title>OpenSCAD Model</title>
+<path d="
+M 40,-25 L 0,-25 L 0,-0 L 40,-0 z
+M 18.0866,-7.3806 L 16.4645,-8.46447 L 15.3806,-10.0866 L 15,-12 L 15.3806,-13.9134 L 16.4645,-15.5355
+ L 18.0866,-16.6194 L 20,-17 L 21.9134,-16.6194 L 23.5355,-15.5355 L 24.6194,-13.9134 L 25,-12
+ L 24.6194,-10.0866 L 23.5355,-8.46447 L 21.9134,-7.3806 L 20,-7 z
+" stroke="black" fill="none" stroke-width="0.35"/>
+</svg>
+)SVG";
+    EXPECT_EQ(svgOf("difference() { square([40,25]); translate([20,12]) circle(5, $fn=16); }", "parity.svg"),
+              expected);
+}
