@@ -916,8 +916,8 @@ grep for `ponytail:`.
   — skip it and the mesh comes out non-manifold at the seam). Self-contained 2D geometry math here
   (`dot2`/`len2`/`norm2`, the parabola-canonical-frame rotation in `discretizeArc`) exists nowhere
   else in this codebase.
-- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all nine
-  formats `exportExtensions()` lists: 3MF, AMF, STL, OBJ, OFF, PLY, SVG, VRML, X3D (3MF via
+- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all ten
+  formats `exportExtensions()` lists: 3MF, AMF, PDF, STL, OBJ, OFF, PLY, SVG, VRML, X3D (3MF via
   `zip_stored.hpp`'s `writeDeflateZip`). **`exportExtensions()` is the one source of truth for
   which formats exist** — the Python facade and BelfrySCAD's dialog/CLI all ask it rather than
   restating the list, because three hand-written copies had already drifted far enough that `.off`
@@ -937,6 +937,22 @@ grep for `ponytail:`.
   binary's, vertex order and 6-vertex line wrap included. A 3D body in the list throws
   ("Current top level object is not a 2D object"), as OpenSCAD refuses too: there is no projection
   to fall back on. `ExportOptions::svg` carries OpenSCAD's five `-O export-svg/...` settings.
+  **`writePdf` is the other 2D writer**, and shares `collect2d()` with `writeSvg` so the all-2D
+  rule and its refusal have one implementation. Everything else differs from SVG: the drawing is
+  **centred on a fixed paper size** rather than the page being cut to fit, and **PDF user space is
+  Y-up like the model's, so there is NO Y negation** — `pt = mm * 72/25.4` plus a centring offset,
+  symmetric in both axes. (OpenSCAD's own file negates Y only because Cairo draws Y-down and then
+  flips the whole page; its centring is also a fraction of a point off, because it truncates the
+  span to an `int` — a bug, not a spec, so ours centres exactly.) With `showScale` it draws
+  OpenSCAD's ruler: two axes at a 30pt margin, ticks every **10mm of model space** (hard-coded —
+  `gridSize` drives only the optional grid), labels on every second tick, and the caption telling
+  you what to measure. That ruler is the point of the format: it is what lets a printed page reveal
+  a printer's scaling error. Text is the **base-14 `/Helvetica`** every reader supplies, so nothing
+  is embedded and no font metrics are needed — Cairo's subset-embedded font is a Cairo habit, not a
+  PDF requirement, and skipping it is what turned this from a project into a writer. The content
+  stream is Flate-compressed through `zip_stored.hpp`'s `zlibCompress` (PDF's `/FlateDecode` *is* a
+  zlib stream), falling back to raw when that would not shrink it. `writePdf` returns warnings
+  rather than `void`: a model too big for the page is drawn anyway and said so.
   `colored_body.hpp`/`.cpp`'s `toRenderableBodies()` (thin-extrudes any top-level 2D-only result to
   a 1-unit-tall `flatPreview` Manifold) must run on a body list before handing it to any of the
   MESH writers — none of them look at `ColoredBody::section` at all, only `.body`. Not before

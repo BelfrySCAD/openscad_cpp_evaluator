@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <sstream>
+#include <stb_image.h>
 
 using namespace oscadeval;
 using namespace oscadeval::test;
@@ -440,3 +442,294 @@ M 18.0866,-7.3806 L 16.4645,-8.46447 L 15.3806,-10.0866 L 15,-12 L 15.3806,-13.9
     EXPECT_EQ(svgOf("difference() { square([40,25]); translate([20,12]) circle(5, $fn=16); }", "parity.svg"),
               expected);
 }
+
+// -- PDF (2D) --------------------------------------------------------------
+
+namespace {
+
+std::string readBinary(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// The page's content stream, inflated when it was Flate-compressed.
+// Inflating with stb's own decoder doubles as proof that what we wrote is a
+// real zlib stream -- which is exactly what /FlateDecode promises a reader.
+std::string pdfContentStream(const std::string& file) {
+    const size_t at = file.find("stream\n");
+    if (at == std::string::npos) return "";
+    const size_t start = at + 7;
+    const size_t end = file.find("\nendstream", start);
+    const std::string raw = file.substr(start, end - start);
+    if (file.find("/FlateDecode") == std::string::npos) return raw;
+    int outLen = 0;
+    char* inflated = stbi_zlib_decode_malloc(raw.data(), static_cast<int>(raw.size()), &outLen);
+    if (!inflated) return "";
+    std::string out(inflated, inflated + outLen);
+    free(inflated);
+    return out;
+}
+
+struct Pdf {
+    std::string file;
+    std::string content;
+    std::vector<std::string> warnings;
+};
+
+Pdf pdfOf(const std::string& code, const std::string& name, const ExportPdfOptions& opts = {}) {
+    const std::string path = tempPath(name).string();
+    Pdf out;
+    out.warnings = writePdf(path, evalToBodies(code), opts);
+    out.file = readBinary(path);
+    out.content = pdfContentStream(out.file);
+    std::remove(path.c_str());
+    return out;
+}
+
+// Every number that appears before a `m`/`l` operator, as (x, y) pairs.
+std::vector<std::pair<double, double>> pathPoints(const std::string& content) {
+    std::vector<std::pair<double, double>> pts;
+    std::istringstream in(content);
+    std::string tok;
+    std::vector<std::string> toks;
+    while (in >> tok) toks.push_back(tok);
+    for (size_t i = 2; i < toks.size(); ++i) {
+        if (toks[i] != "m" && toks[i] != "l") continue;
+        try {
+            pts.emplace_back(std::stod(toks[i - 2]), std::stod(toks[i - 1]));
+        } catch (const std::exception&) {
+            // A "0 0 m"-shaped false positive is impossible here, but a
+            // non-numeric neighbour (an operator) simply is not a point.
+        }
+    }
+    return pts;
+}
+
+} // namespace
+
+TEST(ExportPdf, IsAValidLookingPdfWithAnA4PortraitPageByDefault) {
+    const Pdf pdf = pdfOf("square([40,25]);", "a4.pdf");
+    EXPECT_EQ(pdf.file.substr(0, 8), "%PDF-1.4");
+    EXPECT_NE(pdf.file.find("/MediaBox [0 0 595 842]"), std::string::npos);
+    EXPECT_NE(pdf.file.find("\nxref\n"), std::string::npos);
+    EXPECT_NE(pdf.file.find("startxref"), std::string::npos);
+    EXPECT_EQ(pdf.file.substr(pdf.file.size() - 6), "%%EOF\n");
+    EXPECT_TRUE(pdf.warnings.empty());
+}
+
+TEST(ExportPdf, UsesTheBase14HelveticaSoNothingIsEmbedded) {
+    // The whole reason this issue turned out to be small: a standard-14
+    // font needs no font file, no subsetting and no metrics.
+    const Pdf pdf = pdfOf("square([40,25]);", "font.pdf");
+    EXPECT_NE(pdf.file.find("/BaseFont /Helvetica"), std::string::npos);
+    EXPECT_EQ(pdf.file.find("/FontFile"), std::string::npos);
+}
+
+// The ruler's own lines are `m`/`l` too, so these two read the drawing
+// with the ruler turned off -- otherwise every measurement is of the page.
+namespace {
+ExportPdfOptions drawingOnly() {
+    ExportPdfOptions opts;
+    opts.showScale = false;
+    return opts;
+}
+} // namespace
+
+TEST(ExportPdf, DrawsAtTrueSizeAndCentresOnThePage) {
+    // 40mm x 25mm at 72/25.4 pt per mm, centred on 595x842.
+    const Pdf pdf = pdfOf("square([40,25]);", "size.pdf", drawingOnly());
+    const std::vector<std::pair<double, double>> pts = pathPoints(pdf.content);
+    ASSERT_FALSE(pts.empty());
+    double minx = pts[0].first, maxx = pts[0].first, miny = pts[0].second, maxy = pts[0].second;
+    for (const auto& p : pts) {
+        minx = std::min(minx, p.first);
+        maxx = std::max(maxx, p.first);
+        miny = std::min(miny, p.second);
+        maxy = std::max(maxy, p.second);
+    }
+    EXPECT_NEAR(maxx - minx, 40.0 * 72.0 / 25.4, 0.01);
+    EXPECT_NEAR(maxy - miny, 25.0 * 72.0 / 25.4, 0.01);
+    // Exactly centred -- OpenSCAD's own is a fraction of a point off
+    // because it truncates the span to an int, which is a bug, not a spec.
+    EXPECT_NEAR((minx + maxx) / 2.0, 595.0 / 2.0, 0.01);
+    EXPECT_NEAR((miny + maxy) / 2.0, 842.0 / 2.0, 0.01);
+}
+
+TEST(ExportPdf, DoesNotNegateYUnlikeSvg) {
+    // PDF user space is Y-up, same as the model's, so the placement is a
+    // scale and an offset in both axes and nothing more. Copying the SVG
+    // writer's Y negation here would print the page upside down, which on
+    // a symmetric model is invisible -- hence a triangle with its apex at
+    // one known corner.
+    const Pdf pdf = pdfOf("polygon([[0,0],[40,0],[40,25]]);", "yup.pdf", drawingOnly());
+    const std::vector<std::pair<double, double>> pts = pathPoints(pdf.content);
+    ASSERT_GE(pts.size(), 3u);
+    double topY = pts[0].second, topX = pts[0].first, leftX = pts[0].first;
+    for (const auto& p : pts) {
+        if (p.second > topY) {
+            topY = p.second;
+            topX = p.first;
+        }
+        leftX = std::min(leftX, p.first);
+    }
+    // Model (40,25) is both the highest and the rightmost vertex. Negated
+    // Y would put the highest point on the LEFT, at model (0,0).
+    EXPECT_GT(topX, leftX + 1.0);
+}
+
+TEST(ExportPdf, PaperSizeAndOrientation) {
+    ExportPdfOptions letter;
+    letter.paper = ExportPdfOptions::Paper::Letter;
+    EXPECT_NE(pdfOf("square(10);", "letter.pdf", letter).file.find("/MediaBox [0 0 612 792]"),
+              std::string::npos);
+
+    ExportPdfOptions land = letter;
+    land.orientation = ExportPdfOptions::Orientation::Landscape;
+    EXPECT_NE(pdfOf("square(10);", "land.pdf", land).file.find("/MediaBox [0 0 792 612]"), std::string::npos);
+
+    // AUTO follows the model: wider than tall means landscape.
+    ExportPdfOptions autoOrient;
+    autoOrient.orientation = ExportPdfOptions::Orientation::Auto;
+    EXPECT_NE(pdfOf("square([200,20]);", "auto_wide.pdf", autoOrient).file.find("/MediaBox [0 0 842 595]"),
+              std::string::npos);
+    EXPECT_NE(pdfOf("square([20,200]);", "auto_tall.pdf", autoOrient).file.find("/MediaBox [0 0 595 842]"),
+              std::string::npos);
+}
+
+TEST(ExportPdf, DrawsTheRulerAndItsCaptionByDefault) {
+    const Pdf pdf = pdfOf("square([70,25]);", "ruler.pdf");
+    EXPECT_NE(pdf.content.find("Scale is to calibrate actual printed dimension"), std::string::npos);
+    // Labels every 20mm, both signs -- the ruler is model space projected
+    // across the whole sheet, not a scale bar under the drawing.
+    EXPECT_NE(pdf.content.find("(0) Tj"), std::string::npos);
+    EXPECT_NE(pdf.content.find("(20) Tj"), std::string::npos);
+    EXPECT_NE(pdf.content.find("(-20) Tj"), std::string::npos);
+    // ... and NOT on every tick.
+    EXPECT_EQ(pdf.content.find("(10) Tj"), std::string::npos);
+}
+
+TEST(ExportPdf, TheZeroTickSitsOnTheModelOrigin) {
+    // This is what makes the printed page a ruler for the model rather
+    // than for the paper.
+    const Pdf pdf = pdfOf("square([70,25]);", "origin.pdf");
+    const size_t at = pdf.content.find("Tm (0) Tj");
+    ASSERT_NE(at, std::string::npos);
+    // "1 0 0 1 <x> <y> Tm (0) Tj" -- pull the x back out.
+    const size_t numStart = pdf.content.rfind("1 0 0 1 ", at) + 8;
+    const double x = std::stod(pdf.content.substr(numStart, at - numStart));
+    // Model x=0 is 35mm left of the model centre, which sits on the page
+    // centre; the label is drawn 1pt right of its tick.
+    const double expected = 595.0 / 2.0 - 35.0 * 72.0 / 25.4 + 1.0;
+    EXPECT_NEAR(x, expected, 0.01);
+}
+
+TEST(ExportPdf, ScaleOffLeavesJustTheDrawing) {
+    ExportPdfOptions opts;
+    opts.showScale = false;
+    const Pdf pdf = pdfOf("square([70,25]);", "noscale.pdf", opts);
+    EXPECT_EQ(pdf.content.find("Scale is to calibrate"), std::string::npos);
+    EXPECT_EQ(pdf.content.find(" Tj"), std::string::npos);
+}
+
+TEST(ExportPdf, TheCaptionCanBeDroppedWithoutDroppingTheRuler) {
+    ExportPdfOptions opts;
+    opts.showScaleMsg = false;
+    const Pdf pdf = pdfOf("square([70,25]);", "nomsg.pdf", opts);
+    EXPECT_EQ(pdf.content.find("Scale is to calibrate"), std::string::npos);
+    EXPECT_NE(pdf.content.find("(20) Tj"), std::string::npos);
+}
+
+TEST(ExportPdf, GridOnlyWhenAskedAndItIsGridSizeThatDrivesIt) {
+    const Pdf without = pdfOf("square([70,25]);", "nogrid.pdf");
+    ExportPdfOptions opts;
+    opts.showGrid = true;
+    opts.gridSize = 5.0;
+    const Pdf with = pdfOf("square([70,25]);", "grid.pdf", opts);
+    EXPECT_GT(countOf(with.content, " l S"), countOf(without.content, " l S"));
+
+    // A finer grid means more lines; the ruler's own ticks never change,
+    // since those are hard-coded at 10mm.
+    opts.gridSize = 2.0;
+    const Pdf finer = pdfOf("square([70,25]);", "grid2.pdf", opts);
+    EXPECT_GT(countOf(finer.content, " l S"), countOf(with.content, " l S"));
+}
+
+TEST(ExportPdf, FilenameIsDrawnOnlyWhenAskedForAndSupplied) {
+    ExportPdfOptions opts;
+    opts.showFilename = true;
+    EXPECT_EQ(pdfOf("square(10);", "noname.pdf", opts).content.find("(scale-card.scad) Tj"),
+              std::string::npos);
+    opts.designFilename = "scale-card.scad";
+    EXPECT_NE(pdfOf("square(10);", "named.pdf", opts).content.find("(scale-card.scad) Tj"),
+              std::string::npos);
+}
+
+TEST(ExportPdf, FillAndStrokeReachTheContentStream) {
+    ExportPdfOptions opts;
+    opts.fill = true;
+    opts.fillColor = "red";
+    opts.strokeColor = "blue";
+    opts.strokeWidth = 1.0;
+    const Pdf pdf = pdfOf("square(10);", "styled.pdf", opts);
+    EXPECT_NE(pdf.content.find("1 0 0 rg"), std::string::npos);
+    EXPECT_NE(pdf.content.find("0 0 1 RG"), std::string::npos);
+    // 1mm of stroke is 2.8346pt, not 1.
+    EXPECT_NE(pdf.content.find("2.8346 w"), std::string::npos);
+    EXPECT_NE(pdf.content.find("B\n"), std::string::npos);  // fill AND stroke
+}
+
+TEST(ExportPdf, AModelTooBigForThePageIsWarnedAboutAndStillWritten) {
+    const std::string path = tempPath("toobig.pdf").string();
+    const std::vector<std::string> warnings = writePdf(path, evalToBodies("square([500,500]);"));
+    ASSERT_EQ(warnings.size(), 1u);
+    EXPECT_NE(warnings[0].find("larger than the printable area"), std::string::npos);
+    EXPECT_GT(readBinary(path).size(), 500u);  // written anyway
+    std::remove(path.c_str());
+}
+
+TEST(ExportPdf, MetadataIsOptional) {
+    ExportPdfOptions opts;
+    opts.metaTitle = "Calibration scale";
+    opts.metaAuthor = "A Person";
+    const Pdf with = pdfOf("square(10);", "meta.pdf", opts);
+    EXPECT_NE(with.file.find("/Title (Calibration scale)"), std::string::npos);
+    EXPECT_NE(with.file.find("/Author (A Person)"), std::string::npos);
+    EXPECT_NE(with.file.find("/CreationDate (D:"), std::string::npos);
+
+    opts.addMetaData = false;
+    const Pdf without = pdfOf("square(10);", "nometa.pdf", opts);
+    EXPECT_EQ(without.file.find("/Title"), std::string::npos);
+    EXPECT_EQ(without.file.find("/Info"), std::string::npos);
+}
+
+TEST(ExportPdf, PaperAndOrientationNames) {
+    ExportPdfOptions::Paper paper = ExportPdfOptions::Paper::A4;
+    EXPECT_TRUE(paperFromName("Tabloid", paper));
+    EXPECT_EQ(paper, ExportPdfOptions::Paper::Tabloid);
+    EXPECT_FALSE(paperFromName("a2", paper));
+    EXPECT_EQ(paper, ExportPdfOptions::Paper::Tabloid);  // untouched
+
+    ExportPdfOptions::Orientation o = ExportPdfOptions::Orientation::Portrait;
+    EXPECT_TRUE(orientationFromName("AUTO", o));
+    EXPECT_EQ(o, ExportPdfOptions::Orientation::Auto);
+    EXPECT_FALSE(orientationFromName("sideways", o));
+}
+
+TEST(ExportPdf, RefusesA3dModelAndEmptyGeometry) {
+    std::vector<ColoredBody> solid = evalToBodies("cube(10);");
+    EXPECT_THROW(writePdf(tempPath("solid.pdf").string(), solid), std::runtime_error);
+    std::vector<ColoredBody> empty;
+    EXPECT_THROW(writePdf(tempPath("empty.pdf").string(), empty), std::runtime_error);
+}
+
+TEST(ExportPdf, ReachableThroughExportModelAndListedAsAnExtension) {
+    const std::vector<std::string>& exts = exportExtensions();
+    EXPECT_NE(std::find(exts.begin(), exts.end(), ".pdf"), exts.end());
+
+    const std::string path = tempPath("via_export_model.pdf").string();
+    const std::vector<std::string> warnings = exportModel(path, evalToBodies("circle(5, $fn=8);"), ExportOptions{});
+    EXPECT_TRUE(warnings.empty());
+    EXPECT_EQ(readBinary(path).substr(0, 8), "%PDF-1.4");
+    std::remove(path.c_str());
+}
+

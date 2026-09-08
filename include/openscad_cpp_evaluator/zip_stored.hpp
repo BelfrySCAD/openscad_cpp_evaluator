@@ -28,6 +28,14 @@ void writeStoredZip(const std::string& path, const std::vector<ZipEntry>& entrie
 // std::runtime_error if the file can't be opened for writing.
 void writeDeflateZip(const std::string& path, const std::vector<ZipEntry>& entries);
 
+// Compresses `data` to a zlib stream (RFC 1950: 2-byte header, DEFLATE
+// data, Adler-32 trailer) -- which is exactly what PDF's /FlateDecode
+// filter reads, so the PDF writer uses this rather than growing its own
+// compressor. Same stb_image_write.h implementation the ZIP writer above
+// deflates with, only without the wrapper stripped off. Empty if
+// compression fails; the caller can always write the data uncompressed.
+std::vector<uint8_t> zlibCompress(const uint8_t* data, size_t size);
+
 // Reads one entry (by exact name match) from a ZIP archive via its central
 // directory (authoritative regardless of how local headers were written).
 // Supports both STORED (method 0, this project's own writeStoredZip()

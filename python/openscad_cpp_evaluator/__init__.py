@@ -295,7 +295,7 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
                  strip_slivers: bool = True, split_components: bool = False,
                  svg_fill: bool = False, svg_fill_color: str = "white",
                  svg_stroke: bool = True, svg_stroke_color: str = "black",
-                 svg_stroke_width: float = 0.35) -> list:
+                 svg_stroke_width: float = 0.35, pdf_options: dict | None = None) -> list:
     """Write `geometry` to `path`. Returns the warnings to surface.
 
     `geometry` is the handle an Evaluator stashes on itself as
@@ -321,11 +321,23 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
     `svg_stroke`/`svg_stroke_width` also pad the page, so they are not
     purely cosmetic. An `.svg` export of anything 3D raises, as OpenSCAD's
     does -- there is no projection to fall back on.
+
+    `pdf_options` is a dict keyed the way OpenSCAD names its own
+    `-O export-pdf/...` settings: `paper-size`, `orientation`,
+    `show-scale`, `show-scale-message`, `show-grid`, `grid-size`,
+    `show-filename`, `design-filename`, `fill`, `fill-color`, `stroke`,
+    `stroke-color`, `stroke-width`, `add-meta-data`, `title`, `author`,
+    `subject`, `keywords`. An unknown key raises rather than being
+    ignored -- a silently dropped `paper-size` would print the wrong page
+    size with nothing to explain it. `.pdf` is 2D-only like `.svg`, and
+    centres the drawing on a fixed paper size instead of cutting the page
+    to fit.
     """
     try:
         return list(_ext.export_model(path, geometry, format, ascii_stl, strip_slivers,
                                        split_components, svg_fill, svg_fill_color,
-                                       svg_stroke, svg_stroke_color, svg_stroke_width))
+                                       svg_stroke, svg_stroke_color, svg_stroke_width,
+                                       pdf_options))
     except Exception as e:
         raise EvalError(str(e)) from e
 

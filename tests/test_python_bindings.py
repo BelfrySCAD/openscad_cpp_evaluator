@@ -701,6 +701,50 @@ def test_export_model_svg_refuses_a_3d_model(tmp_path):
         export_model(str(tmp_path / "solid.svg"), ev.geometry)
 
 
+def test_export_model_writes_pdf_and_takes_its_options(tmp_path):
+    """.pdf through the facade, plus the option dict. Same
+    two-parameter-list trap as split_components and the svg_* set."""
+    from openscad_cpp_evaluator import Evaluator, export_extensions, export_model
+
+    assert ".pdf" in export_extensions()
+
+    src = tmp_path / "flat.scad"
+    src.write_text("square([70, 25]);")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+
+    out = tmp_path / "flat.pdf"
+    assert export_model(str(out), ev.geometry) == []
+    data = out.read_bytes()
+    assert data.startswith(b"%PDF-1.4")
+    assert b"/MediaBox [0 0 595 842]" in data       # A4 portrait default
+    assert b"/BaseFont /Helvetica" in data          # base-14, nothing embedded
+    assert b"/FontFile" not in data
+
+    letter = tmp_path / "letter.pdf"
+    export_model(str(letter), ev.geometry,
+                 pdf_options={"paper-size": "letter", "orientation": "landscape",
+                              "show-scale": False})
+    assert b"/MediaBox [0 0 792 612]" in letter.read_bytes()
+
+
+def test_export_model_rejects_an_unknown_pdf_option(tmp_path):
+    """Silently ignoring one would print the wrong page with nothing to
+    explain it -- which is exactly how OpenSCAD's own `children(separate=)`
+    trap works."""
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError, export_model
+
+    src = tmp_path / "flat.scad"
+    src.write_text("square(10);")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+    with pytest.raises(EvalError, match="unknown pdf option"):
+        export_model(str(tmp_path / "x.pdf"), ev.geometry, pdf_options={"papersize": "a4"})
+    with pytest.raises(EvalError, match="unknown paper-size"):
+        export_model(str(tmp_path / "x.pdf"), ev.geometry, pdf_options={"paper-size": "a2"})
+
+
 def test_strict_commas_reaches_the_parser(tmp_path):
     """Evaluator.evaluate(strict_commas=True) must survive both hand-written
     parameter lists -- the facade's and the nanobind binding's. The last

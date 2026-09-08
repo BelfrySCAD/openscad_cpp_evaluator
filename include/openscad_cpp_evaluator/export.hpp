@@ -157,6 +157,68 @@ struct ExportSvgOptions {
 void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies,
               const ExportSvgOptions& opts = {});
 
+// Options for the PDF writer, named and defaulted after OpenSCAD's own
+// `-O export-pdf/...` set.
+struct ExportPdfOptions {
+    enum class Paper { A6, A5, A4, A3, Letter, Legal, Tabloid };
+    // AUTO picks landscape when the model is wider than it is tall.
+    enum class Orientation { Portrait, Landscape, Auto };
+
+    Paper paper = Paper::A4;
+    Orientation orientation = Orientation::Portrait;
+    // The ruler, its labels and the caption that explains them. This is
+    // what makes a printed page a measuring tool rather than a plot, and
+    // is why the format was asked for at all.
+    bool showScale = true;
+    bool showScaleMsg = true;
+    bool showGrid = false;
+    double gridSize = 10.0;
+    // Drawn bottom-left when set. The DESIGN's name -- the writer has no
+    // way to know it, so a caller that wants it must pass it.
+    bool showFilename = false;
+    std::string designFilename;
+    bool fill = false;
+    std::string fillColor = "black";
+    bool stroke = true;
+    std::string strokeColor = "black";
+    double strokeWidth = 0.35;
+    bool addMetaData = true;
+    std::string metaTitle;
+    std::string metaAuthor;
+    std::string metaSubject;
+    std::string metaKeywords;
+};
+
+// "a4"/"letter"/... (case-insensitive) -> Paper. Returns false for a name
+// it does not know, leaving `out` untouched.
+bool paperFromName(const std::string& name, ExportPdfOptions::Paper& out);
+// "portrait"/"landscape"/"auto" -> Orientation, same contract.
+bool orientationFromName(const std::string& name, ExportPdfOptions::Orientation& out);
+
+// PDF 1.4 of a 2D-only model, drawn at 1:1 and CENTRED on a fixed paper
+// size -- unlike SVG, where the page is cut to fit the model.
+//
+// PDF user space is Y-up like model space, so unlike writeSvg there is NO
+// Y negation: the placement is `pt = mm * 72/25.4` plus a centring offset,
+// symmetric in both axes. (OpenSCAD's own file negates Y only because
+// Cairo draws Y-down and then flips the whole page.)
+//
+// With `showScale` on it also draws OpenSCAD's ruler: a left and bottom
+// axis at a 30pt margin, ticks every 10mm of MODEL space (hard-coded --
+// `gridSize` belongs to the optional grid, not to this), numeric labels on
+// every second tick, and the caption explaining what to measure. That
+// ruler is the point of the format: it is what lets a printed page tell
+// you how far off your printer's scaling is.
+//
+// Text uses the base-14 Helvetica every PDF reader supplies, so nothing is
+// embedded and no font metrics are needed.
+//
+// Returns the warnings to surface (a model too large for the page is drawn
+// anyway, and said so). Throws std::runtime_error if any top-level body is
+// 3D, if there is nothing to draw, or if the file cannot be opened.
+std::vector<std::string> writePdf(const std::string& path, const std::vector<ColoredBody>& bodies,
+                                   const ExportPdfOptions& opts = {});
+
 // -- one entry point ------------------------------------------------------
 
 struct ExportOptions {
@@ -176,6 +238,8 @@ struct ExportOptions {
     bool splitComponents = false;
     // .svg only.
     ExportSvgOptions svg;
+    // .pdf only.
+    ExportPdfOptions pdf;
 };
 
 // Writes `bodies` to `path`, choosing the writer from the extension (or
