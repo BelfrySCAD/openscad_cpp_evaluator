@@ -418,7 +418,8 @@ std::vector<std::array<float, 4>> carryTriColors(const std::vector<std::array<fl
 
 } // namespace
 
-std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies, std::vector<int>* openParts) {
+std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies, std::vector<int>* openParts,
+                                                bool splitComponents) {
     struct Solid {
         manifold::Manifold man;
         std::optional<std::array<float, 4>> color;
@@ -545,9 +546,12 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
 
     std::vector<ExportObject> out;
     for (const Claimed& g : claimedGroups) {
-        // Decompose() is the rule-3 split. A single-component solid comes
-        // back as a one-element list, so there is no special case here.
-        std::vector<manifold::Manifold> parts = g.man.Decompose();
+        // Decompose() is the rule-3 split, and it is opt-in: without it this
+        // colour group stays one object however many disjoint pieces it is
+        // in, which is what OpenSCAD writes. A single-component solid comes
+        // back as a one-element list either way, so there is no special case.
+        std::vector<manifold::Manifold> parts;
+        if (splitComponents) parts = g.man.Decompose();
         if (parts.empty()) parts.push_back(g.man);
         for (const manifold::Manifold& part : parts) {
             if (part.IsEmpty()) continue;
@@ -1022,7 +1026,7 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
         // its own -- that is what the file contains.
         for (std::string& w : checkExportBodies(bodies)) warnings.push_back(std::move(w));
         std::vector<int> openParts;
-        const std::vector<ExportObject> objects = splitBodiesForExport(bodies, &openParts);
+        const std::vector<ExportObject> objects = splitBodiesForExport(bodies, &openParts, opts.splitComponents);
         reportOpen(openParts);
         if (objects.empty()) throw std::runtime_error("No geometry to export");
         if (ext == ".3mf") {

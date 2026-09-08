@@ -163,14 +163,64 @@ TEST(ExportAmf, WritesOneObjectAndOneMaterialPerColour) {
 }
 
 TEST(ExportAmf, TwoObjectsSharingAColourShareOneMaterial) {
+    // splitComponents, because two objects is the premise: same-coloured
+    // disjoint pieces are ONE object by default (see the DisjointPieces
+    // tests below). What is under test here is that the two of them share a
+    // single material entry rather than each declaring their own.
     std::vector<ColoredBody> bodies =
         evalToBodies("color(\"red\") cube(2); translate([10,0,0]) color(\"red\") cube(2);");
     const std::string path = tempPath("shared.amf").string();
-    exportModel(path, bodies, ExportOptions{});
+    ExportOptions opts;
+    opts.splitComponents = true;
+    exportModel(path, bodies, opts);
 
     const std::string xml = readFile(path);
     EXPECT_EQ(countOf(xml, "<object id="), 2u);
     EXPECT_EQ(countOf(xml, "<material id="), 1u);
+    std::remove(path.c_str());
+}
+
+// Issue #319: a model in several disconnected pieces was written as one
+// object PER PIECE, so a slicer listed them individually -- hundreds of
+// entries for a multiboard tile, and Prusa Slicer objecting. OpenSCAD writes
+// one object, and so does this by default now; the split is still available
+// for callers that want the pieces apart.
+TEST(ExportSplit, DisjointPiecesAreOneObjectByDefault) {
+    std::vector<ColoredBody> bodies =
+        evalToBodies("cube(10); translate([20,0,0]) cube(10); translate([40,0,0]) cube(10);");
+    const std::string path = tempPath("joined.amf").string();
+    exportModel(path, bodies, ExportOptions{});
+
+    const std::string xml = readFile(path);
+    EXPECT_EQ(countOf(xml, "<object id="), 1u);
+    EXPECT_EQ(countOf(xml, "<volume"), 1u);
+    std::remove(path.c_str());
+}
+
+TEST(ExportSplit, DisjointPiecesSplitWhenAsked) {
+    std::vector<ColoredBody> bodies =
+        evalToBodies("cube(10); translate([20,0,0]) cube(10); translate([40,0,0]) cube(10);");
+    const std::string path = tempPath("split.amf").string();
+    ExportOptions opts;
+    opts.splitComponents = true;
+    exportModel(path, bodies, opts);
+
+    const std::string xml = readFile(path);
+    EXPECT_EQ(countOf(xml, "<object id="), 3u);
+    std::remove(path.c_str());
+}
+
+// Rule 2 is not what became optional: differently-coloured solids must stay
+// separate objects either way, or a multi-material export loses its colours.
+TEST(ExportSplit, ColoursStayApartWithTheSplitOff) {
+    std::vector<ColoredBody> bodies =
+        evalToBodies("color(\"red\") cube(10); translate([20,0,0]) color(\"blue\") cube(10);");
+    const std::string path = tempPath("colours.amf").string();
+    exportModel(path, bodies, ExportOptions{});
+
+    const std::string xml = readFile(path);
+    EXPECT_EQ(countOf(xml, "<object id="), 2u);
+    EXPECT_EQ(countOf(xml, "<material id="), 2u);
     std::remove(path.c_str());
 }
 

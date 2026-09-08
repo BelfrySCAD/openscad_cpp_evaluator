@@ -633,3 +633,29 @@ def test_degenerate_ranges_do_not_overflow_the_element_count(tmp_path):
     # Silent for NaN; the unbounded pair warn, with the reference's number.
     assert len(warnings) == 2, warnings
     assert all("too many elements (4294967295)" in w for w in warnings), warnings
+
+
+def test_export_model_facade_accepts_split_components(tmp_path):
+    """The Python facade's signature must track the nanobind binding's.
+
+    They are two hand-written parameter lists for one call, and adding
+    `split_components` to the binding alone left the facade dropping it --
+    a TypeError the C++ suite cannot see, because it never goes through
+    Python. Caught in practice, hence this.
+    """
+    from openscad_cpp_evaluator import Evaluator, export_model
+
+    src = tmp_path / "pieces.scad"
+    src.write_text("cube(10); translate([20,0,0]) cube(10); translate([40,0,0]) cube(10);")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+
+    def objects_in(path, **kwargs):
+        export_model(str(path), ev.geometry, **kwargs)
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            return z.read("3D/3dmodel.model").decode().count("<object ")
+
+    # Default matches OpenSCAD: one object however many pieces.
+    assert objects_in(tmp_path / "joined.3mf") == 1
+    assert objects_in(tmp_path / "split.3mf", split_components=True) == 3

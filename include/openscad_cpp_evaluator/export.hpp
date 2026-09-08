@@ -39,13 +39,21 @@ struct ExportObject {
 //      `color("red") body(); color("blue") detail();` leaves the detail
 //      whole. Only the invisible interior is affected: the visible surface
 //      is identical either way.
-//   3. One object per connected component.
+//   3. One object per connected component -- OPTIONAL, and off by default.
+//      Rules 1 and 2 are about correctness; this one is presentation, and
+//      it is the one that diverges from OpenSCAD, which writes a single
+//      object however many disjoint pieces the model has. Splitting turned
+//      `cube(10); translate([20,0,0]) cube(10);` into two 3MF objects and a
+//      multiboard tile into hundreds, which slicers list individually and
+//      Prusa Slicer complains about (issue #319). Ask for it when separate
+//      pieces are what you want; leave it off to match OpenSCAD.
 //
 // A body Manifold rejected (an open shell is not a solid) can take part in
 // none of that: it keeps its own triangles and its own object, and its
 // 1-based index is appended to `openParts` for the caller to warn about.
 std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies,
-                                                std::vector<int>* openParts = nullptr);
+                                                std::vector<int>* openParts = nullptr,
+                                                bool splitComponents = false);
 
 // Writes a binary STL: composes every body's mesh into one solid (bodies
 // with no `.body` -- 2D-only sections -- or an empty Manifold are
@@ -130,6 +138,12 @@ struct ExportOptions {
     // break no topology, but slicers commonly discard them and are then
     // left with the holes their removal opens.
     bool stripSlivers = true;
+    // Rule 3 of splitBodiesForExport: give every disconnected piece its own
+    // object in the multi-object formats (3MF, AMF, OBJ, PLY, VRML, X3D).
+    // Off matches OpenSCAD, which writes one object per colour however many
+    // pieces it is in; see that function's own comment for why the default
+    // moved here.
+    bool splitComponents = false;
 };
 
 // Writes `bodies` to `path`, choosing the writer from the extension (or
