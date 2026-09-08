@@ -292,7 +292,10 @@ def strip_slivers(verts, tris):
 
 
 def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
-                 strip_slivers: bool = True, split_components: bool = False) -> list:
+                 strip_slivers: bool = True, split_components: bool = False,
+                 svg_fill: bool = False, svg_fill_color: str = "white",
+                 svg_stroke: bool = True, svg_stroke_color: str = "black",
+                 svg_stroke_width: float = 0.35) -> list:
     """Write `geometry` to `path`. Returns the warnings to surface.
 
     `geometry` is the handle an Evaluator stashes on itself as
@@ -312,10 +315,17 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
 
     `split_components` gives every disconnected piece its own object in the
     multi-object formats. Off by default, which is what OpenSCAD writes.
+
+    The `svg_*` arguments are OpenSCAD's `-O export-svg/...` set and apply
+    to `.svg` only, which writes a 2D model at 1:1 in millimetres.
+    `svg_stroke`/`svg_stroke_width` also pad the page, so they are not
+    purely cosmetic. An `.svg` export of anything 3D raises, as OpenSCAD's
+    does -- there is no projection to fall back on.
     """
     try:
         return list(_ext.export_model(path, geometry, format, ascii_stl, strip_slivers,
-                                       split_components))
+                                       split_components, svg_fill, svg_fill_color,
+                                       svg_stroke, svg_stroke_color, svg_stroke_width))
     except Exception as e:
         raise EvalError(str(e)) from e
 

@@ -43,6 +43,13 @@ std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodi
             flat.body = flat.body->Transform(cb.sectionXform);
             flat.color = cb.color;
             flat.flatPreview = true;
+            // Carried, not consumed: the 2D writers (writeSvg) need the
+            // contours, and every caller that exports goes through this
+            // conversion first -- the Python binding hands ONE body list to
+            // both the renderer and export. Dropping it here made an SVG
+            // export of any 2D script impossible from Python.
+            flat.section = cb.section;
+            flat.sectionXform = cb.sectionXform;
             flat.role = cb.role;
             out.push_back(std::move(flat));
         } else {

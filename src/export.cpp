@@ -999,8 +999,117 @@ void writeOffMesh(const std::string& path, const manifold::MeshGL& mesh) {
 
 } // namespace
 
+namespace {
+
+// The contours of one 2D body, projected to XY.
+//
+// A section can carry a transform a CrossSection itself cannot hold -- a Z
+// offset, a rotation out of the plane (ColoredBody::sectionXform). Applying
+// it and keeping x/y is the top view, which is the only thing a flat page
+// can show; for the overwhelmingly common case (no such transform) it is
+// the identity and the points pass through untouched.
+manifold::Polygons sectionContours(const ColoredBody& cb) {
+    manifold::Polygons polys = cb.section->ToPolygons();
+    const manifold::mat3x4& m = cb.sectionXform;
+    for (manifold::SimplePolygon& contour : polys) {
+        for (manifold::vec2& p : contour) {
+            const double x = m[0].x * p.x + m[1].x * p.y + m[3].x;
+            const double y = m[0].y * p.x + m[1].y * p.y + m[3].y;
+            p = manifold::vec2(x, y);
+        }
+    }
+    return polys;
+}
+
+} // namespace
+
+void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies, const ExportSvgOptions& opts) {
+    // OpenSCAD's own wording, and its rule: 2D export needs an all-2D top
+    // level. There is no sane projection to fall back on -- a silhouette
+    // would be a different model from the one the script describes -- so
+    // refusing is the honest answer.
+    const char* kNot2d = "Current top level object is not a 2D object";
+
+    std::vector<manifold::Polygons> perBody;
+    double minx = 0, miny = 0, maxx = 0, maxy = 0;
+    bool any = false;
+    for (const ColoredBody& cb : bodies) {
+        if (!isExportable(cb)) continue;
+        // The section decides, not the Manifold: a body that has been
+        // through toRenderableBodies() carries BOTH -- a 1-unit slab
+        // extruded so a 2D script has something to show, and the contours
+        // it came from. Those contours are the real geometry, and the
+        // binding hands export that same converted list, so reading `body`
+        // first would make SVG unreachable for every 2D script.
+        if (!cb.section) {
+            if (cb.isDisplayOnly()) throw std::runtime_error(kNot2d);
+            if (cb.body && !cb.body->IsEmpty()) throw std::runtime_error(kNot2d);
+            continue;
+        }
+        manifold::Polygons polys = sectionContours(cb);
+        for (const manifold::SimplePolygon& contour : polys) {
+            for (const manifold::vec2& p : contour) {
+                if (!any) {
+                    minx = maxx = p.x;
+                    miny = maxy = p.y;
+                    any = true;
+                } else {
+                    minx = std::min(minx, p.x);
+                    maxx = std::max(maxx, p.x);
+                    miny = std::min(miny, p.y);
+                    maxy = std::max(maxy, p.y);
+                }
+            }
+        }
+        perBody.push_back(std::move(polys));
+    }
+    if (!any) throw std::runtime_error("No geometry to export");
+
+    // Page = bounding box, padded by half the stroke (the stroke straddles
+    // the contour, so half of it lies outside), rounded outward to whole
+    // millimetres. Note the Y terms use -maxy/-miny: the negation below
+    // turns the TOP of the model into the most negative coordinate.
+    const double pad = opts.stroke ? opts.strokeWidth / 2.0 : 0.0;
+    const long left = static_cast<long>(std::floor(minx - pad));
+    const long top = static_cast<long>(std::floor(-maxy - pad));
+    const long right = static_cast<long>(std::ceil(maxx + pad));
+    const long bottom = static_cast<long>(std::ceil(-miny + pad));
+    const long width = right - left;
+    const long height = bottom - top;
+
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("Could not open '" + path + "' for writing");
+
+    const std::string stroke = opts.stroke ? opts.strokeColor : "none";
+    const std::string fill = opts.fill ? opts.fillColor : "none";
+
+    out << "<?xml version=\"1.0\" standalone=\"no\"?>\n"
+        << "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" "
+            "\"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n"
+        << "<svg width=\"" << width << "mm\" height=\"" << height << "mm\" viewBox=\"" << left << " " << top
+        << " " << width << " " << height << "\" xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">\n"
+        << "<title>OpenSCAD Model</title>\n";
+
+    for (const manifold::Polygons& polys : perBody) {
+        out << "<path d=\"\n";
+        for (const manifold::SimplePolygon& contour : polys) {
+            if (contour.empty()) continue;
+            out << "M " << contour[0].x << "," << -contour[0].y;
+            for (size_t i = 1; i < contour.size(); ++i) {
+                out << " L " << contour[i].x << "," << -contour[i].y;
+                if ((i % 6) == 5) out << "\n";
+            }
+            out << " z\n";
+        }
+        out << "\" stroke=\"" << stroke << "\" fill=\"" << fill << "\" stroke-width=\"" << opts.strokeWidth
+            << "\"/>\n";
+    }
+    out << "</svg>\n";
+}
+
 const std::vector<std::string>& exportExtensions() {
-    static const std::vector<std::string> exts = {".3mf", ".amf", ".stl", ".obj", ".off", ".ply", ".wrl", ".x3d"};
+    static const std::vector<std::string> exts = {".3mf", ".amf", ".stl", ".obj", ".off",
+                                                  ".ply", ".svg", ".wrl", ".x3d"};
     return exts;
 }
 
@@ -1020,6 +1129,14 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
                                 " is not a closed solid; its surface is written as-is, and most slicers will reject it.");
         }
     };
+
+    if (ext == ".svg") {
+        // 2D, and nothing the mesh pipeline below does applies: no merge,
+        // no sliver strip, no manifoldness check. Contours are what they
+        // are.
+        writeSvg(path, bodies, opts.svg);
+        return warnings;
+    }
 
     if (isMultiObject(ext)) {
         // These keep the parts as separate objects, so each is checked on
