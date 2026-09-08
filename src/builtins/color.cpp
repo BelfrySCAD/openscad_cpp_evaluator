@@ -50,12 +50,42 @@ CSGParams resolveColor(Evaluator& ev, const oscad::ModularCall& node, EvalContex
     return std::move(result.params);
 }
 
-std::vector<ColoredBody> generateColor(Evaluator&, const CSGParams& params,
+namespace {
+
+// Stamping cb.color is not enough: the colour has to be recorded against
+// the body's RUN IDS too.
+//
+// attachTriColors (booleans.cpp) reads `idToColor` back AFTER a merge has
+// thrown the individual bodies away -- run IDs are all it has left to go
+// on -- and a run it cannot find looks uncoloured. tagGenerated() records
+// the colour a body was BORN with, which covers `color("red") cube(10)`
+// because the colour reaches the primitive through the context. It does
+// not cover a body that already existed when colour was applied to it,
+// which is every module whose geometry comes out of its own CSG:
+// `union() { color("red") stroke(...); text(); }` had no red recorded for
+// the stroke's runs at all, so every run looked identical, the merge kept
+// the first child's colour, and the whole thing came out red.
+void recordRunColors(Evaluator& ev, const ColoredBody& b, const std::optional<std::array<float, 4>>& rgba) {
+    if (!b.body || b.body->IsEmpty()) return;
+    // A body that is still one original knows its own ID without building
+    // a mesh -- the common case, and the cheap one.
+    const int original = b.body->OriginalID();
+    if (original >= 0) {
+        ev.idToColor[static_cast<uint32_t>(original)] = rgba;
+        return;
+    }
+    for (uint32_t id : b.body->GetMeshGL().runOriginalID) ev.idToColor[id] = rgba;
+}
+
+} // namespace
+
+std::vector<ColoredBody> generateColor(Evaluator& ev, const CSGParams& params,
                                         const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode&) {
     const auto rgba = valueToColor(params.at("rgba"));
     std::vector<ColoredBody> result;
     for (ColoredBody b : flattenCsgTree(children)) {
         b.color = rgba;
+        if (!ev.measuring()) recordRunColors(ev, b, rgba);
         result.push_back(std::move(b));
     }
     return result;

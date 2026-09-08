@@ -168,6 +168,13 @@ nb::dict bodyToDict(oscadeval::ColoredBody& cb) {
     // (numTri, 4) float32 array or None). The renderer reads this to split
     // one merged body's triangles across separate opaque/translucent draw
     // buffers.
+    // Size-checked, not trusted: a per-triangle array that disagrees with
+    // the mesh it is meant to index makes the renderer raise IndexError and
+    // draw nothing. Dropping it costs the per-triangle colours of one body
+    // and keeps the model on screen. Everything that can invalidate it is
+    // supposed to clear it (simplify(), minkowski_difference(), the retag
+    // rebuild); this is the backstop for the one that gets missed.
+    if (cb.triColors && cb.triColors->size() != numTri) cb.triColors.reset();
     if (cb.triColors) {
         const std::vector<std::array<float, 4>>& src = *cb.triColors;
         std::vector<float> flat;

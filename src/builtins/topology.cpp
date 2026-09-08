@@ -481,7 +481,14 @@ std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params
                 const manifold::vec3 d = bb.Size();
                 tol = kDefaultSimplifyFraction * std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
             }
-            if (tol > 0.0) cb.body = b.body->Simplify(tol);
+            if (tol > 0.0) {
+                cb.body = b.body->Simplify(tol);
+                // triColors is indexed by triangle, and decimation changes
+                // how many there are -- carrying it across leaves the
+                // renderer masking a 550-triangle mesh with a 556-entry
+                // array, which is an IndexError, not a wrong colour.
+                cb.triColors.reset();
+            }
         } else if (b.section) {
             double tol = explicitValue;
             if (!explicitTol) {

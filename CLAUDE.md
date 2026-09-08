@@ -793,6 +793,24 @@ grep for `ponytail:`.
   color instead of preserving each part's own, matching real OpenSCAD's actual behavior once fixed
   (cross-checked triangle-color-count-and-values against the Python reference directly, not just
   “does it run”).
+  Two things that pipeline depends on, both learned from BelfrySCAD #372 (`union() { color("red")
+  stroke(...); text(); }` came out entirely red):
+  **`color()` records its colour against the body's RUN IDS**, not only in `cb.color`
+  (`recordRunColors`, `color.cpp`). `tagGenerated()` covers a body coloured at birth — the colour
+  reaches a primitive through the context — but not one that already existed when colour was applied
+  to it, which is every module that wraps FORWARDED children: `module setcolor(clr) { color(clr)
+  children(); }` (BOSL2's `stroke()` has exactly that) generates the children in the caller's
+  colourless context, so nothing recorded them as red and after the merge every run looked
+  uncoloured. Uses `Manifold::OriginalID()` where the body is still one original, so the common case
+  costs no mesh build.
+  **An unknown run falls back to `nullopt`, never `cb.color`** — `cb.color` is the *first* child's
+  colour, so falling back to it made an uncoloured sibling look identically coloured, `allSame` came
+  out true, and nothing was tagged at all.
+  And the invariant behind both: **`triColors` must index the body's CURRENT mesh**. The renderer
+  masks its vertex arrays with it, so a stale length is an `IndexError` and a blank viewport rather
+  than a wrong colour. Anything that re-meshes clears it — `simplify()`, `minkowski_difference()`,
+  and the ID-retag rebuild when the triangle count moves — and `bodyToDict` drops a mismatched array
+  as a backstop for whichever one gets missed next.
   **2D cannot use any of that, and keeps colour geometrically instead** (`Part2d`, same file): a
   `CrossSection` is contours, not a mesh, so nothing in it remembers which child an edge came from
   and there is no provenance for `attachTriColors` to read back. So the 2D accumulator holds **one

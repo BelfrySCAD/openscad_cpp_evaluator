@@ -331,7 +331,16 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
             }
             id = found->second;
         }
+        const size_t trisBefore = mesh.triVerts.size() / 3;
         cb.body = manifold::Manifold(mesh);
+        // Rebuilding a Manifold from a mesh can clean it up (degenerate
+        // triangles merged away), and triColors is indexed by triangle. An
+        // array that no longer matches is worse than none: the renderer
+        // masks its vertex arrays with it and raises IndexError rather
+        // than drawing anything at all.
+        if (cb.triColors && cb.body && cb.body->GetMeshGL().triVerts.size() / 3 != trisBefore) {
+            cb.triColors.reset();
+        }
     }
 }
 

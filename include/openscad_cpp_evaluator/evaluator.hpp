@@ -1237,6 +1237,13 @@ public:
     // it), which no RAII guard can span.
     bool measuring_ = false;
 
+    // True while a render() expression is measuring geometry it will then
+    // discard. The provenance tables (idToNode/idToColor) are not written
+    // during that, so anything outside this class applying the same guard
+    // -- color.cpp records run colours the way tagGenerated does -- reads
+    // it here.
+    bool measuring() const { return measuring_; }
+
     // Test-only accessors for the invariants above -- a leaked measuring_ or
     // an unbalanced treeStack_ is otherwise silent until something much
     // later goes mysteriously wrong.

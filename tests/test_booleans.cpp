@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <gtest/gtest.h>
+#include <set>
 
 using namespace oscadeval;
 using namespace oscadeval::test;
@@ -1553,4 +1554,82 @@ TEST(Union2dColor, ExtrudingAColouredUnionStillDropsColour) {
     ASSERT_TRUE(e.bodies[0].body.has_value());
     EXPECT_FALSE(e.bodies[0].color.has_value());
     EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-6);
+}
+
+
+// -- 3D colour survives a merge (BelfrySCAD #372) -------------------------
+
+namespace {
+
+std::set<std::array<float, 4>> distinctTriColors(const ColoredBody& b) {
+    std::set<std::array<float, 4>> out;
+    if (b.triColors) out.insert(b.triColors->begin(), b.triColors->end());
+    return out;
+}
+
+} // namespace
+
+TEST(Union3dColor, ColourAppliedToForwardedChildrenSurvivesTheMerge) {
+    // The reported case, reduced out of BOSL2. Its stroke() colours what
+    // it draws through exactly this shape -- a module that wraps FORWARDED
+    // children in color(). The children were generated in the caller's
+    // context, where there is no colour, so tagGenerated() recorded them as
+    // uncoloured; color() then stamped cb.color and nothing else. After the
+    // merge, attachTriColors had only run IDs to go on, every one of them
+    // looked uncoloured, they all "matched", and the union kept the first
+    // child's colour -- the whole model came out red.
+    Evaluated e = evalSrc(
+        "module setcolor(clr) { color(clr) children(); }\n"
+        "union() {"
+        "  setcolor(\"red\") cube(10);"
+        "  translate([12,0,0]) cube(10);"
+        "}");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].triColors.has_value());
+    const auto colours = distinctTriColors(e.bodies[0]);
+    EXPECT_EQ(colours.size(), 2u);
+    EXPECT_EQ(colours.count(std::array<float, 4>{1, 0, 0, 1}), 1u);
+}
+
+TEST(Union3dColor, AnUncolouredChildDoesNotInheritTheColouredOne) {
+    // perRunColor's fallback used to be cb.color -- the FIRST child's
+    // colour -- so an uncoloured sibling looked identically coloured, the
+    // "do the colours differ?" test said no, and nothing was tagged at all.
+    Evaluated e = evalSrc(
+        "union() { color(\"red\") cube(10); translate([12,0,0]) cube(10); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].triColors.has_value());
+    const auto colours = distinctTriColors(e.bodies[0]);
+    EXPECT_EQ(colours.size(), 2u);
+    EXPECT_EQ(colours.count(std::array<float, 4>{1, 0, 0, 1}), 1u);
+    // ... and the other half is the default, not red.
+    for (const auto& c : colours) {
+        if (c != std::array<float, 4>{1, 0, 0, 1}) EXPECT_NE(c[0], 1.0f);
+    }
+}
+
+TEST(Union3dColor, EveryTriangleIsAccountedFor) {
+    // triColors must index the body's CURRENT mesh exactly: the renderer
+    // masks its vertex arrays with it, so a stale length is an IndexError
+    // and a blank viewport, not a wrong colour.
+    Evaluated e = evalSrc(
+        "union() { color(\"red\") cube(10); color(\"blue\") translate([12,0,0]) cube(10); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].triColors.has_value());
+    EXPECT_EQ(e.bodies[0].triColors->size(), e.bodies[0].body->GetMeshGL().triVerts.size() / 3);
+}
+
+TEST(Union3dColor, SimplifyDropsPerTriangleColoursRatherThanKeepingStaleOnes) {
+    // Decimation changes the triangle count; an array indexed against the
+    // old one cannot be salvaged, and handing it on crashes the renderer.
+    Evaluated e = evalSrc(
+        "simplify(0.5) union() {"
+        "  color(\"red\") sphere(10, $fn=32);"
+        "  color(\"blue\") translate([25,0,0]) sphere(10, $fn=32);"
+        "}");
+    ASSERT_FALSE(e.bodies.empty());
+    for (const ColoredBody& b : e.bodies) {
+        if (!b.body || !b.triColors) continue;
+        EXPECT_EQ(b.triColors->size(), b.body->GetMeshGL().triVerts.size() / 3);
+    }
 }
