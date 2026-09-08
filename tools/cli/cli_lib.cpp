@@ -222,6 +222,7 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
     std::string profileMinSelfStr;
     std::string profileMinCallsStr;
     bool debug = false;
+    bool strictCommas = false;
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "-o" && i + 1 < args.size()) {
@@ -242,6 +243,8 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
             profileMinCallsStr = args[++i];
         } else if (arg == "--debug") {
             debug = true;
+        } else if (arg == "--strict-commas") {
+            strictCommas = true;
         } else if (inputPath.empty()) {
             inputPath = arg;
         }
@@ -249,7 +252,7 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
     if (inputPath.empty() || outputPath.empty()) {
         err << "usage: openscad-cpp-evaluator <input.scad> -o <output.{stl,obj,off,3mf,ply,wrl,x3d}> [--format stl|obj|off|3mf|ply|wrl|x3d] [--ascii-stl] "
                "[--profile FILENAME [--profile-format text|csv] [--profile-sort self|cumulative|calls|name] "
-               "[--profile-min-self SECONDS] [--profile-min-calls N]] [--debug]\n";
+               "[--profile-min-self SECONDS] [--profile-min-calls N]] [--debug] [--strict-commas]\n";
         return 1;
     }
     const std::string fmt = formatForPath(format, outputPath);
@@ -293,6 +296,11 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
     }
 
     try {
+        // Scoped to the parse: a trailing comma in a call argument list or a
+        // let/for assignment list is a syntax error while it is in effect,
+        // as OpenSCAD 2021.01 had it. See oscad::StrictCommaScope.
+        std::optional<oscad::StrictCommaScope> strict;
+        if (strictCommas) strict.emplace();
         std::vector<std::unique_ptr<oscad::ASTNode>> ast = oscad::getASTFromFile(inputPath);
         ResolvedUseScopes used = resolveUseScopes(ast, inputPath, [&out](const std::string& msg) { out << msg << "\n"; });
 

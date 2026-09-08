@@ -497,7 +497,7 @@ class Evaluator:
         self.dyn_explicit = set()
 
     def evaluate(self, source_path: str, viewport_params: Optional[dict] = None,
-                 generate: bool = True):
+                 generate: bool = True, strict_commas: bool = False):
         """Run `source_path` and return (bodies, id_to_node).
 
         `generate=False` stops after the resolve pass. The script still runs
@@ -508,6 +508,13 @@ class Evaluator:
         the geometry without skipping the language.
 
         Ignored on the debugger path, which has no geometry handle anyway.
+
+        `strict_commas=True` makes a trailing comma in a call argument list
+        or a let/for assignment list a syntax error, as OpenSCAD 2021.01 did
+        -- `cube(1,)` and `let(x = 1,)`, but NOT `[2, 4,]` or
+        `module m(a, b,)`, which 2021.01 accepted. For checking a script
+        against that version; off, and no divergence from current OpenSCAD,
+        otherwise. Also ignored on the debugger path.
         """
         vp = viewport_params or {}
         try:
@@ -528,7 +535,8 @@ class Evaluator:
             else:
                 (body_dicts, echoes, id_spans, csg_tree, profile_result, dyn,
                  dyn_explicit, geometry) = _ext.evaluate(
-                    source_path, vp, self._manifold_cache, self._profile, generate)
+                    source_path, vp, self._manifold_cache, self._profile, generate,
+                    strict_commas)
                 # The evaluated bodies, still on the C++ side. Stashed like
                 # csg_tree/profile_result rather than returned, so
                 # evaluate()'s own 2-tuple result is unchanged -- callers
