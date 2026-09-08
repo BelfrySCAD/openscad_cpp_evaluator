@@ -184,7 +184,13 @@ void attachTriColors(Evaluator& ev, ColoredBody& cb) {
     perRunColor.reserve(runIds.size());
     for (uint32_t rid : runIds) {
         auto it = ev.idToColor.find(rid);
-        perRunColor.push_back(it != ev.idToColor.end() ? it->second : cb.color);
+        // nullopt, NOT cb.color, when a run has no recorded colour of its
+        // own. cb.color is the FIRST child's colour, so falling back to it
+        // made an uncoloured child look identically coloured, `allSame`
+        // came out true, and the whole merge kept one colour -- which is
+        // the "union() { color("red") a; b; } is all red" bug. nullopt is
+        // what an uncoloured body means everywhere else: follow the theme.
+        perRunColor.push_back(it != ev.idToColor.end() ? it->second : std::nullopt);
     }
     const bool allSame =
         std::all_of(perRunColor.begin(), perRunColor.end(), [&](const auto& c) { return c == perRunColor.front(); });
