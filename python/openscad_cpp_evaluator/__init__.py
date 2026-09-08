@@ -292,13 +292,13 @@ def strip_slivers(verts, tris):
 
 
 def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
-                 strip_slivers: bool = True) -> list:
+                 strip_slivers: bool = True, split_components: bool = False) -> list:
     """Write `geometry` to `path`. Returns the warnings to surface.
 
     `geometry` is the handle an Evaluator stashes on itself as
     `.geometry` -- the evaluated bodies, still on the C++ side. Export has
     to do real CSG (the implicit top-level union, the per-colour volume
-    claim, the connected-component split), and going through the flattened
+    claim), and going through the flattened
     arrays the renderer gets would mean rebuilding every Manifold first:
     ~146ms on a 224k-triangle model, and Manifold's own provenance lost
     along the way.
@@ -309,9 +309,13 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
     here refuses to write: a deliberately open surface is a legitimate
     export. Raises EvalError when there is no geometry, the format is
     unknown, or the file cannot be opened.
+
+    `split_components` gives every disconnected piece its own object in the
+    multi-object formats. Off by default, which is what OpenSCAD writes.
     """
     try:
-        return list(_ext.export_model(path, geometry, format, ascii_stl, strip_slivers))
+        return list(_ext.export_model(path, geometry, format, ascii_stl, strip_slivers,
+                                       split_components))
     except Exception as e:
         raise EvalError(str(e)) from e
 
