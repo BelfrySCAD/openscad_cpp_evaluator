@@ -1439,3 +1439,118 @@ TEST(LevelSet, AGridFieldIsAlsoCutCleanlyAtTheBox) {
     ASSERT_EQ(e.bodies.size(), 1u);
     EXPECT_NEAR(soleBody(e).Volume(), 32000.0, 40.0);   // one sample layer of slack
 }
+
+// -- 2D union keeps every colour (bug report: "multiple colors inside a
+// union(), only one color is used") -----------------------------------
+
+namespace {
+
+// (colour, area) per 2D body, in result order.
+std::vector<std::pair<std::array<float, 4>, double>> colouredAreas(const std::vector<ColoredBody>& bodies) {
+    std::vector<std::pair<std::array<float, 4>, double>> out;
+    for (const ColoredBody& b : bodies) {
+        if (!b.section) continue;
+        out.emplace_back(b.color.value_or(std::array<float, 4>{0, 0, 0, 0}), b.section->Area());
+    }
+    return out;
+}
+
+constexpr std::array<float, 4> kRed{1, 0, 0, 1};
+constexpr std::array<float, 4> kBlue{0, 0, 1, 1};
+
+} // namespace
+
+TEST(Union2dColor, KeepsOneBodyPerColour) {
+    // A CrossSection has no per-edge provenance for attachTriColors to read
+    // back afterwards, so 2D keeps colour by staying in separate parts.
+    // Before this, both squares came out red -- the first child's colour
+    // for the whole merged section, where OpenSCAD draws red AND blue.
+    Evaluated e = evalSrc("union() { color(\"red\") square(10); color(\"blue\") translate([12,0]) square(10); }");
+    const auto parts = colouredAreas(e.bodies);
+    ASSERT_EQ(parts.size(), 2u);
+    EXPECT_EQ(parts[0].first, kRed);
+    EXPECT_EQ(parts[1].first, kBlue);
+    EXPECT_NEAR(parts[0].second, 100.0, 1e-6);
+    EXPECT_NEAR(parts[1].second, 100.0, 1e-6);
+}
+
+TEST(Union2dColor, OneColourStaysOneBody) {
+    // Splitting per colour must not split per child: two red squares are
+    // one red shape, as they always were.
+    Evaluated e = evalSrc("union() { color(\"red\") square(10); color(\"red\") translate([12,0]) square(10); }");
+    const auto parts = colouredAreas(e.bodies);
+    ASSERT_EQ(parts.size(), 1u);
+    EXPECT_EQ(parts[0].first, kRed);
+    EXPECT_NEAR(parts[0].second, 200.0, 1e-6);
+}
+
+TEST(Union2dColor, AnUncolouredUnionIsStillASingleBody) {
+    Evaluated e = evalSrc("union() { square(10); translate([12,0]) square(10); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_FALSE(e.bodies[0].color.has_value());
+}
+
+TEST(Union2dColor, TheLaterColourWinsAnOverlap) {
+    // Painter's order, the same rule splitBodiesForExport applies to
+    // overlapping 3D solids -- and what OpenSCAD's own preview shows.
+    Evaluated e = evalSrc(
+        "union() { color(\"red\") square(10); color(\"blue\") translate([5,5]) square(10); }");
+    const auto parts = colouredAreas(e.bodies);
+    ASSERT_EQ(parts.size(), 2u);
+    EXPECT_EQ(parts[0].first, kRed);
+    EXPECT_EQ(parts[1].first, kBlue);
+    // Blue keeps its whole square; red is notched by the 5x5 overlap.
+    EXPECT_NEAR(parts[1].second, 100.0, 1e-6);
+    EXPECT_NEAR(parts[0].second, 75.0, 1e-6);
+}
+
+TEST(Union2dColor, DifferenceCutsEveryColouredPart) {
+    Evaluated e = evalSrc(
+        "difference() {"
+        "  union() { color(\"red\") square(10); color(\"blue\") translate([10,0]) square(10); }"
+        "  translate([5,0]) square(10);"
+        "}");
+    const auto parts = colouredAreas(e.bodies);
+    ASSERT_EQ(parts.size(), 2u);
+    // The cut spans both: 5 wide off red's right, 5 off blue's left.
+    EXPECT_NEAR(parts[0].second, 50.0, 1e-6);
+    EXPECT_NEAR(parts[1].second, 50.0, 1e-6);
+}
+
+TEST(Union2dColor, IntersectionKeepsColoursToo) {
+    Evaluated e = evalSrc(
+        "intersection() {"
+        "  union() { color(\"red\") square(10); color(\"blue\") translate([10,0]) square(10); }"
+        "  translate([5,0]) square(10);"
+        "}");
+    const auto parts = colouredAreas(e.bodies);
+    ASSERT_EQ(parts.size(), 2u);
+    EXPECT_EQ(parts[0].first, kRed);
+    EXPECT_EQ(parts[1].first, kBlue);
+    EXPECT_NEAR(parts[0].second, 50.0, 1e-6);
+    EXPECT_NEAR(parts[1].second, 50.0, 1e-6);
+}
+
+TEST(Union2dColor, APartCutAwayEntirelyIsDropped) {
+    Evaluated e = evalSrc(
+        "difference() {"
+        "  union() { color(\"red\") square(10); color(\"blue\") translate([20,0]) square(10); }"
+        "  square(10);"
+        "}");
+    const auto parts = colouredAreas(e.bodies);
+    ASSERT_EQ(parts.size(), 1u);
+    EXPECT_EQ(parts[0].first, kBlue);
+}
+
+TEST(Union2dColor, ExtrudingAColouredUnionStillDropsColour) {
+    // Not a bug, and checked against the real binary: OpenSCAD's own
+    // linear_extrude of coloured 2D children draws the default colour too.
+    // Splitting 2D by colour must not accidentally start colouring these.
+    Evaluated e = evalSrc(
+        "linear_extrude(5) union() { color(\"red\") square(10); color(\"blue\") translate([12,0]) square(10); }");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_FALSE(e.bodies[0].color.has_value());
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-6);
+}

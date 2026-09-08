@@ -793,6 +793,18 @@ grep for `ponytail:`.
   color instead of preserving each part's own, matching real OpenSCAD's actual behavior once fixed
   (cross-checked triangle-color-count-and-values against the Python reference directly, not just
   “does it run”).
+  **2D cannot use any of that, and keeps colour geometrically instead** (`Part2d`, same file): a
+  `CrossSection` is contours, not a mesh, so nothing in it remembers which child an edge came from
+  and there is no provenance for `attachTriColors` to read back. So the 2D accumulator holds **one
+  part per colour** rather than one merged section — same-coloured children still merge into one
+  part, a later statement notches what it covers out of the earlier parts (painter's order, the
+  rule `splitBodiesForExport` applies to overlapping 3D solids), `difference`/`intersection` apply
+  to every part, and a part cut away entirely is dropped. `generateCsg` then returns one
+  `ColoredBody` per surviving part, so **a 2D `union()` of differently-coloured children returns
+  several bodies where it used to return one**. Reported as a user bug: `union() { color("red")
+  square(10); color("blue") translate([12,0]) square(10); }` drew both squares red, where OpenSCAD
+  draws red and blue (verified by pixel-sampling both binaries' PNG output). `linear_extrude` of
+  such a union still drops colour entirely — checked against the real binary, which does the same.
 - `src/builtins/primitives_3d.cpp` — `sphere(style=)` is a BelfrySCAD extension naming the
   tessellation, using BOSL2's five `spheroid()` style names and constructions: `"orig"` (the default,
   and what OpenSCAD's own sphere() builds — rings offset half a step from the poles, no pole vertex),

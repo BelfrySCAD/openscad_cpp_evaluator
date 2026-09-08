@@ -201,6 +201,57 @@ void attachTriColors(Evaluator& ev, ColoredBody& cb) {
     cb.triColors = std::move(triColors);
 }
 
+// One colour's worth of 2D result.
+//
+// 3D recovers per-child colour AFTER the merge, from Manifold's own
+// per-triangle provenance (attachTriColors above). A CrossSection has no
+// such thing -- it is contours, not a mesh, and nothing in it remembers
+// which child a given edge came from. So 2D has to keep colour
+// GEOMETRICALLY instead: one part per colour, each notched by whatever is
+// drawn over it later. That is the same painter's-order rule
+// splitBodiesForExport applies to overlapping 3D solids, and it is what
+// `union() { color("red") square(10); color("blue") ... }` needs to come
+// out as two coloured shapes instead of one shape wearing the first
+// child's colour.
+struct Part2d {
+    std::optional<std::array<float, 4>> color;
+    manifold::CrossSection section;
+};
+
+// Appends `add` to `parts`, merging into an existing part of the same
+// colour so `union() { color("red") a; color("red") b; }` stays one body.
+void addPart(std::vector<Part2d>& parts, const std::optional<std::array<float, 4>>& color,
+             const manifold::CrossSection& section) {
+    for (Part2d& p : parts) {
+        if (p.color == color) {
+            p.section = p.section + section;
+            return;
+        }
+    }
+    parts.push_back({color, section});
+}
+
+// The 2D operands of one statement, grouped by colour.
+std::vector<Part2d> partsOf(const std::vector<ColoredBody>& sections2d) {
+    std::vector<Part2d> parts;
+    for (const ColoredBody& c : sections2d) addPart(parts, c.color, *c.section);
+    return parts;
+}
+
+// Every part's section unioned -- the shape the statement covers,
+// whatever colours it is in.
+manifold::CrossSection coveredBy(const std::vector<Part2d>& parts) {
+    manifold::CrossSection all;
+    for (const Part2d& p : parts) all = all + p.section;
+    return all;
+}
+
+void dropEmptyParts(std::vector<Part2d>& parts) {
+    parts.erase(std::remove_if(parts.begin(), parts.end(),
+                                [](const Part2d& p) { return p.section.IsEmpty(); }),
+                parts.end());
+}
+
 } // namespace
 
 std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, const std::vector<std::unique_ptr<CSGNode>>& children,
@@ -222,7 +273,12 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
     // part-way. difference and intersection still see one dimension only:
     // applyDimensionRules drops the mismatch before it gets here, so for
     // them just one of these is ever populated.
-    std::optional<ColoredBody> res3d, res2d;
+    std::optional<ColoredBody> res3d;
+    // 2D keeps one entry per colour rather than one merged section; see
+    // Part2d. `have2d` distinguishes "no 2D operand yet" from "every 2D
+    // part has been cut away", which matters to difference().
+    std::vector<Part2d> res2d;
+    bool have2d = false;
     size_t idx = 0;
 
     size_t stmtIndex = 0;
@@ -282,10 +338,11 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
             // union just skips the empty contributor and keeps going.
             if (op == "intersection") {
                 res3d.reset();
-                res2d.reset();
+                res2d.clear();
+                have2d = false;
                 break;
             }
-            if (op == "difference" && !res3d && !res2d) break;
+            if (op == "difference" && !res3d && !have2d) break;
             continue;
         }
 
@@ -309,20 +366,25 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
             }
         }
         if (!sections2d.empty()) {
-            manifold::CrossSection grp = *sections2d.front().section;
-            for (size_t i = 1; i < sections2d.size(); ++i) grp = grp + *sections2d[i].section;
-            if (!res2d) {
-                ColoredBody cb;
-                cb.section = std::move(grp);
-                cb.color = sections2d.front().color;
-                res2d = std::move(cb);
+            std::vector<Part2d> stmtParts = partsOf(sections2d);
+            const manifold::CrossSection grp = coveredBy(stmtParts);
+            if (!have2d) {
+                res2d = std::move(stmtParts);
+                have2d = true;
             } else if (op == "union") {
-                res2d->section = *res2d->section + grp;
+                // Later wins the overlap: notch what is already there by
+                // everything this statement covers, then add this
+                // statement's parts. Same rule as two overlapping 3D
+                // solids of different colours, and the same thing a
+                // painter does.
+                for (Part2d& p : res2d) p.section = p.section - grp;
+                for (Part2d& np : stmtParts) addPart(res2d, np.color, np.section);
             } else if (op == "difference") {
-                res2d->section = *res2d->section - grp;
+                for (Part2d& p : res2d) p.section = p.section - grp;
             } else if (op == "intersection") {
-                res2d->section = *res2d->section ^ grp;
+                for (Part2d& p : res2d) p.section = p.section ^ grp;
             }
+            dropEmptyParts(res2d);
         }
     }
 
@@ -330,7 +392,12 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
 
     std::vector<ColoredBody> result;
     if (res3d) result.push_back(std::move(*res3d));
-    if (res2d) result.push_back(std::move(*res2d));
+    for (Part2d& p : res2d) {
+        ColoredBody cb;
+        cb.color = p.color;
+        cb.section = std::move(p.section);
+        result.push_back(std::move(cb));
+    }
     result.insert(result.end(), allBg.begin(), allBg.end());
     result.insert(result.end(), allHi.begin(), allHi.end());
     result.insert(result.end(), allSo.begin(), allSo.end());
