@@ -659,3 +659,40 @@ def test_export_model_facade_accepts_split_components(tmp_path):
     # Default matches OpenSCAD: one object however many pieces.
     assert objects_in(tmp_path / "joined.3mf") == 1
     assert objects_in(tmp_path / "split.3mf", split_components=True) == 3
+
+
+def test_strict_commas_reaches_the_parser(tmp_path):
+    """Evaluator.evaluate(strict_commas=True) must survive both hand-written
+    parameter lists -- the facade's and the nanobind binding's. The last
+    argument added this way was dropped by the facade and no C++ test could
+    see it (see test_export_model_facade_accepts_split_components)."""
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError
+
+    rejected = tmp_path / "call.scad"
+    rejected.write_text("cube(1,);\n")
+    accepted = tmp_path / "list.scad"
+    accepted.write_text("a = [2, 4,];\ncube(a[0]);\n")
+
+    # Off by default: both parse, as they do in current OpenSCAD.
+    Evaluator(echo_fn=lambda _m: None).evaluate(str(rejected), {})
+    Evaluator(echo_fn=lambda _m: None).evaluate(str(accepted), {})
+
+    # On: a call's trailing comma is a syntax error, a list literal's is not
+    # -- 2021.01 accepted the list.
+    with pytest.raises(EvalError):
+        Evaluator(echo_fn=lambda _m: None).evaluate(str(rejected), {}, strict_commas=True)
+    Evaluator(echo_fn=lambda _m: None).evaluate(str(accepted), {}, strict_commas=True)
+
+
+def test_strict_commas_does_not_leak_between_evaluations(tmp_path):
+    """The parser mode is a scope object; a strict parse must not leave it on
+    for the next caller."""
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError
+
+    src = tmp_path / "call.scad"
+    src.write_text("cube(1,);\n")
+    with pytest.raises(EvalError):
+        Evaluator(echo_fn=lambda _m: None).evaluate(str(src), {}, strict_commas=True)
+    Evaluator(echo_fn=lambda _m: None).evaluate(str(src), {})   # must not raise
