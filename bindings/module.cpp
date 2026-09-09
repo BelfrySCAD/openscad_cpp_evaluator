@@ -457,6 +457,7 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
             oscad::ParsedProgram program = oscad::getProgramFromFile(path);
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(program.nodes, path, logFn);
             oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile);
+            ev.setUsedFileGlobals(used.usedFileGlobals);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp, generate));
             collectIdSpans(ev, idSpans);
@@ -764,6 +765,7 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             oscadeval::Evaluator ev(echoCpp, nullptr, manifoldCache, hooks, false);
             evPtr = &ev;
             if (fastContinueSignal) ev.setFastContinueInterruptFlag(fastContinueSignal->flag());
+            ev.setUsedFileGlobals(used.usedFileGlobals);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
             collectIdSpans(ev, idSpans);

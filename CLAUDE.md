@@ -449,6 +449,24 @@ closed in one pass after a fresh "anything still unimplemented?" audit. Each bel
    all (`resolve_use_scopes`/`UseStatement` had zero hits in `openscad_evaluator`'s own `tests/`), so
    these were verified against real reference *behavior*, not ported from an existing test.
 
+   **File-level globals are evaluated ONCE per run (v1.16.0).** The main file's and every
+   `include`'s are, by the top-level statement pass, into the root `let_` level; a `use`d file's
+   are not -- `use` injects only declarations -- so `Evaluator::fileGlobal` evaluates ALL of that
+   file's top-level assignments, in source order, into a context of its own the first time anything
+   in the file reads one, and keeps it for the run. `ResolvedUseScopes::usedFileGlobals` carries
+   the per-file assignment lists and every entry point hands them over with
+   `Evaluator::setUsedFileGlobals` (CLI, both binding paths, the tests); a caller that skips that
+   keeps the old per-read fallback. Before this, `evalIdentifier`'s scope fallback re-evaluated the
+   assignment's expression on EVERY read from inside a function -- `callCtx()` isolates `let_` so the
+   root level was invisible -- which made `r = rands(0,1,1); function g() = r;` give `g() != g()`
+   (OpenSCAD: equal) and a 20K-element global list read 2000 times from a function cost 9.7s
+   (now 0.02s). Two deliberate divergences from OpenSCAD 2026.02.01, both verified against it:
+   a used file's globals are evaluated once, not once per call into the file (upstream's per-call
+   re-evaluation is a long-standing bug there, so its forward-read warning prints once here, not
+   per call); and a global read from a function BEFORE its assignment has run is `undef` with an
+   "Ignoring unknown variable" warning, exactly as upstream, where the old fallback had quietly
+   computed the not-yet-assigned value.
+
 **Known gap closed in Phase 3, worth remembering for Phase 5+**: every builtin resolve function must
 call `resolveCallArgs` (call_args.hpp), never bare `resolveArgs`, or a `$`-prefixed named call
 argument (`circle(r=2, $fn=64)`) silently fails to reach `ctx.dyn`. Caught by a geometric-correctness

@@ -162,7 +162,42 @@ Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* 
         return Value{};
     }
     if (decl->kind() == oscad::NodeKind::ParameterDeclaration) return Value{};
+    // A file-level global (its declaring scope has no parent) is read back
+    // from its file's once-evaluated values, never re-evaluated -- see
+    // fileGlobal. Anything else (a module body's own variable reached from
+    // a function declared inside it) keeps the on-demand evaluation.
+    const oscad::Scope* declScope = ctx.scopeOf(*decl);
+    if (declScope && declScope->parent() == nullptr && rootCtx_) {
+        if (std::optional<const Value*> v = fileGlobal(*declScope, name)) {
+            if (*v) return **v;
+            if (warnIfUndef) warn("Ignoring unknown variable '" + name + "'", position);
+            return Value{};
+        }
+    }
     return evalExpr(*static_cast<const oscad::Assignment*>(decl)->expr, ctx);
+}
+
+std::optional<const Value*> Evaluator::fileGlobal(const oscad::Scope& fileRoot, const std::string& name) {
+    if (&fileRoot == rootCtx_->scope) return rootCtx_->let_->find(name);
+    auto it = usedFileCtx_.find(&fileRoot);
+    if (it == usedFileCtx_.end()) {
+        const UsedFileGlobals* globals = nullptr;
+        for (const UsedFileGlobals& g : usedFileGlobals_) {
+            if (g.root == &fileRoot) { globals = &g; break; }
+        }
+        if (!globals) return std::nullopt;
+        // Reference, not iterator: a global's initializer can call a function
+        // from ANOTHER used file, whose first read inserts here too, and a
+        // rehash invalidates iterators but never element references.
+        EvalContext& fctx = usedFileCtx_.emplace(&fileRoot, rootCtx_->callCtx(&fileRoot)).first->second;
+        // Source order, once; a read of a later global from an earlier one's
+        // initializer finds nothing yet and is undef, as in OpenSCAD.
+        for (const oscad::ASTNode* a : globals->assignments) {
+            evalAssignment(static_cast<const oscad::Assignment&>(*a), fctx);
+        }
+        return fctx.let_->find(name);
+    }
+    return it->second.let_->find(name);
 }
 
 // -- List comprehensions ----------------------------------------------

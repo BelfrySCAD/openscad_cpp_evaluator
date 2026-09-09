@@ -7,6 +7,7 @@
 #include "openscad_cpp_evaluator/csg_node.hpp"
 #include "openscad_cpp_evaluator/debug_hooks.hpp"
 #include "openscad_cpp_evaluator/eval_context.hpp"
+#include "openscad_cpp_evaluator/eval_use.hpp"
 #include "openscad_cpp_evaluator/eval_error.hpp"
 #include "openscad_cpp_evaluator/font_provider.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
@@ -1396,6 +1397,11 @@ public:
     // the same decision evalUserFunction*/evalFunctionLiteral* already
     // make before calling lookupOrCompileChunk/lookupCompiledLiteralChunk
     // themselves.
+    // Every used file's own top-level assignments (ResolvedUseScopes::
+    // usedFileGlobals), so fileGlobal() can evaluate a file's globals once.
+    // A caller that skips this keeps the old per-read fallback for used files.
+    void setUsedFileGlobals(std::vector<UsedFileGlobals> globals) { usedFileGlobals_ = std::move(globals); }
+
     bool useBytecodeVm() const {
         return bytecodeVmEnabled() && (!debugHooks_.debugHook || fastContinueBreakpoints_.has_value());
     }
@@ -1941,6 +1947,25 @@ private:
     // lifetime contract as every other raw AST/EvalContext pointer this
     // class holds).
     const EvalContext* rootCtx_ = nullptr;
+
+    // File-level globals are evaluated ONCE per run. The main file's (and
+    // every include's) already are, by the top-level statement pass, into
+    // rootCtx_'s own let_ level. A used file's are not -- `use` injects only
+    // its declarations -- so the first read of any global from that file
+    // evaluates ALL of its assignments, in source order, into a context of
+    // its own, kept here for the rest of the run. Before this, a function
+    // reading a global re-evaluated the assignment's expression on every
+    // read (evalIdentifier's scope fallback): `r = rands(0,1,1); function
+    // g() = r;` gave `g() != g()`, and a 20K-element global list read 2000
+    // times from a function cost 9.7s. OpenSCAD itself re-evaluates a used
+    // file's globals per CALL, which is a long-standing upstream bug, not
+    // behaviour to match. Returns nullopt for a file this evaluator was
+    // never told about (setUsedFileGlobals), so such a caller keeps the
+    // old fallback; nullptr for a known file whose global is not (yet)
+    // assigned -- a forward read, undef in OpenSCAD too.
+    std::optional<const Value*> fileGlobal(const oscad::Scope& fileRoot, const std::string& name);
+    std::vector<UsedFileGlobals> usedFileGlobals_;
+    std::unordered_map<const oscad::Scope*, EvalContext> usedFileCtx_;
     // The most recent ctx seen by evalStatement() -- error()'s only way to
     // reach a locals snapshot for its own errorBreak hook call, since
     // error() itself (called from dozens of builtin resolve functions)

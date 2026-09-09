@@ -34,6 +34,7 @@ struct UseEvaluated {
 UseEvaluated evalFile(const std::filesystem::path& path, EchoFn echoFn = {}) {
     UseEvaluated e{oscad::getASTFromFile(path.string()), {}, Evaluator(echoFn), {}};
     e.used = resolveUseScopes(e.ast, path.string(), echoFn);
+    e.ev.setUsedFileGlobals(e.used.usedFileGlobals);
     EvalContext ctx = EvalContext::makeRoot(e.used.rootScope.get());
     e.bodies = e.ev.evaluate(e.used.processedNodes, ctx);
     return e;
@@ -115,5 +116,60 @@ TEST(UseStatement, NoUseStatementsLeavesOwnNodesUnchanged) {
     UseEvaluated e = evalFile(main);
     EXPECT_EQ(e.used.processedNodes.size(), e.ast.size());
     EXPECT_EQ(e.bodies.size(), 1u);
+    std::filesystem::remove(main);
+}
+
+// A file's globals are evaluated ONCE per run. OpenSCAD re-evaluates a used
+// file's globals on every call into it (a long-standing upstream bug, not
+// reference behaviour); this evaluator used to re-evaluate ANY global on
+// every READ from inside a function, so `g() != g()` below.
+TEST(UseStatement, UsedFileGlobalsEvaluatedOncePerRun) {
+    auto lib = writeFile("lib_once.scad", "r = rands(0, 1, 1);\n"
+                                           "function g() = r;\n"
+                                           "function h() = r;\n");
+    auto main = writeFile("main_once.scad", "use <" + lib.string() + ">\n"
+                                             "echo(g() == g(), g() == h());\n");
+    std::vector<std::string> echoed;
+    evalFile(main, [&](const std::string& m) { echoed.push_back(m); });
+    ASSERT_EQ(echoed.size(), 1u);
+    EXPECT_EQ(echoed[0], "ECHO: true, true");
+    std::filesystem::remove(lib);
+    std::filesystem::remove(main);
+}
+
+// Source order, eagerly, so a later global read from an earlier one's
+// initializer is undef with one warning -- what OpenSCAD prints too (three
+// times there, once per call).
+TEST(UseStatement, UsedFileForwardReadIsUndef) {
+    auto lib = writeFile("lib_fwd.scad", "q = is_undef(w) ? \"early\" : w;\n"
+                                          "w = 5;\n"
+                                          "function uq() = q;\n"
+                                          "function uw() = w;\n");
+    auto main = writeFile("main_fwd.scad", "use <" + lib.string() + ">\n"
+                                            "echo(uq(), uw(), uq());\n");
+    std::vector<std::string> echoed;
+    evalFile(main, [&](const std::string& m) { echoed.push_back(m); });
+    ASSERT_EQ(echoed.size(), 1u);
+    EXPECT_EQ(echoed[0], "ECHO: \"early\", 5, \"early\"");
+    std::filesystem::remove(lib);
+    std::filesystem::remove(main);
+}
+
+// The main file's globals go the same way: read back from the values the
+// top-level pass already computed, never re-evaluated.
+TEST(UseStatement, MainFileGlobalReadFromFunctionIsStable) {
+    auto main = writeFile("main_stable.scad", "r = rands(0, 1, 1);\n"
+                                               "function f() = r;\n"
+                                               "echo(f() == f(), f() == r);\n"
+                                               "x = g();\n"
+                                               "function g() = y;\n"
+                                               "y = 1;\n"
+                                               "echo(x);\n");
+    std::vector<std::string> echoed;
+    evalFile(main, [&](const std::string& m) { echoed.push_back(m); });
+    ASSERT_EQ(echoed.size(), 3u);
+    EXPECT_NE(echoed[0].find("Ignoring unknown variable 'y'"), std::string::npos); // forward read: undef, as in OpenSCAD
+    EXPECT_EQ(echoed[1], "ECHO: true, true");
+    EXPECT_EQ(echoed[2], "ECHO: undef");
     std::filesystem::remove(main);
 }

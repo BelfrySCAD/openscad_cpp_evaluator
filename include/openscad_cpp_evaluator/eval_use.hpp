@@ -15,9 +15,21 @@ namespace oscadeval {
 // must keep this struct alive for as long as evaluation runs against
 // .rootScope/.processedNodes, since declarations injected from a used file
 // are raw (non-owning) pointers into it.
+// One used file's own top-level assignments, in source order, keyed by
+// that file's root Scope (the one its injected declarations were
+// re-anchored onto). Evaluator::setUsedFileGlobals takes the list so a
+// used file's globals can be evaluated ONCE per run, eagerly, the first
+// time anything in that file reads one -- see Evaluator::fileGlobal.
+// Raw pointers into usedFileAsts, same lifetime contract as processedNodes.
+struct UsedFileGlobals {
+    const oscad::Scope* root = nullptr;
+    std::vector<const oscad::ASTNode*> assignments;
+};
+
 struct ResolvedUseScopes {
     std::vector<std::vector<std::unique_ptr<oscad::ASTNode>>> usedFileAsts;
     std::vector<std::unique_ptr<oscad::Scope>> usedFileScopes;
+    std::vector<UsedFileGlobals> usedFileGlobals;
     // What currentFile should actually be evaluated as: declarations
     // injected via `use` (raw pointers into usedFileAsts, above), followed
     // by currentFile's own nodes (raw pointers into the caller-owned
