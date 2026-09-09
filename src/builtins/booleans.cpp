@@ -286,6 +286,14 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
     std::vector<Part2d> res2d;
     bool have2d = false;
     size_t idx = 0;
+    // Whether the 3D operands could possibly disagree on colour. Only then
+    // is attachTriColors worth its GetMeshGL(), which evaluates the boolean
+    // and copies the whole mesh out -- at EVERY level of a nested union
+    // chain, when nothing but the top ever needed it. Operands that all
+    // carry the same colour and no per-triangle colours of their own can
+    // only produce a uniformly coloured result.
+    std::optional<std::optional<std::array<float, 4>>> firstColor;
+    bool mixedColors = false;
 
     size_t stmtIndex = 0;
     for (const Value& sizeVal : groupSizes) {
@@ -314,7 +322,7 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         allDo.insert(allDo.end(), split.displayOnly.begin(), split.displayOnly.end());
 
         std::vector<ColoredBody> bodies3d, sections2d;
-        for (const ColoredBody& c : split.foreground) {
+        for (ColoredBody& c : split.foreground) {
             // A body whose own Manifold::Status() isn't NoError (e.g.
             // NonFiniteVertex, from a degenerate accumulated transform deep
             // in an unrelated ancestor's positioning math -- found via a
@@ -331,7 +339,12 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
             // operand and unioning everything else is the closest match to
             // its own behavior available without new numerical-robustness
             // work on Manifold's own boolean ops.
-            if (c.body && c.body->Status() == manifold::Manifold::Error::NoError) bodies3d.push_back(c);
+            if (c.body && bodyStatus(c) == manifold::Manifold::Error::NoError) bodies3d.push_back(c);
+        }
+        for (const ColoredBody& c : bodies3d) {
+            if (c.triColors) mixedColors = true;
+            if (!firstColor) firstColor = c.color;
+            else if (*firstColor != c.color) mixedColors = true;
         }
         for (const ColoredBody& c : split.foreground) {
             if (c.section) sections2d.push_back(c);
@@ -358,17 +371,33 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         if (!bodies3d.empty()) {
             manifold::Manifold grp = *bodies3d.front().body;
             for (size_t i = 1; i < bodies3d.size(); ++i) grp = grp + *bodies3d[i].body;
+            // The result stays LAZY inside Manifold: its emptiness is derived
+            // from the operands' flags here rather than asked, so a chain of
+            // unions under transforms is evaluated once, at the top, instead
+            // of once per level (see ColoredBody::knownEmpty).
+            const std::optional<bool> grpEmpty =
+                unionEmptyOf(bodies3d, [](const ColoredBody& b) -> const ColoredBody& { return b; });
+            const auto known = [](const std::optional<bool>& e, bool v) { return e && *e == v; };
             if (!res3d) {
                 ColoredBody cb;
                 cb.body = std::move(grp);
                 cb.color = bodies3d.front().color;
+                cb.knownStatus = manifold::Manifold::Error::NoError; // every operand was
+                cb.knownEmpty = grpEmpty;
                 res3d = std::move(cb);
             } else if (op == "union") {
                 res3d->body = *res3d->body + grp;
+                if (known(res3d->knownEmpty, false) || known(grpEmpty, false)) res3d->knownEmpty = false;
+                else if (known(res3d->knownEmpty, true) && known(grpEmpty, true)) res3d->knownEmpty = true;
+                else res3d->knownEmpty.reset();
             } else if (op == "difference") {
                 res3d->body = *res3d->body - grp;
+                if (known(res3d->knownEmpty, true)) res3d->knownEmpty = true;
+                else if (!known(grpEmpty, true)) res3d->knownEmpty.reset(); // subtracting nothing changes nothing
             } else if (op == "intersection") {
                 res3d->body = *res3d->body ^ grp;
+                if (known(res3d->knownEmpty, true) || known(grpEmpty, true)) res3d->knownEmpty = true;
+                else res3d->knownEmpty.reset();
             }
         }
         if (!sections2d.empty()) {
@@ -394,7 +423,7 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         }
     }
 
-    if (res3d && res3d->body) attachTriColors(ev, *res3d);
+    if (res3d && res3d->body && mixedColors) attachTriColors(ev, *res3d);
 
     std::vector<ColoredBody> result;
     if (res3d) result.push_back(std::move(*res3d));

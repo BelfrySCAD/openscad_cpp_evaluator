@@ -286,6 +286,11 @@ public:
                           const oscad::ASTNode* producer);
 
     std::unordered_map<uint32_t, const oscad::ASTNode*> idToNode;
+    // Nodes whose bodies were actually generated this run (not served from
+    // the ManifoldCache). Reset per run; a diagnostic, and the only honest
+    // way for a test to tell a cache hit from a miss now that an inner
+    // node's bodies are released the moment its parent has consumed them.
+    std::size_t generatedNodeCount = 0;
     std::unordered_map<uint32_t, std::optional<std::array<float, 4>>> idToColor;
 
     // Called by primitive-construction generate functions (cube, sphere,

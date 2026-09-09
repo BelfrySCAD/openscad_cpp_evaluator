@@ -928,6 +928,28 @@ grep for `ponytail:`.
   operation`. `linear_extrude`/`rotate_extrude`/`offset` are always-2D and `projection` always-3D, so
   they skip the "mixing" line and emit only the second; `roof()` emits neither, matching the
   reference. Background (`%`) children are exempt.
+  **The emptiness test is cached on the body (`ColoredBody::knownEmpty`, v1.17.0).** It used to
+  call `Manifold::NumTri()` on every child at every level, and every Manifold accessor goes through
+  `GetImpl()`, which materialises a lazy transform (a full mesh + collider copy) and runs a lazy
+  boolean -- so each leaf was copied once per ancestor transform, and because every node kept its
+  `bodies` until the tree died, all those copies stayed alive: fractal_tree.scad held 72,929
+  transformed copies of 1024 leaves (3.1GB). Now a body is asked once, the flag rides along on the
+  struct copies transform/colour/flatten make (emptiness is transform-invariant, and every generate
+  function that builds a new body starts from a fresh `ColoredBody`), and `generateTreeImpl` clears
+  each child's `bodies` once the parent has consumed them (move-assigning a fresh vector: `clear()`
+  and `= {}` both keep the capacity, and 35K nodes x 592-byte slots was 230MB) -- only top-level
+  bodies leave, a cache hit re-fills from the cache, and the bindings' `csg_tree` facade no longer
+  converts per-node bodies (it used to `GetMeshGL()` every node into numpy on every evaluate(), for
+  a dump that never read them). Three more forcing points had to go for the chain to stay lazy: the
+  booleans' `Status()` operand filter (now `bodyStatus()`, same cache), the boolean RESULT's own
+  emptiness (derived from the operands' flags -- a union is non-empty if any operand is -- rather
+  than asked), and `attachTriColors`, which `GetMeshGL()`'d every boolean result and now runs only
+  when the operands could actually disagree on colour. `Evaluator::generatedNodeCount` replaced
+  "does the child have bodies" as the cache-hit proxy in tests. Transforms compose lazily inside
+  Manifold and each leaf is transformed once, at the boolean that needs it. fractal_tree 3.1GB ->
+  0.67GB, Dalek 370 -> 277MB, snappy-reprap full_assembly 1.6GB -> 0.87GB; wall time neutral to
+  -3% interleaved. The output is geometrically identical (triangle count, area, volume) but not
+  byte-identical: Manifold evaluates one flat batch union instead of our old level-by-level order.
 
   Doing this centrally is also what keeps `generateCsg` safe: it builds ONE result and switches on
   whether it holds a `body` or a `section`, so a group that changed dimension part-way dereferenced

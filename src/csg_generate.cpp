@@ -81,6 +81,7 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             insideHull = savedInsideHull;
 
             applyDimensionRules(node);
+            ++generatedNodeCount;
 
             auto it = dispatch.find(node.kind);
             if (node.isBuiltin && it != dispatch.end()) {
@@ -109,6 +110,25 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 manifoldCache_->put(*key, node.bodies);
                 if (!measuring_) cacheProducer_[*key] = node.node;
             }
+                // The children's bodies have been consumed (by the dispatch above,
+                // or flattened into this node's own) and nothing reads them again:
+                // only a TOP-LEVEL node's bodies leave this function, a cache hit
+                // re-fills a node from the cache, and the CSG-tree facade in the
+                // bindings never used them. Keeping them held every intermediate
+                // result of the whole tree alive until the tree died -- one
+                // transformed copy per level per leaf. A cache, when there is one,
+                // already holds its own reference to whatever it wants to keep.
+            // The children's bodies have been consumed (by the dispatch above,
+            // or flattened into this node's own) and nothing reads them again:
+            // only a TOP-LEVEL node's bodies leave this function, a cache hit
+            // re-fills a node from the cache, and the CSG-tree facade in the
+            // bindings never used them. Keeping them held every intermediate
+            // result of the whole tree alive until the tree died -- one
+            // transformed copy per level per leaf. A cache, when there is one,
+            // already holds its own reference to whatever it wants to keep.
+            // Move-assign a fresh vector, not clear() or `= {}`: both keep the
+            // capacity, and 35K nodes' worth of 592-byte slots was 230MB.
+            for (const std::unique_ptr<CSGNode>& c : node.children) c->bodies = std::vector<ColoredBody>();
         }
         for (const ColoredBody& b : node.bodies) topLevelBodies.push_back(b);
     }
@@ -151,8 +171,8 @@ DimRule dimRuleFor(const std::string& kind) {
     return DimRule::Group;
 }
 
-bool isEmptyBody(const ColoredBody& b) {
-    if (b.body) return b.body->NumTri() == 0;
+bool isEmptyBody(ColoredBody& b) {
+    if (b.body) return bodyIsEmpty(b); // see ColoredBody::knownEmpty
     if (b.section) return b.section->IsEmpty();
     return true;
 }

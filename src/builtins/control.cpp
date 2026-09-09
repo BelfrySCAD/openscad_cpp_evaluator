@@ -68,6 +68,7 @@ ColoredBody combineBodies(const std::vector<ColoredBody>& bodies) {
         ColoredBody cb;
         cb.body = std::move(merged);
         cb.color = bodies3d.front()->color;
+        cb.knownEmpty = unionEmptyOf(bodies3d, [](const ColoredBody* b) -> const ColoredBody& { return *b; });
         return cb;
     }
     std::vector<const ColoredBody*> sections;

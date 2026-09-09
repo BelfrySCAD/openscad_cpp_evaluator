@@ -65,8 +65,8 @@ namespace {
 // `union() { color("red") stroke(...); text(); }` had no red recorded for
 // the stroke's runs at all, so every run looked identical, the merge kept
 // the first child's colour, and the whole thing came out red.
-void recordRunColors(Evaluator& ev, const ColoredBody& b, const std::optional<std::array<float, 4>>& rgba) {
-    if (!b.body || b.body->IsEmpty()) return;
+void recordRunColors(Evaluator& ev, ColoredBody& b, const std::optional<std::array<float, 4>>& rgba) {
+    if (!b.body || bodyIsEmpty(b)) return;
     // A body that is still one original knows its own ID without building
     // a mesh -- the common case, and the cheap one.
     const int original = b.body->OriginalID();
