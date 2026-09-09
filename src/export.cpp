@@ -421,7 +421,7 @@ std::vector<std::array<float, 4>> carryTriColors(const std::vector<std::array<fl
 } // namespace
 
 std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies, std::vector<int>* openParts,
-                                                bool splitComponents) {
+                                                bool splitComponents, bool splitColors) {
     struct Solid {
         manifold::Manifold man;
         std::optional<std::array<float, 4>> color;
@@ -484,7 +484,15 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
             if (k.hasColor) k.color = *solids[i].color;
             keys.push_back(k);
         }
-        const bool allSame = std::all_of(keys.begin(), keys.end(), [&](const ColorKey& k) { return k == keys[0]; });
+        // Splitting by colour is for a MULTI-MATERIAL print, where each
+        // colour becomes an object the slicer assigns to a filament. A
+        // single-material print wants the opposite: one welded solid, with
+        // no seams between colour regions for the slicer to treat as
+        // separate walls. Unioning everything here (rather than
+        // concatenating the per-colour objects afterwards) is what makes
+        // touching regions weld instead of leaving coincident faces.
+        const bool allSame = !splitColors ||
+            std::all_of(keys.begin(), keys.end(), [&](const ColorKey& k) { return k == keys[0]; });
 
         if (allSame) {
             // The common case by far, and it needs no per-body subtraction
@@ -496,7 +504,10 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
             Claimed c;
             c.man = addAll(parts);
             c.color = solids[0].color;
-            c.triColors = solids[0].triColors;
+            // Per-triangle colour cannot survive a weld across colours --
+            // the union rebuilds the surface -- and a single-material
+            // print has no use for it anyway.
+            c.triColors = splitColors ? solids[0].triColors : std::vector<std::array<float, 4>>{};
             c.sourceTris = solids[0].tris;
             c.key = keys[0];
             claimedGroups.push_back(std::move(c));
@@ -1507,7 +1518,8 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
         // its own -- that is what the file contains.
         for (std::string& w : checkExportBodies(bodies)) warnings.push_back(std::move(w));
         std::vector<int> openParts;
-        const std::vector<ExportObject> objects = splitBodiesForExport(bodies, &openParts, opts.splitComponents);
+        const std::vector<ExportObject> objects =
+            splitBodiesForExport(bodies, &openParts, opts.splitComponents, opts.splitColors);
         reportOpen(openParts);
         if (objects.empty()) throw std::runtime_error("No geometry to export");
         if (ext == ".3mf") {
