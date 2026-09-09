@@ -199,6 +199,70 @@ TEST(TrailView, MinimalTwoLevelKeepAlive) {
     EXPECT_EQ(*grandchild->find("x"), 42);
 }
 
+
+// parent_ (level -> parent level) used to grow by one int per level ever
+// opened and never shrink: 3 x 64MB vectors on a 13M-call script, plus the
+// copy at every doubling. A popped level is now marked dead, and whenever the
+// NEWEST level dies the vector shrinks back past every dead level above the
+// newest live one, whose numbers are then handed out again.
+TEST(ScopeTrailStorage, PoppingInCallOrderShrinksTheLevelTable) {
+    ScopeTrailStorage<int> storage;
+    const int root = storage.openLevel(0);
+    const size_t base = storage.debugLevelSlotsForTesting();
+    for (int call = 0; call < 1000; ++call) {
+        const int a = storage.openLevel(root);
+        const int b = storage.openLevel(a);
+        storage.set("x", call, b);
+        ASSERT_EQ(*storage.lookup("x", b), call);
+        storage.popLevel(b);
+        storage.popLevel(a);
+        EXPECT_EQ(storage.debugLevelSlotsForTesting(), base) << "call " << call;
+        EXPECT_EQ(a, root + 1) << "level numbers are reused, not consumed";
+    }
+    EXPECT_EQ(storage.debugEntryCountForTesting("x"), 0u);
+}
+
+TEST(ScopeTrailStorage, AStillLiveLevelStopsTheShrinkAndKeepsItsBindings) {
+    // An escaping closure keeps one level alive past its creator's return.
+    ScopeTrailStorage<int> storage;
+    const int root = storage.openLevel(0);
+    storage.set("g", 1, root);
+    const int call = storage.openLevel(root);
+    const int captured = storage.openLevel(call); // the closure holds this one
+    storage.set("c", 42, captured);
+    const int later = storage.openLevel(captured);
+    storage.popLevel(later);
+    storage.popLevel(call); // out of order: `captured` outlives `call`
+    const size_t slots = storage.debugLevelSlotsForTesting();
+    EXPECT_EQ(slots, static_cast<size_t>(captured) + 1) << "shrunk past `later`, stopped at the live level";
+    // New levels take numbers ABOVE the live one, so its entries stay sorted
+    // and reachable exactly as before.
+    const int fresh = storage.openLevel(root);
+    EXPECT_GT(fresh, captured);
+    storage.set("c", 7, fresh);
+    EXPECT_EQ(*storage.lookup("c", captured), 42);
+    EXPECT_EQ(*storage.lookup("c", fresh), 7);
+    // (Reads THROUGH the popped `call` level stop there, as they always did
+    // -- a real escaping closure keeps its whole ancestor chain alive via
+    // TrailView::parentView_, so this storage-level walk never sees that.)
+    EXPECT_EQ(storage.lookup("g", captured), nullptr);
+    storage.popLevel(fresh);
+    storage.popLevel(captured);
+    EXPECT_EQ(storage.debugLevelSlotsForTesting(), static_cast<size_t>(root) + 1);
+}
+
+TEST(IndexedScopeTrailStorage, PoppingInCallOrderShrinksTheLevelTable) {
+    IndexedScopeTrailStorage<int> storage(std::make_shared<DynNameIntern>());
+    const int root = storage.openLevel(0);
+    const size_t base = storage.debugLevelSlotsForTesting();
+    for (int call = 0; call < 1000; ++call) {
+        const int a = storage.openLevel(root);
+        storage.set("$fn", call, a);
+        ASSERT_EQ(*storage.lookup("$fn", a), call);
+        storage.popLevel(a);
+        ASSERT_EQ(storage.debugLevelSlotsForTesting(), base);
+    }
+}
 } // namespace
 } // namespace oscadeval
 

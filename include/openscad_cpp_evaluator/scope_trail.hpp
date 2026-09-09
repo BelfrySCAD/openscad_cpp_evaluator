@@ -186,7 +186,7 @@ public:
             }
             dirty_.erase(it);
         }
-        parent_[static_cast<size_t>(level)] = 0; // dead: an ancestry walk stops here
+        markDead(level);
     }
 
     // nullptr if `name` has no binding on `myLevel`'s own ancestry chain.
@@ -211,7 +211,7 @@ public:
         const std::vector<Entry>& vec = it->second;
         auto idx = static_cast<long>(vec.size()) - 1;
         int ancestor = myLevel;
-        while (ancestor != 0 && idx >= 0) {
+        while (ancestor > 0 && idx >= 0) {
             const int entryLevel = vec[static_cast<size_t>(idx)].level;
             if (entryLevel > ancestor) {
                 --idx;
@@ -236,6 +236,11 @@ public:
         auto it = stacks_.find(name);
         return it == stacks_.end() ? 0 : it->second.size();
     }
+    // Test-only: how many level slots `parent_` currently holds (index 0
+    // included) -- lets ScopeTrailStorageTest assert that popping levels in
+    // call/return order really does shrink it back, and that an escaping
+    // closure's still-live level stops the shrink at itself.
+    size_t debugLevelSlotsForTesting() const { return parent_.size(); }
 
     // Ancestry-filtered snapshot -- O(total distinct names ever bound so
     // far in the whole evaluation), not O(names visible now). Only used
@@ -272,6 +277,27 @@ private:
     std::vector<int> parent_{0};
     int nextLevel_ = 0;
 
+    // A popped level is marked -1 (0 is a live level with no parent -- an
+    // isolated root -- so the two must stay distinguishable). Then, whenever
+    // the level being popped is the newest one, `parent_` shrinks back past
+    // every dead level above the newest still-live one, and its number is
+    // handed out again by the next openLevel(). This keeps every invariant
+    // lookup() relies on: a reused number is greater than every level still
+    // holding an entry (all higher levels were dead, and popLevel already
+    // removed their entries), so a name's push-stack stays ascending, and a
+    // live level's number never changes -- an escaping closure that keeps a
+    // level alive simply stops the shrink at it. Without this, `parent_`
+    // grew by one int per level for the whole run and never shrank: 3 x
+    // 64MB for a 13M-call script, plus the copy of each doubling.
+    void markDead(int level) {
+        parent_[static_cast<size_t>(level)] = -1;
+        if (level == nextLevel_) {
+            while (nextLevel_ > 0 && parent_[static_cast<size_t>(nextLevel_)] < 0) {
+                parent_.pop_back();
+                --nextLevel_;
+            }
+        }
+    }
 };
 
 // Per-EvalContext handle onto a shared ScopeTrailStorage<T>: this view's
@@ -473,7 +499,7 @@ public:
             }
             dirty_.erase(it);
         }
-        parent_[static_cast<size_t>(level)] = 0; // dead: an ancestry walk stops here
+        markDead(level);
     }
 
     // Same sorted-merge ancestry walk as ScopeTrailStorage::lookup -- see
@@ -485,7 +511,7 @@ public:
         const std::vector<Entry>& vec = stacks_[static_cast<size_t>(id)];
         auto idx = static_cast<long>(vec.size()) - 1;
         int ancestor = myLevel;
-        while (ancestor != 0 && idx >= 0) {
+        while (ancestor > 0 && idx >= 0) {
             const int entryLevel = vec[static_cast<size_t>(idx)].level;
             if (entryLevel > ancestor) {
                 --idx;
@@ -505,6 +531,7 @@ public:
         int id = intern_->idFor(name);
         return id >= 0 && static_cast<size_t>(id) < stacks_.size() ? stacks_[static_cast<size_t>(id)].size() : 0;
     }
+    size_t debugLevelSlotsForTesting() const { return parent_.size(); } // see ScopeTrailStorage's
 
     std::vector<std::pair<std::string, T>> items(int myLevel) const {
         std::vector<std::pair<std::string, T>> result;
@@ -530,6 +557,15 @@ private:
     std::vector<int> parent_{0}; // see ScopeTrailStorage::parent_
     int nextLevel_ = 0;
 
+    void markDead(int level) { // see ScopeTrailStorage::markDead
+        parent_[static_cast<size_t>(level)] = -1;
+        if (level == nextLevel_) {
+            while (nextLevel_ > 0 && parent_[static_cast<size_t>(nextLevel_)] < 0) {
+                parent_.pop_back();
+                --nextLevel_;
+            }
+        }
+    }
 };
 
 // Per-EvalContext handle onto a shared IndexedScopeTrailStorage<T> -- the
