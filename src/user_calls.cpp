@@ -251,9 +251,13 @@ EvalContext Evaluator::callCtxFor(const oscad::ASTNode& decl, EvalContext& ctx, 
     const oscad::Position& declPos = decl.position();
     for (const auto& [activeDecl, count] : activeDeclRefcount_) {
         const oscad::Position* outer = &activeDecl->position();
-        if (outer->origin != declPos.origin) continue;
+        // Integer span test first: it rejects almost every candidate, and the
+        // origin compare it used to follow is a string compare per active
+        // declaration per call.
         const bool sameSpan = (outer->start_offset == declPos.start_offset && outer->end_offset == declPos.end_offset);
-        if (!sameSpan && outer->start_offset <= declPos.start_offset && declPos.end_offset <= outer->end_offset) {
+        if (sameSpan || outer->start_offset > declPos.start_offset || declPos.end_offset > outer->end_offset) continue;
+        if (outer->origin != declPos.origin) continue;
+        {
             if (usedChildCtx) *usedChildCtx = true;
             return ctx.childCtx(scope, std::nullopt, std::move(childrenNodes), childrenCallerCtx);
         }

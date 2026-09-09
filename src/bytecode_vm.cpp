@@ -585,7 +585,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 ev.vmCallStack_.pop_back();
                 std::optional<Evaluator::UserCallHandle> bracket = std::move(ev.vmCallBrackets_.back());
                 ev.vmCallBrackets_.pop_back();
-                const std::string finishedName = finished->logicalName;
+                const std::string& finishedName = finished->logicalName; // `finished` outlives every use below
                 const bool ownsModuleSplice = finished->ownsModuleSplice;
                 const std::uint64_t moduleRandsBefore = finished->moduleRandsBefore;
                 const oscad::ASTNode* moduleSpliceCallNode = finished->moduleSpliceCallNode;

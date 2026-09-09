@@ -466,6 +466,21 @@ closed in one pass after a fresh "anything still unimplemented?" audit. Each bel
    per call); and a global read from a function BEFORE its assignment has run is `undef` with an
    "Ignoring unknown variable" warning, exactly as upstream, where the old fallback had quietly
    computed the not-yet-assigned value.
+**Scope-trail level table shrinks (v1.18.0).** `ScopeTrailStorage::parent_` and its indexed twin
+map level -> parent level in a vector indexed by level. Levels came from `++nextLevel_` and were
+never reused, so the vector grew 4 bytes per level for the whole run -- 3 x 64MB on a 13M-call
+script, plus the copy at every doubling -- and was 192MB of fractal_tree.scad's peak. A popped
+level is now marked -1 (0 still means "live, no parent": an isolated root), and when the NEWEST
+level dies `markDead` pops the vector back past every dead level above the newest live one, whose
+numbers `openLevel` then hands out again. Every invariant `lookup()`'s sorted-merge walk relies on
+holds: a reused number is greater than every level still holding an entry (all higher levels were
+dead and `popLevel` had already removed their entries), so a name's push-stack stays ascending,
+and a live level's number never changes -- an escaping closure that keeps a level alive simply
+stops the shrink at it (`tests/test_scope_trail.cpp` covers both). The ancestry walk now stops at
+`ancestor > 0` rather than `!= 0`. Same PR: `callCtxFor`'s per-call scan over active declarations
+does the integer span test before the origin STRING compare (`_platform_memcmp` was 1.4% of
+fractal_tree), and driveVm's completion branch no longer copies the finished frame's name. Anklet
+74 -> 63MB, a 4M-call synthetic 380 -> 258MB, fractal_tree -3.4% wall.
 
 **Known gap closed in Phase 3, worth remembering for Phase 5+**: every builtin resolve function must
 call `resolveCallArgs` (call_args.hpp), never bare `resolveArgs`, or a `$`-prefixed named call
