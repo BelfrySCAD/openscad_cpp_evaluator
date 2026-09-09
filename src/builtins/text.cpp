@@ -34,7 +34,18 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     const std::string text = asStringOr(getArg(args, 0, "text", Value{std::string("")}), "");
     const double size = toDoubleLenient(getArg(args, 1, "size", Value{10.0}));
-    const std::string fontSpec = asStringOr(getArg(args, std::nullopt, "font", Value{std::string("")}), "");
+    // font is POSITIONAL, at index 2: `text("Hi", 10, "Liberation Sans")`
+    // is how people write it and how the reference reads it -- measured
+    // against the 2026.02.01 binary, whose bounding box for the
+    // positional form matches the named one exactly.
+    //
+    // Only font. halign/valign/spacing/direction/language/script stay
+    // name-only, because the same measurement shows the reference
+    // ignoring them positionally: `text("Hi", 10, "F", "center")` is NOT
+    // centred there, while halign="center" is. text() and textmetrics()
+    // genuinely differ here -- textmetrics takes all nine positionally --
+    // so neither can be assumed from the other.
+    const std::string fontSpec = asStringOr(getArg(args, 2, "font", Value{std::string("")}), "");
     const std::string halign = asStringOr(getArg(args, std::nullopt, "halign", Value{std::string("left")}), "left");
     const std::string valign = asStringOr(getArg(args, std::nullopt, "valign", Value{std::string("baseline")}), "baseline");
     const double spacing = toDoubleLenient(getArg(args, std::nullopt, "spacing", Value{1.0}));
