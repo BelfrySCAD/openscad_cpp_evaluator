@@ -977,7 +977,15 @@ grep for `ponytail:`.
   restating the list, because three hand-written copies had already drifted far enough that `.off`
   could be written by neither the GUI nor the CLI while every test passed.
   Colour is carried by 3MF, AMF, OBJ (companion `.mtl`), PLY, VRML and X3D; STL and OFF compose
-  every body into one solid and store geometry only. **AMF** puts colour on the `<volume>` rather
+  every body into one solid and store geometry only.
+  **`ExportOptions::splitColors` picks what the file is FOR**, and is the axis worth asking a user
+  about rather than "should parts be separate": on (the default) writes one object per colour, which
+  is what a **multi-material** print wants — each colour is something the slicer assigns to a
+  filament. Off is a **single-material** print: everything unions into one welded solid, so touching
+  colour regions lose the coincident faces that stacking per-colour objects would leave, and the
+  per-triangle colour is dropped because such a print has no use for it. Implemented by forcing
+  `splitBodiesForExport`'s `allSame` branch, which already unions rather than concatenates —
+  concatenating the per-colour objects instead would have left the seam. **AMF** puts colour on the `<volume>` rather
   than the face, so an object whose triangles are not all one colour is written as one volume per
   colour — per-triangle `<color>` is legal in the spec but poorly supported by the slicers that are
   the audience for it.

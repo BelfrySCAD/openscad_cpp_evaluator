@@ -404,7 +404,8 @@ void applyPdfOptions(const nb::dict& d, oscadeval::ExportPdfOptions& pdf) {
 }
 
 nb::list exportModelPy(const std::string& path, const Geometry& geom, const std::string& format, bool asciiStl,
-                        bool stripSlivers, bool splitComponents, bool svgFill, const std::string& svgFillColor,
+                        bool stripSlivers, bool splitComponents, bool splitColors, bool svgFill,
+                        const std::string& svgFillColor,
                         bool svgStroke, const std::string& svgStrokeColor, double svgStrokeWidth,
                         nb::object pdfOptions) {
     oscadeval::ExportPdfOptions pdf;
@@ -418,6 +419,7 @@ nb::list exportModelPy(const std::string& path, const Geometry& geom, const std:
         opts.asciiStl = asciiStl;
         opts.stripSlivers = stripSlivers;
         opts.splitComponents = splitComponents;
+        opts.splitColors = splitColors;
         opts.svg.fill = svgFill;
         opts.svg.fillColor = svgFillColor;
         opts.svg.stroke = svgStroke;
@@ -850,7 +852,8 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
 
     m.def("export_model", &exportModelPy, nb::arg("path"), nb::arg("geometry"), nb::arg("format") = std::string(),
           nb::arg("ascii_stl") = false, nb::arg("strip_slivers") = true,
-          nb::arg("split_components") = false, nb::arg("svg_fill") = false,
+          nb::arg("split_components") = false, nb::arg("split_colors") = true,
+          nb::arg("svg_fill") = false,
           nb::arg("svg_fill_color") = std::string("white"), nb::arg("svg_stroke") = true,
           nb::arg("svg_stroke_color") = std::string("black"), nb::arg("svg_stroke_width") = 0.35,
           nb::arg("pdf_options") = nb::none(),
@@ -861,6 +864,10 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "`split_components` gives every disconnected piece its own object in the multi-object formats "
           "(3MF, AMF, OBJ, PLY, VRML, X3D). Off by default, matching OpenSCAD, which writes one object "
           "per colour however many pieces it is in.\n\n"
+          "`split_colors` (on by default) writes one object per colour -- what a MULTI-MATERIAL print "
+          "wants, each colour being something the slicer assigns to a filament. Turn it off for a "
+          "single-material print: everything welds into one solid, with no seams between colour "
+          "regions and no per-triangle colour it has no use for.\n\n"
           "The svg_* arguments are OpenSCAD's -O export-svg/... set and apply to .svg only. "
           "svg_stroke/svg_stroke_width also pad the page, so they are not purely cosmetic. An .svg "
           "export needs an all-2D model and raises otherwise, as OpenSCAD does.\n\n"

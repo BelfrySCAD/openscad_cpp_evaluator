@@ -733,3 +733,63 @@ TEST(ExportPdf, ReachableThroughExportModelAndListedAsAnExtension) {
     std::remove(path.c_str());
 }
 
+
+// -- single-material vs multi-material -------------------------------------
+
+TEST(SplitColors, MultiMaterialGivesOneObjectPerColour) {
+    // The default: each colour becomes something a slicer can assign to a
+    // filament.
+    std::vector<ColoredBody> bodies =
+        evalToBodies("color(\"red\") cube(10); color(\"blue\") translate([12,0,0]) cube(10);");
+    const std::vector<ExportObject> objs = splitBodiesForExport(bodies, nullptr, false, /*splitColors=*/true);
+    EXPECT_EQ(objs.size(), 2u);
+}
+
+TEST(SplitColors, SingleMaterialGivesOneObject) {
+    // A single-material print has nothing to do with the colours, and
+    // splitting on them only gives the slicer parts to list.
+    std::vector<ColoredBody> bodies =
+        evalToBodies("color(\"red\") cube(10); color(\"blue\") translate([12,0,0]) cube(10);");
+    const std::vector<ExportObject> objs = splitBodiesForExport(bodies, nullptr, false, /*splitColors=*/false);
+    ASSERT_EQ(objs.size(), 1u);
+    EXPECT_TRUE(objs[0].triColors.empty());  // no per-triangle colour to carry
+}
+
+TEST(SplitColors, SingleMaterialWeldsTouchingColourRegions) {
+    // Unioned, not concatenated: two touching cubes of different colours
+    // must come out as one solid without the coincident interior faces
+    // that stacking the per-colour objects would leave behind.
+    std::vector<ColoredBody> bodies =
+        evalToBodies("color(\"red\") cube(10); color(\"blue\") translate([10,0,0]) cube(10);");
+    const std::vector<ExportObject> single = splitBodiesForExport(bodies, nullptr, false, /*splitColors=*/false);
+    ASSERT_EQ(single.size(), 1u);
+
+    const std::vector<ExportObject> multi = splitBodiesForExport(bodies, nullptr, false, true);
+    ASSERT_EQ(multi.size(), 2u);
+    size_t multiTris = 0;
+    for (const ExportObject& o : multi) multiTris += o.tris.size() / 3;
+
+    // Fewer triangles than the two objects have between them: the pair of
+    // coincident faces along the seam is gone, which is the difference
+    // between a welded solid and two boxes stacked in one object. (Not
+    // the 12 of a plain 20x10x10 box -- Manifold keeps the seam's
+    // vertices, so the faces crossing it stay split.)
+    EXPECT_LT(single[0].tris.size() / 3, multiTris);
+    EXPECT_EQ(single[0].tris.size() / 3, 20u);
+}
+
+TEST(SplitColors, SingleMaterialKeepsTheWholeVolume) {
+    std::vector<ColoredBody> bodies =
+        evalToBodies("color(\"red\") cube(10); color(\"blue\") translate([12,0,0]) cube(10);");
+    const std::vector<ExportObject> multi = splitBodiesForExport(bodies, nullptr, false, true);
+    const std::vector<ExportObject> single = splitBodiesForExport(bodies, nullptr, false, false);
+    size_t multiTris = 0;
+    for (const ExportObject& o : multi) multiTris += o.tris.size();
+    EXPECT_EQ(single[0].tris.size(), multiTris);  // same surface, one object
+}
+
+TEST(SplitColors, AnUncolouredModelIsUnaffectedEitherWay) {
+    std::vector<ColoredBody> bodies = evalToBodies("cube(10); translate([12,0,0]) cube(10);");
+    EXPECT_EQ(splitBodiesForExport(bodies, nullptr, false, true).size(), 1u);
+    EXPECT_EQ(splitBodiesForExport(bodies, nullptr, false, false).size(), 1u);
+}

@@ -776,6 +776,27 @@ def test_list_fonts_reports_specs_that_actually_resolve(tmp_path):
     assert echoes == ['ECHO: "Regular"', 'ECHO: "Bold"', 'ECHO: "Italic"', 'ECHO: "Bold Italic"']
 
 
+def test_split_colors_chooses_single_or_multi_material(tmp_path):
+    """Same two-hand-written-parameter-lists trap as split_components."""
+    from openscad_cpp_evaluator import Evaluator, export_model
+
+    src = tmp_path / "two.scad"
+    src.write_text('color("red") cube(10); color("blue") translate([12,0,0]) cube(10);')
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+
+    def objects_in(path, **kwargs):
+        import zipfile
+        export_model(str(path), ev.geometry, **kwargs)
+        with zipfile.ZipFile(path) as z:
+            return z.read("3D/3dmodel.model").decode().count("<object ")
+
+    # Multi-material (the default): one object per colour for the slicer.
+    assert objects_in(tmp_path / "multi.3mf") == 2
+    # Single-material: one solid, colours irrelevant.
+    assert objects_in(tmp_path / "single.3mf", split_colors=False) == 1
+
+
 def test_strict_commas_reaches_the_parser(tmp_path):
     """Evaluator.evaluate(strict_commas=True) must survive both hand-written
     parameter lists -- the facade's and the nanobind binding's. The last

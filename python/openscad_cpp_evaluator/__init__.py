@@ -293,6 +293,7 @@ def strip_slivers(verts, tris):
 
 def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
                  strip_slivers: bool = True, split_components: bool = False,
+                 split_colors: bool = True,
                  svg_fill: bool = False, svg_fill_color: str = "white",
                  svg_stroke: bool = True, svg_stroke_color: str = "black",
                  svg_stroke_width: float = 0.35, pdf_options: dict | None = None) -> list:
@@ -316,6 +317,12 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
     `split_components` gives every disconnected piece its own object in the
     multi-object formats. Off by default, which is what OpenSCAD writes.
 
+    `split_colors` (on by default) writes one object per colour -- what a
+    MULTI-MATERIAL print wants, each colour being something the slicer
+    assigns to a filament. Turn it off for a single-material print:
+    everything welds into one solid, with no seams between colour regions
+    and no per-triangle colour it has no use for.
+
     The `svg_*` arguments are OpenSCAD's `-O export-svg/...` set and apply
     to `.svg` only, which writes a 2D model at 1:1 in millimetres.
     `svg_stroke`/`svg_stroke_width` also pad the page, so they are not
@@ -335,7 +342,7 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
     """
     try:
         return list(_ext.export_model(path, geometry, format, ascii_stl, strip_slivers,
-                                       split_components, svg_fill, svg_fill_color,
+                                       split_components, split_colors, svg_fill, svg_fill_color,
                                        svg_stroke, svg_stroke_color, svg_stroke_width,
                                        pdf_options))
     except Exception as e:

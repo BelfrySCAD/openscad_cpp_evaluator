@@ -53,7 +53,8 @@ struct ExportObject {
 // 1-based index is appended to `openParts` for the caller to warn about.
 std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies,
                                                 std::vector<int>* openParts = nullptr,
-                                                bool splitComponents = false);
+                                                bool splitComponents = false,
+                                                bool splitColors = true);
 
 // Writes a binary STL: composes every body's mesh into one solid (bodies
 // with no `.body` -- 2D-only sections -- or an empty Manifold are
@@ -236,6 +237,12 @@ struct ExportOptions {
     // pieces it is in; see that function's own comment for why the default
     // moved here.
     bool splitComponents = false;
+    // Rule 2 of splitBodiesForExport: one object per colour. That is what
+    // a MULTI-MATERIAL print wants -- each colour becomes something the
+    // slicer assigns to a filament. Turn it off for a single-material
+    // print, which wants one welded solid instead: no seams between
+    // colour regions, and no per-triangle colour it has no use for.
+    bool splitColors = true;
     // .svg only.
     ExportSvgOptions svg;
     // .pdf only.
