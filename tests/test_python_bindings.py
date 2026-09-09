@@ -745,6 +745,37 @@ def test_export_model_rejects_an_unknown_pdf_option(tmp_path):
         export_model(str(tmp_path / "x.pdf"), ev.geometry, pdf_options={"paper-size": "a2"})
 
 
+def test_list_fonts_reports_specs_that_actually_resolve(tmp_path):
+    """The list exists so a name can be pasted into font=.
+
+    Read from the evaluator's own FreeType index, not the windowing
+    toolkit's -- a system font database names faces differently, which is
+    the whole reason BelfrySCAD #379 asked for a list.
+    """
+    from openscad_cpp_evaluator import Evaluator, list_fonts
+
+    fonts = list_fonts()
+    assert fonts, "no fonts at all, not even the bundled ones"
+    for f in fonts:
+        assert set(f) == {"family", "style", "spec", "path"}
+
+    bundled = {f["style"]: f for f in fonts if f["family"] == "Liberation Sans"}
+    assert {"Regular", "Bold", "Italic", "Bold Italic"} <= set(bundled)
+    # Regular is written as the bare family: printing the longer form for
+    # it would teach the wrong habit.
+    assert bundled["Regular"]["spec"] == "Liberation Sans"
+    assert bundled["Bold"]["spec"] == "Liberation Sans:style=Bold"
+
+    # ... and every spec resolves to the face it names.
+    src = tmp_path / "fonts.scad"
+    src.write_text("".join(
+        f'echo(fontmetrics(10, "{bundled[style]["spec"]}").font.style);\n'
+        for style in ("Regular", "Bold", "Italic", "Bold Italic")))
+    echoes = []
+    Evaluator(echo_fn=echoes.append).evaluate(str(src), {})
+    assert echoes == ['ECHO: "Regular"', 'ECHO: "Bold"', 'ECHO: "Italic"', 'ECHO: "Bold Italic"']
+
+
 def test_strict_commas_reaches_the_parser(tmp_path):
     """Evaluator.evaluate(strict_commas=True) must survive both hand-written
     parameter lists -- the facade's and the nanobind binding's. The last

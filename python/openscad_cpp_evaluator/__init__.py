@@ -20,7 +20,7 @@ __all__ = [
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
     "FastContinueSignal", "parse_ast", "parse_ast_string", "format_source",
     "check_mesh", "strip_slivers",
-    "export_model", "export_extensions",
+    "export_model", "export_extensions", "list_fonts",
 ]
 
 
@@ -340,6 +340,23 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
                                        pdf_options))
     except Exception as e:
         raise EvalError(str(e)) from e
+
+
+def list_fonts() -> list:
+    """Every font `text()`/`textmetrics()`/`fontmetrics()` can resolve.
+
+    A list of dicts with `family`, `style`, `spec` and `path`. `spec` is
+    the exact string to put in `font=`, which is the point of asking:
+    the name a system font dialog shows is often not the name OpenSCAD
+    takes, and this list comes from the same FreeType index the text
+    functions match against. `path` is `"<bundled>"` for the faces
+    shipped with this package.
+
+    Scans the system font directories, so it costs real time on a machine
+    with many fonts -- call it when someone asks to see the list, not on
+    a hot path.
+    """
+    return list(_ext.list_fonts())
 
 
 def export_extensions() -> list:

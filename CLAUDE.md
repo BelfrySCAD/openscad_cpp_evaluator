@@ -276,7 +276,16 @@ OpenSCAD's `detect_properties()`/`detect_script()` does by hand.
 `resolveFont()` never fails. An unmatched family falls back to the bundled Liberation Sans
 (`resources/fonts/`, embedded into the binary by `cmake/embed_font.cmake`, byte-identical to the
 Python reference's own bundled font), which is both the default and the last-resort fallback — so
-`text()` draws something even on a machine with no fonts installed at all. That mirrors
+`text()` draws something even on a machine with no fonts installed at all.
+**All four styles are bundled** (Regular, Bold, Italic, Bold Italic), and they are seeded into the
+face index ahead of anything installed, so `style=` resolves the same way on every machine.
+Bundling only Regular meant a `style=Bold` nothing installed could satisfy fell silently back to
+Regular — `fontmetrics(10, "Liberation Sans:style=bold")` then reported Regular's numbers under
+the name the script asked for (BelfrySCAD #381). A bundled entry's `path` is the sentinel
+`"<bundled>"` and its `faceIndex` is the already-open handle, so `resolveFont` opens no file for it.
+`FreetypeFontProvider::listFonts()` returns every resolvable face (family, style, path), sorted and
+deduplicated by family+style — reached from Python as `list_fonts()`, which adds the exact `font=`
+spec for each. It is the only call here that forces the system scan the rest of the class defers. That mirrors
 fontconfig's own never-fails matching, and so real OpenSCAD's: a missing font silently becomes the
 nearest available one rather than an error.
 
@@ -288,6 +297,14 @@ variable real OpenSCAD reads). Family match is case-insensitive and required; st
 *preference* — exact, then substring, then Regular, then the family's first face — because
 dropping to Regular beats falling through to an unrelated family, which is what fontconfig does
 too.
+
+**`font` is a POSITIONAL argument in both metrics functions**, and so is everything after it:
+`fontmetrics(size, font)` and `textmetrics(text, size, font, direction, language, script, halign,
+valign, spacing)`. Verified against the 2026.02.01 binary rather than read off a doc page. Having
+`font` name-only meant `fontmetrics(10, "Liberation Sans:style=Bold")` — how the bug report was
+written, and how real OpenSCAD reads it — was taken as *no font at all*, so the default face was
+measured and reported under the requested name. That was the visible half of BelfrySCAD #381; the
+bundled-styles gap above was the other.
 
 `text_metrics.hpp`/`.cpp` holds the shared layout math (`measureText`/`textAlignOffset`) used by
 both `text()` (`builtins/text.cpp`) and `textmetrics()`/`fontmetrics()` (`function_builtins.cpp`).
