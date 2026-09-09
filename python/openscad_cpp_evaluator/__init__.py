@@ -123,8 +123,11 @@ class RootScope:
 
 class _CSGNode:
     """One resolved (and, after evaluate(), generated) node in the CSG tree --
-    mirrors the reference's CSGNode dataclass. `bodies` is a list of already-
-    converted ColoredBody dicts (see bodyToDict on the C++ side); `params` is
+    mirrors the reference's CSGNode dataclass. `bodies` is always empty since
+    v1.17.0: an inner node's bodies are released as soon as its parent has
+    consumed them, and converting every node's mesh to numpy on every
+    evaluate() was work nothing read (format_csg_tree() prints structure,
+    not geometry; the rendered bodies come back separately). `params` is
     plain Python data (numbers/strings/bools/lists/dicts/OscObject), never an
     AST pointer -- eagerly converted, no lifetime tie to the Evaluator that
     produced it. Used by format_csg_tree(); not otherwise part of the public

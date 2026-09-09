@@ -1633,3 +1633,30 @@ TEST(Union3dColor, SimplifyDropsPerTriangleColoursRatherThanKeepingStaleOnes) {
         EXPECT_EQ(b.triColors->size(), b.body->GetMeshGL().triVerts.size() / 3);
     }
 }
+
+// ColoredBody::knownEmpty: the emptiness test asks Manifold once and the
+// answer rides along on the copies a transform makes, so a transform chain
+// never materialises its child just to be asked "are you empty?". An empty
+// body stays exempt from the dimension rules however deep it is buried.
+TEST(MixedDimensions, EmptyBodyUnderTransformsStillDoesNotFixTheDimension) {
+    EXPECT_TRUE(dimWarnings("union() { square(4); "
+                            "translate([0,0,1]) rotate(10) scale(2) difference() { cube(1); cube(3, center=true); } }")
+                    .empty());
+    Evaluated e = evalSrc("translate([1,0,0]) translate([0,1,0]) cube(1);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    // Set by the inner translate's own dimension check on the cube, then
+    // carried through both transforms' struct copies.
+    ASSERT_TRUE(e.bodies[0].knownEmpty.has_value());
+    EXPECT_FALSE(*e.bodies[0].knownEmpty);
+}
+
+TEST(CsgTree, InnerNodeBodiesAreReleasedOnceTheParentHasConsumedThem) {
+    Evaluated e = evalSrc("translate([1,0,0]) union() { cube(1); sphere(1); }");
+    ASSERT_EQ(e.tree.size(), 1u);
+    EXPECT_EQ(e.tree[0]->bodies.size(), 1u);
+    ASSERT_EQ(e.tree[0]->children.size(), 1u);
+    EXPECT_TRUE(e.tree[0]->children[0]->bodies.empty());
+    for (const auto& leaf : e.tree[0]->children[0]->children) EXPECT_TRUE(leaf->bodies.empty());
+    Evaluated plain = evalSrc("union() { cube(1); sphere(1); }"); // the union really was consumed first
+    EXPECT_NEAR(e.bodies[0].body->Volume(), plain.bodies[0].body->Volume(), 1e-9);
+}

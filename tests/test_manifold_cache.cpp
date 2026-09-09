@@ -183,23 +183,22 @@ TEST(ManifoldCacheClosure, TwoClosuresOverOneLiteralAreNotServedEachOthersGeomet
 // -- cache reuse -----------------------------------------------------------
 
 TEST(ManifoldCache, CacheHitSkipsRegeneratingTheSubtree) {
-    // Read through the children: a hit serves the whole subtree at once, so
-    // the child is never generated and its own .bodies stays empty while
-    // the parent's is populated. (idToNode is no longer a proxy for this --
-    // restampCachedIds() populates it on a hit too, on purpose, or nothing
-    // served from cache would be selectable.)
+    // generatedNodeCount is the proxy: a hit serves the whole subtree at
+    // once, so nothing is generated. (Neither idToNode nor a child's own
+    // .bodies can tell any more -- restampCachedIds() populates the former
+    // on a hit too, on purpose, and an inner node's bodies are released as
+    // soon as its parent has consumed them, hit or miss.)
     const char* src = "translate([1,0,0]) cube(5, center=true);";
     auto cache = std::make_shared<ManifoldCache>();
 
     Evaluated first = evalSrcWithCache(src, cache);
     ASSERT_EQ(first.tree.size(), 1u);
     ASSERT_EQ(first.tree[0]->children.size(), 1u);
-    EXPECT_FALSE(first.tree[0]->children[0]->bodies.empty()) << "the cube really was generated";
+    EXPECT_EQ(first.ev.generatedNodeCount, 2u) << "the translate and the cube really were generated";
 
     Evaluated second = evalSrcWithCache(src, cache);
     ASSERT_EQ(second.tree.size(), 1u);
-    ASSERT_EQ(second.tree[0]->children.size(), 1u);
-    EXPECT_TRUE(second.tree[0]->children[0]->bodies.empty())
+    EXPECT_EQ(second.ev.generatedNodeCount, 0u)
         << "a cache hit regenerated the subtree it was supposed to replace";
 
     ASSERT_EQ(second.bodies.size(), 1u);

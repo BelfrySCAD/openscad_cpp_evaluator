@@ -223,8 +223,9 @@ nb::dict idSpansToDict(const std::vector<IdSpan>& idSpans) {
     return d;
 }
 
-// CSGNode -> a facade `_CSGNode` (kind/params/bodies/is_builtin/children),
-// recursively, eagerly converting every field to plain Python data. No
+// CSGNode -> a facade `_CSGNode` (kind/params/is_builtin/children; `bodies`
+// is always empty, see below), recursively, eagerly converting every field
+// to plain Python data. No
 // lifetime extension needed -- CSGParams (Value-only, see csg_node.hpp) and
 // ColoredBody never hold AST pointers, so the result is fully self-contained
 // once built, unlike CSGNode::node itself (deliberately not exposed: the AST
@@ -234,15 +235,14 @@ nb::dict idSpansToDict(const std::vector<IdSpan>& idSpans) {
 nb::object csgNodeToPy(const oscadeval::CSGNode& node) {
     nb::dict params;
     for (const auto& [k, v] : node.params) params[nb::str(k.c_str())] = valueToPy(v);
+    // Deliberately no bodies. This used to GetMeshGL() every body of every
+    // node in the tree into numpy on every evaluate() -- and the only
+    // consumer, format_csg_tree(), never read them. Since v1.17.0 an inner
+    // node's bodies are released once its parent has consumed them (see
+    // generateTreeImpl), so there is nothing here to convert anyway; and a
+    // body the tree still holds may be a LAZY Manifold whose GetMeshGL()
+    // would materialise the very transform that release exists to avoid.
     nb::list bodies;
-    for (const oscadeval::ColoredBody& cb : node.bodies) {
-        if (!cb.isDisplayOnly() && (!cb.body || cb.body->IsEmpty())) continue;
-        // ColoredBody here is const in this walk (tree ownership stays with
-        // the caller) -- GetMeshGL() itself is logically read-only, so a
-        // const_cast here is safe/local, mirroring bodyToDict's mutating
-        // signature only because manifold3d's own API isn't const-qualified.
-        bodies.append(bodyToDict(const_cast<oscadeval::ColoredBody&>(cb)));
-    }
     nb::list children;
     for (const std::unique_ptr<oscadeval::CSGNode>& child : node.children) children.append(csgNodeToPy(*child));
     return facadeAttr("_CSGNode")(node.kind, params, bodies, node.isBuiltin, children);

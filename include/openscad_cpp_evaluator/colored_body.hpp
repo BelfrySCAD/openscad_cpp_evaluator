@@ -53,6 +53,22 @@ struct ColoredBody {
     BodyRole role = BodyRole::Normal;
     std::optional<std::vector<std::array<float, 4>>> triColors; // per-triangle RGBA, multi-color CSG merges only
 
+    // Whether `body` is empty, once anything has asked (isEmptyBody,
+    // csg_generate.cpp). Asking Manifold is not free: every accessor goes
+    // through GetImpl(), which MATERIALIZES a lazy transform (a full copy of
+    // the mesh and its collider) and, for a boolean, runs it. Emptiness is
+    // invariant under transforms and colour, and every generate function
+    // that produces a genuinely new body starts from a fresh ColoredBody,
+    // so a copy carrying this flag is always still right. Before this, the
+    // dimension check at every tree level materialised every child at
+    // every level: fractal_tree.scad held 72,929 transformed copies of its
+    // 1024 leaf meshes at once (3.1GB).
+    std::optional<bool> knownEmpty;
+    // Same idea for Manifold::Status(), which the booleans consult to keep an
+    // invalid operand from poisoning a union: validity is transform-invariant
+    // too, and a boolean of valid operands is valid.
+    std::optional<manifold::Manifold::Error> knownStatus;
+
     // Set ONLY when a mesh could not be built into a valid Manifold -- in
     // practice a polyhedron() whose faces don't close the surface (it has
     // boundary edges), which Manifold reports by returning an *empty* body
@@ -74,6 +90,33 @@ struct ColoredBody {
 
     bool isDisplayOnly() const { return rawMesh.has_value(); }
 };
+
+// The cached questions -- see ColoredBody::knownEmpty. Ask Manifold once per
+// body, never once per tree level.
+inline bool bodyIsEmpty(ColoredBody& b) {
+    if (!b.knownEmpty) b.knownEmpty = !b.body || b.body->IsEmpty();
+    return *b.knownEmpty;
+}
+inline manifold::Manifold::Error bodyStatus(ColoredBody& b) {
+    if (!b.knownStatus) b.knownStatus = b.body ? b.body->Status() : manifold::Manifold::Error::NoError;
+    return *b.knownStatus;
+}
+
+// Emptiness of a union, from its operands' own flags and nothing else:
+// non-empty if any operand is known non-empty, empty if every one is known
+// empty, otherwise unknown (asked of Manifold later, if anyone ever asks).
+// `get` maps a range element to its ColoredBody.
+template <typename Range, typename Get>
+std::optional<bool> unionEmptyOf(const Range& ops, Get get) {
+    bool allKnownEmpty = true;
+    for (const auto& o : ops) {
+        const ColoredBody& b = get(o);
+        if (b.knownEmpty && !*b.knownEmpty) return false;
+        if (!b.knownEmpty) allKnownEmpty = false;
+    }
+    if (allKnownEmpty) return true;
+    return std::nullopt;
+}
 
 // `EvalContext::color`/CSGParams round-trip: a resolve function reads
 // ctx.color (double-precision, matching Value's own numeric type) but a
