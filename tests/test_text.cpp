@@ -379,3 +379,30 @@ TEST(FontArgs, TheLaterPositionalsLineUpToo) {
     ASSERT_EQ(echoes.size(), 1u);
     EXPECT_EQ(echoes[0], "ECHO: true, true");
 }
+
+TEST(TextArgs, FontIsPositionalButTheRestAreNot) {
+    // text("Hi", 10, "Liberation Sans:style=Bold") silently drew the
+    // DEFAULT face: `font` was name-only, so the third argument went
+    // nowhere. Same defect as BelfrySCAD #381's, in the module people
+    // actually use.
+    //
+    // And only `font`: the reference accepts nothing after it
+    // positionally, which was measured rather than assumed --
+    // `text("Hi", 10, "F", "center")` is not centred in OpenSCAD
+    // 2026.02.01, while halign="center" is. textmetrics() differs from
+    // text() here, taking all nine positionally.
+    std::vector<std::string> echoes;
+    Evaluated e = evalSrc(
+        "p = render() { linear_extrude(1) text(\"Hi\", 10, \"Liberation Sans:style=Bold\"); };\n"
+        "n = render() { linear_extrude(1) text(\"Hi\", 10, font=\"Liberation Sans:style=Bold\"); };\n"
+        "d = render() { linear_extrude(1) text(\"Hi\", 10); };\n"
+        "h = render() { linear_extrude(1) text(\"Hi\", 10, \"Liberation Sans\", \"center\"); };\n"
+        "hn = render() { linear_extrude(1) text(\"Hi\", 10, \"Liberation Sans\", halign=\"center\"); };\n"
+        "echo(p.volume == n.volume, p.volume == d.volume, h.boundingbox == d.boundingbox,"
+        " hn.boundingbox == d.boundingbox);\n",
+        [&](const std::string& m) { echoes.push_back(m); });
+    ASSERT_EQ(echoes.size(), 1u);
+    // positional == named, positional != default, a 4th positional does
+    // NOTHING, and halign by name does move it.
+    EXPECT_EQ(echoes[0], "ECHO: true, false, true, false");
+}

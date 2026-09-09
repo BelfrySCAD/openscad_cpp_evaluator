@@ -298,6 +298,13 @@ variable real OpenSCAD reads). Family match is case-insensitive and required; st
 dropping to Regular beats falling through to an unrelated family, which is what fontconfig does
 too.
 
+**`text()` takes `font` positionally too — and NOTHING after it.** `text(text, size, font)` is the
+positional set; `halign`/`valign`/`spacing`/`direction`/`language`/`script` are name-only, because
+that is what the 2026.02.01 binary does: `text("Hi", 10, "F", "center")` is not centred there while
+`halign="center"` is, measured by bounding box. So **`text()` and `textmetrics()` genuinely differ**
+— the latter takes all nine positionally — and neither can be assumed from the other. `font` being
+name-only made `text("Hi", 10, "Liberation Sans:style=Bold")` silently draw the default face.
+
 **`font` is a POSITIONAL argument in both metrics functions**, and so is everything after it:
 `fontmetrics(size, font)` and `textmetrics(text, size, font, direction, language, script, halign,
 valign, spacing)`. Verified against the 2026.02.01 binary rather than read off a doc page. Having
