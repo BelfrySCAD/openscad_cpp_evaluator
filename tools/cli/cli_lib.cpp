@@ -352,6 +352,7 @@ int runCli(const std::vector<std::string>& args, std::istream& in, std::ostream&
             Evaluator evaluator([&out](const std::string& msg) { out << msg << "\n"; }, nullptr, nullptr, hooks,
                                  /*profiling=*/!profilePath.empty());
             if (repl) repl->attachEvaluator(evaluator); // lets "child" read Evaluator::lastChildrenPositions()
+            evaluator.setUsedFileGlobals(used.usedFileGlobals);
             EvalContext ctx = EvalContext::makeRoot(used.rootScope.get());
 
             std::vector<ColoredBody> bodies;

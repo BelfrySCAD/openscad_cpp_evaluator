@@ -87,6 +87,12 @@ ResolvedUseScopes resolveUseScopesInto(const std::vector<const oscad::ASTNode*>&
         for (auto& sc : nested.usedFileScopes) result.usedFileScopes.push_back(std::move(sc));
         result.usedFileScopes.push_back(std::move(nested.rootScope));
         if (!libInjected.empty()) reanchor.emplace_back(std::move(libInjected), result.usedFileScopes.back().get());
+        for (auto& g : nested.usedFileGlobals) result.usedFileGlobals.push_back(std::move(g));
+        UsedFileGlobals globals{result.usedFileScopes.back().get(), {}};
+        for (const oscad::ASTNode* n : nested.ownNodesFiltered) {
+            if (n->kind() == oscad::NodeKind::Assignment) globals.assignments.push_back(n);
+        }
+        result.usedFileGlobals.push_back(std::move(globals));
     }
 
     for (const oscad::ASTNode* nodePtr : ownNodes) {

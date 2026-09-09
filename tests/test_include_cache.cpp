@@ -34,6 +34,7 @@ std::vector<std::string> echoesOf(const std::filesystem::path& path) {
     oscad::ParsedProgram program = oscad::getProgramFromFile(path.string());
     ResolvedUseScopes used = resolveUseScopes(program.nodes, path.string(), log);
     Evaluator ev(log);
+    ev.setUsedFileGlobals(used.usedFileGlobals);
     EvalContext ctx = EvalContext::makeRoot(used.rootScope.get());
     ev.evaluate(used.processedNodes, ctx, {}, /*generate=*/false);
     return echoes;
@@ -116,6 +117,7 @@ TEST(IncludeCache, ADerivedContextKeepsTheScopeTable) {
     oscad::ParsedProgram program = oscad::getProgramFromFile(top.string());
     ResolvedUseScopes used = resolveUseScopes(program.nodes, top.string(), log);
     Evaluator ev(log);
+    ev.setUsedFileGlobals(used.usedFileGlobals);
     EvalContext ctx = EvalContext::makeRoot(used.rootScope.get());
     ASSERT_NE(ctx.scopeTable, nullptr);
 

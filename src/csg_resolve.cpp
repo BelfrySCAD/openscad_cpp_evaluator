@@ -216,6 +216,7 @@ std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTreeImpl(const NodeList&
     treeStack_.emplace_back();
     rootCtx_ = &ctx;
     lastCtx_ = &ctx;
+    usedFileCtx_.clear();
     // Cleared here, not just guarded by inResolvePass_ below, so a host
     // that reuses one Evaluator across separate top-level resolveTree()/
     // evaluate() calls (each against a freshly re-parsed AST -- the normal
