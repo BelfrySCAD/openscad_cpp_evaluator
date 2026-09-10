@@ -1483,8 +1483,12 @@ than the current pause point). Ported identically (same qualifier syntax, same e
 ## Coverage
 
 `Evaluator(coverage=true)` records which parts of a run's source actually executed and
-fills `coverageResult` (bindings: `Evaluator(coverage=True)` → `ev.coverage_result`, a list of
-dicts `origin/line/column/start/end/kind/arm/hits`). The vocabulary is fixed in one place,
+fills `coverageResult`: `spans` (one per coverable node), `files` (one `CoverageFileSummary`
+per origin, sorted: statements/branches/bodies/spans, each with a hit count and a percent;
+`branches` counts Branch spans plus arm Statements, `percent` is over every span) and `total`
+(the same over every file). `summarizeCoverage()` is public so an aggregated span list can be
+re-summarised. Bindings: `Evaluator(coverage=True)` → `ev.coverage_result`, a dict
+`{spans, files, total}` of plain dicts. The vocabulary is fixed in one place,
 `coverage.hpp`/`coverage.cpp`, and used by both the recorder and the universe walk, so
 "covered" and "uncovered" never disagree about what counts:
 

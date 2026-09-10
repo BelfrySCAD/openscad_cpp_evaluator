@@ -5,6 +5,8 @@
 #include "openscad_cpp_parser/ast/module_instantiation.hpp"
 #include "openscad_cpp_parser/ast/vector_element.hpp"
 
+#include <algorithm>
+#include <map>
 #include <unordered_set>
 
 namespace oscadeval {
@@ -357,7 +359,39 @@ CoverageResult buildCoverageResult(const std::vector<const ASTNode*>& roots,
         result.spans.push_back(CoverageSpan{p.origin, p.line, p.column, p.start_offset, p.end_offset, c.kind, c.arm,
                                             recorder.hitsFor(*c.node)});
     }
+    summarizeCoverage(result);
     return result;
+}
+
+void summarizeCoverage(CoverageResult& result) {
+    std::map<std::string, CoverageFileSummary> files;
+    CoverageFileSummary total;
+    const auto add = [](CoverageFileSummary& f, const CoverageSpan& s) {
+        const bool hit = s.hits > 0;
+        ++f.spans;
+        f.spans_hit += hit;
+        if (s.kind == CoverageKind::Statement) {
+            ++f.statements;
+            f.statements_hit += hit;
+        }
+        if (s.kind == CoverageKind::Branch || s.arm) {
+            ++f.branches;
+            f.branches_hit += hit;
+        }
+        if (s.kind == CoverageKind::Body) {
+            ++f.bodies;
+            f.bodies_hit += hit;
+        }
+    };
+    for (const CoverageSpan& s : result.spans) {
+        CoverageFileSummary& f = files[s.origin];
+        f.origin = s.origin;
+        add(f, s);
+        add(total, s);
+    }
+    result.files.clear();
+    for (auto& [origin, f] : files) result.files.push_back(std::move(f));
+    result.total = total;
 }
 
 } // namespace oscadeval

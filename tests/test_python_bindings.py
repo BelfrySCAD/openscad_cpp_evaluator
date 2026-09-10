@@ -844,8 +844,17 @@ def test_coverage_reports_statements_arms_and_bodies():
     """)
     ev = Evaluator(coverage=True)
     ev.evaluate(path, generate=False)
-    spans = ev.coverage_result
+    result = ev.coverage_result
+    assert set(result) == {"spans", "files", "total"}
+    spans = result["spans"]
     assert isinstance(spans, list) and spans
+    (summary,) = result["files"]
+    assert summary["bodies"] == 3 and summary["bodies_hit"] == 2
+    assert summary["branches"] == 2 and summary["branches_hit"] == 1
+    assert summary["branch_percent"] == 50.0
+    assert summary["spans"] == summary["statements"] + summary["bodies"] + 2
+    assert 0 < summary["percent"] < 100
+    assert result["total"]["spans"] == summary["spans"]
     assert {s["kind"] for s in spans} == {"statement", "branch", "body"}
     by = {(s["line"], s["kind"], s["column"]): s["hits"] for s in spans}
     bodies = {line: hits for (line, kind, _), hits in by.items() if kind == "body"}

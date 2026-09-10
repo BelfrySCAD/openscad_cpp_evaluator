@@ -47,9 +47,32 @@ struct CoverageSpan {
     std::uint32_t hits = 0;
 };
 
-struct CoverageResult {
-    std::vector<CoverageSpan> spans; // one per coverable node, source order per tree
+// Per-file totals. "branches" counts Branch spans plus arm Statements (an
+// if/else arm is a branch too); those arm statements are ALSO in
+// "statements", since a statement count should be a statement count.
+// "percent" is over every span in the file, whatever its kind.
+struct CoverageFileSummary {
+    std::string origin;
+    std::uint32_t statements = 0, statements_hit = 0;
+    std::uint32_t branches = 0, branches_hit = 0;
+    std::uint32_t bodies = 0, bodies_hit = 0;
+    std::uint32_t spans = 0, spans_hit = 0;
+    double percent() const { return spans ? 100.0 * spans_hit / spans : 100.0; }
+    double statement_percent() const { return statements ? 100.0 * statements_hit / statements : 100.0; }
+    double branch_percent() const { return branches ? 100.0 * branches_hit / branches : 100.0; }
+    double body_percent() const { return bodies ? 100.0 * bodies_hit / bodies : 100.0; }
 };
+
+struct CoverageResult {
+    std::vector<CoverageSpan> spans;         // one per coverable node, source order per tree
+    std::vector<CoverageFileSummary> files;  // one per origin, sorted by origin
+    CoverageFileSummary total;               // every file together (origin empty)
+};
+
+// The per-file and total summaries for `spans`; buildCoverageResult calls
+// this, and a merged/aggregated span list (BelfrySCAD's --test --coverage)
+// can call it again.
+void summarizeCoverage(CoverageResult& result);
 
 class CoverageRecorder {
 public:

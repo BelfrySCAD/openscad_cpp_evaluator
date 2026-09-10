@@ -433,8 +433,28 @@ nb::list exportModelPy(const std::string& path, const Geometry& geom, const std:
     return out;
 }
 
+nb::dict coverageSummaryToPy(const oscadeval::CoverageFileSummary& f) {
+    nb::dict d;
+    d["origin"] = f.origin;
+    d["statements"] = f.statements;
+    d["statements_hit"] = f.statements_hit;
+    d["branches"] = f.branches;
+    d["branches_hit"] = f.branches_hit;
+    d["bodies"] = f.bodies;
+    d["bodies_hit"] = f.bodies_hit;
+    d["spans"] = f.spans;
+    d["spans_hit"] = f.spans_hit;
+    d["percent"] = f.percent();
+    d["statement_percent"] = f.statement_percent();
+    d["branch_percent"] = f.branch_percent();
+    d["body_percent"] = f.body_percent();
+    return d;
+}
+
 nb::object coverageResultToPy(const std::optional<oscadeval::CoverageResult>& cr) {
     if (!cr) return nb::none();
+    nb::list files;
+    for (const oscadeval::CoverageFileSummary& f : cr->files) files.append(coverageSummaryToPy(f));
     nb::list out;
     for (const oscadeval::CoverageSpan& s : cr->spans) {
         nb::dict d;
@@ -448,7 +468,11 @@ nb::object coverageResultToPy(const std::optional<oscadeval::CoverageResult>& cr
         d["hits"] = s.hits;
         out.append(d);
     }
-    return out;
+    nb::dict result;
+    result["spans"] = out;
+    result["files"] = files;
+    result["total"] = coverageSummaryToPy(cr->total);
+    return result;
 }
 
 nb::object evaluate(const std::string& path, nb::dict viewportParams,
@@ -934,9 +958,11 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           nb::arg("coverage") = false,
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit, "
           "geometry, coverage_result).\n"
-          "coverage=True records which statements, branch arms and bodies ran: coverage_result is a list of "
-          "dicts (origin, line, column, start, end, kind, arm, hits), one per coverable node of every file the "
-          "run touched, or None when off.\n"
+          "coverage=True records which statements, branch arms and bodies ran: coverage_result is a dict "
+          "{spans, files, total}: spans is a list of dicts (origin, line, column, start, end, kind, arm, hits), "
+          "one per coverable node of every file the run touched; files is one summary per origin, sorted "
+          "(statements/statements_hit, branches/branches_hit, bodies/bodies_hit, spans/spans_hit and the four "
+          "percent fields); total is the same over every file. None when off.\n"
           "generate=False stops after the resolve pass: the script runs and reports everything "
           "it normally would, but no Manifold geometry is built, and neither bodies nor csg_tree "
           "are populated.\n\n"

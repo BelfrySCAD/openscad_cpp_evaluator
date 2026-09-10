@@ -168,6 +168,32 @@ TEST(Coverage, VmAndInterpreterAgree) {
     }
 }
 
+TEST(Coverage, PerFilePercentages) {
+    const CoverageResult r = cover(
+        "function f(x) = x > 0 ? 1 : 2;\n"   // body hit; arms: 1 of 2
+        "module unused() { cube(1); }\n"    // body 0, its statement 0
+        "a = f(1);\n"                        // statement hit
+        "if (a == 1) sphere(1); else cube(1);\n"); // if hit, arms: 1 of 2
+    ASSERT_EQ(r.files.size(), 1u);
+    const CoverageFileSummary& f = r.files[0];
+    EXPECT_EQ(f.bodies, 2u);
+    EXPECT_EQ(f.bodies_hit, 1u);
+    EXPECT_EQ(f.statements, 5u) << "cube in unused, a, if, sphere arm, cube arm";
+    EXPECT_EQ(f.statements_hit, 3u);
+    EXPECT_EQ(f.branches, 4u) << "two ternary arms + two if arms";
+    EXPECT_EQ(f.branches_hit, 2u);
+    EXPECT_EQ(f.spans, 9u);
+    EXPECT_EQ(f.spans_hit, 5u);
+    EXPECT_NEAR(f.percent(), 100.0 * 5 / 9, 1e-9);
+    EXPECT_NEAR(f.statement_percent(), 60.0, 1e-9);
+    EXPECT_NEAR(f.branch_percent(), 50.0, 1e-9);
+    EXPECT_NEAR(f.body_percent(), 50.0, 1e-9);
+    EXPECT_EQ(r.total.spans, f.spans);
+    EXPECT_EQ(r.total.spans_hit, f.spans_hit);
+    CoverageFileSummary empty;
+    EXPECT_EQ(empty.percent(), 100.0) << "nothing to cover is fully covered, not a divide by zero";
+}
+
 TEST(Coverage, IncludedAndUsedFilesCarryTheirOwnOrigin) {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / "oscad_cov_test";
@@ -197,6 +223,11 @@ TEST(Coverage, IncludedAndUsedFilesCarryTheirOwnOrigin) {
     EXPECT_EQ(body("used.scad", 2), 1u);
     EXPECT_EQ(body("used.scad", 3), 0u);
     EXPECT_EQ(statements["used.scad"], 1u) << "the used file's own global is in the universe";
+    std::map<std::string, double> pct;
+    for (const CoverageFileSummary& f : ev.coverageResult->files) pct[fs::path(f.origin).filename().string()] = f.body_percent();
+    EXPECT_EQ(pct.size(), 3u) << "main, include and used file each get a summary";
+    EXPECT_NEAR(pct["inc.scad"], 50.0, 1e-9);
+    EXPECT_NEAR(pct["used.scad"], 50.0, 1e-9);
     fs::remove_all(dir);
 }
 

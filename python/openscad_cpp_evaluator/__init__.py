@@ -543,10 +543,13 @@ class Evaluator:
         self._coverage = coverage
         self.csg_tree = []
         self.profile_result = None
-        # coverage=True: after evaluate(), a list of dicts (origin, line,
-        # column, start, end, kind, arm, hits), one per coverable node --
-        # statement, branch arm, or function/module body -- of every file
-        # the run touched. None when off. See coverage.hpp.
+        # coverage=True: after evaluate(), {"spans": [...], "files": [...],
+        # "total": {...}}. spans: one dict (origin, line, column, start, end,
+        # kind, arm, hits) per coverable node -- statement, branch arm, or
+        # function/module body -- of every file the run touched. files: one
+        # summary per origin, sorted, with counts and percentages per kind
+        # and overall; total: the same over every file. None when off. See
+        # coverage.hpp.
         self.coverage_result = None
         self.dyn = {}
         self.dyn_explicit = set()
