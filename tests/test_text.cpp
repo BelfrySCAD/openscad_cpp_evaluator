@@ -380,6 +380,22 @@ TEST(FontArgs, TheLaterPositionalsLineUpToo) {
     EXPECT_EQ(echoes[0], "ECHO: true, true");
 }
 
+TEST(TextArgs, StyleWithoutFamilyStylesTheDefaultFace) {
+    // font=":style=bold" -- BOSL2's text3d() example 2 -- drew Regular:
+    // no family, so resolveFont handed back the default handle and never
+    // looked at the style (BelfrySCAD #405). It means the default family
+    // in bold, the same face "Liberation Sans:style=Bold" names.
+    std::vector<std::string> echoes;
+    evalSrc(
+        "b = render() { linear_extrude(1) text(\"Hi\", 10, font=\":style=bold\"); };\n"
+        "n = render() { linear_extrude(1) text(\"Hi\", 10, font=\"Liberation Sans:style=Bold\"); };\n"
+        "d = render() { linear_extrude(1) text(\"Hi\", 10); };\n"
+        "echo(b.volume == n.volume, b.volume == d.volume);\n",
+        [&](const std::string& m) { echoes.push_back(m); });
+    ASSERT_EQ(echoes.size(), 1u);
+    EXPECT_EQ(echoes[0], "ECHO: true, false");
+}
+
 TEST(TextArgs, FontIsPositionalButTheRestAreNot) {
     // text("Hi", 10, "Liberation Sans:style=Bold") silently drew the
     // DEFAULT face: `font` was name-only, so the third argument went

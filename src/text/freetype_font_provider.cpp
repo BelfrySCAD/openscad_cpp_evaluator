@@ -238,8 +238,15 @@ FreetypeFontProvider::FreetypeFontProvider() : impl_(std::make_unique<Impl>()) {
 FreetypeFontProvider::~FreetypeFontProvider() = default;
 
 FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
-    const FontSpec parsed = parseFontSpec(spec);
-    if (parsed.families.empty()) return 0;
+    FontSpec parsed = parseFontSpec(spec);
+    if (parsed.families.empty()) {
+        // font=":style=bold" -- a style with no family names the DEFAULT
+        // family in that style, which is what fontconfig does with it and
+        // what BOSL2's text3d() example relies on (BelfrySCAD #405).
+        // Returning handle 0 here silently drew Regular.
+        if (parsed.style.empty()) return 0;
+        parsed.families.push_back(impl_->faces[0].metrics.family);
+    }
 
     const auto cached = impl_->bySpec.find(spec);
     if (cached != impl_->bySpec.end()) return cached->second;
