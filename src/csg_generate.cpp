@@ -338,28 +338,68 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
         manifold::MeshGL mesh = cb.body->GetMeshGL();
         if (mesh.runOriginalID.empty()) continue;
         std::unordered_map<uint32_t, uint32_t> remap;
-        for (uint32_t& id : mesh.runOriginalID) {
+        // fresh ID -> the colour its triangles carried, multi-colour
+        // bodies only; what triColors is rebuilt from below.
+        std::unordered_map<uint32_t, std::array<float, 4>> runColor;
+        for (size_t run = 0; run < mesh.runOriginalID.size(); ++run) {
+            uint32_t& id = mesh.runOriginalID[run];
             auto found = remap.find(id);
             if (found == remap.end()) {
                 const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
                 auto old = idToNode.find(id);
                 idToNode[fresh] =
                     (old != idToNode.end() && old->second != producer) ? old->second : &node;
+                // The colour has to be re-recorded too, or a later merge
+                // cannot tell this body's runs apart from uncoloured ones
+                // (attachTriColors looks runs up here). Across renders
+                // the old ID was minted by an earlier Evaluator and this
+                // one's idToColor has never heard of it, so the cached
+                // body itself is the record: its own colour, or for a
+                // multi-colour merge the colour its triangles carry. This
+                // is what made `difference() { color("orange") cube();
+                // color("cyan") cylinder(); ... }` lose the cyan on the
+                // first re-render after an edit and go flat orange on the
+                // next (BelfrySCAD #412) -- every cached operand looked
+                // uncoloured, so the merge saw nothing to distinguish.
                 auto color = idToColor.find(id);
-                if (color != idToColor.end()) idToColor[fresh] = color->second;
+                if (color != idToColor.end()) {
+                    idToColor[fresh] = color->second;
+                } else if (cb.triColors && run + 1 < mesh.runIndex.size() &&
+                           mesh.runIndex[run] / 3 < cb.triColors->size()) {
+                    // ponytail: a run whose triangles carry the default
+                    // fallback colour reads back as that explicit colour
+                    // rather than "follow the theme"; the tint is the same.
+                    idToColor[fresh] = (*cb.triColors)[mesh.runIndex[run] / 3];
+                } else {
+                    idToColor[fresh] = cb.color;
+                }
+                if (cb.triColors && run + 1 < mesh.runIndex.size() &&
+                    mesh.runIndex[run] / 3 < cb.triColors->size()) {
+                    runColor[fresh] = (*cb.triColors)[mesh.runIndex[run] / 3];
+                }
                 found = remap.emplace(id, fresh).first;
             }
             id = found->second;
         }
-        const size_t trisBefore = mesh.triVerts.size() / 3;
         cb.body = manifold::Manifold(mesh);
         // Rebuilding a Manifold from a mesh can clean it up (degenerate
-        // triangles merged away), and triColors is indexed by triangle. An
-        // array that no longer matches is worse than none: the renderer
-        // masks its vertex arrays with it and raises IndexError rather
-        // than drawing anything at all.
-        if (cb.triColors && cb.body && cb.body->GetMeshGL().triVerts.size() / 3 != trisBefore) {
-            cb.triColors.reset();
+        // triangles merged away), and triColors is indexed by triangle, so
+        // the old array no longer lines up. The RUNS survive the rebuild,
+        // and each run's colour was just recorded, so the array is
+        // rebuilt from them rather than dropped -- dropping it turned a
+        // fully cached multi-colour difference() flat (BelfrySCAD #412).
+        if (cb.triColors && cb.body) {
+            const manifold::MeshGL rebuilt = cb.body->GetMeshGL();
+            const size_t numTris = rebuilt.triVerts.size() / 3;
+            std::vector<std::array<float, 4>> triColors(numTris, cb.color.value_or(kDefaultGeometryColor));
+            for (size_t i = 0; i + 1 < rebuilt.runIndex.size() && i < rebuilt.runOriginalID.size(); ++i) {
+                auto it = runColor.find(rebuilt.runOriginalID[i]);
+                if (it == runColor.end()) continue;
+                const size_t start = rebuilt.runIndex[i] / 3;
+                const size_t end = std::min<size_t>(rebuilt.runIndex[i + 1] / 3, numTris);
+                for (size_t t = start; t < end; ++t) triColors[t] = it->second;
+            }
+            cb.triColors = std::move(triColors);
         }
     }
 }

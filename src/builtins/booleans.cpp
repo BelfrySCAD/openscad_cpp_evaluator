@@ -150,14 +150,6 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
 
 namespace {
 
-// Matches the reference's own SceneRenderer._default_color -- shown for
-// geometry with no explicit color() override. ColoredBody::color normally
-// stays nullopt for uncolored geometry so a live renderer can resolve it
-// against its own color theme, but a per-triangle triColors override has
-// no such live-resolution mechanism, so a concrete fallback is needed here
-// specifically.
-constexpr std::array<float, 4> kDefaultGeometryColor{0.9f, 0.85f, 0.1f, 1.0f};
-
 // After a real boolean merge, `cb.color` is just one arbitrary child's
 // color (the first contributing operand above) -- every other child's own
 // color is otherwise lost, e.g. union()-ing an opaque cube with a
