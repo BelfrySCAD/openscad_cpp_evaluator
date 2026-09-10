@@ -23,6 +23,11 @@ enum class BodyRole { Normal, Highlight, Background, ShowOnly };
 // `role`/`triColors` are later-phase fields (modifier tagging -- Phase 3;
 // multi-color CSG merges -- Phase 3/8) included now so the struct shape
 // doesn't need reworking when those land.
+// The colour drawn for geometry with no explicit color() wherever a live
+// theme cannot be consulted -- per-triangle colour arrays, which are baked.
+// Matches the reference's SceneRenderer._default_color.
+inline constexpr std::array<float, 4> kDefaultGeometryColor{0.9f, 0.85f, 0.1f, 1.0f};
+
 struct ColoredBody {
     std::optional<manifold::Manifold> body;
     std::optional<std::array<float, 4>> color; // RGBA; nullopt = "no explicit color() -- follow the live theme"

@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <numbers>
 #include <set>
@@ -325,6 +326,46 @@ TEST(ManifoldCache, ACachedMultiPartSubtreeKeepsOneIdPerPart) {
         for (uint32_t id : mesh.runOriginalID) all.insert(id);
     }
     EXPECT_EQ(all.size(), 4u) << "parts of the reused subtree share IDs";
+}
+
+namespace {
+// Distinct RGB triples a body's triangles carry (its flat colour if it has
+// no per-triangle colours).
+std::set<std::array<float, 3>> distinctColors(const ColoredBody& cb) {
+    std::set<std::array<float, 3>> out;
+    if (cb.triColors) {
+        for (const auto& c : *cb.triColors) out.insert({c[0], c[1], c[2]});
+    } else if (cb.color) {
+        out.insert({(*cb.color)[0], (*cb.color)[1], (*cb.color)[2]});
+    }
+    return out;
+}
+} // namespace
+
+TEST(ManifoldCache, CachedOperandsKeepTheirColoursInALaterMerge) {
+    // BelfrySCAD #412: edit one subtrahend's colour and re-render with the
+    // cache shared, as the GUI does. The unchanged operands are cache hits
+    // and their run colours were never re-recorded, so the merge saw them
+    // as uncoloured: first re-render lost the cyan, the next (every
+    // operand cached) collapsed to flat orange.
+    const std::string a =
+        "difference() { color(\"orange\") cube(20, center=true);"
+        " color(\"cyan\") cylinder(30, r=8, center=true, $fn=24);"
+        " color(\"magenta\") rotate([0,90,0]) cylinder(30, r=8, center=true, $fn=24); }";
+    const std::string b = [&] { std::string s = a; s.replace(s.find("magenta"), 7, "green"); return s; }();
+
+    const std::set<std::array<float, 3>> wantB = distinctColors(evalSrc(b).bodies[0]);
+    ASSERT_EQ(wantB.size(), 3u);
+
+    auto cache = std::make_shared<ManifoldCache>();
+    evalSrcWithCache(a, cache);
+    EXPECT_EQ(distinctColors(evalSrcWithCache(b, cache).bodies[0]), wantB) << "first re-render";
+    EXPECT_EQ(distinctColors(evalSrcWithCache(b, cache).bodies[0]), wantB) << "fully cached";
+    // And a cached multi-colour body merged again keeps every colour.
+    Evaluated wrapped = evalSrcWithCache("union() { " + b + " translate([30,0,0]) color(\"red\") cube(5); }", cache);
+    std::set<std::array<float, 3>> wantWrapped = wantB;
+    wantWrapped.insert({1.0f, 0.0f, 0.0f});
+    EXPECT_EQ(distinctColors(wrapped.bodies[0]), wantWrapped);
 }
 
 TEST(ManifoldCache, OutputIsIdenticalCacheOnVsCacheOffAcrossBuiltinCategories) {

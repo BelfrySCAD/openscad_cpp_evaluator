@@ -36,7 +36,6 @@ std::vector<std::array<float, 4>> distinctColors(const std::vector<std::array<fl
     return out;
 }
 
-constexpr std::array<float, 4> kDefaultGeometryColor{0.9f, 0.85f, 0.1f, 1.0f};
 
 } // namespace
 
