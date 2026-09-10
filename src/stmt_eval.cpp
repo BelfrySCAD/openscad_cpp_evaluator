@@ -314,6 +314,15 @@ void Evaluator::evalChildren(const std::vector<const oscad::ASTNode*>& children,
             // ASSIGNMENTS instead -- checking here as well would produce
             // one extra stop the reference never fires.
             const oscad::NodeKind k = child->kind();
+            // Coverage counts every statement executed, exactly once per
+            // execution, here in the one loop that runs interpreted
+            // statements; the compiled paths emit Op::Cover per statement
+            // (compileOneStatement, tryCompileAssignmentBlock) so the two
+            // agree. Not in checkDebug: the debugger checkpoints an if-arm's
+            // first statement twice and the `if` itself never.
+            if (k != oscad::NodeKind::ModuleDeclaration && k != oscad::NodeKind::FunctionDeclaration) {
+                coverHit(*child);
+            }
             if (k != oscad::NodeKind::ModuleDeclaration && k != oscad::NodeKind::FunctionDeclaration &&
                 k != oscad::NodeKind::ModularLet) {
                 checkDebug(*child, childCtx);

@@ -29,6 +29,7 @@ add_executable(oscad_eval_tests
   test_zip_stored.cpp
   test_include_cache.cpp
   test_use.cpp
+  test_coverage.cpp
   test_extrude_roof.cpp
   test_surface.cpp
   test_dxf_svg_import.cpp

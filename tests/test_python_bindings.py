@@ -832,3 +832,36 @@ def test_strict_commas_does_not_leak_between_evaluations(tmp_path):
     with pytest.raises(EvalError):
         Evaluator(echo_fn=lambda _m: None).evaluate(str(src), {}, strict_commas=True)
     Evaluator(echo_fn=lambda _m: None).evaluate(str(src), {})   # must not raise
+
+
+def test_coverage_reports_statements_arms_and_bodies():
+    path = _write("""
+        function f(x) = x > 0 ? 1 : 2;
+        module used() { cube(1); }
+        module unused() { sphere(1); }
+        a = f(1);
+        used();
+    """)
+    ev = Evaluator(coverage=True)
+    ev.evaluate(path, generate=False)
+    result = ev.coverage_result
+    assert set(result) == {"spans", "files", "total"}
+    spans = result["spans"]
+    assert isinstance(spans, list) and spans
+    (summary,) = result["files"]
+    assert summary["bodies"] == 3 and summary["bodies_hit"] == 2
+    assert summary["branches"] == 2 and summary["branches_hit"] == 1
+    assert summary["branch_percent"] == 50.0
+    assert summary["spans"] == summary["statements"] + summary["bodies"] + 2
+    assert 0 < summary["percent"] < 100
+    assert result["total"]["spans"] == summary["spans"]
+    assert {s["kind"] for s in spans} == {"statement", "branch", "body"}
+    by = {(s["line"], s["kind"], s["column"]): s["hits"] for s in spans}
+    bodies = {line: hits for (line, kind, _), hits in by.items() if kind == "body"}
+    assert bodies[2] == 1 and bodies[3] == 1 and bodies[4] == 0
+    branches = sorted(hits for (_, kind, _), hits in by.items() if kind == "branch")
+    assert branches == [0, 1]          # the false arm never, the true arm once
+    assert all(k in spans[0] for k in ("origin", "line", "column", "start", "end", "kind", "arm", "hits"))
+    assert Evaluator().coverage_result is None
+    off = Evaluator(); off.evaluate(path, generate=False)
+    assert off.coverage_result is None

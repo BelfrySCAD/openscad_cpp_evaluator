@@ -26,6 +26,7 @@
 #include "openscad_cpp_evaluator/freetype_font_provider.hpp"
 #include "openscad_cpp_evaluator/mesh_check.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
+#include "openscad_cpp_evaluator/coverage.hpp"
 #include "openscad_cpp_evaluator/profile.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
 
@@ -432,9 +433,51 @@ nb::list exportModelPy(const std::string& path, const Geometry& geom, const std:
     return out;
 }
 
+nb::dict coverageSummaryToPy(const oscadeval::CoverageFileSummary& f) {
+    nb::dict d;
+    d["origin"] = f.origin;
+    d["statements"] = f.statements;
+    d["statements_hit"] = f.statements_hit;
+    d["branches"] = f.branches;
+    d["branches_hit"] = f.branches_hit;
+    d["bodies"] = f.bodies;
+    d["bodies_hit"] = f.bodies_hit;
+    d["spans"] = f.spans;
+    d["spans_hit"] = f.spans_hit;
+    d["percent"] = f.percent();
+    d["statement_percent"] = f.statement_percent();
+    d["branch_percent"] = f.branch_percent();
+    d["body_percent"] = f.body_percent();
+    return d;
+}
+
+nb::object coverageResultToPy(const std::optional<oscadeval::CoverageResult>& cr) {
+    if (!cr) return nb::none();
+    nb::list files;
+    for (const oscadeval::CoverageFileSummary& f : cr->files) files.append(coverageSummaryToPy(f));
+    nb::list out;
+    for (const oscadeval::CoverageSpan& s : cr->spans) {
+        nb::dict d;
+        d["origin"] = s.origin;
+        d["line"] = s.line;
+        d["column"] = s.column;
+        d["start"] = s.start_offset;
+        d["end"] = s.end_offset;
+        d["kind"] = oscadeval::coverageKindName(s.kind);
+        d["arm"] = s.arm;
+        d["hits"] = s.hits;
+        out.append(d);
+    }
+    nb::dict result;
+    result["spans"] = out;
+    result["files"] = files;
+    result["total"] = coverageSummaryToPy(cr->total);
+    return result;
+}
+
 nb::object evaluate(const std::string& path, nb::dict viewportParams,
                      std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile,
-                     bool generate, bool strictCommas) {
+                     bool generate, bool strictCommas, bool coverage) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
@@ -442,6 +485,7 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
     std::vector<IdSpan> idSpans;
     std::vector<std::unique_ptr<oscadeval::CSGNode>> csgTree;
     std::optional<oscadeval::ProfileResult> profileResult;
+    std::optional<oscadeval::CoverageResult> coverageResult;
     nb::dict dyn;
     nb::object dynExplicit;
     {
@@ -456,7 +500,7 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
             if (strictCommas) strict.emplace();
             oscad::ParsedProgram program = oscad::getProgramFromFile(path);
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(program.nodes, path, logFn);
-            oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile);
+            oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile, coverage);
             ev.setUsedFileGlobals(used.usedFileGlobals);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp, generate));
@@ -466,6 +510,7 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
             // which a resolve-only caller has no use for.
             if (generate) csgTree = std::move(ev.csgTree);
             profileResult = std::move(ev.profileResult);
+            coverageResult = std::move(ev.coverageResult);
             {
                 nb::gil_scoped_acquire g; // building Python objects needs the GIL back
                 std::tie(dyn, dynExplicit) = dynStateToPy(ctx);
@@ -495,7 +540,7 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
     auto geom = std::make_shared<Geometry>();
     geom->bodies = std::move(bodies);
     return nb::make_tuple(bodiesToList(geom->bodies), echoList, idSpansToDict(idSpans), csgTreeToPy(csgTree),
-                           profileResultToPy(profileResult), dyn, dynExplicit, geom);
+                           profileResultToPy(profileResult), dyn, dynExplicit, geom, coverageResultToPy(coverageResult));
 }
 
 // ------------------------------------------------------------------------
@@ -910,7 +955,14 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
 
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
           nb::arg("profile") = false, nb::arg("generate") = true, nb::arg("strict_commas") = false,
-          "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit).\n"
+          nb::arg("coverage") = false,
+          "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit, "
+          "geometry, coverage_result).\n"
+          "coverage=True records which statements, branch arms and bodies ran: coverage_result is a dict "
+          "{spans, files, total}: spans is a list of dicts (origin, line, column, start, end, kind, arm, hits), "
+          "one per coverable node of every file the run touched; files is one summary per origin, sorted "
+          "(statements/statements_hit, branches/branches_hit, bodies/bodies_hit, spans/spans_hit and the four "
+          "percent fields); total is the same over every file. None when off.\n"
           "generate=False stops after the resolve pass: the script runs and reports everything "
           "it normally would, but no Manifold geometry is built, and neither bodies nor csg_tree "
           "are populated.\n\n"

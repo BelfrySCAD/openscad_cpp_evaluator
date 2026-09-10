@@ -728,6 +728,12 @@ enum class Op {
     // on failure, otherwise runs any chained node.children natively (rare;
     // not worth its own compiled path -- see AssertSite's own doc comment).
     AssertStatement,
+    // a = nativeStatements index of the AST node whose arm this is. Emitted
+    // only when the Evaluator was built with coverage on (compile-time
+    // flag, and chunks are per-Evaluator): Evaluator::coverHit(node), nothing
+    // else. Marks the arms the debugger never checkpoints in compiled code
+    // -- ternary arms, comprehension if/else arms, `&&`/`||` right operands.
+    Cover,
 };
 
 struct Instruction {

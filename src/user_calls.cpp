@@ -11,7 +11,7 @@ namespace oscadeval {
 const CompiledChunk* Evaluator::lookupOrCompileChunk(const oscad::FunctionDeclaration& decl) {
     auto it = chunkCache_.find(&decl);
     if (it == chunkCache_.end()) {
-        it = chunkCache_.emplace(&decl, tryCompileFunction(decl, scopeTable_)).first;
+        it = chunkCache_.emplace(&decl, tryCompileFunction(decl, scopeTable_, coverage_)).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second) return nullptr;
@@ -33,7 +33,7 @@ const CompiledChunk* Evaluator::lookupCompiledLiteralChunk(const oscad::Function
 const CompiledChunk* Evaluator::lookupOrCompileModuleChunk(const oscad::ModuleDeclaration& decl) {
     auto it = moduleChunkCache_.find(&decl);
     if (it == moduleChunkCache_.end()) {
-        it = moduleChunkCache_.emplace(&decl, tryCompileModuleBody(decl, scopeTable_)).first;
+        it = moduleChunkCache_.emplace(&decl, tryCompileModuleBody(decl, scopeTable_, coverage_)).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second) return nullptr;
@@ -52,7 +52,7 @@ Value Evaluator::evalExprMaybeCompiled(const oscad::Expression& node, EvalContex
     if (!useBytecodeVm() || !inResolvePass_) return evalExpr(node, ctx);
     auto it = stmtExprChunkCache_.find(&node);
     if (it == stmtExprChunkCache_.end()) {
-        it = stmtExprChunkCache_.emplace(&node, tryCompileStatementExpr(node, scopeOfNode(node), scopeTable_)).first;
+        it = stmtExprChunkCache_.emplace(&node, tryCompileStatementExpr(node, scopeOfNode(node), scopeTable_, coverage_)).first;
         // A zero-capture closure literal (e.g. `x = function(y) y + 1;`)
         // still reaches chunk.nestedLiterals even though it never touches
         // closureSites (see tryCompileStatementExpr's own doc comment: only
@@ -74,7 +74,7 @@ bool Evaluator::tryRunCompiledAssignmentBlock(const std::vector<const oscad::AST
         std::vector<const oscad::Assignment*> assigns;
         assigns.reserve(assignments.size());
         for (const oscad::ASTNode* n : assignments) assigns.push_back(static_cast<const oscad::Assignment*>(n));
-        it = assignBlockChunkCache_.emplace(first, tryCompileAssignmentBlock(assigns, scopeTable_, scopeOfNode(*first))).first;
+        it = assignBlockChunkCache_.emplace(first, tryCompileAssignmentBlock(assigns, scopeTable_, scopeOfNode(*first), coverage_)).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second || !chunkEligibleNow(*it->second)) return false;
@@ -102,7 +102,7 @@ const CompiledChunk* Evaluator::lookupOrCompileChildrenListChunk(const std::vect
     const auto key = std::make_pair(first, children.size());
     auto it = childrenListChunkCache_.find(key);
     if (it == childrenListChunkCache_.end()) {
-        it = childrenListChunkCache_.emplace(key, tryCompileChildrenList(children, scopeTable_, scopeOfNode(*first))).first;
+        it = childrenListChunkCache_.emplace(key, tryCompileChildrenList(children, scopeTable_, scopeOfNode(*first), coverage_)).first;
         if (it->second) flattenNestedLiterals(*it->second);
     }
     if (!it->second || !chunkEligibleNow(*it->second)) return nullptr;
@@ -489,6 +489,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
             auto& n = static_cast<const oscad::TernaryOp&>(node);
             checkDebug(n, ctx);
             const oscad::Expression* branch = truthy(evalExpr(*n.condition, ctx)) ? n.trueExpr.get() : n.falseExpr.get();
+            coverHit(*branch); // the tail trampoline bypasses evalExpr's own TernaryOp case
             checkDebug(*branch, ctx, /*forced=*/false, /*exprLevel=*/true);
             TailStep step;
             step.nextExpr = branch;
@@ -727,6 +728,7 @@ Evaluator::UserCallHandle Evaluator::enterUserCall(const std::string& name, cons
     UserCallHandle h;
     h.kind = kind;
     h.declNode = &declNode;
+    coverHit(declNode); // Body coverage: this declaration was entered
     if (!skipDepthGuard) {
         ++nativeUserCallDepth_;
         h.countedTowardNativeDepth = true;

@@ -532,7 +532,7 @@ class Evaluator:
     """
 
     def __init__(self, echo_fn=None, debug_hook=None, error_break_fn=None, return_hook=None,
-                 manifold_cache=None, profile=False, fast_continue_signal=None):
+                 manifold_cache=None, profile=False, fast_continue_signal=None, coverage=False):
         self._echo_fn = echo_fn
         self._debug_hook = debug_hook
         self._error_break_fn = error_break_fn
@@ -540,8 +540,17 @@ class Evaluator:
         self._manifold_cache = manifold_cache
         self._profile = profile
         self._fast_continue_signal = fast_continue_signal
+        self._coverage = coverage
         self.csg_tree = []
         self.profile_result = None
+        # coverage=True: after evaluate(), {"spans": [...], "files": [...],
+        # "total": {...}}. spans: one dict (origin, line, column, start, end,
+        # kind, arm, hits) per coverable node -- statement, branch arm, or
+        # function/module body -- of every file the run touched. files: one
+        # summary per origin, sorted, with counts and percentages per kind
+        # and overall; total: the same over every file. None when off. See
+        # coverage.hpp.
+        self.coverage_result = None
         self.dyn = {}
         self.dyn_explicit = set()
 
@@ -583,9 +592,9 @@ class Evaluator:
                 self.geometry = None
             else:
                 (body_dicts, echoes, id_spans, csg_tree, profile_result, dyn,
-                 dyn_explicit, geometry) = _ext.evaluate(
+                 dyn_explicit, geometry, coverage_result) = _ext.evaluate(
                     source_path, vp, self._manifold_cache, self._profile, generate,
-                    strict_commas)
+                    strict_commas, self._coverage)
                 # The evaluated bodies, still on the C++ side. Stashed like
                 # csg_tree/profile_result rather than returned, so
                 # evaluate()'s own 2-tuple result is unchanged -- callers
@@ -598,6 +607,7 @@ class Evaluator:
                         self._echo_fn(line)
                 self.csg_tree = csg_tree
                 self.profile_result = profile_result
+                self.coverage_result = coverage_result
             self.dyn = dyn
             self.dyn_explicit = dyn_explicit
         except EvalError:

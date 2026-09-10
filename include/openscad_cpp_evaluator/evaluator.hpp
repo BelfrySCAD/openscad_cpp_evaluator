@@ -8,6 +8,7 @@
 #include "openscad_cpp_evaluator/debug_hooks.hpp"
 #include "openscad_cpp_evaluator/eval_context.hpp"
 #include "openscad_cpp_evaluator/eval_use.hpp"
+#include "openscad_cpp_evaluator/coverage.hpp"
 #include "openscad_cpp_evaluator/eval_error.hpp"
 #include "openscad_cpp_evaluator/font_provider.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
@@ -84,7 +85,7 @@ public:
     // work at all.
     explicit Evaluator(EchoFn echoFn = {}, std::shared_ptr<FontProvider> fontProvider = nullptr,
                         std::shared_ptr<ManifoldCache> manifoldCache = nullptr, DebugHooks debugHooks = {},
-                        bool profiling = false);
+                        bool profiling = false, bool coverage = false);
 
     // Text/font builtins' shared access to the resolved FontProvider
     // (lazily constructing the built-in default on first call if none was
@@ -659,6 +660,22 @@ public:
     // resolve+generate bracket evaluate() itself runs). Mirrors the
     // reference's Evaluator.profile_result.
     std::optional<ProfileResult> profileResult;
+    // Filled by evaluate() when constructed with coverage=true: one span per
+    // coverable node of every tree the run touched, with its hit count.
+    // See coverage.hpp for the vocabulary.
+    std::optional<CoverageResult> coverageResult;
+
+    bool coverageEnabled() const { return coverage_; }
+    // Called once per statement execution (evalChildren on the interpreter
+    // side, Op::Cover on the compiled side), once per body entry
+    // (enterUserCall), and once per branch arm taken (ternary, comprehension
+    // if/else, `&&`/`||` right operand). Deliberately NOT from checkDebug:
+    // the debugger's checkpoints double up on an if-arm's first statement
+    // and never land on the `if` itself. Free when coverage is off: one
+    // predictable branch.
+    void coverHit(const oscad::ASTNode& node) {
+        if (coverage_) coverageRecorder_.hit(node);
+    }
 
     // The resolved (and, after evaluate() runs, generated) CSG tree from the
     // most recent evaluate() call -- moved here from evaluateImpl's local
@@ -1984,6 +2001,8 @@ private:
     // -- Profiling (Phase 9) ----------------------------------------------
 
     bool profiling_ = false;
+    bool coverage_ = false;
+    CoverageRecorder coverageRecorder_;
     std::map<ProfileSiteKey, CallSiteProfile> profileSites_;
     std::set<ProfileSiteKey> profileActive_; // site keys with a call currently on callStack_
     std::vector<double> profileChildTime_;   // parallel aux stack to callStack_

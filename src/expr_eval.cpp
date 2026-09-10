@@ -77,9 +77,9 @@ void appendAll(std::vector<Value>& out, std::vector<Value> more) {
 } // namespace
 
 Evaluator::Evaluator(EchoFn echoFn, std::shared_ptr<FontProvider> fontProvider, std::shared_ptr<ManifoldCache> manifoldCache,
-                     DebugHooks debugHooks, bool profiling)
+                     DebugHooks debugHooks, bool profiling, bool coverage)
     : echoFn_(std::move(echoFn)), fontProvider_(std::move(fontProvider)), manifoldCache_(std::move(manifoldCache)),
-      debugHooks_(std::move(debugHooks)), profiling_(profiling) {}
+      debugHooks_(std::move(debugHooks)), profiling_(profiling), coverage_(coverage) {}
 
 FontProvider& Evaluator::fontProvider() {
     if (!fontProvider_) fontProvider_ = std::make_shared<FreetypeFontProvider>();
@@ -290,6 +290,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             auto& n = static_cast<const oscad::ListCompIf&>(elem);
             checkDebug(n, ctx);
             if (truthy(evalExpr(*n.condition, ctx))) {
+                coverHit(*n.trueExpr);
                 checkDebug(*n.trueExpr, ctx, /*forced=*/false, /*exprLevel=*/true);
                 appendAll(out, evalListCompBody(*n.trueExpr, ctx));
             }
@@ -299,6 +300,7 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             auto& n = static_cast<const oscad::ListCompIfElse&>(elem);
             checkDebug(n, ctx);
             const oscad::ASTNode& branch = truthy(evalExpr(*n.condition, ctx)) ? *n.trueExpr : *n.falseExpr;
+            coverHit(branch);
             checkDebug(branch, ctx, /*forced=*/false, /*exprLevel=*/true);
             appendAll(out, evalListCompBody(branch, ctx));
             return;
@@ -548,11 +550,13 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             // (the previous behavior here) broke exactly that idiom.
             auto& n = static_cast<const oscad::LogicalAndOp&>(node);
             if (!truthy(evalExpr(*n.left, ctx))) return Value{false};
+            coverHit(*n.right); // the short-circuited arm, for coverage only
             return Value{truthy(evalExpr(*n.right, ctx))};
         }
         case NodeKind::LogicalOrOp: {
             auto& n = static_cast<const oscad::LogicalOrOp&>(node);
             if (truthy(evalExpr(*n.left, ctx))) return Value{true};
+            coverHit(*n.right);
             return Value{truthy(evalExpr(*n.right, ctx))};
         }
         case NodeKind::LogicalNotOp: {
@@ -594,6 +598,7 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             auto& n = static_cast<const oscad::TernaryOp&>(node);
             checkDebug(n, ctx);
             const oscad::Expression& branch = truthy(evalExpr(*n.condition, ctx)) ? *n.trueExpr : *n.falseExpr;
+            coverHit(branch);
             checkDebug(branch, ctx, /*forced=*/false, /*exprLevel=*/true);
             return evalExpr(branch, ctx);
         }
