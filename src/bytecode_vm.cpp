@@ -1552,6 +1552,10 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     ++f.pc;
                     break;
                 }
+                case Op::Cover:
+                    ev.coverHit(*f.chunk->nativeStatements[static_cast<size_t>(ins.a)]);
+                    ++f.pc;
+                    break;
                 case Op::CheckDebugStatement: {
                     const oscad::ASTNode* stmt = f.chunk->nativeStatements[static_cast<size_t>(ins.a)];
                     ev.checkDebug(*stmt, ctx);

@@ -12,6 +12,7 @@ add_library(openscad_cpp_evaluator STATIC
   colored_body.cpp
   css_colors.cpp
   csg_resolve.cpp
+  coverage.cpp
   csg_generate.cpp
   measure_geometry.cpp
   manifold_cache.cpp

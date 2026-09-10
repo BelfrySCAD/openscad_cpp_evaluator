@@ -260,6 +260,8 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     for (const auto& [k, v] : viewportParams) ctx.dyn->set(k, v);
 
     profileResult.reset();
+    coverageResult.reset();
+    coverageRecorder_.clear();
     profileSites_.clear();
     profileActive_.clear();
     profileChildTime_.clear();
@@ -291,6 +293,15 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
             std::move(sites), profilePaths_, resolveTime, generateTime, resolveTime + generateTime,
             std::max(0.0, resolveTime - selfSum),
         };
+    }
+
+    if (coverage_) {
+        std::vector<const oscad::ASTNode*> roots;
+        roots.reserve(nodes.size());
+        for (const auto& n : nodes) roots.push_back(&*n);
+        std::vector<const oscad::ASTNode*> extra;
+        for (const UsedFileGlobals& g : usedFileGlobals_) extra.insert(extra.end(), g.assignments.begin(), g.assignments.end());
+        coverageResult = buildCoverageResult(roots, extra, coverageRecorder_);
     }
 
     const bool anyShowOnly = std::any_of(result.begin(), result.end(),

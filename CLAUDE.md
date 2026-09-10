@@ -1480,6 +1480,35 @@ than the current pause point). Ported identically (same qualifier syntax, same e
 - `tools/cli/main.cpp` — a 3-line wrapper: builds `args` from `argv`, calls `runCli(args)` with the
   real `std::cin`/`std::cout`/`std::cerr`, returns its exit code.
 
+## Coverage
+
+`Evaluator(coverage=true)` records which parts of a run's source actually executed and
+fills `coverageResult` (bindings: `Evaluator(coverage=True)` → `ev.coverage_result`, a list of
+dicts `origin/line/column/start/end/kind/arm/hits`). The vocabulary is fixed in one place,
+`coverage.hpp`/`coverage.cpp`, and used by both the recorder and the universe walk, so
+"covered" and "uncovered" never disagree about what counts:
+
+- **statement** — every node in a statement list (top level, module/if/for/let bodies,
+  `render()` children). A modifier (`%`/`#`/`!`/`*`) is the statement; the call it wraps is
+  not one of its own. The first statement of an if/else arm carries `arm=true`.
+- **branch** — a ternary arm, a comprehension if/else arm, the right operand of `&&`/`||`.
+- **body** — a function, module or function-literal declaration: was it ever entered?
+
+Hits are recorded at deliberate points, once per execution: `evalChildren`'s statement loop
+and `Op::Cover` (emitted per statement by `compileOneStatement`/`tryCompileAssignmentBlock`
+and at every arm, only when the Evaluator was built with coverage — chunks are per-Evaluator)
+on the two paths; `enterUserCall` for bodies; the arm sites in `evalExpr`, the tail
+trampoline (`simplifyTailStep`, which bypasses `evalExpr`'s own TernaryOp case) and the
+comprehension if/else cases. **Not** from `checkDebug`: the debugger checkpoints an if-arm's
+first statement twice and the `if` itself never, so piggybacking on it gave counts that
+differed between the VM and the interpreter. `Coverage.VmAndInterpreterAgree` compares the
+covered set under both and is the test that keeps them honest. The VM stays on under
+coverage (unlike a debug hook). The hit table is indexed by the node's `(treeId, slot)`
+numbering, so a hit is an array increment. Used-file globals are in the universe via
+`usedFileGlobals_`; everything else comes from the processed node list with each node's own
+`origin`, so includes and `use`d files report under their own paths. Let-bindings and plain
+comprehension elements are not in the vocabulary; hits on them are simply not reported.
+
 ## `render()` in expression position
 
 `render()` has two jobs, decided by where it is written:
