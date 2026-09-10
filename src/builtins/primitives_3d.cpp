@@ -409,13 +409,20 @@ CSGParams resolveCylinder(Evaluator& ev, const oscad::ModularCall& node, EvalCon
     // per-end r1/r2, then the per-end d1/d2. So `cylinder(h=10, d=8, r1=5)`
     // is r1=5/r2=4, and `cylinder(h=10, r=5, r2=2)` is r1=5/r2=2. Both ends
     // default to 1 independently -- r2 does NOT fall back to r1.
+    //
+    // NUMBERS only, as the reference's isNumber() tests: a stray positional
+    // in a radius slot -- `cylinder(30, r=5, true)`, a mistyped center= --
+    // is ignored, not coerced. Lenient conversion turned that `true` into
+    // r1=1 and drew a cone where OpenSCAD draws the r=5 cylinder
+    // (BelfrySCAD #409).
+    const auto isNum = [](const Value& v) { return std::holds_alternative<double>(v); };
     double r1 = 1.0, r2 = 1.0;
-    if (!isUndef(rV)) r1 = r2 = toDoubleLenient(rV);
-    if (!isUndef(dV)) r1 = r2 = toDoubleLenient(dV) / 2.0;
-    if (!isUndef(r1V)) r1 = toDoubleLenient(r1V);
-    if (!isUndef(r2V)) r2 = toDoubleLenient(r2V);
-    if (!isUndef(d1V)) r1 = toDoubleLenient(d1V) / 2.0;
-    if (!isUndef(d2V)) r2 = toDoubleLenient(d2V) / 2.0;
+    if (isNum(rV)) r1 = r2 = std::get<double>(rV);
+    if (isNum(dV)) r1 = r2 = std::get<double>(dV) / 2.0;
+    if (isNum(r1V)) r1 = std::get<double>(r1V);
+    if (isNum(r2V)) r2 = std::get<double>(r2V);
+    if (isNum(d1V)) r1 = std::get<double>(d1V) / 2.0;
+    if (isNum(d2V)) r2 = std::get<double>(d2V) / 2.0;
 
     const int segs = fnSegmentsFromCtx(effCtx, std::max(r1, r2));
 

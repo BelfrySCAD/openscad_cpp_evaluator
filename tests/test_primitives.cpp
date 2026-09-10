@@ -51,6 +51,19 @@ TEST(Cylinder, StraightCylinderVolumeAndBoundsWhenCentered) {
     EXPECT_NEAR(e.bodies[0].body->Volume(), analytic, analytic * 0.02);
 }
 
+TEST(Cylinder, NonNumericRadiusIsIgnoredNotCoerced) {
+    // cylinder(30, r=5, true): the `true` lands in r1's slot. The reference
+    // applies a radius only if it isNumber(), so this is the r=5 cylinder;
+    // lenient conversion made it a cone from r1=1 (BelfrySCAD #409).
+    Evaluated e = evalSrc("cylinder(30, r=5, true, $fn=32);");
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    const double analytic = std::numbers::pi * 5.0 * 5.0 * 30.0;
+    EXPECT_NEAR(e.bodies[0].body->Volume(), analytic, analytic * 0.02);
+    // Same rule for every radius spelling, and a string is not a number.
+    Evaluated s = evalSrc("cylinder(h=30, r=5, r2=\"7\", $fn=32);");
+    EXPECT_NEAR(s.bodies[0].body->Volume(), analytic, analytic * 0.02);
+}
+
 TEST(Cylinder, UncenteredSitsOnZEqualsZero) {
     Evaluated e = evalSrc("cylinder(h=5, r=1, $fn=16);");
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
