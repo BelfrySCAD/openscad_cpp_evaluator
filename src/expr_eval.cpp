@@ -193,6 +193,7 @@ std::optional<const Value*> Evaluator::fileGlobal(const oscad::Scope& fileRoot, 
         // Source order, once; a read of a later global from an earlier one's
         // initializer finds nothing yet and is undef, as in OpenSCAD.
         for (const oscad::ASTNode* a : globals->assignments) {
+            coverHit(*a); // a used file's globals never pass through evalChildren
             evalAssignment(static_cast<const oscad::Assignment&>(*a), fctx);
         }
         return fctx.let_->find(name);

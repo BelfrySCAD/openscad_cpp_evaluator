@@ -223,6 +223,11 @@ TEST(Coverage, IncludedAndUsedFilesCarryTheirOwnOrigin) {
     EXPECT_EQ(body("used.scad", 2), 1u);
     EXPECT_EQ(body("used.scad", 3), 0u);
     EXPECT_EQ(statements["used.scad"], 1u) << "the used file's own global is in the universe";
+    for (const CoverageSpan& s : ev.coverageResult->spans) {
+        if (s.kind == CoverageKind::Statement && fs::path(s.origin).filename() == "used.scad") {
+            EXPECT_EQ(s.hits, 1u) << "and it ran, eagerly, when used_fn() first read it";
+        }
+    }
     std::map<std::string, double> pct;
     for (const CoverageFileSummary& f : ev.coverageResult->files) pct[fs::path(f.origin).filename().string()] = f.body_percent();
     EXPECT_EQ(pct.size(), 3u) << "main, include and used file each get a summary";
