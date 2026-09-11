@@ -349,6 +349,19 @@ CSGParams resolveTransform(Evaluator& ev, const oscad::ModularCall& node, EvalCo
     return std::move(result.params);
 }
 
+namespace {
+std::shared_ptr<const std::vector<ColoredBody>> transformParts(const std::vector<ColoredBody>& parts,
+                                                                const std::string& name, const CallArgs& args) {
+    std::vector<ColoredBody> out;
+    for (ColoredBody part : parts) {
+        if (part.body) part.body = applyTransform3d(name, args, std::move(*part.body));
+        if (part.mergedFrom) part.mergedFrom = transformParts(*part.mergedFrom, name, args);
+        out.push_back(std::move(part));
+    }
+    return std::make_shared<const std::vector<ColoredBody>>(std::move(out));
+}
+} // namespace
+
 std::vector<ColoredBody> generateTransform(Evaluator&, const CSGParams& params,
                                             const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode&) {
     const std::string& name = std::get<std::string>(params.at("name"));
@@ -391,6 +404,10 @@ std::vector<ColoredBody> generateTransform(Evaluator&, const CSGParams& params,
                 if (std::optional<manifold::mat3x4> m = transformMatrix3d(name, args))
                     transformMeshInPlace(*b.rawMesh, *m);
             }
+            // The unmerged parts of a union move with it (see
+            // ColoredBody::mergedFrom). Recursion through this same
+            // function keeps their own parts moving too.
+            if (b.mergedFrom) b.mergedFrom = transformParts(*b.mergedFrom, name, args);
         }
         result.push_back(std::move(b));
     }

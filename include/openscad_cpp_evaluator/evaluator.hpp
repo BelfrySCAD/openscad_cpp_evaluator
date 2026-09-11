@@ -294,6 +294,22 @@ public:
     std::size_t generatedNodeCount = 0;
     std::unordered_map<uint32_t, std::optional<std::array<float, 4>>> idToColor;
 
+    // Record `rgba` against every run ID of `b`, so a later merge can still
+    // tell the body's triangles apart once the body itself is gone
+    // (attachTriColors looks runs up in idToColor). Cheap for a body that is
+    // still one original; a merged body pays a GetMeshGL().
+    void recordRunColors(ColoredBody& b, const std::optional<std::array<float, 4>>& rgba);
+
+    // difference() keeps the minuend's colour on the faces a subtrahend
+    // exposes, instead of the subtrahend's colour (or the cut green). Off
+    // by default: OpenSCAD paints cut faces with the cutter's colour, and
+    // that is what a script author sees there. A viewer option, not a
+    // language feature -- it is honest for every existing script. Costs one
+    // boolean per coloured minuend part instead of one per difference,
+    // since (A ∪ B) − S = (A − S) ∪ (B − S) is how each part's cut faces get
+    // that part's colour. Cached results are keyed apart per mode.
+    bool keepMinuendColor = false;
+
     // Called by primitive-construction generate functions (cube, sphere,
     // cylinder, polyhedron) right after building a brand-new Manifold:
     // reads back its mesh's runOriginalID run(s) and records each against

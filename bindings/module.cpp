@@ -477,7 +477,7 @@ nb::object coverageResultToPy(const std::optional<oscadeval::CoverageResult>& cr
 
 nb::object evaluate(const std::string& path, nb::dict viewportParams,
                      std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile,
-                     bool generate, bool strictCommas, bool coverage) {
+                     bool generate, bool strictCommas, bool coverage, bool keepMinuendColor) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
@@ -501,6 +501,7 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
             oscad::ParsedProgram program = oscad::getProgramFromFile(path);
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(program.nodes, path, logFn);
             oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile, coverage);
+            ev.keepMinuendColor = keepMinuendColor;
             ev.setUsedFileGlobals(used.usedFileGlobals);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp, generate));
@@ -955,7 +956,7 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
 
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
           nb::arg("profile") = false, nb::arg("generate") = true, nb::arg("strict_commas") = false,
-          nb::arg("coverage") = false,
+          nb::arg("coverage") = false, nb::arg("keep_minuend_color") = false,
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit, "
           "geometry, coverage_result).\n"
           "coverage=True records which statements, branch arms and bodies ran: coverage_result is a dict "

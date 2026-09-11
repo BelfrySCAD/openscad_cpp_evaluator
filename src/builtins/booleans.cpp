@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 
 namespace oscadeval {
 
@@ -199,6 +200,61 @@ void attachTriColors(Evaluator& ev, ColoredBody& cb) {
     cb.triColors = std::move(triColors);
 }
 
+// keepMinuendColor: the leaf parts of a minuend operand -- the operand
+// itself, or what a union() merged it from, recursively.
+void collectKeepParts(const ColoredBody& b, std::vector<ColoredBody>& out) {
+    if (b.mergedFrom) {
+        for (const ColoredBody& part : *b.mergedFrom) collectKeepParts(part, out);
+    } else if (b.body) {
+        out.push_back(b);
+    }
+}
+
+// keepMinuendColor: one minuend part, differenced on its own.
+struct KeepPart {
+    ColoredBody body;
+    std::vector<uint32_t> ownIds;   // run IDs the part was born with; anything else on it afterwards is a cut face
+};
+
+std::vector<uint32_t> runIdsOf(const ColoredBody& b) {
+    const int original = b.body->OriginalID();
+    if (original >= 0) return {static_cast<uint32_t>(original)};
+    return b.body->GetMeshGL().runOriginalID;
+}
+
+// Union the per-part differences back into one body, first re-minting each
+// part's cut-face runs (the subtrahend's IDs, shared by every part's result)
+// under fresh IDs carrying THAT part's colour, so attachTriColors can tell
+// one part's cut faces from another's. The source node stays the
+// subtrahend's: clicking a cut face still finds the tool that made it.
+manifold::Manifold finishKeepMinuend(Evaluator& ev, std::vector<KeepPart>& parts) {
+    std::optional<manifold::Manifold> out;
+    for (KeepPart& part : parts) {
+        if (!part.body.body) continue;
+        manifold::MeshGL mesh = part.body.body->GetMeshGL();
+        if (mesh.triVerts.empty()) continue;
+        std::unordered_map<uint32_t, uint32_t> remap;
+        for (uint32_t& id : mesh.runOriginalID) {
+            if (std::find(part.ownIds.begin(), part.ownIds.end(), id) != part.ownIds.end()) continue;
+            auto found = remap.find(id);
+            if (found == remap.end()) {
+                const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
+                auto node = ev.idToNode.find(id);
+                if (node != ev.idToNode.end()) ev.idToNode[fresh] = node->second;
+                // ponytail: a part that is itself a multi-colour merge
+                // gives its cut faces its first child's colour rather than
+                // the colour of whichever child the cut passed through.
+                ev.idToColor[fresh] = part.body.color;
+                found = remap.emplace(id, fresh).first;
+            }
+            id = found->second;
+        }
+        manifold::Manifold rebuilt(mesh);
+        out = out ? *out + rebuilt : rebuilt;
+    }
+    return out.value_or(manifold::Manifold());
+}
+
 // One colour's worth of 2D result.
 //
 // 3D recovers per-child colour AFTER the merge, from Manifold's own
@@ -286,6 +342,15 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
     // only produce a uniformly coloured result.
     std::optional<std::optional<std::array<float, 4>>> firstColor;
     bool mixedColors = false;
+    // keepMinuendColor: the minuend's parts, each differenced on its own
+    // (see Evaluator::keepMinuendColor). Not while measuring: a render()
+    // expression only wants the volume, which is the same either way.
+    const bool keeping = op == "difference" && ev.keepMinuendColor && !ev.measuring();
+    std::vector<KeepPart> keepParts;
+    // ... and a union() built under that mode remembers what it merged, so
+    // a difference() it is the minuend of can cut each part on its own.
+    const bool rememberParts = op == "union" && ev.keepMinuendColor && !ev.measuring();
+    std::vector<ColoredBody> unionParts;
 
     size_t stmtIndex = 0;
     for (const Value& sizeVal : groupSizes) {
@@ -338,6 +403,20 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
             if (!firstColor) firstColor = c.color;
             else if (*firstColor != c.color) mixedColors = true;
         }
+        // A subtrahend with no colour of its own paints the faces it
+        // exposes the cut green, as the reference does, rather than the
+        // default geometry colour -- otherwise a cut through an uncoloured
+        // part is invisible as a cut. Recorded against its runs, which is
+        // all attachTriColors will have left after the merge; and the
+        // merge must then look, even when every operand's own colour
+        // agrees.
+        if (op == "difference" && res3d && !ev.measuring()) {
+            for (ColoredBody& c : bodies3d) {
+                if (c.color || c.triColors) continue;
+                ev.recordRunColors(c, kCutFaceColor);
+                mixedColors = true;
+            }
+        }
         for (const ColoredBody& c : split.foreground) {
             if (c.section) sections2d.push_back(c);
         }
@@ -377,8 +456,27 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
                 cb.knownStatus = manifold::Manifold::Error::NoError; // every operand was
                 cb.knownEmpty = grpEmpty;
                 res3d = std::move(cb);
+                if (keeping) {
+                    std::vector<ColoredBody> leaves;
+                    for (const ColoredBody& c : bodies3d) collectKeepParts(c, leaves);
+                    for (ColoredBody& leaf : leaves) {
+                        std::vector<uint32_t> ids = runIdsOf(leaf);
+                        keepParts.push_back({std::move(leaf), std::move(ids)});
+                    }
+                }
+                if (rememberParts) {
+                    for (const ColoredBody& c : bodies3d) collectKeepParts(c, unionParts);
+                }
+            } else if (keeping) {
+                // The whole-minuend result above is never evaluated (Manifold
+                // is lazy); finishKeepMinuend replaces it after the loop.
+                for (KeepPart& part : keepParts) part.body.body = *part.body.body - grp;
+                res3d->knownEmpty.reset();
             } else if (op == "union") {
                 res3d->body = *res3d->body + grp;
+                if (rememberParts) {
+                    for (const ColoredBody& c : bodies3d) collectKeepParts(c, unionParts);
+                }
                 if (known(res3d->knownEmpty, false) || known(grpEmpty, false)) res3d->knownEmpty = false;
                 else if (known(res3d->knownEmpty, true) && known(grpEmpty, true)) res3d->knownEmpty = true;
                 else res3d->knownEmpty.reset();
@@ -415,6 +513,14 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         }
     }
 
+    if (res3d && res3d->body && rememberParts && unionParts.size() > 1) {
+        res3d->mergedFrom = std::make_shared<const std::vector<ColoredBody>>(std::move(unionParts));
+    }
+    if (res3d && res3d->body && keeping && !keepParts.empty()) {
+        res3d->body = finishKeepMinuend(ev, keepParts);
+        res3d->knownEmpty.reset();
+        mixedColors = true;   // attachTriColors still no-ops when every run agrees
+    }
     if (res3d && res3d->body && mixedColors) attachTriColors(ev, *res3d);
 
     std::vector<ColoredBody> result;
