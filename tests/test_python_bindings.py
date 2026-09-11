@@ -865,3 +865,14 @@ def test_coverage_reports_statements_arms_and_bodies():
     assert Evaluator().coverage_result is None
     off = Evaluator(); off.evaluate(path, generate=False)
     assert off.coverage_result is None
+
+
+def test_keep_minuend_color_paints_cut_faces_with_the_minuend(tmp_path):
+    src = tmp_path / "keep.scad"
+    src.write_text('difference() { color("orange") cube(20, center=true);'
+                   ' color("cyan") cylinder(30, r=8, center=true, $fn=24); }')
+    plain, _ = Evaluator().evaluate(str(src), {})
+    assert plain[0].tri_colors is not None            # orange faces and cyan cut faces
+    kept, _ = Evaluator(keep_minuend_color=True).evaluate(str(src), {})
+    assert kept[0].tri_colors is None                 # one colour: the minuend's
+    assert all(abs(a - b) < 1e-3 for a, b in zip(kept[0].color[:3], (1.0, 0.647, 0.0)))

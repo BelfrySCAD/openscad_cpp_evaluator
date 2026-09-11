@@ -532,7 +532,8 @@ class Evaluator:
     """
 
     def __init__(self, echo_fn=None, debug_hook=None, error_break_fn=None, return_hook=None,
-                 manifold_cache=None, profile=False, fast_continue_signal=None, coverage=False):
+                 manifold_cache=None, profile=False, fast_continue_signal=None, coverage=False,
+                 keep_minuend_color=False):
         self._echo_fn = echo_fn
         self._debug_hook = debug_hook
         self._error_break_fn = error_break_fn
@@ -541,6 +542,11 @@ class Evaluator:
         self._profile = profile
         self._fast_continue_signal = fast_continue_signal
         self._coverage = coverage
+        # keep_minuend_color=True: difference() paints the faces a
+        # subtrahend exposes with the MINUEND's colour rather than the
+        # subtrahend's (or the cut green). A viewer option; see
+        # Evaluator::keepMinuendColor in evaluator.hpp.
+        self._keep_minuend_color = keep_minuend_color
         self.csg_tree = []
         self.profile_result = None
         # coverage=True: after evaluate(), {"spans": [...], "files": [...],
@@ -594,7 +600,7 @@ class Evaluator:
                 (body_dicts, echoes, id_spans, csg_tree, profile_result, dyn,
                  dyn_explicit, geometry, coverage_result) = _ext.evaluate(
                     source_path, vp, self._manifold_cache, self._profile, generate,
-                    strict_commas, self._coverage)
+                    strict_commas, self._coverage, self._keep_minuend_color)
                 # The evaluated bodies, still on the C++ side. Stashed like
                 # csg_tree/profile_result rather than returned, so
                 # evaluate()'s own 2-tuple result is unchanged -- callers

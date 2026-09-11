@@ -6,6 +6,7 @@
 #include <manifold/manifold.h>
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -27,6 +28,13 @@ enum class BodyRole { Normal, Highlight, Background, ShowOnly };
 // theme cannot be consulted -- per-triangle colour arrays, which are baked.
 // Matches the reference's SceneRenderer._default_color.
 inline constexpr std::array<float, 4> kDefaultGeometryColor{0.9f, 0.85f, 0.1f, 1.0f};
+
+// The colour of a face a difference() exposed when the subtrahend that cut
+// it carried no colour of its own: the reference's CGAL "back face" green,
+// the same one its preview paints and its colour-preserving render (and
+// 3MF export, measured on 2026.02.01) keeps. Distinct from the default
+// geometry colour so a cut reads as a cut.
+inline constexpr std::array<float, 4> kCutFaceColor{157.0f / 255.0f, 203.0f / 255.0f, 81.0f / 255.0f, 1.0f};
 
 struct ColoredBody {
     std::optional<manifold::Manifold> body;
@@ -57,6 +65,16 @@ struct ColoredBody {
                                    manifold::vec3(0, 0, 1), manifold::vec3(0, 0, 0)};
     BodyRole role = BodyRole::Normal;
     std::optional<std::vector<std::array<float, 4>>> triColors; // per-triangle RGBA, multi-color CSG merges only
+
+    // The operands a union() merged into this body, kept unmerged, each as
+    // it was when merged (colour and transforms carried along since --
+    // generateTransform and generateColor map over them). Set only under
+    // Evaluator::keepMinuendColor, where a difference() cuts each part on
+    // its own so its cut faces take THAT part's colour; nothing else reads
+    // it, and any other op that builds a new body from this one drops it.
+    // Shared, never mutated in place: an op that changes it makes a new
+    // vector.
+    std::shared_ptr<const std::vector<ColoredBody>> mergedFrom;
 
     // Whether `body` is empty, once anything has asked (isEmptyBody,
     // csg_generate.cpp). Asking Manifold is not free: every accessor goes

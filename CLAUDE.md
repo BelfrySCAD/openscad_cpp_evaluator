@@ -866,8 +866,33 @@ grep for `ponytail:`.
   And the invariant behind both: **`triColors` must index the body's CURRENT mesh**. The renderer
   masks its vertex arrays with it, so a stale length is an `IndexError` and a blank viewport rather
   than a wrong colour. Anything that re-meshes clears it — `simplify()`, `minkowski_difference()`,
-  and the ID-retag rebuild when the triangle count moves — and `bodyToDict` drops a mismatched array
-  as a backstop for whichever one gets missed next.
+  and `bodyToDict` drops a mismatched array as a backstop for whichever one gets missed next. The
+  ID-retag rebuild on a cache hit (`restampCachedIds`) used to clear it too when the triangle count
+  moved; it now **rebuilds it from the runs**, which survive the rebuild, and **re-records every
+  run's colour against the fresh IDs** from the cached body itself (its `color`, or per run what its
+  `triColors` carry) — this render's `idToColor` has never heard of an ID an earlier render minted,
+  and without it every cached operand looked uncoloured to the next merge: an edited three-colour
+  `difference()` lost the unchanged subtrahend's colour on the first re-render and went flat on the
+  next (BelfrySCAD #412).
+  **An uncoloured subtrahend paints the faces it exposes the cut green** (`kCutFaceColor`,
+  `colored_body.hpp`: #9DCB51, the reference's CGAL back-face green, which its preview shows and its
+  colour-preserving render keeps — measured in a 3MF export from 2026.02.01), recorded against the
+  tool's runs before the merge, and the merge is forced to look even when every operand's own colour
+  agrees. It used to fall to the default geometry colour, so a cut through an uncoloured part could
+  not be seen as a cut. A coloured tool still paints its cut with its own colour, as the reference
+  does.
+  **`Evaluator::keepMinuendColor`** (bindings: `Evaluator(keep_minuend_color=True)`) is the viewer
+  option the reference cannot offer (openscad/openscad#4798 — OpenCSG preview is pixels in a frame
+  buffer): `difference()` paints its cut faces with the **minuend's** colour instead. Since
+  (A ∪ B) − S = (A − S) ∪ (B − S), each minuend part is differenced on its own and its cut-face runs
+  are re-minted under fresh IDs carrying that part's colour (`finishKeepMinuend`, `booleans.cpp`; the
+  source node stays the tool's, so a click on a cut face still finds it), then the parts are unioned.
+  A `union()` built in this mode remembers what it merged (`ColoredBody::mergedFrom`, unmerged and
+  carried through `generateTransform`/`generateColor`/`restampCachedIds`), so `difference() {
+  union() { red; blue; } tool }` cuts red on the red side and blue on the blue side; any op that builds
+  a new body drops the record and that body is one part. Off by default — a viewer option, not a
+  language feature, so it is honest for every existing script — and cache keys are prefixed per
+  mode so the two never serve each other's bodies. Costs one boolean per minuend part.
   **2D cannot use any of that, and keeps colour geometrically instead** (`Part2d`, same file): a
   `CrossSection` is contours, not a mesh, so nothing in it remembers which child an edge came from
   and there is no provenance for `attachTriColors` to read back. So the 2D accumulator holds **one

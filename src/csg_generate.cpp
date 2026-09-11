@@ -46,6 +46,11 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
         std::optional<std::string> key;
         if (manifoldCache_ && !node.uncacheable) {
             key = cacheKey(node);
+            // A difference() built with keepMinuendColor colours its cut
+            // faces differently, so the two modes must never serve each
+            // other's bodies. Prefixing every key (not only differences)
+            // keeps the rule simple; the cache holds both.
+            if (keepMinuendColor) key->insert(0, "keepMinuendColor;");
             // A key that serialized a function literal is not a pure
             // function of content -- it embeds a raw AST address that the
             // next parse can hand out again. Dropping the key here forces
@@ -305,6 +310,26 @@ std::vector<ColoredBody> Evaluator::generatePartialTree() {
     return generateTreeImpl(flat);
 }
 
+namespace {
+std::shared_ptr<const std::vector<ColoredBody>> remapParts(const std::vector<ColoredBody>& parts,
+                                                            const std::unordered_map<uint32_t, uint32_t>& remap) {
+    std::vector<ColoredBody> out;
+    for (ColoredBody part : parts) {
+        if (part.mergedFrom) part.mergedFrom = remapParts(*part.mergedFrom, remap);
+        if (part.body && !part.body->IsEmpty()) {
+            manifold::MeshGL mesh = part.body->GetMeshGL();
+            for (uint32_t& id : mesh.runOriginalID) {
+                auto found = remap.find(id);
+                if (found != remap.end()) id = found->second;
+            }
+            part.body = manifold::Manifold(mesh);
+        }
+        out.push_back(std::move(part));
+    }
+    return std::make_shared<const std::vector<ColoredBody>>(std::move(out));
+}
+} // namespace
+
 void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
                                  const oscad::ASTNode* producer) {
     // A cache hit hands back the geometry AND the originalIDs of whichever
@@ -382,6 +407,10 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
             id = found->second;
         }
         cb.body = manifold::Manifold(mesh);
+        // The unmerged parts a union() remembered (ColoredBody::mergedFrom)
+        // share the merged body's IDs, so the same remap applies to them;
+        // a part left on the old IDs would look uncoloured next to it.
+        if (cb.mergedFrom) cb.mergedFrom = remapParts(*cb.mergedFrom, remap);
         // Rebuilding a Manifold from a mesh can clean it up (degenerate
         // triangles merged away), and triColors is indexed by triangle, so
         // the old array no longer lines up. The RUNS survive the rebuild,
@@ -402,6 +431,19 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
             cb.triColors = std::move(triColors);
         }
     }
+}
+
+
+void Evaluator::recordRunColors(ColoredBody& b, const std::optional<std::array<float, 4>>& rgba) {
+    if (!b.body || bodyIsEmpty(b)) return;
+    // A body that is still one original knows its own ID without building
+    // a mesh -- the common case, and the cheap one.
+    const int original = b.body->OriginalID();
+    if (original >= 0) {
+        idToColor[static_cast<uint32_t>(original)] = rgba;
+        return;
+    }
+    for (uint32_t id : b.body->GetMeshGL().runOriginalID) idToColor[id] = rgba;
 }
 
 ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue) {
