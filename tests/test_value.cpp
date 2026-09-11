@@ -470,8 +470,8 @@ TEST(StringEscapes, BackslashNewlineContributesNothing) {
     // Deliberately unlike the reference implementation, which drops only
     // the LF and leaves the CR in the value -- a stray control character
     // in any string continued in a file written on Windows.
-    EXPECT_EQ(unescapeStringLiteral("a \\\rb"), "a \rb")
-        << "a lone CR is an ordinary escaped character, not a line ending";
+    EXPECT_EQ(unescapeStringLiteral("a \\\rb"), "a b")
+        << "a lone CR is a line ending too (pre-OSX Mac)";
 }
 
 // Both evaluation paths build the Value, and only one of them was reached
@@ -583,11 +583,16 @@ TEST(StringEscapes, ARawNewlineInsideALiteralContributesNothing) {
     EXPECT_EQ(unescapeStringLiteral("x\n  \n  y"), "x    y");
 }
 
-TEST(StringEscapes, ARawCarriageReturnStandsForItself) {
-    // Only the LF is special. A CRLF file therefore leaves the CR in the
-    // string: "x<CR><LF>y" is three characters, not two.
-    EXPECT_EQ(unescapeStringLiteral("x\ry"), "x\ry");
-    EXPECT_EQ(unescapeStringLiteral("x\r\ny"), "x\ry");
+TEST(StringEscapes, ARawCarriageReturnIsALineEndingToo) {
+    // The reference treats only the LF as special, so a string wrapped in
+    // a CRLF file keeps a stray CR there ("x<CR><LF>y" is three characters
+    // on 2026.02.01). Deliberately not reproduced: a raw CR in source is a
+    // line ending in every real file -- CRLF on Windows, a lone CR on a
+    // pre-OSX Mac -- and a script wanting a real CR writes \r.
+    EXPECT_EQ(unescapeStringLiteral("x\r\ny"), "xy");
+    EXPECT_EQ(unescapeStringLiteral("x\ry"), "xy");
+    EXPECT_EQ(unescapeStringLiteral("x\r\n  y"), "x  y") << "indentation is kept";
+    EXPECT_EQ(unescapeStringLiteral("x\\ry"), "x\ry") << "an escaped CR still works";
 }
 
 TEST(StringEscapes, ABackslashBeforeANewlineTakesTheWholeLineEnding) {
@@ -600,5 +605,5 @@ TEST(StringEscapes, ABackslashBeforeANewlineTakesTheWholeLineEnding) {
     // BackslashNewlineContributesNothing above.
     EXPECT_EQ(unescapeStringLiteral("x\\\ny"), "xy");
     EXPECT_EQ(unescapeStringLiteral("x\\\r\ny"), "xy");   // reference keeps the CR
-    EXPECT_EQ(unescapeStringLiteral("x\\\ry"), "x\ry");
+    EXPECT_EQ(unescapeStringLiteral("x\\\ry"), "xy");
 }
