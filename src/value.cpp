@@ -410,24 +410,28 @@ std::string encodeEscapedCodePoint(std::uint32_t cp) {
 std::string unescapeStringLiteral(const std::string& raw) {
     // Most strings need no work at all, and this runs on every evaluation
     // of a literal on the tree-walking path -- so don't build a second copy
-    // unless there is something to change. A bare newline counts as
-    // something to change (see the loop), so it has to open the scan too.
-    const size_t first = raw.find_first_of("\\\n");
+    // unless there is something to change. A bare line ending counts as
+    // something to change (see the loop), so CR and LF open the scan too.
+    const size_t first = raw.find_first_of("\\\n\r");
     if (first == std::string::npos) return raw;
 
     std::string out;
     out.reserve(raw.size());
     out.append(raw, 0, first);
     for (size_t i = first; i < raw.size(); ++i) {
-        // A raw LF inside a string literal contributes NOTHING -- writing a
-        // string across two source lines joins them, keeping the second
-        // line's indentation:
+        // A raw line ending inside a string literal contributes NOTHING --
+        // writing a string across two source lines joins them, keeping the
+        // second line's indentation:
         //     s = "abcd
         //         efgh";      // -> "abcd    efgh", 12 characters
-        // A raw CR is not special and stands for itself, so a CRLF file
-        // leaves the CR behind (len 3 for "x<CR><LF>y"). Both verified on
-        // 2026.02.01.
-        if (raw[i] == '\n') continue;
+        // CR counts as a line ending too, which the reference does not do:
+        // it drops only the LF, so every string wrapped in a file written
+        // on Windows keeps a stray CR (len 3 for "x<CR><LF>y" there, 2
+        // here). A raw CR in source is a line ending in every real file --
+        // CRLF on Windows, a lone CR on a pre-OSX Mac -- and a string that
+        // wants a real CR in it writes \r. Same reasoning as the backslash
+        // continuation below.
+        if (raw[i] == '\n' || raw[i] == '\r') continue;
         if (raw[i] != '\\' || i + 1 >= raw.size()) {
             out.push_back(raw[i]);  // a trailing lone backslash stands for itself
             continue;
@@ -467,18 +471,10 @@ std::string unescapeStringLiteral(const std::string& raw) {
                 ++i;
                 break;
             }
-            case '\n': ++i; break;  // backslash + LF: both go
-            case '\r':
-                // A backslash before CRLF takes the whole line ending.
-                // Deliberately unlike the reference, which treats the
-                // backslash as an undefined escape and keeps the CR --
-                // leaving a stray control character in any string wrapped
-                // in a file written on Windows. See this suite's
-                // BackslashNewlineContributesNothing.
-                if (i + 2 < raw.size() && raw[i + 2] == '\n') { i += 2; break; }
-                out.push_back('\r');
-                ++i;
-                break;
+            // A backslash before a line ending takes the whole thing; any
+            // LF after a CR is dropped by the loop itself.
+            case '\n':
+            case '\r': ++i; break;
             default: out.push_back(next); ++i; break;  // \\ and \" land here too
         }
     }
