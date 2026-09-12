@@ -691,6 +691,14 @@ void Evaluator::recordTailCallHop(const std::string& calleeName, const oscad::AS
     // and never see the NEW one at all.
     noteActiveDeclExit(frame.declNode);
     noteActiveDeclEnter(&calleeDecl);
+    // Body coverage: this declaration was entered, exactly as in
+    // enterUserCall. A hop is the ONLY way into a tail-called body, so
+    // without this a function reached only in tail position reports its
+    // body as never run while its own branch arms report hits -- which
+    // reads as "the condition was not covered but the branches were".
+    // BOSL2's _str_split_recurse is the shape that shows it: recursion
+    // through a ternary arm is a tail call every time.
+    coverHit(calleeDecl);
     frame.name = calleeName;
     frame.declNode = &calleeDecl;
     frame.declPosition = &calleeDecl.position();
