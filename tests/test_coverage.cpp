@@ -168,6 +168,33 @@ TEST(Coverage, VmAndInterpreterAgree) {
     }
 }
 
+// A tail call hops the frame instead of pushing one, so it never reaches
+// enterUserCall -- where the body hit is recorded. A function reached ONLY
+// in tail position therefore reported its body as never run while its own
+// ternary arms reported hits, which reads on screen as "the condition is
+// uncovered but both branches are covered". BOSL2's _str_split_recurse is
+// the shape that shows it: recursion through a ternary arm is a tail call
+// every time.
+TEST(Coverage, TailCalledBodyIsCounted) {
+    const std::string code =
+        "function inner(i) = i == 0 ? \"done\" : inner(i-1);\n"
+        "function tail_caller(i) = inner(i);\n"
+        "echo(tail_caller(2));\n";
+    for (bool useVm : {true, false}) {
+        ScopedVm vm(useVm);
+        const CoverageResult r = cover(code);
+        std::uint32_t innerBody = 0, arms = 0;
+        for (const CoverageSpan& s : r.spans) {
+            if (s.kind == CoverageKind::Body && s.line == 1) innerBody = s.hits;
+            if (s.kind == CoverageKind::Branch && s.line == 1) arms += s.hits;
+        }
+        EXPECT_GT(innerBody, 0u) << (useVm ? "VM" : "interpreter")
+                                 << ": a body reached only by tail calls still ran";
+        EXPECT_EQ(innerBody, arms) << (useVm ? "VM" : "interpreter")
+                                   << ": every entry takes exactly one arm";
+    }
+}
+
 TEST(Coverage, PerFilePercentages) {
     const CoverageResult r = cover(
         "function f(x) = x > 0 ? 1 : 2;\n"   // body hit; arms: 1 of 2
