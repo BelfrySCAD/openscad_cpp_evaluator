@@ -422,3 +422,30 @@ TEST(TextArgs, FontIsPositionalButTheRestAreNot) {
     // NOTHING, and halign by name does move it.
     EXPECT_EQ(echoes[0], "ECHO: true, false, true, false");
 }
+
+namespace oscadeval {
+
+// Why text() must put the font SPEC in its CSG params and not just the
+// handle: a handle numbers faces WITHIN one provider, and every Evaluator
+// makes its own. Two evaluators sharing a ManifoldCache -- two GUI tabs --
+// hand the cache the same number for different fonts (BelfrySCAD#434).
+TEST(FontHandles, AreOnlyMeaningfulWithinOneProvider) {
+    FreetypeFontProvider a, b;
+    const FontHandle aReg = a.resolveFont("Arial:style=Regular");
+    const FontHandle aBold = a.resolveFont("Arial:style=Bold");
+    if (aReg == aBold) {
+        GTEST_SKIP() << "this machine resolves both specs to one face";
+    }
+    EXPECT_NE(aReg, aBold) << "within one provider, two fonts get two handles";
+    // What a second provider numbers them is NOT asserted: it depends on
+    // which faces that machine has and the order they are opened in. On
+    // macOS a fresh provider resolving Bold first returns 4 -- the same
+    // number the first provider gave REGULAR, which is the collision this
+    // whole change is about. On a Linux runner with only the bundled faces
+    // the numbering happens to line up instead (0 and 1 either way). That
+    // it CAN collide is the point, and it is not a property to pin to a
+    // number here; the end-to-end regression test lives in BelfrySCAD,
+    // where the collision reproduces in both directions.
+}
+
+} // namespace oscadeval
