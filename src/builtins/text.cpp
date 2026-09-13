@@ -70,6 +70,16 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     }
 
     CSGParams params;
+    // The handle is what generateText looks the face up by, but it is an
+    // index into THIS evaluator's FontProvider -- the first font resolved
+    // is handle 0 whatever it is. Two evaluators sharing a ManifoldCache
+    // (two tabs in a GUI, say) therefore agreed on "font_handle=0" for
+    // entirely different fonts, and the second render was served the
+    // first one's glyphs. The spec goes in the params too, so the cache
+    // key tells them apart: the same spec always resolves to the same
+    // face, and two specs that happen to resolve alike merely miss the
+    // cache rather than collide.
+    params["font_spec"] = Value{fontSpec};
     params["font_handle"] = Value{static_cast<double>(handle)};
     params["scale"] = Value{scale};
     params["segs"] = Value{static_cast<double>(segs)};

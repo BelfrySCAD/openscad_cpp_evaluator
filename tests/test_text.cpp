@@ -422,3 +422,25 @@ TEST(TextArgs, FontIsPositionalButTheRestAreNot) {
     // NOTHING, and halign by name does move it.
     EXPECT_EQ(echoes[0], "ECHO: true, false, true, false");
 }
+
+namespace oscadeval {
+
+// Why text() must put the font SPEC in its CSG params and not just the
+// handle: a handle numbers faces WITHIN one provider, and every Evaluator
+// makes its own. Two evaluators sharing a ManifoldCache -- two GUI tabs --
+// hand the cache the same number for different fonts (BelfrySCAD#434).
+TEST(FontHandles, AreOnlyMeaningfulWithinOneProvider) {
+    FreetypeFontProvider a, b;
+    const FontHandle aReg = a.resolveFont("Arial:style=Regular");
+    const FontHandle aBold = a.resolveFont("Arial:style=Bold");
+    const FontHandle bBold = b.resolveFont("Arial:style=Bold");
+    if (aReg == aBold) {
+        GTEST_SKIP() << "this machine resolves both specs to one face";
+    }
+    EXPECT_NE(aReg, aBold) << "within one provider, two fonts get two handles";
+    EXPECT_EQ(aReg, bBold)
+        << "across providers the numbering restarts, so a handle alone "
+           "cannot identify a font to a shared cache";
+}
+
+} // namespace oscadeval

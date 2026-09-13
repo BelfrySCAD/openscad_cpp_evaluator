@@ -36,6 +36,28 @@ TEST(ManifoldCacheKey, BoolAndNumberParamsProduceDifferentCacheKeys) {
     EXPECT_NE(cacheKey(a), cacheKey(b));
 }
 
+TEST(ManifoldCacheKey, TwoFontsWithTheSameHandleDoNotShareAKey) {
+    // A FontHandle indexes the EVALUATOR's own FontProvider, so the first
+    // font any evaluator resolves is handle 0 whatever it is. Two
+    // evaluators sharing one ManifoldCache -- two tabs in a GUI -- agreed
+    // on "font_handle=0" for entirely different fonts, and the second was
+    // served the first one's glyphs. text() puts the SPEC in the params
+    // too, so the key tells them apart.
+    CSGNode a;
+    a.kind = "text";
+    a.isBuiltin = true;
+    a.params["font_handle"] = Value{0.0};
+    a.params["font_spec"] = Value{std::string("Arial:style=Regular")};
+
+    CSGNode b;
+    b.kind = "text";
+    b.isBuiltin = true;
+    b.params["font_handle"] = Value{0.0};          // same handle, different font
+    b.params["font_spec"] = Value{std::string("Arial:style=Bold")};
+
+    EXPECT_NE(cacheKey(a), cacheKey(b));
+}
+
 TEST(ManifoldCacheKey, IdenticalStructureProducesIdenticalKeyRegardlessOfParamInsertionOrder) {
     CSGNode a;
     a.kind = "cube";
