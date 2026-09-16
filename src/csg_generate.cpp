@@ -68,7 +68,8 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             if (node.node && !measuring_) {
                 auto producer = cacheProducer_.find(*key);
                 restampCachedIds(node.bodies, *node.node,
-                                 producer == cacheProducer_.end() ? nullptr : producer->second);
+                                 producer == cacheProducer_.end() ? nullptr : producer->second,
+                                 node.warnEntry);
             }
         } else {
             // Recurse into children first (bottom-up) -- populates each
@@ -331,7 +332,7 @@ std::shared_ptr<const std::vector<ColoredBody>> remapParts(const std::vector<Col
 } // namespace
 
 void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
-                                 const oscad::ASTNode* producer) {
+                                 const oscad::ASTNode* producer, const oscad::Position* callSite) {
     // A cache hit hands back the geometry AND the originalIDs of whichever
     // call site first produced it. Those IDs are provenance -- "which node
     // made this" -- not content, so two identical shapes at two call sites
@@ -374,6 +375,12 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
                 auto old = idToNode.find(id);
                 idToNode[fresh] =
                     (old != idToNode.end() && old->second != producer) ? old->second : &node;
+                // Unlike idToNode, this is the call site that reached the
+                // geometry NOW: whichever node the cached copy is being
+                // reused at is the line the user would be shown, whatever
+                // produced the original. A module called twice really is
+                // two different call sites.
+                idToCallSite[fresh] = callSite;
                 // The colour has to be re-recorded too, or a later merge
                 // cannot tell this body's runs apart from uncoloured ones
                 // (attachTriColors looks runs up here). Across renders
@@ -453,6 +460,7 @@ ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNod
         for (uint32_t originalId : mesh.runOriginalID) {
             idToNode[originalId] = &node;
             idToColor[originalId] = color;
+            idToCallSite[originalId] = generateWarnEntry;
         }
     }
     ColoredBody cb;
@@ -474,6 +482,7 @@ ColoredBody Evaluator::tagDisplayOnly(manifold::MeshGL mesh, const oscad::ASTNod
     if (!measuring_) {
         idToNode[originalId] = &node;
         idToColor[originalId] = color;
+        idToCallSite[originalId] = generateWarnEntry;
     }
 
     ColoredBody cb;

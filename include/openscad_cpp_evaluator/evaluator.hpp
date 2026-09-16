@@ -284,9 +284,23 @@ public:
     // Give cached bodies fresh originalIDs so a second call site reusing
     // them is not confused with the first. See its definition.
     void restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
-                          const oscad::ASTNode* producer);
+                          const oscad::ASTNode* producer, const oscad::Position* callSite);
 
     std::unordered_map<uint32_t, const oscad::ASTNode*> idToNode;
+    // originalID -> the call site in the USER's own file that reached this
+    // geometry, or nullptr for geometry written at top level (where
+    // idToNode already names the user's own node).
+    //
+    // idToNode names the node that PRODUCED the geometry, which for
+    // anything a library builds is a node inside that library -- including
+    // a plain `cube(10)` once BOSL2 is included, since BOSL2 overrides the
+    // primitives with its own modules. A consumer that wants to point the
+    // user at their own source (selection, a gizmo edit) cannot use it.
+    //
+    // This is CSGNode::warnEntry, which already captures exactly that at
+    // resolve time so a warning raised during generate can name the user's
+    // line. Recorded per ID here so picking can use it too.
+    std::unordered_map<uint32_t, const oscad::Position*> idToCallSite;
     // Nodes whose bodies were actually generated this run (not served from
     // the ManifoldCache). Reset per run; a diagnostic, and the only honest
     // way for a test to tell a cache hit from a miss now that an inner

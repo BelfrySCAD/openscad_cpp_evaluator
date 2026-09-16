@@ -47,11 +47,21 @@ class _Position:
 
 
 class _DeclNode:
-    __slots__ = ("name", "position")
+    __slots__ = ("name", "position", "call_site")
 
-    def __init__(self, name, position):
+    def __init__(self, name, position, call_site=None):
         self.name = name
         self.position = position
+        #: For a geometry node: the call in the USER's own file that reached
+        #: it, or None when it was written at top level (where `position`
+        #: already names the user's source).
+        #:
+        #: `position` names the node that PRODUCED the geometry, which for
+        #: anything a library builds is inside that library -- a plain
+        #: `cube(10)` lands in BOSL2's builtins.scad once BOSL2 is included,
+        #: since BOSL2 overrides the primitives. A caller that wants to show
+        #: the user their own source wants this instead.
+        self.call_site = call_site
 
 
 class OscObject:
@@ -635,8 +645,13 @@ class Evaluator:
         # originalID -> a node with `.position` (start/end offsets) for WYSIWYG
         # picking and gizmo write-back.
         id_to_node = {
-            oid: _DeclNode(None, _Position(line, column, origin, start, end))
-            for oid, (start, end, line, column, origin) in id_spans.items()
+            oid: _DeclNode(
+                None,
+                _Position(line, column, origin, start, end),
+                _Position(cline, ccolumn, corigin, cstart, cend) if has_call else None,
+            )
+            for oid, (start, end, line, column, origin,
+                      has_call, cstart, cend, cline, ccolumn, corigin) in id_spans.items()
         }
         return bodies, id_to_node
 

@@ -4,3 +4,5 @@ dist/
 wheelhouse/
 *.egg-info/
 __pycache__/
+build-tbb/
+.DS_Store

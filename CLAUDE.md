@@ -1609,8 +1609,32 @@ implementation of "CSG subtree → `object()`"; both engines call it — the
 interpreter from `evalRenderExpr`, the VM from `Op::PopBuiltinWrap`'s
 `Kind::Measure` branch.
 
+**`idToCallSite` is what a picker should actually show the user.** `idToNode`
+names the node that *produced* the geometry, and for anything a library builds
+that is a node inside the library — a plain `cube(10)` maps into BOSL2's
+`builtins.scad` the moment BOSL2 is included, because BOSL2 overrides the
+primitives with its own modules. Pointing an editor at that span means pointing
+it at another file, or (if the consumer forgets to check `origin`) splicing a
+library's byte offsets into the user's buffer, which is how BelfrySCAD #450
+appended a `translate()` to the end of a 59-character script.
+
+`idToCallSite` maps each `originalID` to the call in the *user's* own file that
+reached it, or `nullptr` for geometry written at top level, where `idToNode`
+already is the user's node. It is `CSGNode::warnEntry` — the same
+`callStack_.front().callPosition` captured at resolve time so a warning raised
+during generate can still name the user's line — recorded per ID rather than
+only per node. A cache hit restamps it to the site reusing the geometry, not the
+site that first produced it: a module called twice genuinely is two call sites.
+
+It resolves to the **call**, not the body: `module bracket() { cuboid(10); }
+bracket();` attributes to `bracket();`, since wrapping the body in a transform
+would move every instance.
+
+Exposed to Python as `node.call_site` on each `id_to_node` entry (a `_Position`
+or `None`).
+
 `Evaluator::measuring_` is set for the whole generate. It suppresses the four
-writes that exist solely to describe *drawn* geometry — `idToNode`/`idToColor` in
+writes that exist solely to describe *drawn* geometry — `idToNode`/`idToColor`/`idToCallSite` in
 `tagGenerated` and `tagDisplayOnly`, the `restampCachedIds` call on a cache hit,
 and `cacheProducer_` — because those tables are cleared once per pass, so a leak
 is permanent and surfaces later as wrong click-to-source. It also suppresses

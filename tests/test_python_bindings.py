@@ -13,6 +13,7 @@ this would be a new dependency for a handful of checks; wired into
 wheels.yml's CIBW_TEST_COMMAND instead, which already builds+installs the
 package on every release platform.
 """
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -876,3 +877,58 @@ def test_keep_minuend_color_paints_cut_faces_with_the_minuend(tmp_path):
     kept, _ = Evaluator(keep_minuend_color=True).evaluate(str(src), {})
     assert kept[0].tri_colors is None                 # one colour: the minuend's
     assert all(abs(a - b) < 1e-3 for a, b in zip(kept[0].color[:3], (1.0, 0.647, 0.0)))
+
+
+def test_id_to_node_carries_the_users_own_call_site(tmp_path):
+    """A library-built body must be attributable to the line the user wrote.
+
+    `position` names the node that PRODUCED the geometry, which for anything
+    BOSL2 builds is inside BOSL2 -- a plain cube(10) lands in builtins.scad,
+    since BOSL2 overrides the primitives. `call_site` is what a caller shows
+    the user instead.
+    """
+    import openscad_cpp_evaluator as E
+
+    lib = tmp_path / "MYLIB"
+    lib.mkdir()
+    (lib / "std.scad").write_text(
+        "module boxy(s) { cube(s); }\n"
+        "module wrapped(s) { boxy(s); }\n"
+    )
+    script = tmp_path / "m.scad"
+    src = 'include <MYLIB/std.scad>\nwrapped(10);\n'
+    script.write_text(src)
+
+    old = os.environ.get("OPENSCADPATH")
+    os.environ["OPENSCADPATH"] = str(tmp_path)
+    try:
+        ev = E.Evaluator()
+        _bodies, id_to_node = ev.evaluate(str(script), {})
+    finally:
+        if old is None:
+            os.environ.pop("OPENSCADPATH", None)
+        else:
+            os.environ["OPENSCADPATH"] = old
+
+    assert id_to_node, "the script builds geometry"
+    for node in id_to_node.values():
+        # Produced inside the library...
+        assert node.position.origin.endswith("std.scad"), node.position.origin
+        # ...but attributable to the user's own line.
+        assert node.call_site is not None
+        assert os.path.realpath(node.call_site.origin) == os.path.realpath(str(script))
+        assert src[node.call_site.start_offset:node.call_site.end_offset].startswith("wrapped(10)")
+
+
+def test_top_level_geometry_has_no_call_site():
+    """Nothing to redirect to: `position` is already the user's own node."""
+    import openscad_cpp_evaluator as E
+    p = os.path.join(tempfile.gettempdir(), "toplevel_call_site.scad")
+    with open(p, "w") as f:
+        f.write("cube(10);\n")
+    ev = E.Evaluator()
+    _bodies, id_to_node = ev.evaluate(p, {})
+    assert id_to_node
+    for node in id_to_node.values():
+        assert node.call_site is None
+        assert os.path.realpath(node.position.origin) == os.path.realpath(p)
