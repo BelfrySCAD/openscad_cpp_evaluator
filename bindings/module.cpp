@@ -196,12 +196,17 @@ struct IdSpan {
     uint32_t id;
     int start, end, line, column;
     std::string origin;
-    // The user's own call site that reached this geometry, or `hasCall`
-    // false when it was written at top level and `start`/`origin` above
-    // already name the user's source. See Evaluator::idToCallSite.
-    bool hasCall = false;
-    int callStart = 0, callEnd = 0, callLine = 0, callColumn = 0;
-    std::string callOrigin;
+    // The whole call chain behind this body, innermost frame first. Empty
+    // for geometry written at top level, where the span above is already
+    // the user's own source. Library frames included on purpose -- a BOSL2
+    // author stepping into `attachable` wants them; a front end picks the
+    // level it can actually show. See Evaluator::idToCallChain.
+    struct Frame {
+        int start, end, line, column;
+        std::string origin;
+        bool is_module;
+    };
+    std::vector<Frame> chain;
 };
 
 void collectIdSpans(const oscadeval::Evaluator& ev, std::vector<IdSpan>& out) {
@@ -209,15 +214,17 @@ void collectIdSpans(const oscadeval::Evaluator& ev, std::vector<IdSpan>& out) {
     for (const auto& [id, node] : ev.idToNode) {
         const oscad::Position& p = node->position();
         IdSpan s{id, p.start_offset, p.end_offset, p.line, p.column, p.origin};
-        auto call = ev.idToCallSite.find(id);
-        if (call != ev.idToCallSite.end() && call->second) {
-            const oscad::Position& c = *call->second;
-            s.hasCall = true;
-            s.callStart = c.start_offset;
-            s.callEnd = c.end_offset;
-            s.callLine = c.line;
-            s.callColumn = c.column;
-            s.callOrigin = c.origin;
+        auto found = ev.idToCallChain.find(id);
+        uint32_t idx = found == ev.idToCallChain.end()
+                           ? oscadeval::Evaluator::kNoCallChain : found->second;
+        while (idx != oscadeval::Evaluator::kNoCallChain && idx < ev.callChains_.size()) {
+            const auto& e = ev.callChains_[idx];
+            if (e.site) {
+                s.chain.push_back({e.site->start_offset, e.site->end_offset,
+                                    e.site->line, e.site->column, e.site->origin,
+                                    e.isModule});
+            }
+            idx = e.parent;
         }
         out.push_back(std::move(s));
     }
@@ -236,10 +243,12 @@ nb::list bodiesToList(std::vector<oscadeval::ColoredBody>& bodies) {
 
 nb::dict idSpansToDict(const std::vector<IdSpan>& idSpans) {
     nb::dict d;
-    for (const IdSpan& s : idSpans)
-        d[nb::cast(s.id)] = nb::make_tuple(s.start, s.end, s.line, s.column, s.origin,
-                                            s.hasCall, s.callStart, s.callEnd, s.callLine,
-                                            s.callColumn, s.callOrigin);
+    for (const IdSpan& s : idSpans) {
+        nb::list chain;
+        for (const IdSpan::Frame& f : s.chain)
+            chain.append(nb::make_tuple(f.start, f.end, f.line, f.column, f.origin, f.is_module));
+        d[nb::cast(s.id)] = nb::make_tuple(s.start, s.end, s.line, s.column, s.origin, chain);
+    }
     return d;
 }
 

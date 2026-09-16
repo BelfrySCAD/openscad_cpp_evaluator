@@ -47,21 +47,43 @@ class _Position:
 
 
 class _DeclNode:
-    __slots__ = ("name", "position", "call_site")
+    __slots__ = ("name", "position", "call_sites")
 
-    def __init__(self, name, position, call_site=None):
+    def __init__(self, name, position, call_sites=()):
         self.name = name
         self.position = position
-        #: For a geometry node: the call in the USER's own file that reached
-        #: it, or None when it was written at top level (where `position`
-        #: already names the user's source).
+        #: For a geometry node: the whole call chain behind it, INNERMOST
+        #: frame first, each a `_CallFrame`. Empty for geometry written at
+        #: top level, where `position` is already the user's own source.
         #:
         #: `position` names the node that PRODUCED the geometry, which for
         #: anything a library builds is inside that library -- a plain
-        #: `cube(10)` lands in BOSL2's builtins.scad once BOSL2 is included,
-        #: since BOSL2 overrides the primitives. A caller that wants to show
-        #: the user their own source wants this instead.
-        self.call_site = call_site
+        #: `cube(10)` lands in BOSL2's builtins.scad once BOSL2 is included.
+        #: A caller that wants a line to show the user walks this and picks
+        #: the level it can display: the last frame in the running script
+        #: for an ordinary pick, a deeper one for someone reading the
+        #: library itself. Library frames are included deliberately.
+        self.call_sites = tuple(call_sites)
+
+    @property
+    def call_site(self):
+        """The innermost frame, or None. Convenience for a caller that does
+        not care about the chain."""
+        return self.call_sites[0] if self.call_sites else None
+
+
+class _CallFrame(_Position):
+    """One call in a chain: a position, plus whether it is a MODULE call.
+
+    A function frame (`_find_anchor`, an `assert`) has no geometry of its
+    own to drag, so a gizmo should decline it even though it is worth
+    showing.
+    """
+    __slots__ = ("is_module",)
+
+    def __init__(self, line, column, origin, start_offset, end_offset, is_module):
+        super().__init__(line, column, origin, start_offset, end_offset)
+        self.is_module = is_module
 
 
 class OscObject:
@@ -648,10 +670,10 @@ class Evaluator:
             oid: _DeclNode(
                 None,
                 _Position(line, column, origin, start, end),
-                _Position(cline, ccolumn, corigin, cstart, cend) if has_call else None,
+                [_CallFrame(cl, cc, co, cs, ce, mod)
+                 for (cs, ce, cl, cc, co, mod) in chain],
             )
-            for oid, (start, end, line, column, origin,
-                      has_call, cstart, cend, cline, ccolumn, corigin) in id_spans.items()
+            for oid, (start, end, line, column, origin, chain) in id_spans.items()
         }
         return bodies, id_to_node
 

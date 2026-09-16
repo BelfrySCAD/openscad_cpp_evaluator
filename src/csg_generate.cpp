@@ -69,7 +69,7 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 auto producer = cacheProducer_.find(*key);
                 restampCachedIds(node.bodies, *node.node,
                                  producer == cacheProducer_.end() ? nullptr : producer->second,
-                                 node.userEntry);
+                                 node.callChain);
             }
         } else {
             // Recurse into children first (bottom-up) -- populates each
@@ -96,12 +96,12 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 // can name that line. Restored after (rather than left set)
                 // so a sibling generated at top level doesn't inherit it.
                 const oscad::Position* savedWarnEntry = generateWarnEntry;
-                const oscad::Position* savedUserEntry = generateUserEntry;
+                const uint32_t savedCallChain = generateCallChain;
                 generateWarnEntry = node.warnEntry;
-                generateUserEntry = node.userEntry;
+                generateCallChain = node.callChain;
                 node.bodies = it->second(*this, node.params, node.children, *node.node);
                 generateWarnEntry = savedWarnEntry;
-                generateUserEntry = savedUserEntry;
+                generateCallChain = savedCallChain;
             } else {
                 // No registered GenerateFn for this kind (a builtin with
                 // display-only semantics like render(), or a non-builtin
@@ -335,7 +335,7 @@ std::shared_ptr<const std::vector<ColoredBody>> remapParts(const std::vector<Col
 } // namespace
 
 void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
-                                 const oscad::ASTNode* producer, const oscad::Position* callSite) {
+                                 const oscad::ASTNode* producer, uint32_t callChain) {
     // A cache hit hands back the geometry AND the originalIDs of whichever
     // call site first produced it. Those IDs are provenance -- "which node
     // made this" -- not content, so two identical shapes at two call sites
@@ -383,7 +383,7 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
                 // reused at is the line the user would be shown, whatever
                 // produced the original. A module called twice really is
                 // two different call sites.
-                idToCallSite[fresh] = callSite;
+                idToCallChain[fresh] = callChain;
                 // The colour has to be re-recorded too, or a later merge
                 // cannot tell this body's runs apart from uncoloured ones
                 // (attachTriColors looks runs up here). Across renders
@@ -463,7 +463,7 @@ ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNod
         for (uint32_t originalId : mesh.runOriginalID) {
             idToNode[originalId] = &node;
             idToColor[originalId] = color;
-            idToCallSite[originalId] = generateUserEntry;
+            idToCallChain[originalId] = generateCallChain;
         }
     }
     ColoredBody cb;
@@ -485,7 +485,7 @@ ColoredBody Evaluator::tagDisplayOnly(manifold::MeshGL mesh, const oscad::ASTNod
     if (!measuring_) {
         idToNode[originalId] = &node;
         idToColor[originalId] = color;
-        idToCallSite[originalId] = generateUserEntry;
+        idToCallChain[originalId] = generateCallChain;
     }
 
     ColoredBody cb;

@@ -879,13 +879,19 @@ def test_keep_minuend_color_paints_cut_faces_with_the_minuend(tmp_path):
     assert all(abs(a - b) < 1e-3 for a, b in zip(kept[0].color[:3], (1.0, 0.647, 0.0)))
 
 
-def test_id_to_node_carries_the_users_own_call_site(tmp_path):
-    """A library-built body must be attributable to the line the user wrote.
+def _innermost_in(chain, path):
+    """What a front end does: the deepest frame it can actually show."""
+    for f in chain:
+        if os.path.realpath(f.origin) == os.path.realpath(path):
+            return f
+    return None
 
-    `position` names the node that PRODUCED the geometry, which for anything
-    BOSL2 builds is inside BOSL2 -- a plain cube(10) lands in builtins.scad,
-    since BOSL2 overrides the primitives. `call_site` is what a caller shows
-    the user instead.
+
+def test_call_sites_is_the_whole_chain_library_frames_included(tmp_path):
+    """The chain is NOT filtered to the running script.
+
+    Someone debugging the library wants to step into it, so the evaluator
+    records every frame and leaves the choice of level to the caller.
     """
     import openscad_cpp_evaluator as E
 
@@ -912,21 +918,22 @@ def test_id_to_node_carries_the_users_own_call_site(tmp_path):
 
     assert id_to_node, "the script builds geometry"
     for node in id_to_node.values():
-        # Produced inside the library...
-        assert node.position.origin.endswith("std.scad"), node.position.origin
-        # ...but attributable to the user's own line.
-        assert node.call_site is not None
-        assert os.path.realpath(node.call_site.origin) == os.path.realpath(str(script))
-        assert src[node.call_site.start_offset:node.call_site.end_offset].startswith("wrapped(10)")
+        chain = node.call_sites
+        assert chain, "library-built geometry has a chain"
+        origins = [os.path.realpath(f.origin) for f in chain]
+        # Both layers of the library are present...
+        assert os.path.realpath(str(lib / "std.scad")) in origins
+        # ...and so is the user's own call, further out.
+        assert os.path.realpath(str(script)) in origins
+        # innermost-first: the library frame comes before the script's
+        assert origins.index(os.path.realpath(str(lib / "std.scad"))) < \
+               origins.index(os.path.realpath(str(script)))
+        # node.call_site is just the innermost, for a caller that does not care
+        assert node.call_site is chain[0]
 
 
-def test_call_site_is_the_innermost_call_the_user_wrote(tmp_path):
-    """Not the top-level statement that entered the chain.
-
-    A warning wants the statement to look at; a click wants the line that
-    placed THAT object, so a drag edits it rather than something wrapping
-    everything the module makes.
-    """
+def test_a_front_end_picks_the_last_frame_in_the_running_script(tmp_path):
+    """The default a picker wants: the deepest frame the user wrote."""
     import openscad_cpp_evaluator as E
 
     lib = tmp_path / "MYLIB"
@@ -952,11 +959,26 @@ def test_call_site_is_the_innermost_call_the_user_wrote(tmp_path):
 
     assert id_to_node
     for node in id_to_node.values():
-        cs = node.call_site
-        assert cs is not None
-        text = src[cs.start_offset:cs.end_offset]
+        frame = _innermost_in(node.call_sites, str(script))
+        assert frame is not None
+        text = src[frame.start_offset:frame.end_offset]
         assert text.startswith("boxy(8)"), f"got {text!r}, wanted the innermost user call"
 
+
+def test_module_and_function_frames_are_distinguished(tmp_path):
+    """A function frame has no geometry of its own, so a gizmo declines it."""
+    import openscad_cpp_evaluator as E
+
+    script = tmp_path / "f.scad"
+    script.write_text("function dbl(x) = x * 2;\n"
+                      "module boxy(s) { cube(dbl(s)); }\n"
+                      "boxy(4);\n")
+    ev = E.Evaluator()
+    _bodies, id_to_node = ev.evaluate(str(script), {})
+    assert id_to_node
+    for node in id_to_node.values():
+        assert all(isinstance(f.is_module, bool) for f in node.call_sites)
+        assert any(f.is_module for f in node.call_sites), "boxy() is a module frame"
 
 def test_top_level_geometry_has_no_call_site():
     """Nothing to redirect to: `position` is already the user's own node."""

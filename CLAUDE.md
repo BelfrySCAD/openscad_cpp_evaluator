@@ -1609,45 +1609,46 @@ implementation of "CSG subtree → `object()`"; both engines call it — the
 interpreter from `evalRenderExpr`, the VM from `Op::PopBuiltinWrap`'s
 `Kind::Measure` branch.
 
-**`idToCallSite` is what a picker should actually show the user.** `idToNode`
-names the node that *produced* the geometry, and for anything a library builds
-that is a node inside the library — a plain `cube(10)` maps into BOSL2's
-`builtins.scad` the moment BOSL2 is included, because BOSL2 overrides the
-primitives with its own modules. Pointing an editor at that span means pointing
-it at another file, or (if the consumer forgets to check `origin`) splicing a
-library's byte offsets into the user's buffer, which is how BelfrySCAD #450
-appended a `translate()` to the end of a 59-character script.
+**`idToCallChain` is what a picker should actually walk.** `idToNode` names the
+node that *produced* the geometry, and for anything a library builds that is a
+node inside the library — a plain `cube(10)` maps into BOSL2's `builtins.scad`
+the moment BOSL2 is included, because BOSL2 overrides the primitives with its
+own modules. Pointing an editor at that span means pointing it at another file,
+or (if the consumer forgets to check `origin`) splicing a library's byte offsets
+into the user's buffer, which is how BelfrySCAD #450 appended a `translate()` to
+the end of a 59-character script.
 
-`idToCallSite` maps each `originalID` to the call in the *user's* own file that
-reached it, or `nullptr` for geometry written at top level, where `idToNode`
-already is the user's node. It is `CSGNode::warnEntry` — the same
-`callStack_.front().callPosition` captured at resolve time so a warning raised
-during generate can still name the user's line — recorded per ID rather than
-only per node. A cache hit restamps it to the site reusing the geometry, not the
-site that first produced it: a module called twice genuinely is two call sites.
+`idToCallChain` maps each `originalID` to its **whole call chain**, innermost
+frame first. Deliberately unfiltered: a single `cuboid()` is 24 frames, most of
+them BOSL2's own `attachable`/`_attach_transform` layers, and someone debugging
+the library wants to step into exactly those. Which frames are reachable depends
+on what the front end has open, which the evaluator has no business guessing —
+so it records all of them and a consumer picks its level (BelfrySCAD defaults to
+the last frame in the running script).
 
-It is the **innermost** call still in the user's file, not the top-level
-statement that entered the chain — `currentUserCallEntry()` beside
-`currentWarnEntry()`, which keeps the outermost for warnings. A warning wants
-the statement to look at; a click wants the line that placed *that* object, so a
-drag edits it rather than something wrapping everything the module makes. It
-also keeps the span *inside* any enclosing `translate(...)`, which is what lets
-a gizmo find and update an existing wrapper instead of adding another.
+It is stored as a **cactus stack**, not a list per node. Chains nest, so the
+distinct chains over a run form a tree: `callChains_` holds `{site, parent,
+isModule}` and a `CSGNode` holds one `uint32` into it. Memory tracks distinct
+call *paths* — tens on a real model; Dalek's 139 bodies share 13 innermost sites
+— rather than CSG nodes, and nothing allocates per node. That is what makes this
+affordable where "the full frame list a TRACE would need" (`csg_node.hpp`) was
+not.
 
-The consequence to know: geometry from a module called twice attributes to the
-same line in that module's body both times, so an edit there moves every
-instance. Distinguishing instances is what walking the selection outwards is
-for; this is the innermost answer, deliberately.
+`isModule` separates a module frame, which has geometry behind it, from a
+function frame like `_find_anchor`, which does not: both are worth showing, only
+the former is worth dragging.
+
+A cache hit restamps to the chain reaching the geometry *now*, not the one that
+first produced it: a module called twice genuinely is two call chains.
 
 No stored script path is needed to tell the user's file from a library:
-`callStack_.front()` is by construction the call made from top level, so its
-origin *is* the file being run.
+`callStack_.front()` is by construction the call made from top level.
 
-Exposed to Python as `node.call_site` on each `id_to_node` entry (a `_Position`
-or `None`).
+Exposed to Python as `node.call_sites` (innermost-first `_CallFrame`s, each a
+`_Position` plus `is_module`), with `node.call_site` as the innermost.
 
 `Evaluator::measuring_` is set for the whole generate. It suppresses the four
-writes that exist solely to describe *drawn* geometry — `idToNode`/`idToColor`/`idToCallSite` in
+writes that exist solely to describe *drawn* geometry — `idToNode`/`idToColor`/`idToCallChain` in
 `tagGenerated` and `tagDisplayOnly`, the `restampCachedIds` call on a cache hit,
 and `cacheProducer_` — because those tables are cleared once per pass, so a leak
 is permanent and surfaces later as wrong click-to-source. It also suppresses
