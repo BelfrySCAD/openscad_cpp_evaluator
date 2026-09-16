@@ -76,6 +76,26 @@ TEST(MeshCheck, TwoTetrahedraSharingOneVertexPinchThere) {
     EXPECT_FALSE(d.manifold());
 }
 
+TEST(MeshCheck, ThreeTetrahedraOnOneVertexAreStillOnePinchedVertex) {
+    // The link at vertex 0 falls into THREE pieces, not two. The count is of
+    // pinched VERTICES, so this is still 1 -- worth pinning because the walk
+    // only has to notice that the link is not one piece, and an
+    // implementation that counts pieces instead would say 2 here and agree
+    // with the two-tetrahedron case by luck.
+    manifold::MeshGL m = tetra();
+    for (int k = 0; k < 2; ++k) {
+        const uint32_t base = static_cast<uint32_t>(m.vertProperties.size() / 3);
+        const float z = -1.0f - static_cast<float>(k) * 2.0f;
+        m.vertProperties.insert(m.vertProperties.end(),
+                                {0, 0, z,  1, 0, z,  0, 1, z});
+        m.triVerts.insert(m.triVerts.end(), {
+            0u, base + 1, base,      0u, base, base + 2,
+            0u, base + 2, base + 1,  base, base + 1, base + 2});
+    }
+    const MeshDiagnosis d = checkMesh(m);
+    EXPECT_EQ(d.pinchedVertices, 1u) << d.summary();
+}
+
 TEST(MeshCheck, AReversedFaceIsCaughtAsInconsistentWinding) {
     manifold::MeshGL m = tetra();
     std::swap(m.triVerts[1], m.triVerts[2]);      // flip one face

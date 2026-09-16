@@ -79,20 +79,56 @@ size_t countUnwelded(const M& m) {
 // The faces around `v`, as (prev, next) pairs on the opposite edge. The link
 // is one cycle when following those pairs from any starting corner visits
 // all of them; more than one walk means the surface pinches at v.
+//
+// `vertTris` is CSR: the triangles around vertex v are
+// vertTriList[vertTriStart[v] .. vertTriStart[v+1]).
+//
+// Every buffer here is hoisted out of the loop and cleared per vertex. The
+// straightforward spelling -- an unordered_map of vectors for the link and a
+// std::set for the walk, both built fresh per vertex -- allocated on the
+// order of a dozen blocks for each of a mesh's vertices, millions of them on
+// a 200K-triangle model, to answer a question about roughly six neighbours.
+// Same reason the edge and face counts below collect flat and sort; see
+// their comment.
 template <typename M>
 size_t countPinched(const M& m,
-                    const std::vector<std::vector<size_t>>& vertTris) {
+                    const std::vector<size_t>& vertTriStart,
+                    const std::vector<size_t>& vertTriList) {
     size_t pinched = 0;
-    for (Vert v = 0; v < vertTris.size(); ++v) {
-        const auto& tris = vertTris[v];
-        if (tris.size() < 2) continue;
-        // next[a] = b for the corner opposite v in each face, undirected so
-        // a reversed neighbour still links up -- winding is checked
-        // separately and should not show up as a pinch too.
-        std::unordered_map<Vert, std::vector<Vert>> link;
-        for (size_t t : tris) {
+    const size_t nVerts = vertTriStart.empty() ? 0 : vertTriStart.size() - 1;
+
+    std::vector<Vert> nodes;        // the distinct neighbours of v
+    std::vector<size_t> parent;     // union-find over indices into `nodes`
+    std::vector<std::pair<uint32_t, uint32_t>> edges;
+
+    // Linear search, not a map: a vertex has a handful of neighbours, and at
+    // that size a scan beats hashing outright -- no allocation, no hashing,
+    // and the whole thing stays in cache.
+    const auto indexOf = [&](Vert w) -> uint32_t {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (nodes[i] == w) return static_cast<uint32_t>(i);
+        }
+        nodes.push_back(w);
+        parent.push_back(parent.size());
+        return static_cast<uint32_t>(nodes.size() - 1);
+    };
+    const auto find = [&](size_t i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];   // path halving
+            i = parent[i];
+        }
+        return i;
+    };
+
+    for (Vert v = 0; v < nVerts; ++v) {
+        const size_t begin = vertTriStart[v], end = vertTriStart[v + 1];
+        if (end - begin < 2) continue;
+        nodes.clear();
+        parent.clear();
+        edges.clear();
+        for (size_t k = begin; k < end; ++k) {
             Vert w[3];
-            triVerts(m, t, w);
+            triVerts(m, vertTriList[k], w);
             Vert a = 0, b = 0;
             int found = 0;
             for (int i = 0; i < 3; ++i) {
@@ -100,21 +136,20 @@ size_t countPinched(const M& m,
                 (found++ == 0 ? a : b) = w[i];
             }
             if (found < 2) continue;      // degenerate; counted elsewhere
-            link[a].push_back(b);
-            link[b].push_back(a);
+            edges.emplace_back(indexOf(a), indexOf(b));
         }
-        if (link.empty()) continue;
-        std::set<Vert> visited;
-        std::vector<Vert> stack{link.begin()->first};
-        while (!stack.empty()) {
-            Vert cur = stack.back();
-            stack.pop_back();
-            if (!visited.insert(cur).second) continue;
-            for (Vert nxt : link[cur]) {
-                if (!visited.count(nxt)) stack.push_back(nxt);
-            }
+        if (nodes.empty()) continue;
+        // Undirected, so a reversed neighbour still links up -- winding is
+        // checked separately and should not show up as a pinch too.
+        for (const auto& e : edges) {
+            const size_t ra = find(e.first), rb = find(e.second);
+            if (ra != rb) parent[ra] = rb;
         }
-        if (visited.size() < link.size()) ++pinched;
+        size_t components = 0;
+        for (size_t i = 0; i < parent.size(); ++i) {
+            if (find(i) == i) ++components;
+        }
+        if (components > 1) ++pinched;
     }
     return pinched;
 }
@@ -158,9 +193,15 @@ MeshDiagnosis checkMesh(const M& mesh) {
     // index below; see its comment for the measurement.
     std::vector<std::pair<uint64_t, bool>> uses;   // {undirected edge, traversed a->b}
     uses.reserve(tris * 3);
-    std::vector<std::vector<size_t>> vertTris(nVerts);
     std::vector<std::array<Vert, 3>> seenFaces;    // sorted-corner triples, deduplicated below
     seenFaces.reserve(tris);
+
+    // The triangles around each vertex, CSR rather than a vector per vertex:
+    // one inner vector per vertex is an allocation per vertex, and they are
+    // only ever read back as a flat run. Counted here, filled after the scan.
+    std::vector<size_t> vertTriStart(nVerts + 1, 0);
+    std::vector<size_t> vertTriList;
+    vertTriList.reserve(tris * 3);
 
     for (size_t t = 0; t < tris; ++t) {
         if (degenerate(mesh, t)) ++d.degenerateFaces;
@@ -181,9 +222,23 @@ MeshDiagnosis checkMesh(const M& mesh) {
         seenFaces.push_back(sorted);
 
         for (int i = 0; i < 3; ++i) {
-            if (v[i] < nVerts) vertTris[v[i]].push_back(t);
+            if (v[i] < nVerts) ++vertTriStart[v[i] + 1];
             const Vert a = v[i], b = v[(i + 1) % 3];
             uses.emplace_back(edgeKey(undirected(a, b)), a < b);
+        }
+    }
+
+    for (size_t i = 0; i < nVerts; ++i) vertTriStart[i + 1] += vertTriStart[i];
+    vertTriList.resize(vertTriStart[nVerts]);
+    {
+        std::vector<size_t> fill(vertTriStart.begin(), vertTriStart.end() - 1);
+        for (size_t t = 0; t < tris; ++t) {
+            if (repeatsAVertex(mesh, t)) continue;   // skipped above too
+            Vert v[3];
+            triVerts(mesh, t, v);
+            for (int i = 0; i < 3; ++i) {
+                if (v[i] < nVerts) vertTriList[fill[v[i]]++] = t;
+            }
         }
     }
 
@@ -214,7 +269,7 @@ MeshDiagnosis checkMesh(const M& mesh) {
         i = j;
     }
 
-    d.pinchedVertices = countPinched(mesh, vertTris);
+    d.pinchedVertices = countPinched(mesh, vertTriStart, vertTriList);
     d.unweldedVertices = countUnwelded(mesh);
     return d;
 }
