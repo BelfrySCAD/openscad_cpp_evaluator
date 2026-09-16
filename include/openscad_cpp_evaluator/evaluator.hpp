@@ -284,9 +284,21 @@ public:
     // Give cached bodies fresh originalIDs so a second call site reusing
     // them is not confused with the first. See its definition.
     void restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
-                          const oscad::ASTNode* producer);
+                          const oscad::ASTNode* producer, uint32_t callChain);
 
     std::unordered_map<uint32_t, const oscad::ASTNode*> idToNode;
+    // originalID -> its interned call chain (innermost frame; walk
+    // callChains_[i].parent outwards), or kNoCallChain for geometry
+    // written at top level, where idToNode already is the user's node.
+    //
+    // idToNode names the node that PRODUCED the geometry, which for
+    // anything a library builds is a node inside that library -- including
+    // a plain `cube(10)` once BOSL2 is included, since BOSL2 overrides the
+    // primitives with its own modules. A consumer that wants to point an
+    // editor at a line the user can actually see walks this instead, and
+    // picks the level it wants: the last frame in the script for an
+    // ordinary pick, deeper for someone debugging the library itself.
+    std::unordered_map<uint32_t, uint32_t> idToCallChain;
     // Nodes whose bodies were actually generated this run (not served from
     // the ManifoldCache). Reset per run; a diagnostic, and the only honest
     // way for a test to tell a cache hit from a miss now that an inner
@@ -327,6 +339,57 @@ public:
         return callStack_.empty() ? nullptr : callStack_.front().callPosition;
     }
 
+    // -- Call chains -----------------------------------------------------
+    //
+    // The whole call chain behind a body, so a picker can step through it.
+    // Deliberately UNFILTERED: which frames are reachable depends on what
+    // the front end has open, which the evaluator has no business guessing.
+    // A BOSL2 author stepping into `attachable` -> `_attach_transform` is
+    // the case that settles it; a single cuboid() call is seven frames, six
+    // of them inside the library.
+    //
+    // Stored as a cactus stack rather than a list per node. Call chains
+    // nest, so the distinct chains over a run form a TREE: each entry is
+    // one frame plus its parent's index, and a CSGNode holds a single
+    // uint32 into the pool. Memory tracks distinct call PATHS (tens on a
+    // real model -- Dalek's 139 bodies share 13 innermost sites) rather
+    // than CSG nodes, and nothing allocates per node. That is what makes
+    // this affordable where "the full frame list a TRACE would need"
+    // (csg_node.hpp) was not.
+    static constexpr uint32_t kNoCallChain = UINT32_MAX;
+
+    struct CallChainEntry {
+        const oscad::Position* site = nullptr;  // non-owning, AST-lifetime-bound
+        uint32_t parent = kNoCallChain;         // next frame OUT, or kNoCallChain
+        bool isModule = false;                  // a function frame has no geometry to drag
+    };
+
+    // Intern callStack_ as it stands and return its index, or kNoCallChain
+    // at top level. Outermost-first walk, so a chain sharing a prefix with
+    // one already interned costs only its own tail.
+    uint32_t internCurrentCallChain() {
+        uint32_t parent = kNoCallChain;
+        for (const CallStackFrame& f : callStack_) {
+            if (!f.callPosition) continue;
+            const ChainKey key{parent, f.callPosition};
+            auto found = chainIndex_.find(key);
+            if (found != chainIndex_.end()) {
+                parent = found->second;
+                continue;
+            }
+            const uint32_t idx = static_cast<uint32_t>(callChains_.size());
+            callChains_.push_back({f.callPosition, parent,
+                                   f.kind == CallStackFrame::Kind::Module});
+            chainIndex_.emplace(key, idx);
+            parent = idx;
+        }
+        return parent;   // the innermost frame, or kNoCallChain
+    }
+
+    // The interned pool. Public for the same reason idToNode is: a binding
+    // walks it after evaluate() to flatten each id's chain.
+    std::vector<CallChainEntry> callChains_;
+
     // Set by generateTreeImpl() to the CSGNode currently being generated,
     // so warn() can name the user's own call site during a phase where
     // callStack_ is necessarily empty. Public for the same reason
@@ -335,6 +398,9 @@ public:
     // than anything reentrancy-aware, since generateTreeImpl recurses
     // depth-first on one thread.
     const oscad::Position* generateWarnEntry = nullptr;
+    // The same republish for CSGNode::callChain, read by tagGenerated to
+    // fill idToCallChain.
+    uint32_t generateCallChain = kNoCallChain;
 
     // Set while generating anything beneath a hull(). An open mesh there is
     // not a mistake to report: a convex hull needs only points, so BOSL2's
@@ -1789,6 +1855,22 @@ private:
     // self._call_stack (there, 4-tuples; here, CallStackFrame -- see
     // eval_error.hpp).
     std::vector<CallStackFrame> callStack_;
+
+    // (parent chain index, frame position) -> chain index, the memo that
+    // makes internCurrentCallChain() share prefixes. Cleared with the pool
+    // wherever idToNode is.
+    struct ChainKey {
+        uint32_t parent;
+        const oscad::Position* site;
+        bool operator==(const ChainKey& o) const { return parent == o.parent && site == o.site; }
+    };
+    struct ChainKeyHash {
+        std::size_t operator()(const ChainKey& k) const {
+            return std::hash<uint32_t>{}(k.parent) ^
+                   (std::hash<const void*>{}(k.site) << 1);
+        }
+    };
+    std::unordered_map<ChainKey, uint32_t, ChainKeyHash> chainIndex_;
 
     // Count of callStack_ entries that ACTUALLY cost native C++ stack --
     // i.e. pushed with skipDepthGuard=false (enterUserCall's own

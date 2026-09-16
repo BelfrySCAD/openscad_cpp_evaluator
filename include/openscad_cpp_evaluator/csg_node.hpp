@@ -51,6 +51,13 @@ struct CSGNode {
     // call sites still share a cache entry.
     const oscad::Position* warnEntry = nullptr;
 
+    // This node's interned call chain (Evaluator::callChains_), captured
+    // at RESOLVE time for the same reason warnEntry is: a picker runs long
+    // after the stack has unwound. kNoCallChain at top level. One uint32,
+    // not a frame list -- see Evaluator's call-chain section for why that
+    // is affordable where a per-node list was not.
+    uint32_t callChain = UINT32_MAX;
+
     // 1 + the deepest child's own treeDepth (1 for a leaf) -- set once,
     // at construction, by whichever csg_resolve.cpp site finalizes this
     // node's own `children` (buildTreeNode, evalModularCall's non-splice

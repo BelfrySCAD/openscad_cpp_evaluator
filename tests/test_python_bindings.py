@@ -13,6 +13,7 @@ this would be a new dependency for a handful of checks; wired into
 wheels.yml's CIBW_TEST_COMMAND instead, which already builds+installs the
 package on every release platform.
 """
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -876,3 +877,118 @@ def test_keep_minuend_color_paints_cut_faces_with_the_minuend(tmp_path):
     kept, _ = Evaluator(keep_minuend_color=True).evaluate(str(src), {})
     assert kept[0].tri_colors is None                 # one colour: the minuend's
     assert all(abs(a - b) < 1e-3 for a, b in zip(kept[0].color[:3], (1.0, 0.647, 0.0)))
+
+
+def _innermost_in(chain, path):
+    """What a front end does: the deepest frame it can actually show."""
+    for f in chain:
+        if os.path.realpath(f.origin) == os.path.realpath(path):
+            return f
+    return None
+
+
+def test_call_sites_is_the_whole_chain_library_frames_included(tmp_path):
+    """The chain is NOT filtered to the running script.
+
+    Someone debugging the library wants to step into it, so the evaluator
+    records every frame and leaves the choice of level to the caller.
+    """
+    import openscad_cpp_evaluator as E
+
+    lib = tmp_path / "MYLIB"
+    lib.mkdir()
+    (lib / "std.scad").write_text(
+        "module boxy(s) { cube(s); }\n"
+        "module wrapped(s) { boxy(s); }\n"
+    )
+    script = tmp_path / "m.scad"
+    src = 'include <MYLIB/std.scad>\nwrapped(10);\n'
+    script.write_text(src)
+
+    old = os.environ.get("OPENSCADPATH")
+    os.environ["OPENSCADPATH"] = str(tmp_path)
+    try:
+        ev = E.Evaluator()
+        _bodies, id_to_node = ev.evaluate(str(script), {})
+    finally:
+        if old is None:
+            os.environ.pop("OPENSCADPATH", None)
+        else:
+            os.environ["OPENSCADPATH"] = old
+
+    assert id_to_node, "the script builds geometry"
+    for node in id_to_node.values():
+        chain = node.call_sites
+        assert chain, "library-built geometry has a chain"
+        origins = [os.path.realpath(f.origin) for f in chain]
+        # Both layers of the library are present...
+        assert os.path.realpath(str(lib / "std.scad")) in origins
+        # ...and so is the user's own call, further out.
+        assert os.path.realpath(str(script)) in origins
+        # innermost-first: the library frame comes before the script's
+        assert origins.index(os.path.realpath(str(lib / "std.scad"))) < \
+               origins.index(os.path.realpath(str(script)))
+        # node.call_site is just the innermost, for a caller that does not care
+        assert node.call_site is chain[0]
+
+
+def test_a_front_end_picks_the_last_frame_in_the_running_script(tmp_path):
+    """The default a picker wants: the deepest frame the user wrote."""
+    import openscad_cpp_evaluator as E
+
+    lib = tmp_path / "MYLIB"
+    lib.mkdir()
+    (lib / "std.scad").write_text("module boxy(s) { cube(s); }\n")
+    script = tmp_path / "n.scad"
+    src = ("include <MYLIB/std.scad>\n"
+            "module inner() { boxy(8); }\n"
+            "module outer() { inner(); }\n"
+            "outer();\n")
+    script.write_text(src)
+
+    old = os.environ.get("OPENSCADPATH")
+    os.environ["OPENSCADPATH"] = str(tmp_path)
+    try:
+        ev = E.Evaluator()
+        _bodies, id_to_node = ev.evaluate(str(script), {})
+    finally:
+        if old is None:
+            os.environ.pop("OPENSCADPATH", None)
+        else:
+            os.environ["OPENSCADPATH"] = old
+
+    assert id_to_node
+    for node in id_to_node.values():
+        frame = _innermost_in(node.call_sites, str(script))
+        assert frame is not None
+        text = src[frame.start_offset:frame.end_offset]
+        assert text.startswith("boxy(8)"), f"got {text!r}, wanted the innermost user call"
+
+
+def test_module_and_function_frames_are_distinguished(tmp_path):
+    """A function frame has no geometry of its own, so a gizmo declines it."""
+    import openscad_cpp_evaluator as E
+
+    script = tmp_path / "f.scad"
+    script.write_text("function dbl(x) = x * 2;\n"
+                      "module boxy(s) { cube(dbl(s)); }\n"
+                      "boxy(4);\n")
+    ev = E.Evaluator()
+    _bodies, id_to_node = ev.evaluate(str(script), {})
+    assert id_to_node
+    for node in id_to_node.values():
+        assert all(isinstance(f.is_module, bool) for f in node.call_sites)
+        assert any(f.is_module for f in node.call_sites), "boxy() is a module frame"
+
+def test_top_level_geometry_has_no_call_site():
+    """Nothing to redirect to: `position` is already the user's own node."""
+    import openscad_cpp_evaluator as E
+    p = os.path.join(tempfile.gettempdir(), "toplevel_call_site.scad")
+    with open(p, "w") as f:
+        f.write("cube(10);\n")
+    ev = E.Evaluator()
+    _bodies, id_to_node = ev.evaluate(p, {})
+    assert id_to_node
+    for node in id_to_node.values():
+        assert node.call_site is None
+        assert os.path.realpath(node.position.origin) == os.path.realpath(p)

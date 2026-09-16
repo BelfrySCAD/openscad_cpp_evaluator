@@ -68,6 +68,7 @@ void Evaluator::buildTreeNode(const std::string& kind, const oscad::ASTNode& nod
     treeNode->node = &node;
     treeNode->isBuiltin = true;
     treeNode->warnEntry = currentWarnEntry();
+    treeNode->callChain = internCurrentCallChain();
     treeNode->children = std::move(children);
     treeNode->params = std::move(params);
     treeNode->uncacheable = uncacheable;
@@ -139,6 +140,7 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     treeNode->node = &node;
     treeNode->isBuiltin = true;
     treeNode->warnEntry = currentWarnEntry();
+    treeNode->callChain = internCurrentCallChain();
     treeNode->uncacheable = uncacheable;
     treeNode->children = std::move(children);
     treeNode->params = std::move(params);
@@ -164,6 +166,7 @@ void Evaluator::spliceModuleChildren(std::vector<std::unique_ptr<CSGNode>> child
         unionNode->node = &callNode;
         unionNode->isBuiltin = false;
         unionNode->warnEntry = currentWarnEntry();
+        unionNode->callChain = internCurrentCallChain();
         unionNode->uncacheable = std::any_of(children.begin(), children.end(), [](const auto& c) { return c->uncacheable; });
         unionNode->children = std::move(children);
         setTreeDepthOrThrow(*unionNode, callNode);
