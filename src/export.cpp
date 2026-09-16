@@ -362,9 +362,7 @@ void meshToArrays(const manifold::MeshGL& mesh, std::vector<float>& verts, std::
     tris = mesh.triVerts;
 }
 
-bool boxesOverlap(const manifold::Manifold& a, const manifold::Manifold& b) {
-    const manifold::Box ba = a.BoundingBox();
-    const manifold::Box bb = b.BoundingBox();
+bool boxesOverlap(const manifold::Box& ba, const manifold::Box& bb) {
     return !(ba.max.x < bb.min.x || bb.max.x < ba.min.x || ba.max.y < bb.min.y || bb.max.y < ba.min.y ||
              ba.max.z < bb.min.z || bb.max.z < ba.min.z);
 }
@@ -512,25 +510,42 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
             c.key = keys[0];
             claimedGroups.push_back(std::move(c));
         } else {
-            // Reverse order + subtract-what-is-already-claimed is what makes
-            // the LATER body win: by the time an earlier one is reached,
-            // everything after it has already taken its volume.
-            std::optional<manifold::Manifold> claimed;
+            // Reverse order is what makes the LATER body win: by the time
+            // an earlier one is reached, everything after it has already
+            // taken its volume.
+            //
+            // Each body is cut by the later ones that actually REACH it, not
+            // by a running union of all of them. The running union was
+            // quadratic -- it grows to span the whole model, so every one of
+            // n subtractions faced O(n) geometry however little the parts
+            // really touched, and a 100-body 3MF spent 6.6s on it (#177).
+            //
+            // The result is identical: a later body whose bounding box is
+            // disjoint from this one cannot intersect it, and subtracting a
+            // disjoint solid removes no volume. Bounding boxes settle that in
+            // nanoseconds, so what is left is proportional to how much the
+            // model overlaps rather than to how many parts it has.
+            //
+            // Skipping the subtraction entirely when nothing overlaps is not
+            // just a shortcut: `A - disjoint B` returns A's volume but
+            // REORDERS its triangle list, which throws away any per-triangle
+            // colours A carried. Most models are mostly disjoint parts, so
+            // without this a two-tone body lost its colours the moment any
+            // other differently-coloured body existed.
+            std::vector<manifold::Box> boxes;
+            boxes.reserve(solids.size());
+            for (const Solid& s : solids) boxes.push_back(s.man.BoundingBox());
+
             std::vector<Claimed> owned;
+            std::vector<manifold::Manifold> blockers;
             for (size_t n = solids.size(); n-- > 0;) {
                 Solid& s = solids[n];
-                manifold::Manifold piece = s.man;
-                if (claimed) {
-                    // Skipping the subtraction when the bounding boxes
-                    // cannot overlap is not just a shortcut: `A - disjoint
-                    // B` returns A's volume but REORDERS its triangle list,
-                    // which throws away any per-triangle colours A carried.
-                    // Most models are mostly disjoint parts, so without this
-                    // a two-tone body lost its colours the moment any other
-                    // differently-coloured body existed.
-                    if (boxesOverlap(s.man, *claimed)) piece = s.man - *claimed;
+                blockers.clear();
+                for (size_t m = n + 1; m < solids.size(); ++m) {
+                    if (boxesOverlap(boxes[n], boxes[m])) blockers.push_back(solids[m].man);
                 }
-                claimed = claimed ? (*claimed + s.man) : s.man;
+                manifold::Manifold piece = s.man;
+                if (!blockers.empty()) piece = s.man - addAll(blockers);
                 if (piece.IsEmpty()) continue;
                 Claimed c;
                 c.man = std::move(piece);
