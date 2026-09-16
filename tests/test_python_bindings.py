@@ -920,6 +920,44 @@ def test_id_to_node_carries_the_users_own_call_site(tmp_path):
         assert src[node.call_site.start_offset:node.call_site.end_offset].startswith("wrapped(10)")
 
 
+def test_call_site_is_the_innermost_call_the_user_wrote(tmp_path):
+    """Not the top-level statement that entered the chain.
+
+    A warning wants the statement to look at; a click wants the line that
+    placed THAT object, so a drag edits it rather than something wrapping
+    everything the module makes.
+    """
+    import openscad_cpp_evaluator as E
+
+    lib = tmp_path / "MYLIB"
+    lib.mkdir()
+    (lib / "std.scad").write_text("module boxy(s) { cube(s); }\n")
+    script = tmp_path / "n.scad"
+    src = ("include <MYLIB/std.scad>\n"
+            "module inner() { boxy(8); }\n"
+            "module outer() { inner(); }\n"
+            "outer();\n")
+    script.write_text(src)
+
+    old = os.environ.get("OPENSCADPATH")
+    os.environ["OPENSCADPATH"] = str(tmp_path)
+    try:
+        ev = E.Evaluator()
+        _bodies, id_to_node = ev.evaluate(str(script), {})
+    finally:
+        if old is None:
+            os.environ.pop("OPENSCADPATH", None)
+        else:
+            os.environ["OPENSCADPATH"] = old
+
+    assert id_to_node
+    for node in id_to_node.values():
+        cs = node.call_site
+        assert cs is not None
+        text = src[cs.start_offset:cs.end_offset]
+        assert text.startswith("boxy(8)"), f"got {text!r}, wanted the innermost user call"
+
+
 def test_top_level_geometry_has_no_call_site():
     """Nothing to redirect to: `position` is already the user's own node."""
     import openscad_cpp_evaluator as E

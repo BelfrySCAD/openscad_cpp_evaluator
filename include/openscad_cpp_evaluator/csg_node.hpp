@@ -51,6 +51,14 @@ struct CSGNode {
     // call sites still share a cache entry.
     const oscad::Position* warnEntry = nullptr;
 
+    // The innermost call still in the user's own file, captured at RESOLVE
+    // time for the same reason warnEntry is: a picker runs long after the
+    // stack has unwound. Distinct from warnEntry, which names the call that
+    // entered the chain from the top level -- see Evaluator's
+    // currentUserCallEntry() for why a warning and a click want different
+    // frames. One more pointer per node, on the same reasoning as above.
+    const oscad::Position* userEntry = nullptr;
+
     // 1 + the deepest child's own treeDepth (1 for a leaf) -- set once,
     // at construction, by whichever csg_resolve.cpp site finalizes this
     // node's own `children` (buildTreeNode, evalModularCall's non-splice

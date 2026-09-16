@@ -69,7 +69,7 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 auto producer = cacheProducer_.find(*key);
                 restampCachedIds(node.bodies, *node.node,
                                  producer == cacheProducer_.end() ? nullptr : producer->second,
-                                 node.warnEntry);
+                                 node.userEntry);
             }
         } else {
             // Recurse into children first (bottom-up) -- populates each
@@ -96,9 +96,12 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 // can name that line. Restored after (rather than left set)
                 // so a sibling generated at top level doesn't inherit it.
                 const oscad::Position* savedWarnEntry = generateWarnEntry;
+                const oscad::Position* savedUserEntry = generateUserEntry;
                 generateWarnEntry = node.warnEntry;
+                generateUserEntry = node.userEntry;
                 node.bodies = it->second(*this, node.params, node.children, *node.node);
                 generateWarnEntry = savedWarnEntry;
+                generateUserEntry = savedUserEntry;
             } else {
                 // No registered GenerateFn for this kind (a builtin with
                 // display-only semantics like render(), or a non-builtin
@@ -460,7 +463,7 @@ ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNod
         for (uint32_t originalId : mesh.runOriginalID) {
             idToNode[originalId] = &node;
             idToColor[originalId] = color;
-            idToCallSite[originalId] = generateWarnEntry;
+            idToCallSite[originalId] = generateUserEntry;
         }
     }
     ColoredBody cb;
@@ -482,7 +485,7 @@ ColoredBody Evaluator::tagDisplayOnly(manifold::MeshGL mesh, const oscad::ASTNod
     if (!measuring_) {
         idToNode[originalId] = &node;
         idToColor[originalId] = color;
-        idToCallSite[originalId] = generateWarnEntry;
+        idToCallSite[originalId] = generateUserEntry;
     }
 
     ColoredBody cb;

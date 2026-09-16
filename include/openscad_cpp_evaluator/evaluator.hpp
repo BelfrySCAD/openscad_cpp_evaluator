@@ -341,6 +341,35 @@ public:
         return callStack_.empty() ? nullptr : callStack_.front().callPosition;
     }
 
+    // The INNERMOST call still in the user's own file -- what a picker
+    // should select, where currentWarnEntry() is what a warning should
+    // blame.
+    //
+    // They differ as soon as the user has modules of their own:
+    // `module inner() { cuboid(8); } module outer() { inner(); } outer();`
+    // gives `outer();` from currentWarnEntry (the call that entered the
+    // chain) and `cuboid(8);` from this (the deepest line the user actually
+    // wrote). A warning wants the former, so the reader can see which
+    // top-level statement to look at; clicking geometry wants the latter,
+    // so the drag edits the line that placed THAT object rather than one
+    // wrapping everything the module makes.
+    //
+    // No stored script path is needed to tell "the user's file" from a
+    // library: callStack_.front() is by construction the call made from top
+    // level, so its origin IS the file being run. A `use`d file's top-level
+    // geometry makes that origin the library, and a consumer that checks
+    // the origin (as it must) refuses either way.
+    const oscad::Position* currentUserCallEntry() const {
+        if (callStack_.empty()) return nullptr;
+        const oscad::Position* top = callStack_.front().callPosition;
+        if (!top) return nullptr;
+        for (auto it = callStack_.rbegin(); it != callStack_.rend(); ++it) {
+            if (it->callPosition && it->callPosition->origin == top->origin)
+                return it->callPosition;
+        }
+        return top;
+    }
+
     // Set by generateTreeImpl() to the CSGNode currently being generated,
     // so warn() can name the user's own call site during a phase where
     // callStack_ is necessarily empty. Public for the same reason
@@ -349,6 +378,10 @@ public:
     // than anything reentrancy-aware, since generateTreeImpl recurses
     // depth-first on one thread.
     const oscad::Position* generateWarnEntry = nullptr;
+    // The same republish for CSGNode::userEntry, read by tagGenerated to
+    // fill idToCallSite. Separate from generateWarnEntry because a warning
+    // and a click want different frames -- currentUserCallEntry().
+    const oscad::Position* generateUserEntry = nullptr;
 
     // Set while generating anything beneath a hull(). An open mesh there is
     // not a mistake to report: a convex hull needs only points, so BOSL2's

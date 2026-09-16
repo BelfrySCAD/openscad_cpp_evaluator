@@ -1626,9 +1626,22 @@ during generate can still name the user's line — recorded per ID rather than
 only per node. A cache hit restamps it to the site reusing the geometry, not the
 site that first produced it: a module called twice genuinely is two call sites.
 
-It resolves to the **call**, not the body: `module bracket() { cuboid(10); }
-bracket();` attributes to `bracket();`, since wrapping the body in a transform
-would move every instance.
+It is the **innermost** call still in the user's file, not the top-level
+statement that entered the chain — `currentUserCallEntry()` beside
+`currentWarnEntry()`, which keeps the outermost for warnings. A warning wants
+the statement to look at; a click wants the line that placed *that* object, so a
+drag edits it rather than something wrapping everything the module makes. It
+also keeps the span *inside* any enclosing `translate(...)`, which is what lets
+a gizmo find and update an existing wrapper instead of adding another.
+
+The consequence to know: geometry from a module called twice attributes to the
+same line in that module's body both times, so an edit there moves every
+instance. Distinguishing instances is what walking the selection outwards is
+for; this is the innermost answer, deliberately.
+
+No stored script path is needed to tell the user's file from a library:
+`callStack_.front()` is by construction the call made from top level, so its
+origin *is* the file being run.
 
 Exposed to Python as `node.call_site` on each `id_to_node` entry (a `_Position`
 or `None`).
