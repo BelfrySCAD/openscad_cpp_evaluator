@@ -5,6 +5,7 @@
 #include "test_helpers.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -753,6 +754,69 @@ TEST(SplitColors, SingleMaterialGivesOneObject) {
     const std::vector<ExportObject> objs = splitBodiesForExport(bodies, nullptr, false, /*splitColors=*/false);
     ASSERT_EQ(objs.size(), 1u);
     EXPECT_TRUE(objs[0].triColors.empty());  // no per-triangle colour to carry
+}
+
+// Each body is cut only by the later bodies that actually reach it, rather
+// than by a running union of all of them (#177). These pin the two things
+// that rewrite must not change.
+
+TEST(SplitColors, AFarAwayBodyChangesNothing) {
+    // A body nowhere near the others cannot take volume from them, so adding
+    // one must leave every other object exactly as it was. The old code
+    // subtracted the union of ALL later bodies and leaned on a bounding-box
+    // test against that union to stay correct -- once the union spanned the
+    // model, the test stopped discriminating.
+    const std::string pair =
+        "color(\"red\") cube(10); color(\"blue\") translate([5,0,0]) cube(10);";
+    std::vector<ColoredBody> without = evalToBodies(pair);
+    std::vector<ColoredBody> with =
+        evalToBodies(pair + " color(\"green\") translate([500,0,0]) cube(10);");
+
+    const std::vector<ExportObject> a = splitBodiesForExport(without, nullptr, false, true);
+    const std::vector<ExportObject> b = splitBodiesForExport(with, nullptr, false, true);
+    ASSERT_EQ(a.size(), 2u);
+    ASSERT_EQ(b.size(), 3u);
+    for (size_t i = 0; i < a.size(); ++i) {
+        EXPECT_EQ(a[i].tris.size(), b[i].tris.size()) << "object " << i << " was re-cut";
+        EXPECT_EQ(a[i].verts.size(), b[i].verts.size()) << "object " << i << " was re-cut";
+    }
+}
+
+TEST(SplitColors, LaterWinsAcrossAnInterveningColour) {
+    // red, blue, red -- all overlapping, in that order. The later body wins,
+    // so the second red takes its volume whole, blue keeps only what that
+    // red does not cover, and the first red keeps only what neither does.
+    //
+    // Worth pinning because the obvious way to make this cheaper -- union
+    // the same-coloured bodies first, then subtract per colour -- gets it
+    // wrong: it would let the first red beat the blue that comes after it.
+    std::vector<ColoredBody> bodies = evalToBodies(
+        "color(\"red\")  cube(10);"
+        "color(\"blue\") translate([5,0,0]) cube(10);"
+        "color(\"red\")  translate([10,0,0]) cube(10);");
+    const std::vector<ExportObject> objs = splitBodiesForExport(bodies, nullptr, false, true);
+    ASSERT_EQ(objs.size(), 2u);   // one per colour, the two reds merged
+
+    const auto volumeOf = [](const ExportObject& o) {
+        double v = 0.0;
+        for (size_t t = 0; t + 2 < o.tris.size(); t += 3) {
+            const auto at = [&](size_t k) {
+                const size_t b = static_cast<size_t>(o.tris[t + k]) * 3;
+                return std::array<double, 3>{o.verts[b], o.verts[b + 1], o.verts[b + 2]};
+            };
+            const std::array<double, 3> p = at(0), q = at(1), r = at(2);
+            v += (p[0] * (q[1] * r[2] - q[2] * r[1]) - p[1] * (q[0] * r[2] - q[2] * r[0]) +
+                  p[2] * (q[0] * r[1] - q[1] * r[0])) / 6.0;
+        }
+        return v;
+    };
+
+    // Blue spans x 5..15 and the later red takes x 10..20, leaving x 5..10:
+    // 5 x 10 x 10. The reds keep everything else: 2000 - 500.
+    double red = 0.0, blue = 0.0;
+    for (const ExportObject& o : objs) (o.color[2] > o.color[0] ? blue : red) += volumeOf(o);
+    EXPECT_NEAR(blue, 500.0, 1e-6);
+    EXPECT_NEAR(red, 1500.0, 1e-6);
 }
 
 TEST(SplitColors, SingleMaterialWeldsTouchingColourRegions) {
