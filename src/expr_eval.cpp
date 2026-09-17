@@ -19,7 +19,6 @@ namespace oscadeval {
 namespace {
 
 bool isNumber(const Value& v) { return std::holds_alternative<double>(v); }
-bool isBoolValue(const Value& v) { return std::holds_alternative<bool>(v); }
 
 // Converts a Value to the truncated-to-int64 form real OpenSCAD's own
 // Value::toInt64() uses for bitwise operations (Value.cc, PR #4833:
