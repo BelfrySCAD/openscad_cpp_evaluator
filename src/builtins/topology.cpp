@@ -621,18 +621,6 @@ double bandDistance(double v, double lo, double hi, bool invert) {
     return invert ? -d : d;
 }
 
-std::optional<std::array<double, 3>> readVec3(const Value& v) {
-    const ListPtr* l = std::get_if<ListPtr>(&v);
-    if (!l || !*l || (*l)->items.size() != 3) return std::nullopt;
-    std::array<double, 3> out{};
-    for (size_t i = 0; i < 3; ++i) {
-        const double* d = std::get_if<double>(&(*l)->items[i]);
-        if (!d || !std::isfinite(*d)) return std::nullopt;
-        out[i] = *d;
-    }
-    return out;
-}
-
 } // namespace
 
 // -- 2D: marching squares --------------------------------------------------

@@ -69,3 +69,37 @@ target_link_libraries(openscad_cpp_evaluator PRIVATE linenoise freetype harfbuzz
 target_compile_options(openscad_cpp_evaluator PRIVATE
   $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra>
 )
+
+# -Wall -Wextra above is about OUR code, but two TUs pull a vendored header
+# in wholesale and inherit its warnings: 27 from Boost.Polygon's voronoi
+# headers and 9 from stb_image_write's implementation, against 5 that were
+# real. Silenced per source file, per warning.
+#
+# Deliberately NOT -isystem, which looks like the tidier fix and is a trap:
+# clang searches -isystem AFTER /usr/local/include, so a Homebrew Boost
+# 1.90 silently won over the pinned 1.86 (measured, not assumed). Keeping
+# -I keeps the fetched copy winning.
+include(CheckCXXCompilerFlag)
+foreach(_w deprecated-enum-float-conversion missing-field-initializers deprecated-declarations)
+  check_cxx_compiler_flag("-Wno-${_w}" OSCAD_HAS_WNO_${_w})
+endforeach()
+
+if(OSCAD_HAS_WNO_deprecated-enum-float-conversion)
+  # <boost/polygon/voronoi.hpp> does floating-point arithmetic on an
+  # unnamed enum, deprecated in C++20.
+  set_source_files_properties(builtins/roof.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-deprecated-enum-float-conversion")
+endif()
+
+# zip_stored.cpp defines STB_IMAGE_WRITE_IMPLEMENTATION, so stb's C compiles
+# as ours: `= { 0 }` partial initializers, and one sprintf().
+set(_stb_quiet "")
+if(OSCAD_HAS_WNO_missing-field-initializers)
+  list(APPEND _stb_quiet "-Wno-missing-field-initializers")
+endif()
+if(OSCAD_HAS_WNO_deprecated-declarations)
+  list(APPEND _stb_quiet "-Wno-deprecated-declarations")
+endif()
+if(_stb_quiet)
+  set_source_files_properties(zip_stored.cpp PROPERTIES COMPILE_OPTIONS "${_stb_quiet}")
+endif()

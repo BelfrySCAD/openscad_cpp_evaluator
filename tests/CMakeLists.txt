@@ -43,7 +43,10 @@ add_executable(oscad_eval_tests
   test_unexpected_args.cpp
   test_cli.cpp
 )
-target_link_libraries(oscad_eval_tests PRIVATE openscad_cpp_evaluator oscad_cli_lib GTest::gtest_main)
+# oscad_cli_lib PUBLIC-links openscad_cpp_evaluator, so naming it here too
+# put the archive on the link line twice ("ld: warning: ignoring duplicate
+# libraries").
+target_link_libraries(oscad_eval_tests PRIVATE oscad_cli_lib GTest::gtest_main)
 # stb_image_write.h, used only by this test binary to generate a PNG
 # fixture for ToRenderableBodies/surface() image-loading tests.
 target_include_directories(oscad_eval_tests PRIVATE ${stb_SOURCE_DIR})

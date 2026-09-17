@@ -13,36 +13,6 @@ namespace oscadeval {
 
 namespace {
 
-std::optional<std::vector<double>> asFlatNumericVector(const ValueList& list) {
-    std::vector<double> out;
-    out.reserve(list.items.size());
-    for (const Value& v : list.items) {
-        const double* d = std::get_if<double>(&v);
-        if (!d) return std::nullopt;
-        out.push_back(*d);
-    }
-    return out;
-}
-
-// nullopt unless `list` is a non-ragged list of flat-numeric rows.
-std::optional<std::vector<std::vector<double>>> asNumericMatrix(const ValueList& list) {
-    std::vector<std::vector<double>> rows;
-    rows.reserve(list.items.size());
-    for (const Value& rowValue : list.items) {
-        const ListPtr* rowList = std::get_if<ListPtr>(&rowValue);
-        if (!rowList || !*rowList) return std::nullopt;
-        auto row = asFlatNumericVector(**rowList);
-        if (!row) return std::nullopt;
-        rows.push_back(std::move(*row));
-    }
-    if (rows.empty()) return rows;
-    const size_t width = rows.front().size();
-    for (const auto& row : rows) {
-        if (row.size() != width) return std::nullopt;
-    }
-    return rows;
-}
-
 Value makeList(std::vector<Value> items) {
     return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})};
 }
