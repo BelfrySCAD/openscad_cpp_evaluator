@@ -550,3 +550,105 @@ TEST(DxfCross, ParallelOrTooFewLinesWarns) {
     EXPECT_NE(last.find("Can't find cross"), std::string::npos) << last;
     std::filesystem::remove(path);
 }
+
+// --- SVG id=/class= filters ------------------------------------------------
+//
+// Upstream OpenSCAD filters an SVG import by `id`. `class` is this port's own
+// addition (`supported_feature("svg-class")`), because a class is how a
+// drawing marks "every cut line" without naming each one.
+//
+// `layer` deliberately stays DXF's: upstream reuses the name for SVG but
+// reads only Inkscape's `inkscape:label`, a vendor convention rather than
+// anything SVG defines, so it would not match a layer from any other tool.
+
+namespace {
+
+constexpr const char* kFilterSvg = R"SVG(<svg xmlns="http://www.w3.org/2000/svg"
+     width="100" height="100" viewBox="0 0 100 100">
+  <g id="grp" transform="translate(10,0)">
+    <rect id="inner" class="cut outline" x="0" y="0" width="20" height="10"/>
+  </g>
+  <rect id="other" class="outline" x="50" y="50" width="10" height="10"/>
+</svg>)SVG";
+
+size_t contourCount(const std::string& file, const std::string& args, Evaluator& ev) {
+    Value v = asExpr("import(\"" + file + "\"" + args + ")", ev);
+    return std::get<ListPtr>(v)->items.size();
+}
+
+} // namespace
+
+TEST(SvgFilter, NoFilterImportsEverything) {
+    const auto path = tempPath("filter_all.svg");
+    writeFile(path, kFilterSvg);
+    Evaluator ev;
+    EXPECT_EQ(contourCount(path.generic_string(), "", ev), 2u);
+    std::filesystem::remove(path);
+}
+
+TEST(SvgFilter, IdSelectsOneElement) {
+    const auto path = tempPath("filter_id.svg");
+    writeFile(path, kFilterSvg);
+    Evaluator ev;
+    EXPECT_EQ(contourCount(path.generic_string(), ", id=\"inner\"", ev), 1u);
+    EXPECT_EQ(contourCount(path.generic_string(), ", id=\"other\"", ev), 1u);
+    std::filesystem::remove(path);
+}
+
+TEST(SvgFilter, IdOnAGroupTakesItsContents) {
+    const auto path = tempPath("filter_grp.svg");
+    writeFile(path, kFilterSvg);
+    Evaluator ev;
+    EXPECT_EQ(contourCount(path.generic_string(), ", id=\"grp\"", ev), 1u);
+    std::filesystem::remove(path);
+}
+
+TEST(SvgFilter, ClassIsListMembershipNotEquality) {
+    // class="cut outline" is matched by either name on its own.
+    const auto path = tempPath("filter_cls.svg");
+    writeFile(path, kFilterSvg);
+    Evaluator ev;
+    EXPECT_EQ(contourCount(path.generic_string(), ", class=\"cut\"", ev), 1u);
+    EXPECT_EQ(contourCount(path.generic_string(), ", class=\"outline\"", ev), 2u);
+    // A prefix of a real class must not match.
+    EXPECT_EQ(contourCount(path.generic_string(), ", class=\"out\"", ev), 0u);
+    std::filesystem::remove(path);
+}
+
+TEST(SvgFilter, AnEnclosingTransformStillApplies) {
+    // The selected rect sits inside translate(10,0). Picking it must not
+    // move it back to the origin -- it has to land where it does in the
+    // drawing, or a filtered import cannot be composed with an unfiltered one.
+    const auto path = tempPath("filter_xf.svg");
+    writeFile(path, kFilterSvg);
+    Evaluator ev;
+    Value v = asExpr("import(\"" + path.generic_string() + "\", id=\"inner\")", ev);
+    const auto& region = std::get<ListPtr>(v)->items;
+    ASSERT_EQ(region.size(), 1u);
+    const auto& pts = std::get<ListPtr>(region[0])->items;
+    ASSERT_EQ(pts.size(), 4u);
+    double minx = 1e9;
+    for (const auto& p : pts) minx = std::min(minx, std::get<double>(std::get<ListPtr>(p)->items[0]));
+    EXPECT_NEAR(minx, 10.0, 1e-9);
+    std::filesystem::remove(path);
+}
+
+TEST(SvgFilter, AMissImportsNothingAndWarns) {
+    // Emphatically not a fall-back to the whole drawing: a cut layer that
+    // quietly became every layer is the worst answer available.
+    const auto path = tempPath("filter_miss.svg");
+    writeFile(path, kFilterSvg);
+    std::string last;
+    Evaluator ev([&](const std::string& m) { last = m; });
+    EXPECT_EQ(contourCount(path.generic_string(), ", id=\"nosuch\"", ev), 0u);
+    EXPECT_NE(last.find("did not match anything"), std::string::npos) << last;
+    std::filesystem::remove(path);
+}
+
+TEST(SvgFilter, IdAndClassTogetherMatchEither) {
+    const auto path = tempPath("filter_both.svg");
+    writeFile(path, kFilterSvg);
+    Evaluator ev;
+    EXPECT_EQ(contourCount(path.generic_string(), ", id=\"other\", class=\"cut\"", ev), 2u);
+    std::filesystem::remove(path);
+}

@@ -992,3 +992,57 @@ def test_top_level_geometry_has_no_call_site():
     for node in id_to_node.values():
         assert node.call_site is None
         assert os.path.realpath(node.position.origin) == os.path.realpath(p)
+
+
+SVG_FILTER = """<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <g id="grp" transform="translate(10,0)">
+    <rect id="inner" class="cut outline" x="0" y="0" width="20" height="10"/>
+  </g>
+  <rect id="other" class="outline" x="50" y="50" width="10" height="10"/>
+</svg>"""
+
+
+def _svg_counts(tmp_path, args):
+    """(count, messages) for the region import() returns.
+
+    echo_fn receives warnings as well as echoes, so the ECHO line has to be
+    picked out rather than assumed to be first -- a filter that misses warns
+    before it echoes."""
+    svg = tmp_path / "f.svg"
+    svg.write_text(SVG_FILTER)
+    scad = tmp_path / "f.scad"
+    scad.write_text(f'echo(n = len(import("{svg}"{args})));\n')
+    msgs = []
+    Evaluator(echo_fn=msgs.append).evaluate(str(scad), generate=False)
+    echoes = [m for m in msgs if m.startswith("ECHO:")]
+    assert len(echoes) == 1, msgs
+    return int(echoes[0].split("=")[1]), msgs
+
+
+def test_svg_import_filters_by_id(tmp_path):
+    assert _svg_counts(tmp_path, "")[0] == 2
+    assert _svg_counts(tmp_path, ', id = "inner"')[0] == 1
+    assert _svg_counts(tmp_path, ', id = "grp"')[0] == 1
+
+
+def test_svg_import_filters_by_class(tmp_path):
+    """A class is a space-separated list, so this is membership."""
+    assert _svg_counts(tmp_path, ', class = "cut"')[0] == 1
+    assert _svg_counts(tmp_path, ', class = "outline"')[0] == 2
+    assert _svg_counts(tmp_path, ', class = "out"')[0] == 0
+
+
+def test_svg_filter_miss_imports_nothing_and_warns(tmp_path):
+    """Not a fall-back to the whole drawing -- that would be wrong geometry
+    with nothing said about it."""
+    count, msgs = _svg_counts(tmp_path, ', id = "nosuch"')
+    assert count == 0
+    assert any("did not match anything" in m for m in msgs), msgs
+
+
+def test_svg_class_is_feature_detectable(tmp_path):
+    scad = tmp_path / "f.scad"
+    scad.write_text('echo(v = supported_feature("svg-class"));\n')
+    out = []
+    Evaluator(echo_fn=out.append).evaluate(str(scad), generate=False)
+    assert "1" in out[0], out

@@ -176,6 +176,13 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     const Value fileArg = getArg(args, 0, "file", Value{});
     const Value layerArg = getArg(args, std::nullopt, "layer", Value{});
+    // SVG only. `id` matches an element's id; `class` matches one entry of
+    // its space-separated class list. `layer` stays DXF's, where layers are
+    // part of the format -- upstream reuses the name for SVG but reads only
+    // Inkscape's `inkscape:label`, which is a vendor convention rather than
+    // anything SVG defines.
+    const Value idArg = getArg(args, std::nullopt, "id", Value{});
+    const Value classArg = getArg(args, std::nullopt, "class", Value{});
     // Not an OpenSCAD parameter. A script using it will not run upstream,
     // which is why it has to be asked for rather than being the default.
     const bool repair = truthy(getArg(args, std::nullopt, "repair", Value{false}));
@@ -196,7 +203,24 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
                 if (const std::string* s = std::get_if<std::string>(&layerArg)) layer = *s;
                 contours = loadDxfContours(path, layer);
             } else {
-                contours = loadSvgContours(path);
+                SvgFilter filter;
+                if (const std::string* v = std::get_if<std::string>(&idArg)) filter.id = *v;
+                if (const std::string* v = std::get_if<std::string>(&classArg)) filter.cls = *v;
+                bool matched = true;
+                contours = loadSvgContours(path, filter, &matched);
+                if (!matched) {
+                    // Nothing imported, rather than silently falling back to
+                    // the whole drawing -- a cut layer that quietly became
+                    // every layer is the worst answer available.
+                    std::string what;
+                    if (filter.id) what += "id = \"" + *filter.id + "\"";
+                    if (filter.cls) {
+                        if (!what.empty()) what += ", ";
+                        what += "class = \"" + *filter.cls + "\"";
+                    }
+                    ev.warn("import() filter " + what + " did not match anything in "
+                            + path, &node.position());
+                }
             }
         } catch (const std::exception& e) {
             ev.error(std::string("import: ") + e.what(), node);
@@ -340,6 +364,13 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
 Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node) {
     const Value fileArg = getArg(args, 0, "file", Value{});
     const Value layerArg = getArg(args, std::nullopt, "layer", Value{});
+    // SVG only. `id` matches an element's id; `class` matches one entry of
+    // its space-separated class list. `layer` stays DXF's, where layers are
+    // part of the format -- upstream reuses the name for SVG but reads only
+    // Inkscape's `inkscape:label`, which is a vendor convention rather than
+    // anything SVG defines.
+    const Value idArg = getArg(args, std::nullopt, "id", Value{});
+    const Value classArg = getArg(args, std::nullopt, "class", Value{});
     if (std::holds_alternative<std::monostate>(fileArg)) {
         ev.error("import: 'file' parameter is required", node);
     }
@@ -356,7 +387,24 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
                 if (const std::string* s = std::get_if<std::string>(&layerArg)) layer = *s;
                 contours = loadDxfContours(path, layer);
             } else {
-                contours = loadSvgContours(path);
+                SvgFilter filter;
+                if (const std::string* v = std::get_if<std::string>(&idArg)) filter.id = *v;
+                if (const std::string* v = std::get_if<std::string>(&classArg)) filter.cls = *v;
+                bool matched = true;
+                contours = loadSvgContours(path, filter, &matched);
+                if (!matched) {
+                    // Nothing imported, rather than silently falling back to
+                    // the whole drawing -- a cut layer that quietly became
+                    // every layer is the worst answer available.
+                    std::string what;
+                    if (filter.id) what += "id = \"" + *filter.id + "\"";
+                    if (filter.cls) {
+                        if (!what.empty()) what += ", ";
+                        what += "class = \"" + *filter.cls + "\"";
+                    }
+                    ev.warn("import() filter " + what + " did not match anything in "
+                            + path, &node.position());
+                }
             }
             return contoursToValue(contours);
         }
