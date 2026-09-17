@@ -1046,6 +1046,7 @@ const std::unordered_map<std::string, double>& featureLevels() {
         {"expr-import", 1.0},        // import() in expression position
         {"object-function", 1.0},    // object(), unconditional here
         {"roof-op", 1.0},            // roof(), method="voronoi" only
+        {"svg-class", 1.0},          // import(svg, class=); id= is upstream's
     };
     return levels;
 }

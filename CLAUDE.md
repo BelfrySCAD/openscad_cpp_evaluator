@@ -1121,6 +1121,18 @@ grep for `ponytail:`.
   `user_calls.cpp`'s `evalFunctionCall`, special-cased *before* the `isBuiltinFunctionName` gate
   since `import` isn't in that table — returns a VNF `[[verts],[faces]]` for a mesh file, a Region
   `[[[x,y],...],...]` for DXF/SVG, or the JSON file's content as native values).
+  **SVG filtering**: `id=` selects one element by its `id` (upstream's own parameter, and
+  matching a `<g>` takes everything under it); `class=` selects by one entry of an element's
+  space-separated `class` list, which is **this port's addition** (`supported_feature("svg-class")`)
+  because a class is how a drawing marks "every cut line" without naming each one. Both apply in
+  the module *and* expression forms, enclosing transforms still apply to a selected element (it
+  has to land where it does in the drawing), and **a filter that matches nothing imports nothing
+  and warns** rather than falling back to the whole file — a cut layer that quietly became every
+  layer is the worst answer available. `layer=` stays DXF-only on purpose: upstream reuses the
+  name for SVG but reads only Inkscape's `inkscape:label`, a vendor convention rather than
+  anything SVG defines, so it cannot match a layer from any other tool. `id` had been in
+  `registry.cpp`'s declared parameter list since long before anything read it, so a script
+  filtering by id was accepted in full and silently handed the whole drawing.
   `resolveFilePath()` (also declared here, defined in import.cpp) — resolves a file argument
   relative to the *source .scad file's own directory* — is shared by every file-reading builtin,
   not just import() (`surface.cpp` uses it too). `zip_stored.hpp` is a hand-rolled, dependency-free

@@ -116,10 +116,13 @@ const std::vector<std::string>* builtinParamNames(const std::string& name) {
         {"minkowski", {"convexity"}},
         {"children", {"index", "separate"}},
         {"render", {"convexity"}},
-        // "repair" is this port's own addition, not an upstream parameter.
+        // "repair" and "class" are this port's own additions, not upstream
+        // parameters. ("id" IS upstream's, and was declared here long before
+        // anything read it -- so a script filtering by id was accepted in
+        // full and quietly given the whole drawing.)
         {"import",
           {"file", "layer", "convexity", "origin", "scale", "width", "height", "filename", "layername", "center", "dpi",
-           "id", "repair"}},
+           "id", "class", "repair"}},
         {"linear_extrude", {"height", "v", "scale", "center", "twist", "slices", "segments", "convexity"}},
         {"rotate_extrude", {"angle", "start", "convexity"}},
         {"projection", {"cut", "convexity"}},

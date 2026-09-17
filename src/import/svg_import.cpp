@@ -450,9 +450,50 @@ void walk(const XmlNode& el, const Mat3& mat, std::vector<Contour2d>& out) {
     for (const XmlNode& child : el.children) walk(child, m, out);
 }
 
+// `class` is a space-separated LIST, so this is membership rather than
+// equality: class="cut outline" is matched by class="cut".
+bool hasClass(const XmlNode& el, const std::string& want) {
+    const std::string attr = el.getAttr("class");
+    size_t i = 0;
+    while (i < attr.size()) {
+        while (i < attr.size() && std::isspace(static_cast<unsigned char>(attr[i]))) ++i;
+        size_t j = i;
+        while (j < attr.size() && !std::isspace(static_cast<unsigned char>(attr[j]))) ++j;
+        if (j > i && attr.compare(i, j - i, want) == 0) return true;
+        i = j;
+    }
+    return false;
+}
+
+bool matches(const XmlNode& el, const SvgFilter& f) {
+    if (f.id && el.getAttr("id") == *f.id) return true;
+    if (f.cls && hasClass(el, *f.cls)) return true;
+    return false;
+}
+
+// Walk looking for matching elements; everything under one is taken whole,
+// which is what makes `id=` on a <g> mean "that group". Transforms above
+// the match still apply -- a selected shape must land where it does in the
+// drawing, not at the origin.
+void walkFiltered(const XmlNode& el, const Mat3& mat, const SvgFilter& f,
+                  std::vector<Contour2d>& out, bool& matched) {
+    if (el.tag == "defs" || el.tag == "symbol") return;
+    const Mat3 m = compose(parseTransform(el.getAttr("transform")), mat);
+    if (matches(el, f)) {
+        matched = true;
+        const std::vector<Contour2d> shapes = shapeContours(el, m);
+        out.insert(out.end(), shapes.begin(), shapes.end());
+        for (const XmlNode& child : el.children) walk(child, m, out);
+        return;     // a match is taken whole; no nested re-matching
+    }
+    for (const XmlNode& child : el.children) walkFiltered(child, m, f, out, matched);
+}
+
 } // namespace
 
-std::vector<Contour2d> loadSvgContours(const std::string& path) {
+std::vector<Contour2d> loadSvgContours(const std::string& path,
+                                      const SvgFilter& filter,
+                                      bool* matched) {
     std::ifstream in(path);
     if (!in) throw std::runtime_error("could not open '" + path + "'");
     std::stringstream buf;
@@ -461,7 +502,17 @@ std::vector<Contour2d> loadSvgContours(const std::string& path) {
     if (!root) throw std::runtime_error("'" + path + "' is not a well-formed SVG file");
 
     std::vector<Contour2d> out;
-    walk(*root, Mat3{}, out);
+    if (!filter.id && !filter.cls) {
+        if (matched) *matched = true;   // no filter, nothing to miss
+        walk(*root, Mat3{}, out);
+        return out;
+    }
+    bool hit = false;
+    walkFiltered(*root, Mat3{}, filter, out, hit);
+    // A filter that matched nothing imports nothing -- it does NOT fall
+    // back to the whole drawing, which would be the silent-wrong-geometry
+    // answer. The caller turns this into the warning.
+    if (matched) *matched = hit;
     return out;
 }
 

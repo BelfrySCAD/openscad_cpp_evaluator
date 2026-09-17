@@ -22,6 +22,20 @@ std::vector<Contour2d> loadDxfContours(const std::string& path, const std::optio
 // group transforms). Y is flipped (SVG's is down, OpenSCAD's is up).
 // Throws std::runtime_error on I/O/parse failure. Mirrors
 // _load_svg_contours.
-std::vector<Contour2d> loadSvgContours(const std::string& path);
+//: Which part of the drawing to import. Both unset means the whole file.
+//: `id` matches an element's `id` attribute; `cls` matches one entry of its
+//: space-separated `class` list. Matching an element takes everything under
+//: it, so a filter naming a <g> means "that group".
+struct SvgFilter {
+    std::optional<std::string> id;
+    std::optional<std::string> cls;
+};
+
+// `matched`, when given, reports whether the filter found anything. A miss
+// imports nothing rather than falling back to the whole drawing; the caller
+// warns. Always true when no filter was set.
+std::vector<Contour2d> loadSvgContours(const std::string& path,
+                                       const SvgFilter& filter = {},
+                                       bool* matched = nullptr);
 
 } // namespace oscadeval
