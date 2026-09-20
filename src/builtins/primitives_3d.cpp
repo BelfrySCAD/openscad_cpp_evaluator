@@ -11,7 +11,10 @@
 #include <cstdint>
 #include <map>
 #include <numbers>
+#include <optional>
 #include <set>
+#include <string>
+#include <utility>
 
 namespace oscadeval {
 
@@ -42,8 +45,18 @@ bool isDrawableFailure(const manifold::Manifold& body, const M& mesh) {
                         [](float v) { return std::isfinite(v); });
 }
 
+struct BoundaryEdges {
+    size_t count = 0;
+    // Vertex indices of one representative open edge, or nullopt when the
+    // mesh is closed. A count alone is enough on a hand-written face list,
+    // where you can just read it; it is useless on generated geometry --
+    // three bad edges in a few thousand triangles cannot be found by eye,
+    // which is what happened in BelfrySCAD #521 / issue #187.
+    std::optional<std::pair<uint32_t, uint32_t>> first;
+};
+
 template <typename M>
-size_t countBoundaryEdges(const M& mesh) {
+BoundaryEdges findBoundaryEdges(const M& mesh) {
     std::map<std::pair<uint32_t, uint32_t>, int> uses;
     for (size_t i = 0; i + 2 < mesh.triVerts.size(); i += 3) {
         const uint32_t v[3] = {static_cast<uint32_t>(mesh.triVerts[i]),
@@ -54,11 +67,34 @@ size_t countBoundaryEdges(const M& mesh) {
             ++uses[{std::min(a, b), std::max(a, b)}];
         }
     }
-    size_t open = 0;
+    BoundaryEdges out;
+    // std::map iterates in vertex-index order, which is arbitrary from the
+    // author's point of view but DETERMINISTIC: the same mesh names the same
+    // edge on every run. That matters more than which edge gets picked --
+    // an identifier that moves between renders is worse than no identifier.
+    // A cluster of open edges is nearly always one hole, so the first is
+    // usually representative of the rest.
     for (const auto& [edge, count] : uses) {
-        if (count % 2 != 0) ++open;
+        if (count % 2 == 0) continue;
+        ++out.count;
+        if (!out.first) out.first = edge;
     }
-    return open;
+    return out;
+}
+
+// "[1, 2.5, 0] - [1, 3, 0]" for one edge, using the same number formatting
+// echo() uses, so a coordinate can be pasted straight back into a script.
+template <typename M>
+std::string describeEdge(const M& mesh, std::pair<uint32_t, uint32_t> edge) {
+    const size_t stride = mesh.numProp > 0 ? static_cast<size_t>(mesh.numProp) : 3;
+    auto point = [&](uint32_t v) {
+        const size_t base = static_cast<size_t>(v) * stride;
+        if (base + 2 >= mesh.vertProperties.size()) return std::string("?");
+        return "[" + formatNumber(static_cast<double>(mesh.vertProperties[base])) + ", " +
+               formatNumber(static_cast<double>(mesh.vertProperties[base + 1])) + ", " +
+               formatNumber(static_cast<double>(mesh.vertProperties[base + 2])) + "]";
+    };
+    return point(edge.first) + " - " + point(edge.second);
 }
 } // namespace
 
@@ -810,8 +846,15 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
         // self-intersections builds perfectly well, and only an OPEN one
         // reaches this branch. The count points straight at the problem.
         if (!ev.insideHull) {
-            ev.warn("polyhedron: mesh is not closed -- " + std::to_string(countBoundaryEdges(mesh)) +
-                        " boundary edge(s); drawing it as a surface. hull() can still "
+            const BoundaryEdges open = findBoundaryEdges(mesh);
+            // Name one of them. Where the hole IS is the only part of this
+            // message an author can act on; the count alone just says to go
+            // looking, across the whole mesh.
+            const std::string where =
+                open.first ? ", first at " + describeEdge(mesh, *open.first) : std::string();
+            ev.warn("polyhedron: mesh is not closed -- " + std::to_string(open.count) +
+                        " boundary edge(s)" + where +
+                        "; drawing it as a surface. hull() can still "
                         "use its points, but it cannot take part in union/difference/intersection",
                     &node.position());
         }
