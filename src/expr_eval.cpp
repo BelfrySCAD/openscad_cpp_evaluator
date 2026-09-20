@@ -101,10 +101,15 @@ void Evaluator::warn(const std::string& message, const oscad::Position* position
         if (!sameSpot) {
             out += ", from " + generateWarnEntry->origin + ", line " + std::to_string(generateWarnEntry->line);
         }
-        echoFn_(out);
+        emitWarning(out);
         return;
     }
-    echoFn_(formatWarning(message, position, callStack_));
+    emitWarning(formatWarning(message, position, callStack_));
+}
+
+void Evaluator::emitWarning(const std::string& formatted) {
+    if (warnCapture != nullptr) warnCapture->push_back(formatted);
+    if (echoFn_) echoFn_(formatted);
 }
 
 const oscad::Identifier* Evaluator::undefProbeTarget(const oscad::PrimaryCall& call) {

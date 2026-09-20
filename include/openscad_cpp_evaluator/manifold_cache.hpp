@@ -3,6 +3,7 @@
 #include "openscad_cpp_evaluator/csg_node.hpp"
 
 #include <mutex>
+#include <vector>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,15 +23,28 @@ namespace oscadeval {
 // threading.Lock -- a host may run renders/evaluates on a background
 // thread while another operation reads/clears the same cache). Mirrors
 // the reference's ManifoldCache class.
+// What one cache entry holds. The warnings matter as much as the bodies:
+// a hit skips the whole subtree's GenerateFn, and every generate-time
+// diagnostic is raised *inside* one of those (polyhedron's "mesh is not
+// closed", import()'s failures, the dimension rules). Cached without them,
+// a second render of unchanged source silently dropped every warning the
+// first one raised, so a real defect looked intermittent and the author
+// went hunting for a phantom. A cache has to be transparent; that includes
+// what it says, not only what it draws. See BelfrySCAD issue #521.
+struct CachedSubtree {
+    std::vector<ColoredBody> bodies;
+    std::vector<std::string> warnings;  // already formatted, replayed verbatim
+};
+
 class ManifoldCache {
 public:
-    std::optional<std::vector<ColoredBody>> get(const std::string& key) const;
-    void put(std::string key, std::vector<ColoredBody> bodies);
+    std::optional<CachedSubtree> get(const std::string& key) const;
+    void put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings);
     void clear();
 
 private:
     mutable std::mutex mutex_;
-    std::unordered_map<std::string, std::vector<ColoredBody>> entries_;
+    std::unordered_map<std::string, CachedSubtree> entries_;
 };
 
 // Structural content-hash key for `node`, used by generateTree()'s

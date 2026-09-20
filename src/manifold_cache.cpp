@@ -7,16 +7,16 @@
 
 namespace oscadeval {
 
-std::optional<std::vector<ColoredBody>> ManifoldCache::get(const std::string& key) const {
+std::optional<CachedSubtree> ManifoldCache::get(const std::string& key) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = entries_.find(key);
     if (it == entries_.end()) return std::nullopt;
     return it->second;
 }
 
-void ManifoldCache::put(std::string key, std::vector<ColoredBody> bodies) {
+void ManifoldCache::put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings) {
     std::lock_guard<std::mutex> lock(mutex_);
-    entries_[std::move(key)] = std::move(bodies);
+    entries_[std::move(key)] = CachedSubtree{std::move(bodies), std::move(warnings)};
 }
 
 void ManifoldCache::clear() {

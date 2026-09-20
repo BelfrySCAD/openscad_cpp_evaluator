@@ -58,9 +58,16 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             // skipped. See CSGNode::keyHasClosure.
             if (node.keyHasClosure) key.reset();
         }
-        std::optional<std::vector<ColoredBody>> cached = key ? manifoldCache_->get(*key) : std::nullopt;
+        std::optional<CachedSubtree> cached = key ? manifoldCache_->get(*key) : std::nullopt;
         if (cached) {
-            node.bodies = std::move(*cached);
+            node.bodies = std::move(cached->bodies);
+            // Replay what generating this subtree said the first time. A hit
+            // runs none of it again, so without this the diagnostics simply
+            // disappear on every render after the first -- which is how a
+            // permanently-open polyhedron came to look like an intermittent
+            // one (BelfrySCAD #521). Goes through emitWarning so an enclosing
+            // capture records them too, exactly as a fresh generate would.
+            for (const std::string& w : cached->warnings) emitWarning(w);
             // Skipped entirely while measuring: restampCachedIds writes
             // idToNode/idToColor, and geometry that is about to be discarded
             // has no click-to-source identity worth recording. See
@@ -83,6 +90,23 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             // inside this hull.
             const bool savedInsideHull = insideHull;
             if (node.isBuiltin && node.kind == "hull") insideHull = true;
+            // Collect everything this subtree warns about, so put() below can
+            // store it with the bodies. Only worth doing when the result is
+            // actually cacheable -- an uncacheable node (rands() taint, a
+            // closure in the key) regenerates every time and warns every time
+            // by itself.
+            std::vector<std::string> subtreeWarnings;
+            // RAII, unlike the plain save/restore insideHull and
+            // generateWarnEntry use above: those restore a value, this one
+            // restores a POINTER to a stack vector. An EvalError thrown out
+            // of a GenerateFn would otherwise leave warnCapture dangling at
+            // a destroyed vector for any warning raised afterwards.
+            struct CaptureGuard {
+                Evaluator& ev;
+                std::vector<std::string>* saved;
+                ~CaptureGuard() { ev.warnCapture = saved; }
+            } captureGuard{*this, warnCapture};
+            if (key) warnCapture = &subtreeWarnings;
             generateTreeImpl(childPtrs);
             insideHull = savedInsideHull;
 
@@ -111,12 +135,18 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 node.bodies = flattenCsgTree(node.children);
             }
             if (key) {
+                warnCapture = captureGuard.saved;
+                // Merge inward-out: an ancestor still capturing must end up
+                // holding this subtree's lines too, since a hit at ITS level
+                // skips everything down here.
+                if (warnCapture != nullptr)
+                    warnCapture->insert(warnCapture->end(), subtreeWarnings.begin(), subtreeWarnings.end());
                 // The geometry itself is still cached while measuring --
                 // cacheKey is content-addressed, so the real render can
                 // legitimately reuse it. Only the PRODUCER attribution is
                 // suppressed: a node that gets discarded must never be
                 // recorded as the origin of geometry a later render draws.
-                manifoldCache_->put(*key, node.bodies);
+                manifoldCache_->put(*key, node.bodies, std::move(subtreeWarnings));
                 if (!measuring_) cacheProducer_[*key] = node.node;
             }
                 // The children's bodies have been consumed (by the dispatch above,
