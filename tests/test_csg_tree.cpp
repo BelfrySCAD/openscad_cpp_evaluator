@@ -392,3 +392,52 @@ TEST(HullOpenMesh, ASiblingAfterAHullStillWarns) {
             [&](const std::string& m) { if (warning.empty()) warning = m; });
     EXPECT_NE(warning.find("mesh is not closed"), std::string::npos) << warning;
 }
+
+// A count alone is actionable on a hand-written face list and useless on
+// generated geometry: three bad edges in a few thousand triangles cannot be
+// found by eye. The message names one of them. Issue #187, from BelfrySCAD
+// #521, where the author searched the render, hunted for magenta backfaces
+// and opened the model in OpenSCAD without ever locating the hole.
+TEST(OpenMeshWarning, NamesACoordinateOfOneBoundaryEdge) {
+    std::string warning;
+    // The lid is missing, so the four top edges are open. Every one of them
+    // has z=10, whichever the map happens to name first.
+    evalSrc("polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],\n"
+            "                   [0,0,10],[10,0,10],[10,10,10],[0,10,10]],\n"
+            "           faces=[[0,1,2,3],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]]);\n",
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+
+    EXPECT_NE(warning.find("4 boundary edge(s)"), std::string::npos) << warning;
+    EXPECT_NE(warning.find("first at ["), std::string::npos) << warning;
+    EXPECT_NE(warning.find(" - ["), std::string::npos) << warning;
+    // Both endpoints of an open edge here lie on the missing lid.
+    // Vertices 4..7 are the missing lid's corners, so the open edges are
+    // (4,5) (5,6) (6,7) (4,7); std::map names (4,5) first.
+    EXPECT_NE(warning.find("first at [0, 0, 10] - [10, 0, 10]"), std::string::npos)
+        << "expected the lowest-indexed open edge, deterministically: " << warning;
+}
+
+// The named edge must not move between runs. An identifier that changes
+// render to render is worse than none -- it sends the author somewhere new
+// each time they look.
+TEST(OpenMeshWarning, TheNamedEdgeIsStableAcrossRuns) {
+    const char* src = "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],\n"
+                      "                   [0,0,10],[10,0,10],[10,10,10],[0,10,10]],\n"
+                      "           faces=[[0,1,2,3],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]]);\n";
+    std::string first, second;
+    evalSrc(src, [&](const std::string& m) { if (first.empty()) first = m; });
+    evalSrc(src, [&](const std::string& m) { if (second.empty()) second = m; });
+    EXPECT_EQ(first, second);
+}
+
+// A closed mesh says nothing at all: the coordinate clause must not appear,
+// and no warning should be raised to carry it.
+TEST(OpenMeshWarning, AClosedMeshStaysSilent) {
+    std::string warning;
+    evalSrc("polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],\n"
+            "                   [0,0,10],[10,0,10],[10,10,10],[0,10,10]],\n"
+            "           faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],\n"
+            "                  [2,6,7,3],[3,7,4,0]]);\n",
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+    EXPECT_EQ(warning, "");
+}
