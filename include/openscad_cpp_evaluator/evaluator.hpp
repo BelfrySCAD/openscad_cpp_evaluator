@@ -398,6 +398,14 @@ public:
     // than anything reentrancy-aware, since generateTreeImpl recurses
     // depth-first on one thread.
     const oscad::Position* generateWarnEntry = nullptr;
+    // Non-null while generateTreeImpl() is generating a subtree whose result
+    // it intends to cache: warn() appends each formatted line here as well as
+    // emitting it, so the entry can replay them on a later hit. Saved and
+    // restored around each node rather than left set, and the inner vector is
+    // merged into the outer one on the way out, so a parent's entry carries
+    // everything its whole subtree said -- which is what a parent-level hit
+    // has to reproduce, since it skips all of it. See ManifoldCache.
+    std::vector<std::string>* warnCapture = nullptr;
     // The same republish for CSGNode::callChain, read by tagGenerated to
     // fill idToCallChain.
     uint32_t generateCallChain = kNoCallChain;
@@ -530,6 +538,10 @@ public:
     // Public: builtins/import.cpp's not-manifold warning is emitted from a
     // free function, same reasoning as tagGenerated()/builtinChildren().
     void warn(const std::string& message, const oscad::Position* position);
+    // Hands one already-formatted warning line to echoFn_, recording it in
+    // warnCapture first when one is active. Every warning path goes through
+    // here, including a ManifoldCache hit replaying a cached line.
+    void emitWarning(const std::string& formatted);
 
     // Applies OpenSCAD's mixed-2D/3D rules to a node's children just
     // before its GenerateFn runs -- see csg_generate.cpp.

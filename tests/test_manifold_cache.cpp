@@ -433,3 +433,66 @@ TEST(ManifoldCache, ClearRemovesEntriesForcingRegeneration) {
     Evaluated second = evalSrcWithCache("cube(5);", cache);
     EXPECT_FALSE(second.ev.idToNode.empty()); // no longer a cache hit after clear()
 }
+
+// An open polyhedron warns every time it is drawn, not only the first time.
+// A cache hit runs no GenerateFn, so before warnings were stored in the entry
+// the second render of unchanged source went silent and a permanently-broken
+// mesh looked intermittent -- BelfrySCAD issue #521, where the author lost an
+// afternoon to it and could not find the "sometimes" in their own code.
+TEST(ManifoldCache, AHitReplaysTheWarningsGeneratingItRaised) {
+    // A cube missing one face: five quads, so the mesh has boundary edges.
+    const std::string src = R"(
+        polyhedron(
+          points=[[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],
+                  [-1,-1, 1],[1,-1, 1],[1,1, 1],[-1,1, 1]],
+          faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3]]);
+    )";
+    auto cache = std::make_shared<ManifoldCache>();
+    auto countWarnings = [&] {
+        int n = 0;
+        evalSrcWithCache(src, cache, [&](const std::string& line) {
+            if (line.find("mesh is not closed") != std::string::npos) ++n;
+        });
+        return n;
+    };
+    EXPECT_EQ(countWarnings(), 1) << "cold cache: the generate pass runs and warns";
+    EXPECT_EQ(countWarnings(), 1) << "cache hit must replay, not swallow";
+    EXPECT_EQ(countWarnings(), 1) << "and keep replaying";
+    cache->clear();
+    EXPECT_EQ(countWarnings(), 1) << "after clear, generated afresh";
+}
+
+// The replay must survive a hit ABOVE the node that warned: a parent entry
+// skips its whole subtree, so it has to carry what the subtree said.
+TEST(ManifoldCache, AHitOnAnAncestorStillReplaysADescendantsWarning) {
+    const std::string src = R"(
+        translate([1,0,0]) polyhedron(
+          points=[[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],
+                  [-1,-1, 1],[1,-1, 1],[1,1, 1],[-1,1, 1]],
+          faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3]]);
+    )";
+    auto cache = std::make_shared<ManifoldCache>();
+    auto countWarnings = [&] {
+        int n = 0;
+        evalSrcWithCache(src, cache, [&](const std::string& line) {
+            if (line.find("mesh is not closed") != std::string::npos) ++n;
+        });
+        return n;
+    };
+    EXPECT_EQ(countWarnings(), 1);
+    EXPECT_EQ(countWarnings(), 1) << "the translate() hit must replay its child's warning";
+}
+
+// A clean script stays clean: replay must not invent warnings, and a hit on
+// a node that said nothing must say nothing.
+TEST(ManifoldCache, AHitOnAQuietSubtreeStaysQuiet) {
+    auto cache = std::make_shared<ManifoldCache>();
+    auto countLines = [&] {
+        int n = 0;
+        evalSrcWithCache("difference() { cube(10, center=true); sphere(6); }", cache,
+                         [&](const std::string&) { ++n; });
+        return n;
+    };
+    EXPECT_EQ(countLines(), 0);
+    EXPECT_EQ(countLines(), 0);
+}
