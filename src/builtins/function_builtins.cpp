@@ -1011,6 +1011,7 @@ const std::unordered_map<std::string, double>& featureLevels() {
         {"sphere-styles", 1.0},      // sphere(style=)
         {"export-name", 1.0},        // $export_name
         {"simplify-op", 1.0},        // simplify()
+        {"mesh-repair", 1.0},        // mesh_repair(), and import(tolerance=)
         {"expr-import", 1.0},        // import() in expression position
         {"object-function", 1.0},    // object(), unconditional here
         {"roof-op", 1.0},            // roof(), method="voronoi" only

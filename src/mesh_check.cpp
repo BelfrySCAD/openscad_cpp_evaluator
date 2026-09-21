@@ -309,7 +309,7 @@ namespace {
 // this: unwelded duplicates split one shared edge into two boundary edges,
 // so a mesh that is really closed reads as full of holes until it is done.
 template <typename M>
-std::vector<Vert> weldMap(const M& m, size_t& welded) {
+std::vector<Vert> weldMap(const M& m, size_t& welded, double tolerance) {
     const size_t stride = m.numProp ? m.numProp : 3;
     const size_t n = stride ? m.vertProperties.size() / stride : 0;
     std::vector<Vert> remap(n);
@@ -332,12 +332,17 @@ std::vector<Vert> weldMap(const M& m, size_t& welded) {
         }
         bool samePos(const Keyed& o) const { return x == o.x && y == o.y && z == o.z; }
     };
+    // Snap to a grid of `tolerance`. Guarded because a caller can pass 0 or
+    // a negative to mean "weld only exact duplicates" -- dividing by that
+    // would give inf/NaN keys and weld the whole mesh into one point.
+    const double inv = tolerance > 0.0 ? 1.0 / tolerance : 0.0;
     std::vector<Keyed> keyed;
     keyed.reserve(n);
     for (size_t v = 0; v < n; ++v) {
         double p[3];
         pos(m, static_cast<Vert>(v), p);
-        keyed.push_back({llround(p[0] * 1e6), llround(p[1] * 1e6), llround(p[2] * 1e6), static_cast<Vert>(v)});
+        keyed.push_back({llround(p[0] * inv), llround(p[1] * inv), llround(p[2] * inv),
+                         static_cast<Vert>(v)});
     }
     std::sort(keyed.begin(), keyed.end());
     for (size_t i = 0; i < keyed.size();) {
@@ -400,14 +405,14 @@ std::vector<std::vector<Vert>> boundaryLoops(const std::vector<std::array<Vert, 
 }  // namespace
 
 template <typename M>
-M repairMesh(const M& mesh, MeshRepairReport& report) {
+M repairMesh(const M& mesh, MeshRepairReport& report, double tolerance) {
     report = MeshRepairReport{};
     M out = mesh;
 
     // 1. Weld. Must come first -- it decides which edges are shared, and
     //    every later step reads the edge map.
     size_t welded = 0;
-    const std::vector<Vert> remap = weldMap(mesh, welded);
+    const std::vector<Vert> remap = weldMap(mesh, welded, tolerance);
     report.weldedVertices = welded;
 
     // Remap every face, then find the duplicates by sorting rather than by
@@ -850,8 +855,8 @@ M stripSlivers(const M& mesh, SliverStripReport& report) {
 // header, keeps compile times where they were.
 template MeshDiagnosis checkMesh<manifold::MeshGL>(const manifold::MeshGL&);
 template MeshDiagnosis checkMesh<manifold::MeshGL64>(const manifold::MeshGL64&);
-template manifold::MeshGL repairMesh<manifold::MeshGL>(const manifold::MeshGL&, MeshRepairReport&);
-template manifold::MeshGL64 repairMesh<manifold::MeshGL64>(const manifold::MeshGL64&, MeshRepairReport&);
+template manifold::MeshGL repairMesh<manifold::MeshGL>(const manifold::MeshGL&, MeshRepairReport&, double);
+template manifold::MeshGL64 repairMesh<manifold::MeshGL64>(const manifold::MeshGL64&, MeshRepairReport&, double);
 template manifold::MeshGL stripSlivers<manifold::MeshGL>(const manifold::MeshGL&, SliverStripReport&);
 template manifold::MeshGL64 stripSlivers<manifold::MeshGL64>(const manifold::MeshGL64&, SliverStripReport&);
 

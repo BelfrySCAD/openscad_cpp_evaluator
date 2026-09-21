@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/mesh_check.hpp"
 
 #include <manifold/polygon.h>
 
@@ -497,6 +498,117 @@ std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params
                 tol = kDefaultSimplifyFraction * std::sqrt(d.x * d.x + d.y * d.y);
             }
             if (tol > 0.0) cb.section = b.section->Simplify(tol);
+        }
+        out.push_back(std::move(cb));
+    }
+    return out;
+}
+
+// mesh_repair(tolerance) -- make a broken mesh watertight. A BelfrySCAD
+// extension: nothing in the OpenSCAD language can repair geometry, and a
+// mesh arriving from a library generator or an import is routinely almost
+// closed rather than closed. See issue #190.
+//
+// The work is repairMesh()'s, already used by import(..., repair=true);
+// this exposes the same six steps to any geometry, not only imported
+// files: weld, drop degenerate/duplicate, orient, fill holes, flip
+// outward, strip zero-area faces.
+//
+// NOT a substitute for a generator that emits a closed mesh. Repair costs
+// a full pass over the geometry every render, and welding discards
+// vertices -- which is why the default tolerance is tight enough to
+// weld only what is unambiguously one point, leaving hole filling to
+// close the rest.
+
+CSGParams resolveMeshRepair(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
+    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    CSGParams params;
+    // Position 0, so mesh_repair(0.001) reads the way simplify(0.1) does.
+    params["tolerance"] = getArg(args, 0, "tolerance", Value{});
+    EvalContext blockCtx = ev.blockScope(effCtx);
+    ev.evalChildren(node.children, blockCtx);
+    return params;
+}
+
+std::vector<ColoredBody> generateMeshRepair(Evaluator& ev, const CSGParams& params,
+                                            const std::vector<std::unique_ptr<CSGNode>>& children,
+                                            const oscad::ASTNode& node) {
+    const std::vector<ColoredBody> bodies = flattenCsgTree(children);
+    if (bodies.empty()) return {};
+
+    const Value tolArg = params.at("tolerance");
+    double tolerance = kDefaultWeldTolerance;
+    if (std::holds_alternative<double>(tolArg)) {
+        tolerance = std::get<double>(tolArg);
+        if (tolerance < 0.0) {
+            ev.warn("mesh_repair: tolerance must not be negative", &node.position());
+            return bodies;
+        }
+    } else if (!std::holds_alternative<std::monostate>(tolArg)) {
+        ev.warn("mesh_repair: tolerance must be a number", &node.position());
+    }
+
+    std::vector<ColoredBody> out;
+    out.reserve(bodies.size());
+    for (const ColoredBody& b : bodies) {
+        // Background/highlight geometry is a debugging aid, not part of the
+        // model; repairing it would spend the pass and say nothing useful.
+        // A 2D section has no mesh to repair either.
+        if (b.role != BodyRole::Normal || (!b.body && !b.rawMesh)) {
+            out.push_back(b);
+            continue;
+        }
+        // The case this module exists for: polyhedron() could not build a
+        // Manifold from an open mesh, so it kept the raw soup in rawMesh
+        // and left `body` set but EMPTY (see ColoredBody::rawMesh). Repair
+        // the soup -- repairing the empty Manifold would find nothing to
+        // do and report success at having done nothing.
+        MeshRepairReport report;
+        ColoredBody cb = b;
+        manifold::MeshGL64 fixed;
+        if (b.rawMesh) {
+            manifold::MeshGL64 soup;
+            soup.numProp = b.rawMesh->numProp;
+            soup.vertProperties.assign(b.rawMesh->vertProperties.begin(),
+                                        b.rawMesh->vertProperties.end());
+            soup.triVerts.assign(b.rawMesh->triVerts.begin(), b.rawMesh->triVerts.end());
+            fixed = repairMesh(soup, report, tolerance);
+        } else {
+            fixed = repairMesh(b.body->GetMeshGL64(), report, tolerance);
+        }
+        if (report.didAnything()) {
+            manifold::Manifold rebuilt(fixed);
+            if (rebuilt.Status() == manifold::Manifold::Error::NoError) {
+                cb.body = std::move(rebuilt);
+                // It is a real solid now, so stop carrying the display-only
+                // soup: leaving it set would keep splitByRole() pulling the
+                // body aside as un-CSG-able, which is the whole thing the
+                // repair just fixed.
+                cb.rawMesh.reset();
+                // triColors is indexed by triangle, and repair changes how
+                // many there are -- filling adds, sliver stripping removes.
+                // Carrying it across would mask an N-triangle mesh with an
+                // M-entry array, which is an IndexError rather than a wrong
+                // colour. Same reasoning as simplify()'s.
+                cb.triColors.reset();
+                ev.warn("mesh_repair: " + report.summary(), &node.position());
+            } else {
+                // Say what it could not do. Silently returning the original
+                // would leave the author believing a repair happened.
+                ev.warn("mesh_repair: could not rebuild the repaired mesh (" +
+                            std::string(manifoldErrorName(rebuilt.Status())) +
+                            "); geometry left unchanged",
+                        &node.position());
+            }
+        }
+        if (report.unfilledHoles) {
+            // The sub-3-edge boundary loop: a crack between two nearly
+            // coincident vertices, with no fan to build. Only a coarser
+            // weld closes it, so name the knob rather than just the count.
+            ev.warn("mesh_repair: " + std::to_string(report.unfilledHoles) +
+                        " hole(s) left open -- a crack too narrow to fill needs a"
+                        " larger tolerance to weld shut instead",
+                    &node.position());
         }
         out.push_back(std::move(cb));
     }

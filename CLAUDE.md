@@ -946,6 +946,40 @@ grep for `ponytail:`.
   shut. Note the reduction is NOT monotonic in the tolerance (1.0 gave *more* triangles than 0.5 on
   the test model, since simplification can force re-triangulation), so don't read a jump as a bug.
 
+- `mesh_repair()` (also `topology.cpp`) — makes a broken mesh watertight, so geometry that was
+  merely *almost* closed can take part in CSG. Another BelfrySCAD extension: nothing in the language
+  could repair geometry, and a mesh from a library generator or an import is routinely a few
+  boundary edges short of a solid. The work is `repairMesh()`'s, already used by
+  `import(..., repair=true)`; this exposes the same six steps to any geometry — weld, drop
+  degenerate/duplicate, orient, fill holes, flip outward, strip zero-area faces.
+
+  **It reads `ColoredBody::rawMesh`, not `body`.** An open `polyhedron()` cannot build a Manifold,
+  so it keeps the raw triangle soup there and leaves `body` set but EMPTY. Repairing the empty
+  Manifold finds nothing to do and reports success at having done nothing, which is how the first
+  version of this failed silently. On success the soup is cleared, or `splitByRole()` keeps pulling
+  the body aside as un-CSG-able — the very thing the repair just fixed.
+
+  **The default tolerance is `GRID_FINE` (2⁻²⁰ ≈ 9.54e-7)**, OpenSCAD's own constant for deciding
+  two points are one, so a mesh that welds there welds here; it is exact in binary, so the
+  multiply-and-round in `weldMap()` adds no error. Deliberately tight, unlike `simplify()`'s
+  scale-relative default, because welding DISCARDS vertices: a default that quietly merged real
+  detail would be worse than one that leaves a mesh open, and hole filling closes what welding
+  declines to. `import(..., repair=true)` takes the same `tolerance=` argument for the same reason.
+
+  **Watertight is not the same as clean**, and the tolerance chooses. A gap whose rim is two
+  vertices that should be one closes either by welding (the duplicate disappears, no new geometry)
+  or by filling (the pair survives and step 4 stitches a triangle across). The filled patch is a
+  *needle* — two corners a hair apart — and step 6 will not remove it, because it strips
+  genuinely zero-area faces and a needle across a 2e-5 gap with its third corner 0.25 away has an
+  area around 2.5e-6. Thin, not degenerate. So a repaired-but-ugly mesh means the tolerance was too
+  small; the `polyhedron()` warning names a boundary edge's endpoints, so measure the gap and pass
+  a little more. A boundary loop of fewer than three edges — a crack, not a hole — has no fan to
+  build at all and is reported as left open; only a coarser weld closes that.
+
+  Not a substitute for a generator that emits a closed mesh: repair costs a full pass over the
+  geometry every render. Prompted by BelfrySCAD #521, where BOSL2's `isosurface()` computed a shared
+  voxel corner once per voxel and let the results drift 2e-5 apart.
+
 - `src/builtins/dxf_dim.cpp` — `dxf_dim()`/`dxf_cross()`, which read a measurement out of a DXF file
   rather than out of the model. Ported from the reference's `io/dxfdim.cc` plus the DIMENSION/LINE
   half of `io/DxfData.cc`: `dxf_dim()` returns the first matching DIMENSION's value by its type
