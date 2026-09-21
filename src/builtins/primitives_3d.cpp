@@ -854,7 +854,15 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
                 open.first ? ", first at " + describeEdge(mesh, *open.first) : std::string();
             ev.warn("polyhedron: mesh is not closed -- " + std::to_string(open.count) +
                         " boundary edge(s)" + where +
-                        "; drawing it as a surface. hull() can still "
+                        // "drawing it as a surface" was read by a reporter as
+                        // the HOLE being surfaced over -- i.e. as automatic
+                        // repair hiding their defect. Nothing is repaired: the
+                        // mesh is drawn as the open surface it is. Name the
+                        // object as the thing being drawn, and say what it is
+                        // NOT, since "surface" alone does not imply "not solid"
+                        // to someone who did not know it could be either.
+                        "; drawing the object as an open surface rather than a "
+                        "solid -- nothing is patched. hull() can still "
                         "use its points, but it cannot take part in union/difference/intersection",
                     &node.position());
         }

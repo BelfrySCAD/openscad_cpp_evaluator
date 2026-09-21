@@ -344,7 +344,9 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         if (why.empty()) why = manifoldErrorName(body.Status());
         if (!ev.insideHull) {
             ev.warn("import: mesh is not a closed solid (" + why +
-                        "); drawing it as a surface. hull() can still use its points, but "
+                        // Same rewording as polyhedron's: see the comment there.
+                        "); drawing the object as an open surface rather than a solid "
+                        "-- nothing is patched. hull() can still use its points, but "
                         "it cannot take part in union/difference/intersection" +
                         std::string(repair ? "" : ". Try import(..., repair=true)"),
                     &node.position());

@@ -441,3 +441,24 @@ TEST(OpenMeshWarning, AClosedMeshStaysSilent) {
             [&](const std::string& m) { if (warning.empty()) warning = m; });
     EXPECT_EQ(warning, "");
 }
+
+// The wording matters, and got this wrong once. "drawing it as a surface"
+// was read by the reporter of BelfrySCAD #521 as the HOLE being surfaced
+// over -- automatic repair hiding their defect -- which is the opposite of
+// what happens, and it cost them a second round of confusion after the
+// warning itself was fixed. The message must name the OBJECT as the thing
+// drawn, and say outright that nothing is patched.
+TEST(OpenMeshWarning, SaysTheObjectIsDrawnOpenAndNothingIsPatched) {
+    std::string warning;
+    evalSrc("polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],\n"
+            "                   [0,0,10],[10,0,10],[10,10,10],[0,10,10]],\n"
+            "           faces=[[0,1,2,3],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]]);\n",
+            [&](const std::string& m) { if (warning.empty()) warning = m; });
+
+    EXPECT_NE(warning.find("drawing the object as an open surface"), std::string::npos)
+        << warning;
+    EXPECT_NE(warning.find("nothing is patched"), std::string::npos) << warning;
+    // The ambiguous phrasing must not come back: "it" has no clear referent
+    // here, and readers resolved it to the hole.
+    EXPECT_EQ(warning.find("drawing it as a surface"), std::string::npos) << warning;
+}
