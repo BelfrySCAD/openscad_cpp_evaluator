@@ -186,6 +186,10 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     // Not an OpenSCAD parameter. A script using it will not run upstream,
     // which is why it has to be asked for rather than being the default.
     const bool repair = truthy(getArg(args, std::nullopt, "repair", Value{false}));
+    // How far apart two vertices may be and still be welded into one.
+    // Named rather than hidden so import() and mesh_repair() answer the
+    // same question the same way (issue #190); undef keeps the default.
+    const Value toleranceArg = getArg(args, std::nullopt, "tolerance", Value{});
 
     CSGParams params;
     params["color"] = colorToValue(effCtx.color);
@@ -255,6 +259,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         }
         params["kind"] = Value{std::string("mesh")};
         params["repair"] = Value{repair};
+        params["tolerance"] = toleranceArg;
         params["verts"] = Value{std::make_shared<const ValueList>(ValueList{std::move(vertsFlat)})};
         params["tris"] = Value{std::make_shared<const ValueList>(ValueList{std::move(trisFlat)})};
         return params;
@@ -315,9 +320,23 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     const auto repairIt = params.find("repair");
     const bool repair = repairIt != params.end() && truthy(repairIt->second);
     if (repair) {
+        double tolerance = kDefaultWeldTolerance;
+        const auto tolIt = params.find("tolerance");
+        if (tolIt != params.end()) {
+            if (const double* t = std::get_if<double>(&tolIt->second)) {
+                if (*t < 0.0) {
+                    ev.warn("import: tolerance must not be negative; using the default",
+                            &node.position());
+                } else {
+                    tolerance = *t;
+                }
+            } else if (!std::holds_alternative<std::monostate>(tolIt->second)) {
+                ev.warn("import: tolerance must be a number", &node.position());
+            }
+        }
         const MeshDiagnosis before = checkMesh(mesh);
         MeshRepairReport rep;
-        manifold::MeshGL64 fixed = repairMesh(mesh, rep);
+        manifold::MeshGL64 fixed = repairMesh(mesh, rep, tolerance);
         const MeshDiagnosis after = checkMesh(fixed);
         if (rep.didAnything()) {
             ev.warn("import: repaired the mesh -- " + rep.summary(), &node.position());

@@ -82,6 +82,15 @@ struct MeshRepairReport {
     std::string summary() const;
 };
 
+//: Default welding tolerance: OpenSCAD's own GRID_FINE, 2^-20. Theirs is
+//: the constant their Grid.h uses to decide two points are one, so a mesh
+//: that welds there welds here. Exact in binary, so the multiply-and-round
+//: in weldMap() adds no error of its own. Deliberately tight: welding
+//: DISCARDS vertices, and a default that quietly merged real detail would
+//: be worse than one that leaves a mesh open -- hole filling closes what
+//: welding declines to. See issue #190.
+constexpr double kDefaultWeldTolerance = 0.00000095367431640625;
+
 // Best-effort repair, in the only order that works: welding first (it
 // changes which edges are shared, so every later test depends on it), then
 // degenerate and duplicate removal, then orientation, then hole filling
@@ -91,9 +100,10 @@ struct MeshRepairReport {
 // Returns the repaired mesh. A mesh it cannot close is still returned,
 // improved as far as it got, with the remainder reported in `report`.
 template <typename M>
-M repairMesh(const M& mesh, MeshRepairReport& report);
-extern template manifold::MeshGL repairMesh<manifold::MeshGL>(const manifold::MeshGL&, MeshRepairReport&);
-extern template manifold::MeshGL64 repairMesh<manifold::MeshGL64>(const manifold::MeshGL64&, MeshRepairReport&);
+M repairMesh(const M& mesh, MeshRepairReport& report,
+             double tolerance = kDefaultWeldTolerance);
+extern template manifold::MeshGL repairMesh<manifold::MeshGL>(const manifold::MeshGL&, MeshRepairReport&, double);
+extern template manifold::MeshGL64 repairMesh<manifold::MeshGL64>(const manifold::MeshGL64&, MeshRepairReport&, double);
 
 struct SliverStripReport {
     size_t removed = 0;        // zero-area faces taken out

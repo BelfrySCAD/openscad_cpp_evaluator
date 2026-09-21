@@ -188,6 +188,10 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
                                            const std::vector<std::unique_ptr<CSGNode>>& children,
                                            const oscad::ASTNode& node);
 
+CSGParams resolveMeshRepair(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateMeshRepair(Evaluator& ev, const CSGParams& params,
+                                            const std::vector<std::unique_ptr<CSGNode>>& children,
+                                            const oscad::ASTNode& node);
 CSGParams resolveSimplify(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params,
                                            const std::vector<std::unique_ptr<CSGNode>>& children,

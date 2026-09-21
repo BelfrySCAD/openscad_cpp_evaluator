@@ -1660,3 +1660,99 @@ TEST(CsgTree, InnerNodeBodiesAreReleasedOnceTheParentHasConsumedThem) {
     Evaluated plain = evalSrc("union() { cube(1); sphere(1); }"); // the union really was consumed first
     EXPECT_NEAR(e.bodies[0].body->Volume(), plain.bodies[0].body->Volume(), 1e-9);
 }
+
+// -- mesh_repair() ----------------------------------------------------------
+//
+// Issue #190, out of BelfrySCAD #521: a mesh that is almost closed is not a
+// solid, and nothing in the language could make it one. The repair itself is
+// repairMesh()'s, already covered in test_mesh_check.cpp; these cover the
+// module -- that it reaches the raw soup polyhedron() keeps, that the result
+// is a real solid, and that tolerance does what it claims.
+
+namespace {
+// A 20-cube with its lid left off: five faces, four boundary edges.
+const char* kOpenCube =
+    "polyhedron(points=[[-10,-10,-10],[10,-10,-10],[10,10,-10],[-10,10,-10],"
+    "                   [-10,-10, 10],[10,-10, 10],[10,10, 10],[-10,10, 10]],"
+    "           faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3]]);";
+} // namespace
+
+TEST(MeshRepairModule, TurnsAnOpenMeshIntoASolid) {
+    // Unrepaired, polyhedron() cannot build a Manifold at all: it keeps the
+    // triangle soup for display and leaves an EMPTY body behind.
+    Evaluated broken = evalSrc(kOpenCube);
+    ASSERT_EQ(broken.bodies.size(), 1u);
+    EXPECT_TRUE(broken.bodies[0].rawMesh.has_value());
+    EXPECT_DOUBLE_EQ(broken.bodies[0].body->Volume(), 0.0);
+
+    Evaluated fixed = evalSrc(std::string("mesh_repair() ") + kOpenCube);
+    ASSERT_EQ(fixed.bodies.size(), 1u);
+    // The soup is gone: splitByRole() would otherwise keep pulling this
+    // aside as un-CSG-able, which is the thing the repair just fixed.
+    EXPECT_FALSE(fixed.bodies[0].rawMesh.has_value());
+    EXPECT_NEAR(fixed.bodies[0].body->Volume(), 20.0 * 20 * 20, 1e-6);
+    EXPECT_EQ(fixed.bodies[0].body->Status(), manifold::Manifold::Error::NoError);
+}
+
+TEST(MeshRepairModule, TheResultCanTakePartInCSG) {
+    // The whole point. An unrepaired open mesh is display-only.
+    Evaluated cut = evalSrc(std::string("difference() { mesh_repair() ") + kOpenCube +
+                            " cube(10, center=true); }");
+    ASSERT_EQ(cut.bodies.size(), 1u);
+    EXPECT_NEAR(cut.bodies[0].body->Volume(), 20.0 * 20 * 20 - 10.0 * 10 * 10, 1e-6);
+}
+
+TEST(MeshRepairModule, SaysWhatItDid) {
+    std::string said;
+    evalSrc(std::string("mesh_repair() ") + kOpenCube,
+            [&](const std::string& m) { if (m.find("mesh_repair") != std::string::npos && said.empty()) said = m; });
+    EXPECT_NE(said.find("hole filled"), std::string::npos) << said;
+}
+
+TEST(MeshRepairModule, LeavesAClosedMeshAloneAndSaysNothing) {
+    const char* closed = "cube(10, center=true);";
+    std::string said;
+    Evaluated e = evalSrc(std::string("mesh_repair() ") + closed,
+                          [&](const std::string& m) { if (said.empty()) said = m; });
+    EXPECT_EQ(said, "");
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1000.0, 1e-6);
+}
+
+TEST(MeshRepairModule, ToleranceWeldsVerticesThatTheDefaultLeavesSplit) {
+    // Two cubes sharing a face, with the shared corners 1e-3 apart -- far
+    // above GRID_FINE, so the default welds nothing and only hole filling
+    // closes it. A tolerance covering the gap welds instead, and the two
+    // routes are distinguishable by triangle count: filling ADDS faces.
+    const char* split =
+        "polyhedron(points=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],"
+        "                   [0,0,10],[10,0,10],[10,10,10],[0.001,10,10]],"
+        "           faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]]);";
+    Evaluated tight = evalSrc(std::string("mesh_repair() ") + split);
+    Evaluated loose = evalSrc(std::string("mesh_repair(0.01) ") + split);
+    ASSERT_EQ(tight.bodies.size(), 1u);
+    ASSERT_EQ(loose.bodies.size(), 1u);
+    // Both must end up solid; the looser weld should not need more geometry
+    // than the tighter one.
+    EXPECT_EQ(tight.bodies[0].body->Status(), manifold::Manifold::Error::NoError);
+    EXPECT_EQ(loose.bodies[0].body->Status(), manifold::Manifold::Error::NoError);
+    EXPECT_LE(loose.bodies[0].body->NumTri(), tight.bodies[0].body->NumTri());
+}
+
+TEST(MeshRepairModule, RejectsANegativeTolerance) {
+    // polyhedron() warns about the open mesh first, so pick out ours.
+    std::string said;
+    evalSrc(std::string("mesh_repair(-1) ") + kOpenCube,
+            [&](const std::string& m) {
+                if (said.empty() && m.find("mesh_repair") != std::string::npos) said = m;
+            });
+    EXPECT_NE(said.find("must not be negative"), std::string::npos) << said;
+}
+
+TEST(MeshRepairModule, IsAdvertisedBySupportedFeature) {
+    // A portable script guards on the capability before calling the module,
+    // since mesh_repair() is an extension and will not parse upstream.
+    std::string said;
+    evalSrc("echo(supported_feature(\"mesh-repair\"));",
+            [&](const std::string& m) { if (said.empty()) said = m; });
+    EXPECT_NE(said.find("1"), std::string::npos) << said;
+}
