@@ -169,6 +169,13 @@ std::optional<std::array<float, 4>> valueToColor(const Value& v);
 // (the CLI, any other mesh-export caller) should apply this to
 // Evaluator::evaluate()'s result before exporting, the same way the
 // reference's own cli.py does right before export_bodies().
-std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodies);
+// The thickness toRenderableBodies() gives a top-level 2D shape's slab by
+// default: OpenSCAD's own preview height, measured (see colored_body.cpp).
+// Docs images and exports use it; an interactive viewer may pass a thinner
+// one so a 2D shape reads as the flat contour it is.
+inline constexpr double kTopLevel2dHeight = 1.0;
+
+std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodies,
+                                            double flatHeight = kTopLevel2dHeight);
 
 } // namespace oscadeval

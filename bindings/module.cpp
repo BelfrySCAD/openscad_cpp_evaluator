@@ -505,10 +505,15 @@ nb::object coverageResultToPy(const std::optional<oscadeval::CoverageResult>& cr
 
 nb::object evaluate(const std::string& path, nb::dict viewportParams,
                      std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile,
-                     bool generate, bool strictCommas, bool coverage, bool keepMinuendColor) {
+                     bool generate, bool strictCommas, bool coverage, bool keepMinuendColor,
+                     double flatPreviewHeight) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
+    // What export gets. The same list as `bodies` unless the caller asked
+    // for a thinner preview slab: a 2D-only script exports its slab, and
+    // that must stay the reference's 1 unit whatever the viewer shows.
+    std::vector<oscadeval::ColoredBody> exportBodies;
     std::vector<std::string> echoes;
     std::vector<IdSpan> idSpans;
     std::vector<std::unique_ptr<oscadeval::CSGNode>> csgTree;
@@ -532,7 +537,10 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
             ev.keepMinuendColor = keepMinuendColor;
             ev.setUsedFileGlobals(used.usedFileGlobals);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
-            bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp, generate));
+            std::vector<oscadeval::ColoredBody> raw = ev.evaluate(used.processedNodes, ctx, vp, generate);
+            bodies = oscadeval::toRenderableBodies(raw, flatPreviewHeight);
+            exportBodies = flatPreviewHeight == oscadeval::kTopLevel2dHeight
+                               ? bodies : oscadeval::toRenderableBodies(raw);
             collectIdSpans(ev, idSpans);
             // Only moved out when it will actually be converted below --
             // csgTreeToPy() walks the whole tree building Python objects,
@@ -567,8 +575,8 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
     nb::list echoList;
     for (const std::string& s : echoes) echoList.append(s);
     auto geom = std::make_shared<Geometry>();
-    geom->bodies = std::move(bodies);
-    return nb::make_tuple(bodiesToList(geom->bodies), echoList, idSpansToDict(idSpans), csgTreeToPy(csgTree),
+    geom->bodies = std::move(exportBodies);
+    return nb::make_tuple(bodiesToList(bodies), echoList, idSpansToDict(idSpans), csgTreeToPy(csgTree),
                            profileResultToPy(profileResult), dyn, dynExplicit, geom, coverageResultToPy(coverageResult));
 }
 
@@ -780,7 +788,7 @@ void callPyReturnHook(nb::handle returnHook, const std::string& name, const osca
 nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::callable debugHook,
                           nb::callable errorBreak, nb::callable echoFn,
                           std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, nb::object returnHook,
-                          FastContinueSignal* fastContinueSignal) {
+                          FastContinueSignal* fastContinueSignal, double flatPreviewHeight) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
@@ -841,7 +849,7 @@ nb::object debugEvaluate(const std::string& path, nb::dict viewportParams, nb::c
             if (fastContinueSignal) ev.setFastContinueInterruptFlag(fastContinueSignal->flag());
             ev.setUsedFileGlobals(used.usedFileGlobals);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
-            bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp));
+            bodies = oscadeval::toRenderableBodies(ev.evaluate(used.processedNodes, ctx, vp), flatPreviewHeight);
             collectIdSpans(ev, idSpans);
             {
                 nb::gil_scoped_acquire g;
@@ -985,6 +993,7 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
           nb::arg("profile") = false, nb::arg("generate") = true, nb::arg("strict_commas") = false,
           nb::arg("coverage") = false, nb::arg("keep_minuend_color") = false,
+          nb::arg("flat_preview_height") = oscadeval::kTopLevel2dHeight,
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit, "
           "geometry, coverage_result).\n"
           "coverage=True records which statements, branch arms and bodies ran: coverage_result is a dict "
@@ -1024,5 +1033,6 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
     m.def("debug_evaluate", &debugEvaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("debug_hook"),
           nb::arg("error_break"), nb::arg("echo_fn"), nb::arg("manifold_cache") = nullptr,
           nb::arg("return_hook") = nb::none(), nb::arg("fast_continue_signal") = nullptr,
+          nb::arg("flat_preview_height") = oscadeval::kTopLevel2dHeight,
           "Evaluate with the debugger wired in; returns (bodies, [], id_to_node, dyn, dyn_explicit). Callbacks fire under the GIL.");
 }

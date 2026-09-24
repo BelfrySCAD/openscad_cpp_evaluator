@@ -1135,6 +1135,12 @@ grep for `ponytail:`.
   `writeSvg`, which needs the sections that step throws away, and which says so rather than writing
   the slab's outline. `tools/cli/cli_lib.cpp` is the only current caller; a future GUI/renderer
   caller needs the same call before passing results to its own mesh consumer.
+  **The slab height is a parameter** (`flatHeight`, default `kTopLevel2dHeight` = 1.0, the
+  reference's measured preview height that docs images and `--viewall` framing depend on). Python
+  reaches it as `Evaluator(flat_preview_height=...)`, which thins only the DISPLAYED bodies:
+  `evaluate()` converts the raw list a second time at 1.0 for `geometry`, because a 2D-only script
+  exports its slab and that must not become whatever a viewer found easiest to look at. BelfrySCAD's
+  viewport asks for 0.01 so a 2D shape reads as the flat contour it is.
 - `include/openscad_cpp_evaluator/function_builtins.hpp`, `src/builtins/function_builtins.cpp` —
   the math/string/list/type-check builtin *function* dispatch (`isBuiltinFunctionName`/
   `evalBuiltinFunction`), a completely separate namespace/table from `dispatch.hpp`'s builtin
