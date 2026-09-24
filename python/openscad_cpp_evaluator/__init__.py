@@ -565,7 +565,7 @@ class Evaluator:
 
     def __init__(self, echo_fn=None, debug_hook=None, error_break_fn=None, return_hook=None,
                  manifold_cache=None, profile=False, fast_continue_signal=None, coverage=False,
-                 keep_minuend_color=False):
+                 keep_minuend_color=False, flat_preview_height=1.0):
         self._echo_fn = echo_fn
         self._debug_hook = debug_hook
         self._error_break_fn = error_break_fn
@@ -579,6 +579,12 @@ class Evaluator:
         # subtrahend's (or the cut green). A viewer option; see
         # Evaluator::keepMinuendColor in evaluator.hpp.
         self._keep_minuend_color = keep_minuend_color
+        # How thick a top-level 2D shape's preview slab is in the returned
+        # bodies. 1.0 is OpenSCAD's preview height, which docs images and
+        # --viewall framing depend on; a viewer can pass something thin so
+        # a 2D shape reads as a flat contour. Export (`geometry`) always
+        # keeps 1.0: a 2D-only script exports its slab.
+        self._flat_preview_height = float(flat_preview_height)
         self.csg_tree = []
         self.profile_result = None
         # coverage=True: after evaluate(), {"spans": [...], "files": [...],
@@ -621,7 +627,8 @@ class Evaluator:
                     source_path, vp, self._debug_hook,
                     self._error_break_fn or (lambda *a, **k: None),
                     self._echo_fn or (lambda _m: None),
-                    self._manifold_cache, self._return_hook, self._fast_continue_signal)
+                    self._manifold_cache, self._return_hook, self._fast_continue_signal,
+                    self._flat_preview_height)
                 self.csg_tree = []
                 self.profile_result = None
                 # The debugger path has no geometry handle: debug_evaluate
@@ -632,7 +639,8 @@ class Evaluator:
                 (body_dicts, echoes, id_spans, csg_tree, profile_result, dyn,
                  dyn_explicit, geometry, coverage_result) = _ext.evaluate(
                     source_path, vp, self._manifold_cache, self._profile, generate,
-                    strict_commas, self._coverage, self._keep_minuend_color)
+                    strict_commas, self._coverage, self._keep_minuend_color,
+                    self._flat_preview_height)
                 # The evaluated bodies, still on the C++ side. Stashed like
                 # csg_tree/profile_result rather than returned, so
                 # evaluate()'s own 2-tuple result is unchanged -- callers

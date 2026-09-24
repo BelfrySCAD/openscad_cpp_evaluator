@@ -1096,3 +1096,28 @@ def test_a_cached_2d_shape_is_picked_as_a_solid_would_be(tmp_path):
     assert all(t is not None for render in flat for body in render for t in body)
     assert flat[1] == [["square(3);"], ["translate([10, 0]) circle(4);"]]
     assert solid[1] == [["cube(3);"], ["translate([10, 0, 0]) sphere(4);"]]
+
+
+def test_a_viewer_can_ask_for_a_thin_2d_slab_and_export_keeps_1(tmp_path):
+    """flat_preview_height thins the DISPLAYED slab only: a 2D-only script
+    exports that slab, and it has to stay the reference's 1 unit."""
+    import openscad_cpp_evaluator as E
+    script = tmp_path / "flat.scad"
+    script.write_text("square(10);\n")
+
+    def z_extent(bodies):
+        verts = bodies[0].body.to_mesh().vert_properties
+        return float(verts[:, 2].max() - verts[:, 2].min())
+
+    default = E.Evaluator()
+    assert abs(z_extent(default.evaluate(str(script), {})[0]) - 1.0) < 1e-9
+    thin = E.Evaluator(flat_preview_height=0.01)
+    bodies, id_to_node = thin.evaluate(str(script), {})
+    assert abs(z_extent(bodies) - 0.01) < 1e-9
+    assert id_to_node, "still pickable"
+    out = tmp_path / "flat.off"            # ASCII: header, counts, vertices
+    E.export_model(str(out), thin.geometry)
+    lines = [l for l in out.read_text().splitlines() if l.strip() and not l.startswith("#")]
+    nverts = int(lines[1].split()[0])
+    zs = [float(l.split()[2]) for l in lines[2:2 + nverts]]
+    assert abs(max(zs) - min(zs) - 1.0) < 1e-6, "export is the 1-unit slab"
