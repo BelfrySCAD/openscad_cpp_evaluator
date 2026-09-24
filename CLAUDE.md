@@ -1687,6 +1687,20 @@ the former is worth dragging.
 A cache hit restamps to the chain reaching the geometry *now*, not the one that
 first produced it: a module called twice genuinely is two call chains.
 
+**A 2D shape is picked by `ColoredBody::sectionId`.** A `CrossSection` is contours
+with no run IDs, so a top-level 2D shape had no `idToNode` entry at all: its preview
+slab got fresh IDs from `Manifold::Extrude` in `toRenderableBodies`, after the table
+was built, and a click on it mapped to no source (it blocked BelfrySCAD's extrude
+gizmo, which exists to act on exactly those). Now the generate loop calls
+`tagSections` after every builtin's `GenerateFn`: any 2D body without an ID gets one
+reserved from Manifold's counter, attributed to that node. A transform keeps the ID
+it was given (it edits the body in place), so a 2D shape stays its primitive, as a
+solid's runs do; an op that builds a *new* section -- a 2D `union()`, `offset()`,
+`hull()` -- claims it, so the whole union is one pick. `restampCachedIds` restamps it
+by the solid rule (across renders, to the reused node), `recordRunColors` records its
+colour, and `toRenderableBodies` rebuilds the slab from a `MeshGL` whose one run
+carries it. Tested in `tests/test_python_bindings.py` (`_picked_text`).
+
 No stored script path is needed to tell the user's file from a library:
 `callStack_.front()` is by construction the call made from top level.
 
@@ -1695,7 +1709,7 @@ Exposed to Python as `node.call_sites` (innermost-first `_CallFrame`s, each a
 
 `Evaluator::measuring_` is set for the whole generate. It suppresses the four
 writes that exist solely to describe *drawn* geometry — `idToNode`/`idToColor`/`idToCallChain` in
-`tagGenerated` and `tagDisplayOnly`, the `restampCachedIds` call on a cache hit,
+`tagGenerated`, `tagDisplayOnly` and `tagSections`, the `restampCachedIds` call on a cache hit,
 and `cacheProducer_` — because those tables are cleared once per pass, so a leak
 is permanent and surfaces later as wrong click-to-source. It also suppresses
 `checkDebug`, which would otherwise inject stops at the paused statement's own

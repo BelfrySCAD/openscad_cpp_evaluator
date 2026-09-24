@@ -1046,3 +1046,53 @@ def test_svg_class_is_feature_detectable(tmp_path):
     out = []
     Evaluator(echo_fn=out.append).evaluate(str(scad), generate=False)
     assert "1" in out[0], out
+
+
+def _picked_text(tmp_path, src, cache=None, name="s.scad"):
+    """What a click on each body would select: the source text its run IDs
+    map to, per body, in body order."""
+    script = tmp_path / name
+    script.write_text(src)
+    ev = Evaluator(manifold_cache=cache) if cache else Evaluator()
+    bodies, id_to_node = ev.evaluate(str(script), {})
+    out = []
+    for b in bodies:
+        ids = [int(i) for i in b.body.to_mesh().run_original_id]
+        out.append([src[id_to_node[i].position.start_offset:id_to_node[i].position.end_offset]
+                    if i in id_to_node else None for i in ids])
+    return out
+
+
+def test_a_2d_shape_can_be_picked_back_to_its_source(tmp_path):
+    """A CrossSection carries no run IDs, so a 2D shape's preview slab used
+    to map to no node at all and could not be selected (BelfrySCAD's
+    extrude gizmo needs exactly that)."""
+    picked = _picked_text(tmp_path, "square(3);\ncircle(4);\n")
+    assert picked == [["square(3);"], ["circle(4);"]]
+
+
+def test_a_transform_keeps_the_2d_shape_it_moved(tmp_path):
+    picked = _picked_text(tmp_path, "translate([10, 0]) circle(4);\n")
+    assert len(picked) == 1 and picked[0][0] is not None
+    assert picked[0][0].startswith("circle(4)") or picked[0][0].startswith("translate")
+
+
+def test_a_2d_union_is_its_own_shape(tmp_path):
+    src = "union() { square(3); circle(4); }\n"
+    assert _picked_text(tmp_path, src) == [[src.strip()]]
+
+
+def test_a_cached_2d_shape_is_picked_as_a_solid_would_be(tmp_path):
+    """A cache hit restamps IDs; a 2D shape's must follow, or the second
+    render of an unchanged script loses every 2D selection. It follows the
+    same rule a solid's runs do: across renders the old ID is unknown, so it
+    goes to the reused node -- here the whole translate() statement."""
+    def two_renders(src):
+        cache = ManifoldCache()
+        return _picked_text(tmp_path, src, cache), _picked_text(tmp_path, src, cache)
+
+    flat = two_renders("square(3);\ntranslate([10, 0]) circle(4);\n")
+    solid = two_renders("cube(3);\ntranslate([10, 0, 0]) sphere(4);\n")
+    assert all(t is not None for render in flat for body in render for t in body)
+    assert flat[1] == [["square(3);"], ["translate([10, 0]) circle(4);"]]
+    assert solid[1] == [["cube(3);"], ["translate([10, 0, 0]) sphere(4);"]]

@@ -42,6 +42,15 @@ struct ColoredBody {
     std::optional<manifold::CrossSection> section;
     bool flatPreview = false;
 
+    // The originalID a 2D `section` is picked by. A CrossSection is contours
+    // and carries no run IDs, so a 2D shape had no entry in idToNode and a
+    // click on its preview slab mapped to no source at all. Reserved from
+    // Manifold's own counter (so it cannot collide with a solid's ID) by the
+    // generate loop, for the node that built the section -- a primitive, or
+    // an op like union() that made a new one; a transform keeps the one it
+    // was given. toRenderableBodies() gives the slab this ID.
+    std::optional<uint32_t> sectionId;
+
     // What a 2D `section` has been transformed BY that a CrossSection
     // cannot itself hold: a translation along Z, a rotation out of the XY
     // plane, anything with a Z component. Applied when

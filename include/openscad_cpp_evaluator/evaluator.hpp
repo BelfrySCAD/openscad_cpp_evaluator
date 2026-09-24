@@ -283,6 +283,9 @@ public:
     // attributes there).
     // Give cached bodies fresh originalIDs so a second call site reusing
     // them is not confused with the first. See its definition.
+    // Give every 2D body in `bodies` that has no sectionId yet one of its
+    // own, attributed to `node`. See ColoredBody::sectionId.
+    void tagSections(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node, uint32_t callChain);
     void restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
                           const oscad::ASTNode* producer, uint32_t callChain);
 

@@ -124,6 +124,7 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 generateWarnEntry = node.warnEntry;
                 generateCallChain = node.callChain;
                 node.bodies = it->second(*this, node.params, node.children, *node.node);
+                if (!measuring_) tagSections(node.bodies, *node.node, node.callChain);
                 generateWarnEntry = savedWarnEntry;
                 generateCallChain = savedCallChain;
             } else {
@@ -393,6 +394,16 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
     // its producer check keeps the first copy's descendants. They occupy
     // the same space, so there is nothing to select apart.
     for (ColoredBody& cb : bodies) {
+        // A 2D body's one ID, restamped by the same rule as a solid's runs.
+        if (cb.sectionId) {
+            const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
+            auto old = idToNode.find(*cb.sectionId);
+            idToNode[fresh] =
+                (old != idToNode.end() && old->second != producer) ? old->second : &node;
+            idToCallChain[fresh] = callChain;
+            idToColor[fresh] = cb.color;
+            cb.sectionId = fresh;
+        }
         if (!cb.body || cb.body->IsEmpty()) continue;
         manifold::MeshGL mesh = cb.body->GetMeshGL();
         if (mesh.runOriginalID.empty()) continue;
@@ -475,6 +486,7 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
 
 
 void Evaluator::recordRunColors(ColoredBody& b, const std::optional<std::array<float, 4>>& rgba) {
+    if (b.sectionId) idToColor[*b.sectionId] = rgba;
     if (!b.body || bodyIsEmpty(b)) return;
     // A body that is still one original knows its own ID without building
     // a mesh -- the common case, and the cheap one.
@@ -484,6 +496,18 @@ void Evaluator::recordRunColors(ColoredBody& b, const std::optional<std::array<f
         return;
     }
     for (uint32_t id : b.body->GetMeshGL().runOriginalID) idToColor[id] = rgba;
+}
+
+void Evaluator::tagSections(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
+                            uint32_t callChain) {
+    for (ColoredBody& cb : bodies) {
+        if (!cb.section || cb.body || cb.sectionId) continue;
+        const uint32_t id = manifold::Manifold::ReserveIDs(1);
+        idToNode[id] = &node;
+        idToColor[id] = cb.color;
+        idToCallChain[id] = callChain;
+        cb.sectionId = id;
+    }
 }
 
 ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue) {

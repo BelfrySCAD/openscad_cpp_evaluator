@@ -37,6 +37,18 @@ std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodi
         if (!cb.body && cb.section) {
             ColoredBody flat;
             flat.body = manifold::Manifold::Extrude(cb.section->ToPolygons(), kTopLevel2dHeight);
+            if (cb.sectionId && !flat.body->IsEmpty()) {
+                // One run carrying the section's own ID, so a click on the
+                // slab finds the node that built the shape (see
+                // ColoredBody::sectionId). Manifold keeps a MeshGL's
+                // runOriginalID when it is given one.
+                manifold::MeshGL mesh = flat.body->GetMeshGL();
+                mesh.runOriginalID = {*cb.sectionId};
+                mesh.runIndex = {0, static_cast<uint32_t>(mesh.triVerts.size())};
+                mesh.runTransform.clear();
+                mesh.faceID.clear();
+                flat.body = manifold::Manifold(mesh);
+            }
             // Put it back where the transforms a CrossSection could not
             // hold would have placed it -- a Z offset, a rotation out of
             // the plane. See ColoredBody::sectionXform.
