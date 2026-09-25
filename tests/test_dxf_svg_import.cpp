@@ -459,6 +459,14 @@ const char* kDimDxf =
     // two parallel LINEs, which have no crossing point
     "0\nLINE\n8\npar\n10\n0\n20\n0\n11\n10\n21\n0\n"
     "0\nLINE\n8\npar\n10\n0\n20\n5\n11\n10\n21\n5\n"
+    // an outline: two LINEs joined end to end cross mid-way, but form one path
+    "0\nLINE\n8\noutline\n10\n0\n20\n0\n11\n10\n21\n10\n"
+    "0\nLINE\n8\noutline\n10\n10\n20\n10\n11\n0\n21\n10\n"
+    "0\nLINE\n8\noutline\n10\n0\n20\n10\n11\n10\n21\n0\n"
+    // a LINE closed by an ARC (centre (0,0), r 10, 0..90 degrees): a path too
+    "0\nLINE\n8\narc\n10\n10\n20\n0\n11\n0\n21\n10\n"
+    "0\nARC\n8\narc\n10\n0\n20\n0\n40\n10\n50\n0\n51\n90\n"
+    "0\nLINE\n8\narc\n10\n0\n20\n0\n11\n10\n21\n10\n"
     "0\nENDSEC\n0\nEOF\n";
 
 double dimOf(const std::string& call, Evaluator& ev) { return std::get<double>(asExpr(call, ev)); }
@@ -533,6 +541,22 @@ TEST(DxfCross, FindsTheCrossingPoint) {
     EXPECT_NEAR(std::get<double>(oxy[0]), 5.0, 1e-9);
     EXPECT_NEAR(std::get<double>(oxy[1]), 15.0, 1e-9);
     std::filesystem::remove(path);
+}
+
+// The reference counts only 2-point paths: a LINE sharing an end with
+// another LINE or an ARC belongs to an outline and is no stroke of a cross,
+// even where two such lines do intersect. Checked against OpenSCAD
+// 2026.02.01 on example009.dxf's fan_top layer.
+TEST(DxfCross, LinesJoinedIntoAPathAreNoCross) {
+    const auto path = tempPath("dxfcross_paths.dxf");
+    writeFile(path, kDimDxf);
+    for (const char* layer : {"outline", "arc"}) {
+        std::string last;
+        Evaluator ev([&](const std::string& m) { last = m; });
+        EXPECT_TRUE(std::holds_alternative<std::monostate>(asExpr("dxf_cross(file=\"" + path.generic_string() + "\", layer=\"" + layer + "\")", ev)))
+            << layer;
+        EXPECT_NE(last.find("Can't find cross"), std::string::npos) << layer << ": " << last;
+    }
 }
 
 TEST(DxfCross, ParallelOrTooFewLinesWarns) {

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 
 namespace oscadeval {
@@ -26,7 +27,9 @@ struct Entity {
     std::string layer;
     std::string name;                  // group 1: DIMENSION's text override
     int dimType = 0;                   // group 70
-    double angle = 0.0;                // group 50
+    double angle = 0.0;                // group 50 (an ARC's start angle)
+    double angle2 = 0.0;               // group 51: an ARC's end angle
+    double radius = 0.0;               // group 40: an ARC's radius
     double coords[7][2] = {};          // groups 10-16 / 20-26
     std::vector<double> xverts, yverts; // groups 10/11 and 20/21, in order
 };
@@ -91,6 +94,8 @@ std::vector<Entity> readEntities(const std::string& path, double xorigin, double
             case 20:
             case 21: cur.yverts.push_back((num() - yorigin) * scale); break;
             case 50: cur.angle = num(); break;
+            case 51: cur.angle2 = num(); break;
+            case 40: cur.radius = num() * scale; break;
             case 70:
                 try {
                     cur.dimType = std::stoi(data);
@@ -188,16 +193,34 @@ Value builtinDxfCross(Evaluator& ev, const CallArgs& args, const oscad::ASTNode&
         return Value{};
     }
 
-    // The first two LINEs on the layer are taken to be the cross. The
-    // reference walks every 2-point path instead, which for a real cross is
-    // the same set: its two strokes meet in the middle rather than at their
-    // endpoints, so neither gets joined into a longer path.
+    // The first two 2-POINT PATHS on the layer are the cross, as the
+    // reference walks them: a LINE sharing an end with another LINE or an
+    // ARC is joined into a longer path, part of an outline, and no stroke of
+    // a cross. Taking the first two LINEs outright found a "cross" in any
+    // outline -- example009.dxf's fan_top, where the reference finds none.
+    // ponytail: LINE and ARC ends only; polylines and splines don't
+    // disqualify a LINE here.
+    const std::vector<Entity> entities = readEntities(c.path, c.xorigin, c.yorigin, c.scale);
+    std::map<std::pair<long long, long long>, int> ends;
+    const auto endKey = [](double x, double y) { return std::make_pair(std::llround(x * 1e6), std::llround(y * 1e6)); };
+    for (const Entity& e : entities) {
+        if (!c.layer.empty() && c.layer != e.layer) continue;
+        if (e.type == "LINE" && e.xverts.size() >= 2 && e.yverts.size() >= 2) {
+            ++ends[endKey(e.xverts[0], e.yverts[0])];
+            ++ends[endKey(e.xverts[1], e.yverts[1])];
+        } else if (e.type == "ARC") {
+            for (double a : {e.angle, e.angle2}) {
+                ++ends[endKey(e.coords[0][0] + e.radius * std::cos(rad(a)), e.coords[0][1] + e.radius * std::sin(rad(a)))];
+            }
+        }
+    }
     double p[4][2];
     int found = 0;
-    for (const Entity& e : readEntities(c.path, c.xorigin, c.yorigin, c.scale)) {
+    for (const Entity& e : entities) {
         if (e.type != "LINE") continue;
         if (!c.layer.empty() && c.layer != e.layer) continue;
         if (e.xverts.size() < 2 || e.yverts.size() < 2) continue;
+        if (ends[endKey(e.xverts[0], e.yverts[0])] > 1 || ends[endKey(e.xverts[1], e.yverts[1])] > 1) continue;
         p[found][0] = e.xverts[0];
         p[found][1] = e.yverts[0];
         ++found;
