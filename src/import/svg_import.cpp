@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -194,7 +195,7 @@ Mat3 compose(const Mat3& m, const Mat3& acc) {
 std::array<double, 2> applyMat(const std::array<double, 2>& pt, const Mat3& m) {
     const double x = m.a * pt[0] + m.c * pt[1] + m.e;
     const double y = m.b * pt[0] + m.d * pt[1] + m.f;
-    return {x, -y}; // flip Y: SVG down -> OpenSCAD up
+    return {x, y}; // SVG user units; pageMap places them on the page
 }
 
 std::vector<double> parseNumberList(const std::string& s) {
@@ -489,11 +490,109 @@ void walkFiltered(const XmlNode& el, const Mat3& mat, const SvgFilter& f,
     for (const XmlNode& child : el.children) walkFiltered(child, m, f, out, matched);
 }
 
+// "12", "12.5mm", "3in" -> (number, unit); unit empty when unitless.
+// nullopt for anything else, which OpenSCAD treats as absent.
+std::optional<std::pair<double, std::string>> parseLength(const std::string& text) {
+    const size_t b = text.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return std::nullopt;
+    const size_t e = text.find_last_not_of(" \t\r\n");
+    const std::string t = text.substr(b, e - b + 1);
+    size_t used = 0;
+    double n = 0.0;
+    try {
+        n = std::stod(t, &used);
+    } catch (...) {
+        return std::nullopt;
+    }
+    std::string unit = t.substr(used);
+    unit.erase(0, unit.find_first_not_of(" \t"));
+    static const char* known[] = {"", "em", "ex", "px", "in", "cm", "mm", "pt", "pc", "%"};
+    for (const char* k : known) {
+        if (unit == k) return std::make_pair(n, unit);
+    }
+    return std::nullopt;
+}
+
+// Place SVG user-unit contours as OpenSCAD's import_svg.cc does: the page's
+// width/height to millimetres (a unitless length at `dpi`, px at 96), the
+// viewBox scaled onto it under preserveAspectRatio (default xMidYMid meet),
+// and Y flipped about the page height -- or, with center, about the
+// drawing's own centre. Without this a unitless 100-unit drawing came in
+// 2.8x too large and below the X axis.
+void pageMap(const XmlNode& root, double dpi, bool center, std::vector<Contour2d>& contours) {
+    std::vector<double> vb;
+    {
+        std::string v = root.getAttr("viewBox");
+        std::replace(v.begin(), v.end(), ',', ' ');
+        std::istringstream in(v);
+        double x = 0.0;
+        while (in >> x) vb.push_back(x);
+    }
+    const bool valid = vb.size() == 4 && vb[2] >= 0.0 && vb[3] >= 0.0;
+    const auto toMm = [&](const char* attr, double viewbox) {
+        const auto len = parseLength(root.getAttr(attr));
+        if (!len) return valid ? 25.4 * viewbox / dpi : 0.0;  // absent: rely on dpi, as old Illustrator files do
+        const auto& [n, u] = *len;
+        if (u.empty()) return 25.4 * n / dpi;
+        if (u == "px") return 25.4 * n / 96.0;
+        if (u == "pt") return 25.4 * n / 72.0;
+        if (u == "pc") return 25.4 * n / 6.0;
+        if (u == "in") return 25.4 * n;
+        if (u == "cm") return 10.0 * n;
+        if (u == "mm") return n;
+        if (u == "%") return valid ? 25.4 * n / 100.0 * viewbox / dpi : 0.0;
+        return valid ? viewbox : 0.0;  // em, ex
+    };
+    const double widthMm = toMm("width", valid ? vb[2] : 0.0);
+    const double heightMm = toMm("height", valid ? vb[3] : 0.0);
+    double sx = 1.0, sy = 1.0, vbx = 0.0, vby = 0.0, ax = 0.0, ay = 0.0;
+    if (valid) {
+        const auto w = parseLength(root.getAttr("width")), h = parseLength(root.getAttr("height"));
+        vbx = vb[0] * (w && w->second == "%" ? w->first / 100.0 : 1.0);
+        vby = vb[1] * (h && h->second == "%" ? h->first / 100.0 : 1.0);
+        sx = vb[2] != 0.0 ? widthMm / vb[2] : 0.0;
+        sy = vb[3] != 0.0 ? heightMm / vb[3] : 0.0;
+        std::istringstream par(root.getAttr("preserveAspectRatio"));
+        std::string align, meet;
+        par >> align;
+        if (align == "defer") par >> align;
+        par >> meet;
+        if (align.empty()) align = "xMidYMid";
+        if (align != "none") {
+            const double scaling = meet == "slice" ? std::max(sx, sy) : std::min(sx, sy);
+            sx = sy = scaling;
+            const auto frac = [](const std::string& a) { return a == "Min" ? 0.0 : a == "Max" ? 1.0 : 0.5; };
+            const bool wellFormed = align.size() == 8 && align[0] == 'x' && align[4] == 'Y';
+            const double fx = wellFormed ? frac(align.substr(1, 3)) : 0.5;
+            const double fy = wellFormed ? frac(align.substr(5, 3)) : 0.5;
+            ax = fx * (widthMm - sx * vb[2]);
+            ay = fy * (heightMm - sy * vb[3]);
+        }
+    }
+    double cx = -ax, cy = heightMm - ay;
+    if (center) {
+        double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
+        for (const Contour2d& c : contours)
+            for (const auto& p : c) {
+                lo[0] = std::min(lo[0], sx * p[0]);
+                hi[0] = std::max(hi[0], sx * p[0]);
+                lo[1] = std::min(lo[1], sy * p[1]);
+                hi[1] = std::max(hi[1], sy * p[1]);
+            }
+        cx = std::isfinite(lo[0]) ? (lo[0] + hi[0]) / 2.0 : 0.0;
+        cy = std::isfinite(lo[1]) ? (lo[1] + hi[1]) / 2.0 : 0.0;
+    }
+    // -vby - y, not y - vby: OpenSCAD's own formula, kept for parity.
+    for (Contour2d& c : contours)
+        for (auto& p : c) p = {sx * (p[0] - vbx) - cx, sy * (-vby - p[1]) + cy};
+}
+
 } // namespace
 
 std::vector<Contour2d> loadSvgContours(const std::string& path,
                                       const SvgFilter& filter,
-                                      bool* matched) {
+                                      bool* matched, double dpi, bool center) {
+    if (!(dpi > 0.0)) dpi = 72.0;
     std::ifstream in(path);
     if (!in) throw std::runtime_error("could not open '" + path + "'");
     std::stringstream buf;
@@ -505,6 +604,7 @@ std::vector<Contour2d> loadSvgContours(const std::string& path,
     if (!filter.id && !filter.cls) {
         if (matched) *matched = true;   // no filter, nothing to miss
         walk(*root, Mat3{}, out);
+        pageMap(*root, dpi, center, out);
         return out;
     }
     bool hit = false;
@@ -513,6 +613,7 @@ std::vector<Contour2d> loadSvgContours(const std::string& path,
     // back to the whole drawing, which would be the silent-wrong-geometry
     // answer. The caller turns this into the warning.
     if (matched) *matched = hit;
+    pageMap(*root, dpi, center, out);
     return out;
 }
 

@@ -263,4 +263,40 @@ TEST(Coverage, IncludedAndUsedFilesCarryTheirOwnOrigin) {
     fs::remove_all(dir);
 }
 
+// A file two included files each use<> is parsed once per use; its spans
+// must still be listed once, with the hits of every copy, or its
+// percentages count the unexecuted copies as missed code.
+TEST(Coverage, AFileUsedTwiceIsListedOnce) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "oscad_cov_twice";
+    fs::create_directories(dir);
+    const fs::path lib = dir / "lib.scad", a = dir / "a.scad", b = dir / "b.scad", main = dir / "main.scad";
+    std::ofstream(lib) << "function hit(x) = x;\nfunction miss(x) = x;\n";
+    std::ofstream(a) << "use <lib.scad>\nfunction fa() = hit(1);\n";
+    std::ofstream(b) << "use <lib.scad>\nfunction fb() = hit(2);\n";
+    std::ofstream(main) << "include <a.scad>\ninclude <b.scad>\necho(fa(), fb());\n";
+    auto ast = oscad::getASTFromFile(main.string());
+    ResolvedUseScopes uses = resolveUseScopes(ast, main.string(), {});
+    Evaluator ev({}, nullptr, nullptr, {}, false, /*coverage=*/true);
+    ev.setUsedFileGlobals(uses.usedFileGlobals);
+    EvalContext ctx = EvalContext::makeRoot(uses.rootScope.get());
+    ev.evaluate(uses.processedNodes, ctx, {}, false);
+    ASSERT_TRUE(ev.coverageResult.has_value());
+    std::map<int, std::vector<std::uint32_t>> libBodies;
+    for (const CoverageSpan& s : ev.coverageResult->spans) {
+        if (s.kind == CoverageKind::Body && fs::path(s.origin).filename() == "lib.scad") libBodies[s.line].push_back(s.hits);
+    }
+    ASSERT_EQ(libBodies[1].size(), 1u) << "one span per position, not one per parse";
+    EXPECT_EQ(libBodies[1][0], 2u);
+    ASSERT_EQ(libBodies[2].size(), 1u);
+    EXPECT_EQ(libBodies[2][0], 0u);
+    for (const CoverageFileSummary& f : ev.coverageResult->files) {
+        if (fs::path(f.origin).filename() == "lib.scad") {
+            EXPECT_EQ(f.bodies, 2u);
+            EXPECT_NEAR(f.body_percent(), 50.0, 1e-9);
+        }
+    }
+    fs::remove_all(dir);
+}
+
 } // namespace oscadeval

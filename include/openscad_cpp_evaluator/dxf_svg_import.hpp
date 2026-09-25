@@ -34,8 +34,13 @@ struct SvgFilter {
 // `matched`, when given, reports whether the filter found anything. A miss
 // imports nothing rather than falling back to the whole drawing; the caller
 // warns. Always true when no filter was set.
+// Placed as OpenSCAD places them: page units to mm (a unitless length at
+// `dpi`), the viewBox under preserveAspectRatio, Y flipped about the page
+// height -- or about the drawing's centre with `center`.
 std::vector<Contour2d> loadSvgContours(const std::string& path,
                                        const SvgFilter& filter = {},
-                                       bool* matched = nullptr);
+                                       bool* matched = nullptr,
+                                       double dpi = 72.0,
+                                       bool center = false);
 
 } // namespace oscadeval

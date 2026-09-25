@@ -1,3 +1,4 @@
+#include "openscad_cpp_evaluator/dxf_svg_import.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
 #include "test_helpers.hpp"
@@ -459,6 +460,14 @@ const char* kDimDxf =
     // two parallel LINEs, which have no crossing point
     "0\nLINE\n8\npar\n10\n0\n20\n0\n11\n10\n21\n0\n"
     "0\nLINE\n8\npar\n10\n0\n20\n5\n11\n10\n21\n5\n"
+    // an outline: two LINEs joined end to end cross mid-way, but form one path
+    "0\nLINE\n8\noutline\n10\n0\n20\n0\n11\n10\n21\n10\n"
+    "0\nLINE\n8\noutline\n10\n10\n20\n10\n11\n0\n21\n10\n"
+    "0\nLINE\n8\noutline\n10\n0\n20\n10\n11\n10\n21\n0\n"
+    // a LINE closed by an ARC (centre (0,0), r 10, 0..90 degrees): a path too
+    "0\nLINE\n8\narc\n10\n10\n20\n0\n11\n0\n21\n10\n"
+    "0\nARC\n8\narc\n10\n0\n20\n0\n40\n10\n50\n0\n51\n90\n"
+    "0\nLINE\n8\narc\n10\n0\n20\n0\n11\n10\n21\n10\n"
     "0\nENDSEC\n0\nEOF\n";
 
 double dimOf(const std::string& call, Evaluator& ev) { return std::get<double>(asExpr(call, ev)); }
@@ -533,6 +542,22 @@ TEST(DxfCross, FindsTheCrossingPoint) {
     EXPECT_NEAR(std::get<double>(oxy[0]), 5.0, 1e-9);
     EXPECT_NEAR(std::get<double>(oxy[1]), 15.0, 1e-9);
     std::filesystem::remove(path);
+}
+
+// The reference counts only 2-point paths: a LINE sharing an end with
+// another LINE or an ARC belongs to an outline and is no stroke of a cross,
+// even where two such lines do intersect. Checked against OpenSCAD
+// 2026.02.01 on example009.dxf's fan_top layer.
+TEST(DxfCross, LinesJoinedIntoAPathAreNoCross) {
+    const auto path = tempPath("dxfcross_paths.dxf");
+    writeFile(path, kDimDxf);
+    for (const char* layer : {"outline", "arc"}) {
+        std::string last;
+        Evaluator ev([&](const std::string& m) { last = m; });
+        EXPECT_TRUE(std::holds_alternative<std::monostate>(asExpr("dxf_cross(file=\"" + path.generic_string() + "\", layer=\"" + layer + "\")", ev)))
+            << layer;
+        EXPECT_NE(last.find("Can't find cross"), std::string::npos) << layer << ": " << last;
+    }
 }
 
 TEST(DxfCross, ParallelOrTooFewLinesWarns) {
@@ -629,7 +654,8 @@ TEST(SvgFilter, AnEnclosingTransformStillApplies) {
     ASSERT_EQ(pts.size(), 4u);
     double minx = 1e9;
     for (const auto& p : pts) minx = std::min(minx, std::get<double>(std::get<ListPtr>(p)->items[0]));
-    EXPECT_NEAR(minx, 10.0, 1e-9);
+    // x = 10 on a unitless 100-unit page, which OpenSCAD reads at 72 dpi.
+    EXPECT_NEAR(minx, 10.0 * 25.4 / 72.0, 1e-9);
     std::filesystem::remove(path);
 }
 
@@ -652,3 +678,74 @@ TEST(SvgFilter, IdAndClassTogetherMatchEither) {
     EXPECT_EQ(contourCount(path.generic_string(), ", id=\"other\", class=\"cut\"", ev), 2u);
     std::filesystem::remove(path);
 }
+
+namespace oscadeval {
+namespace {
+
+// SVG placement as OpenSCAD 2026.02.01 does it: page units to mm, the
+// viewBox under preserveAspectRatio, Y flipped about the page height (or
+// about the drawing's centre with center=true). Bounds read off the
+// reference's own export for each document, with and without center.
+struct SvgPlacementCase {
+    const char* attrs;
+    const char* body;
+    bool center;
+    double bounds[4];
+};
+
+TEST(SvgPlacement, MatchesTheReference) {
+    const SvgPlacementCase cases[] = {
+        {R"(width="100" height="100" viewBox="0 0 100 100")",
+         R"(<rect x="0" y="0" width="10" height="10"/><rect x="20" y="50" width="30" height="5"/>)", false,
+         {0.0, 15.875, 17.639, 35.278}},
+        {R"(width="100" height="100" viewBox="0 0 100 100")",
+         R"(<rect x="0" y="0" width="10" height="10"/><rect x="20" y="50" width="30" height="5"/>)", true,
+         {-8.819, -9.701, 8.819, 9.701}},
+        {R"(width="50mm" height="20mm" viewBox="10 5 200 40")",
+         R"(<rect x="10" y="5" width="20" height="10"/><rect x="92" y="17" width="16" height="16"/>)", false,
+         {0.0, 5.5, 24.5, 12.5}},
+        {R"(width="4in" height="2in" viewBox="0 0 100 100" preserveAspectRatio="xMaxYMin meet")",
+         R"(<rect x="0" y="0" width="100" height="100"/>)", false, {50.8, 0.0, 101.6, 50.8}},
+        {R"(width="4in" height="2in" viewBox="0 0 100 100" preserveAspectRatio="xMaxYMin meet")",
+         R"(<rect x="0" y="0" width="100" height="100"/>)", true, {-25.4, -25.4, 25.4, 25.4}},
+        {R"(width="300px" height="150px")", R"(<rect x="10" y="10" width="30" height="20"/>)", false,
+         {10.0, 9.688, 40.0, 29.688}},
+        {R"(viewBox="0 0 200 100")", R"(<rect x="0" y="0" width="200" height="100"/>)", false,
+         {0.0, 0.0, 70.556, 35.278}},
+        {R"(viewBox="0 0 200 100")", R"(<rect x="0" y="0" width="200" height="100"/>)", true,
+         {-35.278, -17.639, 35.278, 17.639}},
+    };
+    int n = 0;
+    for (const SvgPlacementCase& c : cases) {
+        const auto path = std::filesystem::temp_directory_path() / ("svg_place_" + std::to_string(n++) + ".svg");
+        std::ofstream(path) << "<svg xmlns=\"http://www.w3.org/2000/svg\" " << c.attrs << ">" << c.body << "</svg>";
+        const std::vector<Contour2d> contours = loadSvgContours(path.string(), {}, nullptr, 72.0, c.center);
+        double lo[2] = {1e18, 1e18}, hi[2] = {-1e18, -1e18};
+        for (const Contour2d& ct : contours)
+            for (const auto& p : ct)
+                for (int a = 0; a < 2; ++a) {
+                    lo[a] = std::min(lo[a], p[a]);
+                    hi[a] = std::max(hi[a], p[a]);
+                }
+        EXPECT_NEAR(lo[0], c.bounds[0], 1e-3) << c.attrs << " center=" << c.center;
+        EXPECT_NEAR(lo[1], c.bounds[1], 1e-3) << c.attrs << " center=" << c.center;
+        EXPECT_NEAR(hi[0], c.bounds[2], 1e-3) << c.attrs << " center=" << c.center;
+        EXPECT_NEAR(hi[1], c.bounds[3], 1e-3) << c.attrs << " center=" << c.center;
+        std::filesystem::remove(path);
+    }
+}
+
+TEST(SvgPlacement, DpiScalesUnitlessLengths) {
+    const auto path = std::filesystem::temp_directory_path() / "svg_place_dpi.svg";
+    std::ofstream(path) << R"(<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">)"
+                        << R"(<rect x="0" y="0" width="10" height="10"/><rect x="20" y="50" width="30" height="5"/></svg>)";
+    const std::vector<Contour2d> contours = loadSvgContours(path.string(), {}, nullptr, 96.0, false);
+    double maxy = -1e18;
+    for (const Contour2d& ct : contours)
+        for (const auto& p : ct) maxy = std::max(maxy, p[1]);
+    EXPECT_NEAR(maxy, 26.458, 1e-3);
+    std::filesystem::remove(path);
+}
+
+} // namespace
+} // namespace oscadeval
