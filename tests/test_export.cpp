@@ -901,5 +901,6 @@ TEST(ExportPly, PerTriangleColourAfterAnotherObjectIndexesItsOwnVertices) {
     }
     // The painted object's faces are exactly its own twelve vertices, in order.
     for (int k = 0; k < 12; ++k) EXPECT_EQ(seen[12 + k], 4 + k);
+    in.close();  // Windows refuses to remove a file that is still open
     std::filesystem::remove(path);
 }
