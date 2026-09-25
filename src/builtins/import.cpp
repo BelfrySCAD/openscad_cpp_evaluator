@@ -221,7 +221,10 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
                 if (const std::string* v = std::get_if<std::string>(&idArg)) filter.id = *v;
                 if (const std::string* v = std::get_if<std::string>(&classArg)) filter.cls = *v;
                 bool matched = true;
-                contours = loadSvgContours(path, filter, &matched);
+                const Value dpiArg = getArg(args, std::nullopt, "dpi", Value{72.0});
+                contours = loadSvgContours(path, filter, &matched,
+                                           std::holds_alternative<double>(dpiArg) ? std::get<double>(dpiArg) : 72.0,
+                                           truthy(getArg(args, std::nullopt, "center", Value{false})));
                 if (!matched) {
                     // Nothing imported, rather than silently falling back to
                     // the whole drawing -- a cut layer that quietly became
@@ -437,7 +440,10 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
                 if (const std::string* v = std::get_if<std::string>(&idArg)) filter.id = *v;
                 if (const std::string* v = std::get_if<std::string>(&classArg)) filter.cls = *v;
                 bool matched = true;
-                contours = loadSvgContours(path, filter, &matched);
+                const Value dpiArg = getArg(args, std::nullopt, "dpi", Value{72.0});
+                contours = loadSvgContours(path, filter, &matched,
+                                           std::holds_alternative<double>(dpiArg) ? std::get<double>(dpiArg) : 72.0,
+                                           truthy(getArg(args, std::nullopt, "center", Value{false})));
                 if (!matched) {
                     // Nothing imported, rather than silently falling back to
                     // the whole drawing -- a cut layer that quietly became

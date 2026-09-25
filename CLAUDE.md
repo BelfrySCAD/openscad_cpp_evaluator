@@ -984,15 +984,16 @@ grep for `ponytail:`.
   rather than out of the model. Ported from the reference's `io/dxfdim.cc` plus the DIMENSION/LINE
   half of `io/DxfData.cc`: `dxf_dim()` returns the first matching DIMENSION's value by its type
   (`70 & 7` — 0 rotated, 1 aligned, 2 angular, 3/4 diameter/radius, 6 ordinate; type 5 is
-  unsupported there too), `dxf_cross()` intersects the first two LINE entities. Note the reference's
+  unsupported there too), `dxf_cross()` intersects the first two 2-point paths. Note the reference's
   own coordinate quirk, reproduced here: groups 11/12/16 (and 21/22/26) are scaled but NOT
   origin-shifted, being extents rather than positions.
 
   Deliberately its own group-code walk rather than sharing `src/import/dxf_import.cpp`'s: that one
   produces closed contours, and these need the DIMENSION entities' seven coordinate slots and the
-  raw LINE endpoints, neither of which a contour list keeps. One divergence: `dxf_cross()` takes the
-  first two LINEs, where the reference walks every 2-point path — for a real cross (two strokes
-  meeting in the middle, not at their endpoints) that is the same set.
+  raw LINE endpoints, neither of which a contour list keeps. A 2-point path is a LINE sharing
+  neither end with another LINE or an ARC (an ARC's ends read from its centre, radius and 50/51
+  angles): one that does belongs to an outline. Taking the first two LINEs outright found a "cross"
+  in example009.dxf's `fan_top` outline where the reference warns `Can't find cross`.
 
 - `src/csg_generate.cpp` — `Evaluator::applyDimensionRules`, run centrally just before every node's
   `GenerateFn` (and once more over the top-level list, which is an implicit union). Mirrors the
@@ -1210,9 +1211,14 @@ grep for `ponytail:`.
   path-command tokenizer/flattener (`M`/`L`/`H`/`V`/`C`/`S`/`Q`/`T`/`A`, both absolute and relative,
   cubic/quadratic Bezier flattening, full elliptical-arc endpoint-to-center parameterization) plus
   `rect`/`circle`/`ellipse`/`polygon`/`polyline` and nested `transform="matrix()/translate()/
-  scale()/rotate()"` composition (including through `<g>` groups) — Y is flipped (SVG down →
-  OpenSCAD up) at the point-transform step, `applyMat()` (named to avoid colliding with
-  `std::apply` in an ADL lookup that broke the build once — see its own comment).
+  scale()/rotate()"` composition (including through `<g>` groups), in SVG user units at the
+  point-transform step, `applyMat()` (named to avoid colliding with `std::apply` in an ADL lookup
+  that broke the build once — see its own comment). **Placement is `pageMap()`, a port of the
+  reference's `import_svg.cc`**: the page's `width`/`height` to mm (a unitless length at `dpi=`,
+  72 by default; `px` at 96), the `viewBox` scaled onto the page under `preserveAspectRatio`
+  (default `xMidYMid meet`), and Y flipped about the page HEIGHT -- or about the drawing's centre
+  with `center=true`. Negating Y alone, as this did before, put a unitless 100-unit drawing in 2.8x
+  too large and below the X axis. Bounds match OpenSCAD 2026.02.01 (`SvgPlacement` tests).
 - `include/openscad_cpp_evaluator/font_provider.hpp` — the `FontProvider` abstract interface
   (`resolveFont`/`metrics`/`shapeText`/`glyphInkBounds`/`glyphOutline`), the seam that keeps
   `text()`/`textmetrics()`/`fontmetrics()` decoupled from any specific font backend. `Evaluator`'s
