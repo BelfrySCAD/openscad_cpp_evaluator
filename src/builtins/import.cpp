@@ -199,8 +199,18 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     const std::string path = resolveFilePath(fileArg, node);
     const std::string ext = lowerExt(path);
 
+    if (!std::filesystem::exists(path)) {
+        // A missing file warns and imports nothing, as in OpenSCAD; it
+        // aborted the whole render. Warned at generate, where OpenSCAD does,
+        // so it follows the script's echoes.
+        params["kind"] = Value{std::string("missing")};
+        params["path"] = Value{path};
+        params["dxf"] = Value{ext == ".dxf"};
+        return params;
+    }
     if (ext == ".dxf" || ext == ".svg" || ext == ".pdf") {
         std::vector<Contour2d> contours;
+        bool filteredMiss = false;
         try {
             if (ext == ".dxf") {
                 std::optional<std::string> layer;
@@ -222,14 +232,15 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
                         if (!what.empty()) what += ", ";
                         what += "class = \"" + *filter.cls + "\"";
                     }
-                    ev.warn("import() filter " + what + " did not match anything in "
-                            + path, &node.position());
+                    // OpenSCAD's words, which name no file.
+                    ev.warn("import() filter " + what + " did not match anything", &node.position());
+                    filteredMiss = true;
                 }
             }
         } catch (const std::exception& e) {
             ev.error(std::string("import: ") + e.what(), node);
         }
-        if (contours.empty()) {
+        if (contours.empty() && !filteredMiss) {
             ev.error(ext == ".dxf" ? "import: no closed contours found in DXF file" : "import: no shapes found in SVG file", node);
         }
         params["kind"] = Value{std::string("region")};
@@ -276,6 +287,16 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     const auto kindIt = params.find("kind");
     if (kindIt == params.end()) return {};
     const std::string& kind = std::get<std::string>(kindIt->second);
+    if (kind == "missing") {
+        // OpenSCAD's own wording, which names a line rather than a file.
+        const std::string& path = std::get<std::string>(params.at("path"));
+        ev.warn(std::get<bool>(params.at("dxf"))
+                    ? "Can't open DXF file '" + path + "'."
+                    : "Can't open import file '" + path + "', import() at line " +
+                          std::to_string(node.position().line),
+                nullptr);
+        return {};
+    }
     if (kind == "region") {
         const std::vector<Contour2d> contours = valueToContours(params.at("contours"));
         manifold::Polygons polys;
@@ -397,6 +418,10 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
     }
     const std::string path = resolveFilePath(fileArg, node);
     const std::string ext = lowerExt(path);
+    if (!std::filesystem::exists(path)) {
+        ev.warn("Could not read file '" + path + "'", &node.position());
+        return Value{};
+    }
 
     try {
         if (ext == ".json") return loadJsonAsValue(path);
@@ -423,8 +448,7 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
                         if (!what.empty()) what += ", ";
                         what += "class = \"" + *filter.cls + "\"";
                     }
-                    ev.warn("import() filter " + what + " did not match anything in "
-                            + path, &node.position());
+                    ev.warn("import() filter " + what + " did not match anything", &node.position());
                 }
             }
             return contoursToValue(contours);

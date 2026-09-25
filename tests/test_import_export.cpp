@@ -116,8 +116,10 @@ TEST(ImportModuleContext, ThreeMfIsDeflateCompressed) {
 }
 
 TEST(ImportModuleContext, UnsupportedExtensionErrors) {
+    const auto path = tempPath("unsupported.xyz");
+    std::ofstream(path) << "x";
     Evaluator ev;
-    auto ast = parseSrc("import(\"nope.xyz\");");
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
     auto scope = oscad::buildScopes(ast);
     EvalContext ctx = EvalContext::makeRoot(scope.get());
     EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
@@ -277,8 +279,37 @@ TEST(ImportExpressionContext, MissingFileArgumentErrors) {
 }
 
 TEST(ImportExpressionContext, UnsupportedExtensionErrors) {
+    const auto path = tempPath("unsupported_expr.xyz");
+    std::ofstream(path) << "x";
     Evaluator ev;
-    EXPECT_THROW(asExpr("import(\"nope.xyz\")", ev), EvalError);
+    EXPECT_THROW(asExpr("import(\"" + path.generic_string() + "\")", ev), EvalError);
+}
+
+// A missing file warns and carries on, in OpenSCAD 2026.02.01's words; it
+// aborted the render. The module form warns at generate, after the echoes.
+TEST(ImportMissingFile, ModuleFormWarnsAndImportsNothing) {
+    const auto dir = tempPath("missing_dir");
+    std::filesystem::create_directories(dir);
+    std::vector<std::string> log;
+    Evaluator ev([&](const std::string& m) { log.push_back(m); });
+    const std::string stl = (dir / "nope.stl").generic_string(), dxf = (dir / "nope.dxf").generic_string();
+    auto ast = parseSrc("import(\"" + stl + "\");\nimport(\"" + dxf + "\");\necho(1);\ncube(1);\n");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    const std::vector<ColoredBody> bodies = ev.evaluate(ast, ctx);
+    EXPECT_EQ(bodies.size(), 1u);
+    ASSERT_EQ(log.size(), 3u);
+    EXPECT_EQ(log[0], "ECHO: 1");
+    EXPECT_EQ(log[1], "WARNING: Can't open import file '" + stl + "', import() at line 1");
+    EXPECT_EQ(log[2], "WARNING: Can't open DXF file '" + dxf + "'.");
+}
+
+TEST(ImportMissingFile, ExpressionFormWarnsAndIsUndef) {
+    std::string last;
+    Evaluator ev([&](const std::string& m) { last = m; });
+    const std::string path = tempPath("nope_expr.json").generic_string();
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(asExpr("import(\"" + path + "\")", ev)));
+    EXPECT_EQ(last.rfind("WARNING: Could not read file '" + path + "'", 0), 0u) << last;
 }
 
 TEST(ImportExpressionContext, MalformedMeshFileErrors) {
