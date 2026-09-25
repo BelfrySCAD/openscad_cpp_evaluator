@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <map>
+#include <tuple>
 #include <unordered_set>
 
 namespace oscadeval {
@@ -354,8 +355,22 @@ CoverageResult buildCoverageResult(const std::vector<const ASTNode*>& roots,
                                    const std::vector<const ASTNode*>& extraStatements,
                                    const CoverageRecorder& recorder) {
     CoverageResult result;
+    // One span per source position. A file several files use<> is parsed
+    // once per use, so its nodes arrive once per parse -- BOSL2's
+    // builtins.scad three times, two of them with zero hits -- which
+    // counted its spans three times over and pulled its percentages down.
+    // Merged here, hits summed: each copy's executions are real ones.
+    std::map<std::tuple<std::string, int, int, CoverageKind>, size_t> index;
     for (const Coverable& c : collectCoverable(roots, extraStatements)) {
         const oscad::Position& p = c.node->position();
+        const auto key = std::make_tuple(p.origin, p.start_offset, p.end_offset, c.kind);
+        const auto [it, fresh] = index.emplace(key, result.spans.size());
+        if (!fresh) {
+            CoverageSpan& s = result.spans[it->second];
+            s.hits += recorder.hitsFor(*c.node);
+            s.arm = s.arm || c.arm;
+            continue;
+        }
         result.spans.push_back(CoverageSpan{p.origin, p.line, p.column, p.start_offset, p.end_offset, c.kind, c.arm,
                                             recorder.hitsFor(*c.node)});
     }
