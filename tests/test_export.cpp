@@ -857,3 +857,49 @@ TEST(SplitColors, AnUncolouredModelIsUnaffectedEitherWay) {
     EXPECT_EQ(splitBodiesForExport(bodies, nullptr, false, true).size(), 1u);
     EXPECT_EQ(splitBodiesForExport(bodies, nullptr, false, false).size(), 1u);
 }
+
+// A per-triangle-coloured object written after another object indexed its
+// faces with faces.size() + base, counting the earlier object twice -- so
+// every index pointed past the vertex list. Read the file back and check.
+TEST(ExportPly, PerTriangleColourAfterAnotherObjectIndexesItsOwnVertices) {
+    ExportObject plain;
+    plain.verts = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+    plain.tris = {0, 2, 1, 0, 1, 3, 1, 2, 3, 0, 3, 2};
+    ExportObject painted = plain;
+    for (float& v : painted.verts) v += 5.0f;
+    painted.triColors = {{1, 0, 0, 1}, {0, 1, 0, 1}, {0, 0, 1, 1}, {1, 1, 0, 1}};
+
+    const auto path = tempPath("two_objects.ply");
+    writePly(path.string(), {plain, painted});
+
+    std::ifstream in(path, std::ios::binary);
+    std::string line;
+    size_t nVerts = 0, nFaces = 0;
+    while (std::getline(in, line) && line != "end_header") {
+        std::istringstream ls(line);
+        std::string a, b;
+        size_t n = 0;
+        ls >> a >> b >> n;
+        if (a == "element" && b == "vertex") nVerts = n;
+        if (a == "element" && b == "face") nFaces = n;
+    }
+    ASSERT_EQ(nVerts, 4u + 12u);   // the painted object is unwelded: 3 per triangle
+    ASSERT_EQ(nFaces, 8u);
+    in.seekg(static_cast<std::streamoff>(nVerts * (3 * sizeof(float) + 3)), std::ios::cur);
+    std::vector<int32_t> seen;
+    for (size_t f = 0; f < nFaces; ++f) {
+        char count = 0;
+        in.read(&count, 1);
+        ASSERT_EQ(count, 3);
+        for (int k = 0; k < 3; ++k) {
+            int32_t idx = -1;
+            in.read(reinterpret_cast<char*>(&idx), sizeof idx);
+            EXPECT_GE(idx, 0);
+            EXPECT_LT(static_cast<size_t>(idx), nVerts);
+            seen.push_back(idx);
+        }
+    }
+    // The painted object's faces are exactly its own twelve vertices, in order.
+    for (int k = 0; k < 12; ++k) EXPECT_EQ(seen[12 + k], 4 + k);
+    std::filesystem::remove(path);
+}

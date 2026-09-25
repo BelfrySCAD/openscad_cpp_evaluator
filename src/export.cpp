@@ -663,7 +663,11 @@ void writePly(const std::string& path, const std::vector<ExportObject>& objects)
                     colors.push_back(rgb(o.triColors[t], 0));
                     colors.push_back(rgb(o.triColors[t], 1));
                     colors.push_back(rgb(o.triColors[t], 2));
-                    faces.push_back(static_cast<int32_t>(faces.size()) + base);
+                    // The vertex just pushed. Not faces.size() + base: faces
+                    // already holds every earlier object's entries, so that
+                    // counted `base` twice and pointed past the vertex list
+                    // on any object after the first.
+                    faces.push_back(static_cast<int32_t>(verts.size() / 3) - 1);
                 }
             }
         }
