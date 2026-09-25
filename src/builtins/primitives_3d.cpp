@@ -102,18 +102,25 @@ std::string describeEdge(const M& mesh, std::pair<uint32_t, uint32_t> edge) {
 
 CSGParams resolveCube(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    Value sizeArg = getArg(args, 0, "size", Value{1.0});
+    const Value sizeArg = getArg(args, 0, "size", Value{});
     const bool center = truthy(getArg(args, 1, "center", Value{false}));
 
-    std::vector<Value> sizeVec;
+    // As OpenSCAD reads it: undef (absent or explicit) is the default of 1, a
+    // number or three numbers are the size, and anything else warns and
+    // falls back to 1. Explicit undef built a zero-size cube -- nothing --
+    // and a 2-vector or a string was converted leniently, without a word.
+    std::vector<Value> sizeVec(3, Value{1.0});
+    const ListPtr* l = std::get_if<ListPtr>(&sizeArg);
     if (const double* s = std::get_if<double>(&sizeArg)) {
         sizeVec = {Value{*s}, Value{*s}, Value{*s}};
-    } else if (const ListPtr* l = std::get_if<ListPtr>(&sizeArg); l && *l) {
-        for (size_t i = 0; i < 3; ++i) {
-            sizeVec.push_back(Value{i < (*l)->items.size() ? toDoubleLenient((*l)->items[i]) : 0.0});
-        }
-    } else {
-        sizeVec = {Value{0.0}, Value{0.0}, Value{0.0}};
+    } else if (l && *l && (*l)->items.size() == 3 &&
+               std::all_of((*l)->items.begin(), (*l)->items.end(),
+                           [](const Value& v) { return std::holds_alternative<double>(v); })) {
+        sizeVec = (*l)->items;
+    } else if (!std::holds_alternative<std::monostate>(sizeArg)) {
+        ev.warn("Unable to convert cube(size=" + fmtValue(sizeArg) +
+                    ", ...) parameter to a number or a vec3 of numbers",
+                &node.position());
     }
 
     CSGParams params;

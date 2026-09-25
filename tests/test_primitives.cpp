@@ -438,3 +438,32 @@ TEST(SphereStyle, StyleRespectsFnAndRadius) {
     const double v20 = sphereStats("sphere(r=20, style=\"aligned\", $fn=24);").volume;
     EXPECT_NEAR(v20 / v10, 8.0, 1e-6);   // volume goes as r^3
 }
+
+// cube()'s size as OpenSCAD 2026.02.01 reads it: undef, absent or explicit,
+// is the default of 1; anything but a number or three numbers warns and
+// falls back to 1. Explicit undef built a zero-size cube -- nothing at all.
+TEST(Primitives, CubeBadSizeIsAUnitCube) {
+    const std::pair<const char*, const char*> cases[] = {
+        {"undef", ""},
+        {"\"a\"", "size=\"a\""},
+        {"[1,2]", "size=[1, 2]"},
+        {"[1,2,undef]", "size=[1, 2, undef]"},
+        {"true", "size=true"},
+        {"[1,\"a\",3]", "size=[1, \"a\", 3]"},
+    };
+    for (const auto& [arg, shown] : cases) {
+        std::vector<std::string> log;
+        Evaluated e = evalSrc(std::string("cube(") + arg + ");", [&](const std::string& m) { log.push_back(m); });
+        ASSERT_EQ(e.bodies.size(), 1u) << arg;
+        ASSERT_TRUE(e.bodies[0].body.has_value()) << arg;
+        EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-9) << arg;
+        if (*shown == '\0') {
+            EXPECT_TRUE(log.empty()) << arg;
+        } else {
+            ASSERT_EQ(log.size(), 1u) << arg;
+            EXPECT_EQ(log[0], std::string("WARNING: Unable to convert cube(") + shown +
+                                  ", ...) parameter to a number or a vec3 of numbers in file <string>, line 1")
+                << arg;
+        }
+    }
+}
