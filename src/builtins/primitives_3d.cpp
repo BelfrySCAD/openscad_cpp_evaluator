@@ -53,11 +53,18 @@ struct BoundaryEdges {
     // three bad edges in a few thousand triangles cannot be found by eye,
     // which is what happened in BelfrySCAD #521 / issue #187.
     std::optional<std::pair<uint32_t, uint32_t>> first;
+    // An edge both of whose faces run it the SAME way: the mesh is closed
+    // but a face is wound backwards. Named so the author knows which face
+    // to flip (BelfrySCAD #566, where "not closed -- 0 boundary edges"
+    // described a closed tetrahedron with two reversed faces).
+    size_t misoriented = 0;
+    std::optional<std::pair<uint32_t, uint32_t>> firstMisoriented;
 };
 
 template <typename M>
 BoundaryEdges findBoundaryEdges(const M& mesh) {
     std::map<std::pair<uint32_t, uint32_t>, int> uses;
+    std::map<std::pair<uint32_t, uint32_t>, int> forward;  // uses running low -> high
     for (size_t i = 0; i + 2 < mesh.triVerts.size(); i += 3) {
         const uint32_t v[3] = {static_cast<uint32_t>(mesh.triVerts[i]),
                                 static_cast<uint32_t>(mesh.triVerts[i + 1]),
@@ -65,6 +72,7 @@ BoundaryEdges findBoundaryEdges(const M& mesh) {
         for (int e = 0; e < 3; ++e) {
             const uint32_t a = v[e], b = v[(e + 1) % 3];
             ++uses[{std::min(a, b), std::max(a, b)}];
+            if (a < b) ++forward[{a, b}];
         }
     }
     BoundaryEdges out;
@@ -75,7 +83,16 @@ BoundaryEdges findBoundaryEdges(const M& mesh) {
     // A cluster of open edges is nearly always one hole, so the first is
     // usually representative of the rest.
     for (const auto& [edge, count] : uses) {
-        if (count % 2 == 0) continue;
+        if (count % 2 == 0) {
+            // Closed here; consistently wound only if the uses split evenly
+            // between the two directions.
+            const auto f = forward.find(edge);
+            if ((f == forward.end() ? 0 : f->second) * 2 != count) {
+                ++out.misoriented;
+                if (!out.firstMisoriented) out.firstMisoriented = edge;
+            }
+            continue;
+        }
         ++out.count;
         if (!out.first) out.first = edge;
     }
@@ -857,10 +874,22 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
             // Name one of them. Where the hole IS is the only part of this
             // message an author can act on; the count alone just says to go
             // looking, across the whole mesh.
-            const std::string where =
-                open.first ? ", first at " + describeEdge(mesh, *open.first) : std::string();
-            ev.warn("polyhedron: mesh is not closed -- " + std::to_string(open.count) +
-                        " boundary edge(s)" + where +
+            std::string what;
+            if (open.count) {
+                what = "mesh is not closed -- " + std::to_string(open.count) + " boundary edge(s)" +
+                       (open.first ? ", first at " + describeEdge(mesh, *open.first) : std::string());
+            } else if (open.misoriented) {
+                // Closed, but some faces wound backwards: "not closed -- 0
+                // boundary edge(s)" contradicted itself (BelfrySCAD #566).
+                what = "faces are not consistently wound -- " + std::to_string(open.misoriented) +
+                       " edge(s) run the same way by both faces sharing them" +
+                       (open.firstMisoriented ? ", first at " + describeEdge(mesh, *open.firstMisoriented)
+                                              : std::string()) +
+                       "; reverse the point order of the faces on one side of it";
+            } else {
+                what = "mesh is not a valid solid (" + checkMesh(mesh).summary() + ")";
+            }
+            ev.warn("polyhedron: " + what +
                         // "drawing it as a surface" was read by a reporter as
                         // the HOLE being surfaced over -- i.e. as automatic
                         // repair hiding their defect. Nothing is repaired: the
@@ -868,7 +897,8 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
                         // object as the thing being drawn, and say what it is
                         // NOT, since "surface" alone does not imply "not solid"
                         // to someone who did not know it could be either.
-                        "; drawing the object as an open surface rather than a "
+                        (open.count ? "; drawing the object as an open surface rather than a "
+                                    : "; drawing the object as a surface rather than a ") +
                         "solid -- nothing is patched. hull() can still "
                         "use its points, but it cannot take part in union/difference/intersection",
                     &node.position());

@@ -442,6 +442,22 @@ TEST(SphereStyle, StyleRespectsFnAndRadius) {
 // cube()'s size as OpenSCAD 2026.02.01 reads it: undef, absent or explicit,
 // is the default of 1; anything but a number or three numbers warns and
 // falls back to 1. Explicit undef built a zero-size cube -- nothing at all.
+// BelfrySCAD #566: a closed tetrahedron with two faces wound backwards was
+// reported as "mesh is not closed -- 0 boundary edge(s)". It is closed; say
+// what is actually wrong, name an edge, and still draw it.
+TEST(Primitives, PolyhedronWithReversedFacesSaysSo) {
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("polyhedron([[0,0,0], [10,0,0], [0,10,0], [0,0,10]],\n"
+                          "           [[0,1,2], [0,1,3], [0,2,3], [1,2,3]]);",
+                          [&](const std::string& m) { log.push_back(m); });
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_NE(log[0].find("faces are not consistently wound -- 4 edge(s)"), std::string::npos) << log[0];
+    EXPECT_NE(log[0].find("first at [0, 0, 0] - [10, 0, 0]"), std::string::npos) << log[0];
+    EXPECT_EQ(log[0].find("not closed"), std::string::npos) << log[0];
+    EXPECT_EQ(log[0].find("open surface"), std::string::npos) << log[0];
+    ASSERT_EQ(e.bodies.size(), 1u);  // still drawn, as a display-only surface
+}
+
 TEST(Primitives, CubeBadSizeIsAUnitCube) {
     const std::pair<const char*, const char*> cases[] = {
         {"undef", ""},
