@@ -97,6 +97,42 @@ TEST(Textmetrics, AdvanceXIsPositiveForNonEmptyText) {
     EXPECT_DOUBLE_EQ(asNum(items[1]), 0.0);
 }
 
+// Vertical runs, against OpenSCAD 2026.02.01 (it hints, so ~0.01 apart).
+// Its vertical metrics are FreeType's -- OS/2 typo ascender-descender for a
+// font without vmtx -- not hb-ot's hhea fallback, which gave 46.5 here.
+namespace {
+double vec(const Value& obj, const std::string& key, int i) {
+    return asNum(std::get<ListPtr>(objGet(obj, key))->items[i]);
+}
+} // namespace
+
+TEST(Textmetrics, VerticalRunMatchesOpenscad) {
+    Evaluator ev;
+    Value v = asExpr("textmetrics(\"abc\", size=10, direction=\"ttb\")", ev);
+    EXPECT_NEAR(vec(v, "advance", 1), -39.1032, 1e-3);
+    EXPECT_NEAR(vec(v, "position", 0), -3.2733, 0.01);
+    EXPECT_NEAR(vec(v, "position", 1), -36.3957, 0.01);
+    EXPECT_NEAR(vec(v, "size", 1), 33.6848, 0.01);
+    EXPECT_NEAR(asNum(objGet(v, "ascent")), 10.0672, 0.01);  // the glyphs' own, not their placement
+}
+
+TEST(Textmetrics, VerticalRunAlignsByItsOwnRules) {
+    Evaluator ev;
+    Value lc = asExpr("textmetrics(\"abc\", size=10, direction=\"ttb\", halign=\"left\", valign=\"center\")", ev);
+    EXPECT_NEAR(vec(lc, "offset", 0), 3.2733, 0.01);
+    EXPECT_NEAR(vec(lc, "offset", 1), 19.5516, 1e-3);
+    Value rb = asExpr("textmetrics(\"abc\", size=10, direction=\"ttb\", halign=\"right\", valign=\"bottom\")", ev);
+    EXPECT_NEAR(vec(rb, "offset", 0), -3.8627, 0.01);
+    EXPECT_NEAR(vec(rb, "offset", 1), 39.1032, 1e-3);
+}
+
+TEST(Textmetrics, InklessTextIsNotAligned) {
+    Evaluator ev;
+    Value v = asExpr("textmetrics(\"  \", size=10, halign=\"right\")", ev);
+    EXPECT_EQ(vec(v, "offset", 0), 0.0);
+    EXPECT_GT(vec(v, "advance", 0), 7.0);
+}
+
 TEST(Textmetrics, AscentIsPositiveDescentIsNonPositive) {
     Evaluator ev;
     Value v = asExpr("textmetrics(text=\"Hi\", size=10)", ev);

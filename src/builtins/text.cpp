@@ -7,7 +7,7 @@
 
 #include <algorithm>
 
-// text(text=, size=10, font=, halign="left", valign="baseline", spacing=1,
+// text(text=, size=10, font=, halign="default", valign="default", spacing=1,
 // direction=, language=, script=) -- renders `text` as 2D glyph outlines
 // through the FontProvider (Evaluator::fontProvider(), lazily the built-in
 // FreetypeFontProvider if none was injected).
@@ -46,8 +46,8 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     // genuinely differ here -- textmetrics takes all nine positionally --
     // so neither can be assumed from the other.
     const std::string fontSpec = asStringOr(getArg(args, 2, "font", Value{std::string("")}), "");
-    const std::string halign = asStringOr(getArg(args, std::nullopt, "halign", Value{std::string("left")}), "left");
-    const std::string valign = asStringOr(getArg(args, std::nullopt, "valign", Value{std::string("baseline")}), "baseline");
+    const std::string halign = asStringOr(getArg(args, std::nullopt, "halign", Value{std::string("default")}), "default");
+    const std::string valign = asStringOr(getArg(args, std::nullopt, "valign", Value{std::string("default")}), "default");
     const double spacing = toDoubleLenient(getArg(args, std::nullopt, "spacing", Value{1.0}));
     ShapeOptions shape;
     shape.direction = asStringOr(getArg(args, std::nullopt, "direction", Value{std::string("")}), "");

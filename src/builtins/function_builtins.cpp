@@ -792,8 +792,8 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
     // `font` being name-only here is what made
     // `textmetrics("Hi", 10, "Liberation Sans:style=Bold")` silently
     // measure the default face (BelfrySCAD #381).
-    const std::string halign = asStringOr(getArg(args, 6, "halign", Value{std::string("left")}), "left");
-    const std::string valign = asStringOr(getArg(args, 7, "valign", Value{std::string("baseline")}), "baseline");
+    const std::string halign = asStringOr(getArg(args, 6, "halign", Value{std::string("default")}), "default");
+    const std::string valign = asStringOr(getArg(args, 7, "valign", Value{std::string("default")}), "default");
     const double spacing = toDoubleLenient(getArg(args, 8, "spacing", Value{1.0}));
     const std::string fontSpec = asStringOr(getArg(args, 2, "font", Value{std::string("")}), "");
     ShapeOptions shape;
@@ -807,8 +807,8 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
     const auto [offsetX, offsetY] = textAlignOffset(halign, valign, m);
 
     return objectOf({
-        {"position", numList({offsetX + m.inkMinX, offsetY + m.descent})},
-        {"size", numList({m.inkMaxX - m.inkMinX, m.ascent - m.descent})},
+        {"position", numList({offsetX + m.left, offsetY + m.bottom})},
+        {"size", numList({m.right - m.left, m.top - m.bottom})},
         {"ascent", Value{m.ascent}},
         {"descent", Value{m.descent}},
         {"offset", numList({offsetX, offsetY})},

@@ -1,6 +1,7 @@
 #include "openscad_cpp_evaluator/text_metrics.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace oscadeval {
 
@@ -16,29 +17,31 @@ TextMeasurement measureText(FontProvider& fp, FontHandle handle, const std::stri
     const double scale = size * (100.0 / 72.0) / fm.unitsPerEm;
 
     TextMeasurement m;
+    // hb_direction_from_string reads only the first letter, so this is
+    // exactly the set of strings the shaper takes as vertical.
+    const char d = opts.direction.empty() ? 'l' : static_cast<char>(std::tolower(opts.direction[0]));
+    m.vertical = d == 't' || d == 'b';
     double penX = 0.0, penY = 0.0;
-    bool hasInk = false;
 
     for (const ShapedGlyph& g : fp.shapeText(handle, text, opts)) {
         const double x = (penX + g.xOffset) * scale;
         const double y = (penY + g.yOffset) * scale;
 
         if (const std::optional<std::array<double, 4>> b = fp.glyphInkBounds(handle, g.glyph)) {
-            const double left = x + (*b)[0] * scale;
-            const double right = x + (*b)[2] * scale;
-            const double bottom = y + (*b)[1] * scale;
-            const double top = y + (*b)[3] * scale;
-            if (!hasInk) {
-                m.inkMinX = left;
-                m.inkMaxX = right;
-                m.ascent = top;
-                m.descent = bottom;
-                hasInk = true;
+            const double gl = x + (*b)[0] * scale, gr = x + (*b)[2] * scale;
+            const double gb = y + (*b)[1] * scale, gt = y + (*b)[3] * scale;
+            const double asc = (*b)[3] * scale, desc = (*b)[1] * scale;
+            if (!m.hasInk) {
+                m.left = gl, m.right = gr, m.bottom = gb, m.top = gt;
+                m.ascent = asc, m.descent = desc;
+                m.hasInk = true;
             } else {
-                m.inkMinX = std::min(m.inkMinX, left);
-                m.inkMaxX = std::max(m.inkMaxX, right);
-                m.ascent = std::max(m.ascent, top);
-                m.descent = std::min(m.descent, bottom);
+                m.left = std::min(m.left, gl);
+                m.right = std::max(m.right, gr);
+                m.bottom = std::min(m.bottom, gb);
+                m.top = std::max(m.top, gt);
+                m.ascent = std::max(m.ascent, asc);
+                m.descent = std::min(m.descent, desc);
             }
         }
 
@@ -52,18 +55,25 @@ TextMeasurement measureText(FontProvider& fp, FontHandle handle, const std::stri
     return m;
 }
 
+// OpenSCAD's ShapeResults::calc_offsets_horiz/_vert. An unknown value (and,
+// for a vertical run, valign="baseline") does not move the text there
+// either; OpenSCAD also warns, which this does not.
 std::pair<double, double> textAlignOffset(const std::string& halign, const std::string& valign,
                                           const TextMeasurement& m) {
-    double offsetX = 0.0;
-    if (halign == "center") offsetX = -0.5 * m.advanceX;
-    else if (halign == "right") offsetX = -1.0 * m.advanceX;
-
-    double offsetY = 0.0;
-    if (valign == "top") offsetY = -m.ascent;
-    else if (valign == "center") offsetY = -(m.ascent + m.descent) / 2;
-    else if (valign == "bottom") offsetY = -m.descent;
-    // "baseline" (or anything else) -> 0
-
+    if (!m.hasInk) return {0.0, 0.0};
+    double offsetX = 0.0, offsetY = 0.0;
+    if (m.vertical) {
+        if (halign == "right") offsetX = -m.right;
+        else if (halign == "left") offsetX = -m.left;
+        if (valign == "center") offsetY = -m.advanceY / 2;
+        else if (valign == "bottom") offsetY = -m.advanceY;
+    } else {
+        if (halign == "center") offsetX = -0.5 * m.advanceX;
+        else if (halign == "right") offsetX = -m.advanceX;
+        if (valign == "top") offsetY = -m.ascent;
+        else if (valign == "center") offsetY = -(m.ascent + m.descent) / 2;
+        else if (valign == "bottom") offsetY = -m.descent;
+    }
     return {offsetX, offsetY};
 }
 

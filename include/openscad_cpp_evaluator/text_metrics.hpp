@@ -12,7 +12,12 @@ namespace oscadeval {
 // for `size`. `glyphs` is what text() places: each shaped glyph with its
 // pen position, already scaled. An inkless glyph (a space) still advances
 // the pen and still gets a glyphs entry -- it just contributes nothing to
-// ascent/descent/inkMinX/inkMaxX.
+// the ink box or ascent/descent.
+//
+// As in OpenSCAD's ShapeResults: left/right/bottom/top is the ink box of the
+// glyphs where they are placed, while ascent/descent are the glyphs' own
+// extents above and below THEIR baseline, ignoring where they sit. The two
+// only differ for a vertical run or a glyph the shaper offsets (a mark).
 //
 // The run comes from the shaper, so kerning and ligatures are already
 // applied and `spacing` scales the shaped advances rather than raw
@@ -23,8 +28,11 @@ struct TextMeasurement {
         double x = 0, y = 0;
     };
 
-    double ascent = 0, descent = 0, inkMinX = 0, inkMaxX = 0;
+    double ascent = 0, descent = 0;
+    double left = 0, right = 0, bottom = 0, top = 0;
     double advanceX = 0, advanceY = 0;
+    bool hasInk = false;
+    bool vertical = false;  // shaped ttb/btt
     std::vector<Placed> glyphs;
 };
 
@@ -32,7 +40,9 @@ TextMeasurement measureText(FontProvider& fp, FontHandle handle, const std::stri
                             double spacing, const ShapeOptions& opts = {});
 
 // (offsetX, offsetY) translation for halign/valign, given a
-// TextMeasurement. Shared by textmetrics() (reports it) and text()
+// TextMeasurement. "default" is left/baseline for a horizontal run and
+// center/top for a vertical one, as in OpenSCAD; text with no ink is not
+// moved at all. Shared by textmetrics() (reports it) and text()
 // (applies it).
 std::pair<double, double> textAlignOffset(const std::string& halign, const std::string& valign,
                                           const TextMeasurement& m);
