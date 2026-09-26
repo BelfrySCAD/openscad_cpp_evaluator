@@ -24,6 +24,10 @@ namespace oscadeval {
 struct UsedFileGlobals {
     const oscad::Scope* root = nullptr;
     std::vector<const oscad::ASTNode*> assignments;
+    // Every module/function the file sees -- its own and what it use<>d --
+    // for coverage, which is otherwise handed only the top file's nodes, so
+    // a file reached only by a nested use<> went unreported.
+    std::vector<const oscad::ASTNode*> declarations;
 };
 
 struct ResolvedUseScopes {
