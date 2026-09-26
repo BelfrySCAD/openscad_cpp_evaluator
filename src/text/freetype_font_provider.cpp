@@ -31,6 +31,45 @@ void scaleHbFontToEm(hb_font_t* font, unsigned int unitsPerEm) {
     hb_font_set_scale(font, static_cast<int>(unitsPerEm), static_cast<int>(unitsPerEm));
 }
 
+// Vertical metrics come from FreeType, as they do in OpenSCAD (which shapes
+// through hb-ft). For a font with no vmtx -- nearly every Latin font,
+// Liberation Sans included -- the two disagree: hb-ot falls back to hhea
+// ascender-descender, FreeType to OS/2 typo ascender-descender, so a ttb
+// run of "abc" was 46.5 tall here and 39.1 there. Mirrors hb-ft's own
+// callbacks; font units in and out, since the hb font is scaled to the em.
+hb_position_t ftVAdvance(hb_font_t*, void* data, hb_codepoint_t glyph, void*) {
+    FT_Face ft = static_cast<FT_Face>(data);
+    if (FT_Load_Glyph(ft, glyph, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING | FT_LOAD_VERTICAL_LAYOUT) != 0) return 0;
+    return static_cast<hb_position_t>(-ft->glyph->metrics.vertAdvance);  // FreeType's vertical grows downward
+}
+
+hb_bool_t ftVOrigin(hb_font_t*, void* data, hb_codepoint_t glyph, hb_position_t* x, hb_position_t* y, void*) {
+    FT_Face ft = static_cast<FT_Face>(data);
+    if (FT_Load_Glyph(ft, glyph, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING | FT_LOAD_VERTICAL_LAYOUT) != 0) return false;
+    const FT_Glyph_Metrics& m = ft->glyph->metrics;
+    *x = static_cast<hb_position_t>(m.horiBearingX - m.vertBearingX);
+    *y = static_cast<hb_position_t>(m.horiBearingY + m.vertBearingY);
+    return true;
+}
+
+// hb-ot for everything, with the vertical metrics overridden by FreeType.
+hb_font_t* makeHbFont(hb_face_t* face, FT_Face ft, unsigned int unitsPerEm) {
+    static hb_font_funcs_t* vfuncs = [] {
+        hb_font_funcs_t* f = hb_font_funcs_create();
+        hb_font_funcs_set_glyph_v_advance_func(f, ftVAdvance, nullptr, nullptr);
+        hb_font_funcs_set_glyph_v_origin_func(f, ftVOrigin, nullptr, nullptr);
+        hb_font_funcs_make_immutable(f);
+        return f;
+    }();
+    hb_font_t* parent = hb_font_create(face);
+    hb_ot_font_set_funcs(parent);
+    scaleHbFontToEm(parent, unitsPerEm);
+    hb_font_t* font = hb_font_create_sub_font(parent);  // everything unset delegates to parent
+    hb_font_destroy(parent);
+    hb_font_set_funcs(font, vfuncs, ft, nullptr);
+    return font;
+}
+
 struct OutlineSink {
     GlyphContours contours;
     std::vector<std::array<double, 2>> current;
@@ -159,10 +198,8 @@ struct FreetypeFontProvider::Impl {
             return std::nullopt;
         }
         f.hbFace = hb_face_create(f.blob, static_cast<unsigned>(index));
-        f.hbFont = hb_font_create(f.hbFace);
-        hb_ot_font_set_funcs(f.hbFont);
         f.metrics = readMetrics(f.ft);
-        scaleHbFontToEm(f.hbFont, static_cast<unsigned>(f.metrics.unitsPerEm));
+        f.hbFont = makeHbFont(f.hbFace, f.ft, static_cast<unsigned>(f.metrics.unitsPerEm));
         faces.push_back(f);
         return faces.size() - 1;
     }
@@ -185,10 +222,8 @@ struct FreetypeFontProvider::Impl {
             f.blob = hb_blob_create(reinterpret_cast<const char*>(src.data),
                                     static_cast<unsigned>(src.size), HB_MEMORY_MODE_READONLY, nullptr, nullptr);
             f.hbFace = hb_face_create(f.blob, 0);
-            f.hbFont = hb_font_create(f.hbFace);
-            hb_ot_font_set_funcs(f.hbFont);
             f.metrics = readMetrics(f.ft);
-            scaleHbFontToEm(f.hbFont, static_cast<unsigned>(f.metrics.unitsPerEm));
+            f.hbFont = makeHbFont(f.hbFace, f.ft, static_cast<unsigned>(f.metrics.unitsPerEm));
             faces.push_back(f);
         }
     }
