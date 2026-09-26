@@ -1121,3 +1121,37 @@ def test_a_viewer_can_ask_for_a_thin_2d_slab_and_export_keeps_1(tmp_path):
     nverts = int(lines[1].split()[0])
     zs = [float(l.split()[2]) for l in lines[2:2 + nverts]]
     assert abs(max(zs) - min(zs) - 1.0) < 1e-6, "export is the 1-unit slab"
+
+
+def test_parsing_from_two_threads_at_once_is_safe(tmp_path):
+    """BelfrySCAD's render worker parses its file (`parse`) while the UI
+    thread parses the buffer for the Customizer (`parse_ast_string`); the
+    parser's flex scanner is global state, and the two used to collide --
+    an intermittent 0xC0000005 on Windows. The parser now serialises it
+    (openscad_cpp_parser #12). Run in a subprocess, since the failure mode
+    is a crash, not an exception."""
+    import subprocess
+    code = r'''
+import sys, threading
+from openscad_cpp_evaluator import parse, parse_ast_string
+path = sys.argv[1]
+errors = []
+def by_path():
+    try:
+        for _ in range(300): parse(path)
+    except Exception as e: errors.append(repr(e))
+def by_string():
+    try:
+        for i in range(300):
+            ast = parse_ast_string("a%d = [1, 2, 3];\nb = a%d;\n" % (i, i))
+            assert len(ast) == 2, ast
+    except Exception as e: errors.append(repr(e))
+threads = [threading.Thread(target=f) for f in (by_path, by_string, by_path, by_string)]
+for t in threads: t.start()
+for t in threads: t.join()
+print("errors:", errors); sys.exit(1 if errors else 0)
+'''
+    src = tmp_path / "m.scad"
+    src.write_text("".join(f"x{i} = [{i}, {i} + 1, \"s{i}\"];\n" for i in range(200)))
+    r = subprocess.run([sys.executable, "-c", code, str(src)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, (r.returncode, r.stdout[-500:], r.stderr[-1500:])
