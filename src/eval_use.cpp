@@ -92,6 +92,11 @@ ResolvedUseScopes resolveUseScopesInto(const std::vector<const oscad::ASTNode*>&
         for (const oscad::ASTNode* n : nested.ownNodesFiltered) {
             if (n->kind() == oscad::NodeKind::Assignment) globals.assignments.push_back(n);
         }
+        for (const oscad::ASTNode* n : nested.processedNodes) {
+            if (n->kind() == oscad::NodeKind::ModuleDeclaration || n->kind() == oscad::NodeKind::FunctionDeclaration) {
+                globals.declarations.push_back(n);
+            }
+        }
         result.usedFileGlobals.push_back(std::move(globals));
     }
 

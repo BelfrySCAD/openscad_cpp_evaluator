@@ -299,4 +299,32 @@ TEST(Coverage, AFileUsedTwiceIsListedOnce) {
     fs::remove_all(dir);
 }
 
+// A file reached only through a used file's own use<> ran too. Only the top
+// file's nodes were handed to coverage, so its declarations went unlisted.
+TEST(Coverage, AFileReachedByNestedUseIsListed) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "oscad_cov_nested";
+    fs::create_directories(dir);
+    const fs::path lib = dir / "lib.scad", mid = dir / "mid.scad", main = dir / "main.scad";
+    std::ofstream(lib) << "g = 1;\nfunction hit(x) = x + g;\nfunction miss(x) = x;\n";
+    std::ofstream(mid) << "use <lib.scad>\nfunction f() = hit(1);\n";
+    std::ofstream(main) << "use <mid.scad>\necho(f(), f());\n";
+    auto ast = oscad::getASTFromFile(main.string());
+    ResolvedUseScopes uses = resolveUseScopes(ast, main.string(), {});
+    Evaluator ev({}, nullptr, nullptr, {}, false, /*coverage=*/true);
+    ev.setUsedFileGlobals(uses.usedFileGlobals);
+    EvalContext ctx = EvalContext::makeRoot(uses.rootScope.get());
+    ev.evaluate(uses.processedNodes, ctx, {}, false);
+    ASSERT_TRUE(ev.coverageResult.has_value());
+    std::map<std::pair<int, CoverageKind>, std::vector<std::uint32_t>> libSpans;
+    for (const CoverageSpan& s : ev.coverageResult->spans) {
+        if (fs::path(s.origin).filename() == "lib.scad") libSpans[{s.line, s.kind}].push_back(s.hits);
+    }
+    auto hits = [&](int line, CoverageKind kind) { return libSpans[std::make_pair(line, kind)]; };
+    EXPECT_EQ(hits(2, CoverageKind::Body), std::vector<std::uint32_t>{2u});
+    EXPECT_EQ(hits(3, CoverageKind::Body), std::vector<std::uint32_t>{0u});
+    EXPECT_EQ(hits(1, CoverageKind::Statement), std::vector<std::uint32_t>{1u});  // its global, read and so evaluated, once
+    fs::remove_all(dir);
+}
+
 } // namespace oscadeval

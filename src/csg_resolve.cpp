@@ -303,7 +303,10 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
         roots.reserve(nodes.size());
         for (const auto& n : nodes) roots.push_back(&*n);
         std::vector<const oscad::ASTNode*> extra;
-        for (const UsedFileGlobals& g : usedFileGlobals_) extra.insert(extra.end(), g.assignments.begin(), g.assignments.end());
+        for (const UsedFileGlobals& g : usedFileGlobals_) {
+            extra.insert(extra.end(), g.assignments.begin(), g.assignments.end());
+            roots.insert(roots.end(), g.declarations.begin(), g.declarations.end());  // merged by position
+        }
         coverageResult = buildCoverageResult(roots, extra, coverageRecorder_);
     }
 
