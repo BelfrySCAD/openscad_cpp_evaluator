@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/font_provider.hpp"
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,7 +45,10 @@ TextMeasurement measureText(FontProvider& fp, FontHandle handle, const std::stri
 // center/top for a vertical one, as in OpenSCAD; text with no ink is not
 // moved at all. Shared by textmetrics() (reports it) and text()
 // (applies it).
+// `warn`, when given, receives OpenSCAD's own warning for an unknown
+// halign/valign, and for valign="baseline" on a vertical run.
 std::pair<double, double> textAlignOffset(const std::string& halign, const std::string& valign,
-                                          const TextMeasurement& m);
+                                          const TextMeasurement& m,
+                                          const std::function<void(const std::string&)>& warn = {});
 
 } // namespace oscadeval

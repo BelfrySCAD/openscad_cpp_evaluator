@@ -782,7 +782,7 @@ Value objectOf(std::vector<std::pair<std::string, Value>> items) {
 // descent/offset/advance in real OpenSCAD's key order. Going through the
 // same measureText() the geometry goes through is the point: the numbers
 // a script positions against cannot disagree with what it draws.
-Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
+Value builtinTextmetrics(Evaluator& ev, const CallArgs& args, const oscad::Position* pos) {
     const std::string text = asStringOr(getArg(args, 0, "text", Value{std::string("")}), "");
     const double size = toDoubleLenient(getArg(args, 1, "size", Value{10.0}));
     // Positional indices, all of them: OpenSCAD's own signature is
@@ -804,7 +804,8 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args) {
     FontProvider& fp = ev.fontProvider();
     const FontHandle handle = fp.resolveFont(fontSpec);
     const TextMeasurement m = measureText(fp, handle, text, size, spacing, shape);
-    const auto [offsetX, offsetY] = textAlignOffset(halign, valign, m);
+    const auto [offsetX, offsetY] = textAlignOffset(
+        halign, valign, m, [&](const std::string& w) { ev.warn(w, pos); });
 
     return objectOf({
         {"position", numList({offsetX + m.left, offsetY + m.bottom})},
@@ -1251,7 +1252,7 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
 
     switch (id) {
         case BuiltinFnId::None: return Value{}; // unreachable: handled above
-        case BuiltinFnId::TextMetrics: return builtinTextmetrics(ev, args);
+        case BuiltinFnId::TextMetrics: return builtinTextmetrics(ev, args, &node.position());
         case BuiltinFnId::FontMetrics: return builtinFontmetrics(ev, args);
         case BuiltinFnId::Abs: return Value{std::fabs(toDoubleLenient(getArg(args, 0, "x", Value{})))};
         case BuiltinFnId::Sign: {

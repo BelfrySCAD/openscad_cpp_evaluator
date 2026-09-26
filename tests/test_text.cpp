@@ -126,6 +126,33 @@ TEST(Textmetrics, VerticalRunAlignsByItsOwnRules) {
     EXPECT_NEAR(vec(rb, "offset", 1), 39.1032, 1e-3);
 }
 
+// OpenSCAD 2026.02.01's warnings, verbatim. Inkless text never reaches
+// its alignment code there, so it does not warn.
+TEST(Text, UnknownAlignmentWarnsAsOpenscadDoes) {
+    const std::pair<const char*, std::vector<std::string>> cases[] = {
+        {"m = textmetrics(\"ab\", halign=\"middle\");",
+         {"Unknown value for the halign parameter (use \"left\", \"right\" or \"center\"): 'middle'"}},
+        {"m = textmetrics(\"ab\", valign=\"mid\");",
+         {"Unknown value for the valign parameter (use \"baseline\", \"bottom\", \"top\" or \"center\"): 'mid'"}},
+        {"m = textmetrics(\"ab\", direction=\"ttb\", valign=\"baseline\");",
+         {"Don't use valign=\"baseline\" with vertical layouts"}},
+        {"text(\"ab\", direction=\"ttb\", halign=\"x\", valign=\"y\");",
+         {"Unknown value for the halign parameter (use \"left\", \"right\" or \"center\"): 'x'",
+          "Unknown value for the valign parameter (use \"baseline\", \"bottom\", \"top\" or \"center\"): 'y'"}},
+        {"m = textmetrics(\"  \", halign=\"bogus\");", {}},
+        {"m = textmetrics(\"ab\", halign=\"default\", valign=\"default\");", {}},
+        {"m = textmetrics(\"ab\", direction=\"ttb\", valign=\"top\");", {}},
+    };
+    for (const auto& [src, want] : cases) {
+        std::vector<std::string> log;
+        evalSrc(src, [&](const std::string& m) { log.push_back(m); });
+        ASSERT_EQ(log.size(), want.size()) << src;
+        for (size_t i = 0; i < want.size(); ++i) {
+            EXPECT_EQ(log[i], "WARNING: " + want[i] + " in file <string>, line 1") << src;
+        }
+    }
+}
+
 TEST(Textmetrics, InklessTextIsNotAligned) {
     Evaluator ev;
     Value v = asExpr("textmetrics(\"  \", size=10, halign=\"right\")", ev);

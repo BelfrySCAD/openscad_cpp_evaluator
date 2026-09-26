@@ -60,7 +60,8 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     const double scale = size * (100.0 / 72.0) / fm.unitsPerEm;
     const int segs = std::max(2, fnSegmentsFromCtx(effCtx) / 2);
     const TextMeasurement m = measureText(fp, handle, text, size, spacing, shape);
-    const auto [offsetX, offsetY] = textAlignOffset(halign, valign, m);
+    const auto [offsetX, offsetY] = textAlignOffset(
+        halign, valign, m, [&](const std::string& w) { ev.warn(w, &node.position()); });
 
     std::vector<Value> glyphs;
     glyphs.reserve(m.glyphs.size());

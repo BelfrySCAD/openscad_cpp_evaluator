@@ -55,24 +55,39 @@ TextMeasurement measureText(FontProvider& fp, FontHandle handle, const std::stri
     return m;
 }
 
-// OpenSCAD's ShapeResults::calc_offsets_horiz/_vert. An unknown value (and,
-// for a vertical run, valign="baseline") does not move the text there
-// either; OpenSCAD also warns, which this does not.
+// OpenSCAD's ShapeResults::calc_offsets_horiz/_vert, warnings included. An
+// unknown value, or valign="baseline" on a vertical run, leaves that axis
+// where it is. Text with no ink never gets this far there, so it never
+// warns either.
 std::pair<double, double> textAlignOffset(const std::string& halign, const std::string& valign,
-                                          const TextMeasurement& m) {
+                                          const TextMeasurement& m,
+                                          const std::function<void(const std::string&)>& warn) {
     if (!m.hasInk) return {0.0, 0.0};
+    auto unknown = [&](const char* param, const char* choices, const std::string& value) {
+        if (warn) {
+            warn(std::string("Unknown value for the ") + param + " parameter (use " + choices + "): '" + value + "'");
+        }
+    };
+    const char* hChoices = "\"left\", \"right\" or \"center\"";
+    const char* vChoices = "\"baseline\", \"bottom\", \"top\" or \"center\"";
     double offsetX = 0.0, offsetY = 0.0;
     if (m.vertical) {
         if (halign == "right") offsetX = -m.right;
         else if (halign == "left") offsetX = -m.left;
+        else if (halign != "center" && halign != "default") unknown("halign", hChoices, halign);
         if (valign == "center") offsetY = -m.advanceY / 2;
         else if (valign == "bottom") offsetY = -m.advanceY;
+        else if (valign == "baseline") {
+            if (warn) warn("Don't use valign=\"baseline\" with vertical layouts");
+        } else if (valign != "top" && valign != "default") unknown("valign", vChoices, valign);
     } else {
         if (halign == "center") offsetX = -0.5 * m.advanceX;
         else if (halign == "right") offsetX = -m.advanceX;
+        else if (halign != "left" && halign != "default") unknown("halign", hChoices, halign);
         if (valign == "top") offsetY = -m.ascent;
         else if (valign == "center") offsetY = -(m.ascent + m.descent) / 2;
         else if (valign == "bottom") offsetY = -m.descent;
+        else if (valign != "baseline" && valign != "default") unknown("valign", vChoices, valign);
     }
     return {offsetX, offsetY};
 }
