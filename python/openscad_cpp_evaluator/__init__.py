@@ -13,12 +13,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import _openscad_cpp_evaluator as _ext
-from ._openscad_cpp_evaluator import FastContinueSignal, ManifoldCache
+from ._openscad_cpp_evaluator import CancelSignal, FastContinueSignal, ManifoldCache
 
 __all__ = [
     "Evaluator", "ColoredBody", "EvalError", "ParseError", "OscObject", "parse", "to_renderable_bodies",
     "ManifoldCache", "CallSiteProfile", "ProfileResult", "format_csg_tree", "bodies_from_dicts",
-    "FastContinueSignal", "parse_ast", "parse_ast_string", "format_source",
+    "CancelSignal", "FastContinueSignal", "parse_ast", "parse_ast_string", "format_source",
     "check_mesh", "strip_slivers",
     "export_model", "export_extensions", "list_fonts",
 ]
@@ -565,7 +565,7 @@ class Evaluator:
 
     def __init__(self, echo_fn=None, debug_hook=None, error_break_fn=None, return_hook=None,
                  manifold_cache=None, profile=False, fast_continue_signal=None, coverage=False,
-                 keep_minuend_color=False, flat_preview_height=1.0):
+                 keep_minuend_color=False, flat_preview_height=1.0, cancel_signal=None):
         self._echo_fn = echo_fn
         self._debug_hook = debug_hook
         self._error_break_fn = error_break_fn
@@ -574,6 +574,11 @@ class Evaluator:
         self._profile = profile
         self._fast_continue_signal = fast_continue_signal
         self._coverage = coverage
+        # A CancelSignal: request() it from any thread and a running
+        # evaluate() raises EvalError("Render cancelled") -- the only way to
+        # stop a script that prints nothing. Plain path only; the debugger
+        # has its own stop.
+        self._cancel_signal = cancel_signal
         # keep_minuend_color=True: difference() paints the faces a
         # subtrahend exposes with the MINUEND's colour rather than the
         # subtrahend's (or the cut green). A viewer option; see
@@ -640,7 +645,7 @@ class Evaluator:
                  dyn_explicit, geometry, coverage_result) = _ext.evaluate(
                     source_path, vp, self._manifold_cache, self._profile, generate,
                     strict_commas, self._coverage, self._keep_minuend_color,
-                    self._flat_preview_height)
+                    self._flat_preview_height, self._cancel_signal)
                 # The evaluated bodies, still on the C++ side. Stashed like
                 # csg_tree/profile_result rather than returned, so
                 # evaluate()'s own 2-tuple result is unchanged -- callers

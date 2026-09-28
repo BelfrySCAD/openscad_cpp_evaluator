@@ -733,6 +733,9 @@ Evaluator::UserCallHandle Evaluator::enterUserCall(const std::string& name, cons
         error("Recursion too deep while calling " + std::string(isModule ? "module" : "function") + " '" + name + "'",
               declNode);
     }
+    if (isModule && moduleCallDepth_ >= kMaxModuleCallDepth) {
+        error("Recursion detected calling module '" + name + "'", declNode);
+    }
     UserCallHandle h;
     h.kind = kind;
     h.declNode = &declNode;

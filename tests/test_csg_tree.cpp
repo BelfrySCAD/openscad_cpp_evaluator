@@ -189,12 +189,13 @@ TEST(CsgTree, LinearExtrudeNestsItsChildUnderneath) {
 // caught DURING resolve, at tree-construction time, not by a later walk.
 
 TEST(CsgTree, BareModuleRecursionStaysTreeDepthOneRegardlessOfCallDepth) {
-    ScopedVm vm(true); // 20,000-deep recursion needs the compiled path
-    // Splicing collapses every level away -- 20,000 calls deep, but the
+    ScopedVm vm(true); // 16,000-deep recursion needs the compiled path
+    // Splicing collapses every level away -- 16,000 calls deep (just under
+    // kMaxModuleCallDepth), but the
     // FINAL tree is still just the one leaf cube. Proves the new guard
     // (kMaxCsgTreeDepth = 2000) doesn't false-positive on the shape Stage
     // 2's own deep-recursion tests already rely on.
-    Evaluated e = evalSrc("module recur(n) { if (n>0) recur(n-1); else cube(1); }\nrecur(20000);");
+    Evaluated e = evalSrc("module recur(n) { if (n>0) recur(n-1); else cube(1); }\nrecur(16000);");
     ASSERT_EQ(e.tree.size(), 1u);
     EXPECT_EQ(e.tree[0]->kind, "cube");
     EXPECT_EQ(e.tree[0]->treeDepth, 1);

@@ -1569,6 +1569,21 @@ than the current pause point). Ported identically (same qualifier syntax, same e
 - `tools/cli/main.cpp` — a 3-line wrapper: builds `args` from `argv`, calls `runCli(args)` with the
   real `std::cin`/`std::cout`/`std::cerr`, returns its exit code.
 
+## Cancel and the module recursion limit (#554)
+
+- **`Evaluator::setCancelFlag(shared_ptr<atomic<bool>>)`** -- bound as `CancelSignal` /
+  `Evaluator(cancel_signal=...)`. Once the flag is set, from any thread, evaluate() throws
+  `EvalError("Render cancelled")` at its next check: the top of `checkDebug` (every interpreted
+  statement and loop pass already calls it, hooks or not), `pollCancel()` every 1,024 VM
+  instructions in `driveVm`, and each top-level node in `generateTreeImpl`. A single Manifold op
+  already under way still finishes. Sticky, unlike `setFastContinueInterruptFlag`'s test-and-clear.
+  A host's echo callback was the only way in before, so a script that printed nothing could not
+  be stopped at all.
+- **`kMaxModuleCallDepth = 16384`** nested user module calls, checked in `enterUserCall` against
+  `moduleCallDepth_` -- "Recursion detected calling module 'm'", OpenSCAD's wording. Functions
+  keep `kMaxVmCallStackDepth` (1e6). `module m() { m(); }` went from 4.2 s / 3.3 GB to stopping
+  at once; OpenSCAD 2026.02.01 stops the same script near 14,000.
+
 ## Coverage
 
 `Evaluator(coverage=true)` records which parts of a run's source actually executed and

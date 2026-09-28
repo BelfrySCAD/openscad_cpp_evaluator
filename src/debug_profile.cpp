@@ -104,6 +104,7 @@ void Evaluator::checkDebug(const oscad::ASTNode& node, EvalContext& ctx, bool fo
     // injecting stops the user never wrote and corrupting lastStmtByDepth_'s
     // duplicate-collapse state below. Rides the existing null-hook
     // short-circuit so it costs nothing on the normal path.
+    checkCancel(); // every interpreted statement and loop pass comes through here
     if (measuring_ || !debugHooks_.debugHook) return;
     const oscad::Position& pos = node.position();
     const size_t stmtDepth = callStack_.size();

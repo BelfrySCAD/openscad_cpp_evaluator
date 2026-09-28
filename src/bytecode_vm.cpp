@@ -609,6 +609,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 continue;
             }
 
+            ev.pollCancel();
             const Instruction& ins = f.code[f.pc];
             EvalContext& ctx = f.ctxChain.back();
             switch (ins.op) {
