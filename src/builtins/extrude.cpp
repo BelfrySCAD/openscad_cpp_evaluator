@@ -5,7 +5,9 @@
 #include "openscad_cpp_evaluator/segments.hpp"
 
 #include <algorithm>
+#include <manifold/polygon.h>
 #include <cmath>
+#include <numbers>
 
 namespace oscadeval {
 
@@ -26,13 +28,110 @@ namespace oscadeval {
 // still not covered by PushBuiltinWrap) is behaviorally unobservable --
 // see computeRoofParams's own doc comment (roof.cpp) for the one builtin
 // in this group where that ISN'T true and a different split was needed.
+namespace {
+
+// Upstream's sgn_vdiff: which of two diagonals is shorter, treating lengths
+// within 1 part in 1e5 as a tie.
+int sgnVdiff(const manifold::vec2& v1, const manifold::vec2& v2) {
+    const double l1 = manifold::la::length(v1), l2 = manifold::la::length(v2);
+    return 2 * std::fabs(l1 - l2) * 1e5 > l1 + l2 ? (l1 < l2 ? -1 : 1) : 0;
+}
+
+// A twisted or non-uniformly scaled extrusion, built the way upstream's
+// linear_extrude.cc builds it. Its side quads are not planar, so which
+// diagonal splits each one changes the solid, and Manifold's own Extrude
+// always picks the same one: the result had OpenSCAD's triangle count and a
+// different volume (241 vs 254 for a 180-degree twist of square(5)).
+// Upstream splits along the SHORTER diagonal, breaking exact ties by twist
+// direction and whether the outline is a hole.
+manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height, int slices, double twist,
+                                  double scaleX, double scaleY) {
+    size_t stride = 0;
+    for (const manifold::SimplePolygon& o : polys) stride += o.size();
+    const auto ringPoint = [&](const manifold::vec2& v, int j) {
+        const double t = static_cast<double>(j) / slices;
+        const double a = -twist * t * std::numbers::pi / 180.0;
+        return manifold::vec2((v.x * std::cos(a) - v.y * std::sin(a)) * (1 - (1 - scaleX) * t),
+                              (v.x * std::sin(a) + v.y * std::cos(a)) * (1 - (1 - scaleY) * t));
+    };
+
+    manifold::MeshGL64 mesh;
+    mesh.numProp = 3;
+    for (int j = 0; j <= slices; ++j) {
+        for (const manifold::SimplePolygon& o : polys) {
+            for (const manifold::vec2& v : o) {
+                const manifold::vec2 p = ringPoint(v, j);
+                mesh.vertProperties.insert(mesh.vertProperties.end(),
+                                           {p.x, p.y, height * j / slices});
+            }
+        }
+    }
+    const auto tri = [&](size_t a, size_t b, size_t c) { mesh.triVerts.insert(mesh.triVerts.end(), {a, b, c}); };
+
+    const bool backTwist = twist <= 0; // rotation_slice_top <= rotation_slice_bottom, every slice
+    for (int j = 1; j <= slices; ++j) {
+        const size_t bot = (j - 1) * stride, top = j * stride;
+        size_t cur = 0;
+        for (const manifold::SimplePolygon& o : polys) {
+            const size_t n = o.size();
+            double area2 = 0;
+            for (size_t i = 0; i < n; ++i) area2 += o[i].x * o[(i + 1) % n].y - o[(i + 1) % n].x * o[i].y;
+            const bool flip = (area2 < 0) != backTwist; // !positive xor back_twist
+            manifold::vec2 prevBot = ringPoint(o[0], j - 1), prevTop = ringPoint(o[0], j);
+            for (size_t i = 1; i <= n; ++i) {
+                const manifold::vec2 vBot = ringPoint(o[i % n], j - 1), vTop = ringPoint(o[i % n], j);
+                const size_t idx = cur + i % n, prev = cur + i - 1;
+                const int diff = sgnVdiff(prevBot - vTop, vBot - prevTop);
+                if (diff == -1 || (diff == 0 && !flip)) {
+                    tri(bot + idx, top + idx, bot + prev);
+                    tri(top + prev, bot + prev, top + idx);
+                } else {
+                    tri(bot + idx, top + prev, bot + prev);
+                    tri(bot + idx, top + idx, top + prev);
+                }
+                prevBot = vBot;
+                prevTop = vTop;
+            }
+            cur += n;
+        }
+    }
+
+    // Caps: one triangulation of the outline, reused at both ends.
+    manifold::PolygonsIdx indexed;
+    size_t cur = 0;
+    for (const manifold::SimplePolygon& o : polys) {
+        manifold::SimplePolygonIdx ring;
+        for (size_t i = 0; i < o.size(); ++i) ring.push_back({o[i], static_cast<int>(cur + i)});
+        indexed.push_back(std::move(ring));
+        cur += o.size();
+    }
+    const size_t topBase = static_cast<size_t>(slices) * stride;
+    for (const manifold::ivec3& t : manifold::TriangulateIdx(indexed)) {
+        tri(t.x, t.z, t.y);                                    // bottom faces down
+        tri(topBase + t.x, topBase + t.y, topBase + t.z);      // top faces up
+    }
+    return manifold::Manifold(mesh);
+}
+
+} // namespace
+
 BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
     const double height = toDoubleLenient(getArg(args, 0, "height", Value{1.0}));
     const bool center = truthy(getArg(args, std::nullopt, "center", Value{false}));
     const double twist = toDoubleLenient(getArg(args, std::nullopt, "twist", Value{0.0}));
-    const int slices = static_cast<int>(toDoubleLenient(getArg(args, std::nullopt, "slices", Value{0.0})));
+    // Upstream's validate_integral: any finite number counts as given, and is
+    // truncated and clamped (slices >= 1, segments >= 0). Not given, the
+    // discretizer decides.
+    const auto integral = [&](const char* name, double lo) -> std::optional<double> {
+        const Value v = getArg(args, std::nullopt, name, Value{});
+        const double* d = std::get_if<double>(&v);
+        if (!d || !std::isfinite(*d)) return std::nullopt;
+        return *d < lo ? lo : std::trunc(*d);
+    };
+    const std::optional<double> slices = integral("slices", 1.0);
+    const std::optional<double> segments = integral("segments", 0.0);
     const Value scaleArg = getArg(args, std::nullopt, "scale", Value{});
 
     double scaleX = 1.0, scaleY = 1.0;
@@ -47,7 +146,9 @@ BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::Modular
     params["height"] = Value{height};
     params["center"] = Value{center};
     params["twist"] = Value{twist};
-    params["slices"] = Value{static_cast<double>(slices)};
+    params["slices"] = slices ? Value{*slices} : Value{};
+    params["segments"] = segments ? Value{*segments} : Value{};
+    Discretizer::fromCtx(effCtx).store(params);
     params["scale_x"] = Value{scaleX};
     params["scale_y"] = Value{scaleY};
     params["color"] = colorToValue(effCtx.color);
@@ -69,11 +170,60 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
     if (!cs || cs->IsEmpty()) return {};
 
     const double height = std::get<double>(params.at("height"));
-    const int slices = static_cast<int>(std::get<double>(params.at("slices")));
     const double twist = std::get<double>(params.at("twist"));
-    const manifold::vec2 scaleTop(std::get<double>(params.at("scale_x")), std::get<double>(params.at("scale_y")));
+    const double scaleX = std::get<double>(params.at("scale_x"));
+    const double scaleY = std::get<double>(params.at("scale_y"));
+    const double* givenSlices = std::get_if<double>(&params.at("slices"));
+    const double* givenSegments = std::get_if<double>(&params.at("segments"));
+    const Discretizer disc = Discretizer::fromParams(params);
+    manifold::Polygons polys = cs->ToPolygons();
 
-    manifold::Manifold body = manifold::Manifold::Extrude(cs->ToPolygons(), height, slices, -twist, scaleTop);
+    // Upstream's calc_num_slices (linear_extrude.cc).
+    const auto maxDeltaSqr = [&] {
+        double m = 0;
+        for (const manifold::SimplePolygon& o : polys)
+            for (const manifold::vec2& v : o) m = std::max(m, manifold::la::length2(v - manifold::vec2(v.x * scaleX, v.y * scaleY)));
+        return m;
+    };
+    const int twistFallback = std::max(static_cast<int>(std::ceil(twist / 120.0)), 1);
+    int slices = 1;
+    if (givenSlices) {
+        slices = static_cast<int>(*givenSlices);
+    } else if (twist != 0.0) {
+        double maxR1Sqr = 0;
+        for (const manifold::SimplePolygon& o : polys)
+            for (const manifold::vec2& v : o) maxR1Sqr = std::max(maxR1Sqr, manifold::la::length2(v));
+        if (scaleX == 1.0 && scaleY == 1.0) {
+            slices = disc.helixSlices(maxR1Sqr, height, twist).value_or(twistFallback);
+        } else if (scaleX != scaleY) {
+            slices = std::max(disc.diagonalSlices(maxDeltaSqr(), height).value_or(1),
+                              disc.helixSlices(maxR1Sqr, height, twist).value_or(twistFallback));
+        } else {
+            slices = disc.conicalHelixSlices(maxR1Sqr, height, twist, scaleX).value_or(twistFallback);
+        }
+    } else if (scaleX != scaleY) {
+        slices = disc.diagonalSlices(maxDeltaSqr(), height).value_or(1);
+    }
+
+    // Split outline edges where a straight one would lose the shape between
+    // slices: twist or non-uniform scale, or `segments` asked for. segments=0
+    // turns it off.
+    const unsigned segments = givenSegments ? static_cast<unsigned>(*givenSegments) : 0;
+    const bool nonLinear = twist != 0.0 || scaleX != scaleY;
+    if (!(givenSegments && segments == 0) && (segments > 0 || nonLinear)) {
+        for (manifold::SimplePolygon& o : polys)
+            o = disc.splitOutline(o, twist, scaleX, scaleY, static_cast<unsigned>(slices), segments);
+    }
+
+    // Planar side quads (no twist, uniform scale) come out the same however
+    // they are split, so Manifold's own Extrude does. So does a top scaled to
+    // zero in either axis, where upstream's shorter-diagonal rule is
+    // reversed to avoid zero-thickness ears; a cone tip is Extrude's to make.
+    // Manifold's nDivisions is the copies BETWEEN the ends: slices - 1.
+    manifold::Manifold body =
+        nonLinear && scaleX > 0 && scaleY > 0 && height > 0
+            ? extrudeTwisted(polys, height, slices, twist, scaleX, scaleY)
+            : manifold::Manifold::Extrude(polys, height, slices - 1, -twist, manifold::vec2(scaleX, scaleY));
     if (std::get<bool>(params.at("center"))) body = body.Translate(manifold::vec3(0, 0, -height / 2));
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
@@ -91,18 +241,9 @@ BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::Modular
 
     const double angle = toDoubleLenient(getArg(args, 0, "angle", Value{360.0}));
 
-    const auto dynOr = [&](const char* name, double fallback) {
-        const Value* v = effCtx.dyn->find(name);
-        if (!v) return fallback;
-        const double* d = std::get_if<double>(v);
-        return d ? *d : fallback;
-    };
-
     CSGParams params;
     params["angle"] = Value{angle};
-    params["fn"] = Value{dynOr("$fn", 0.0)};
-    params["fa"] = Value{dynOr("$fa", 12.0)};
-    params["fs"] = Value{dynOr("$fs", 2.0)};
+    Discretizer::fromCtx(effCtx).store(params);
     params["color"] = colorToValue(effCtx.color);
     return BuiltinWrapParams{std::move(params), std::move(effCtx)};
 }
@@ -121,12 +262,41 @@ std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& p
     const std::optional<manifold::CrossSection> cs = toCrossSection(flattenCsgTree(children));
     if (!cs || cs->IsEmpty()) return {};
 
+    // Upstream (rotate_extrude.cc) sizes the arc by the profile's extent in X,
+    // measured from the axis: both ends start at 0.
     const manifold::Rect bounds = cs->Bounds();
-    const double maxX = std::max(std::fabs(bounds.min.x), std::fabs(bounds.max.x));
-    const int segs = fnSegments(std::get<double>(params.at("fn")), std::get<double>(params.at("fa")),
-                                 std::get<double>(params.at("fs")), maxX);
-
-    manifold::Manifold body = manifold::Manifold::Revolve(cs->ToPolygons(), segs, std::get<double>(params.at("angle")));
+    const double width = std::max(bounds.max.x, 0.0) - std::min(bounds.min.x, 0.0);
+    const double angle = std::get<double>(params.at("angle"));
+    const int sections = Discretizer::fromParams(params).circular(width, angle).value_or(
+        std::max(1, static_cast<int>(std::fabs(angle) / 360 * 3)));
+    // Revolve takes this as the section count for the arc it is given -- not
+    // per full circle, which is what it used to be handed, packing a whole
+    // circle's worth into a partial one.
+    manifold::Manifold body;
+    if (sections >= 3 || bounds.min.x < 0) {
+        // (A profile left of the axis keeps Revolve's handling; a 1-2 section
+        // arc of one is the only case still drawn with 3.)
+        body = manifold::Manifold::Revolve(cs->ToPolygons(), std::max(sections, 3), angle);
+    } else {
+        // Revolve substitutes its own default below 3 sections, but a short
+        // arc at coarse settings is 1 or 2 (upstream draws exactly that). So
+        // extrude the profile into that many sections and wrap them round the
+        // Z axis. The wrap turns the solid inside out for a positive angle, so
+        // then the profile goes in mirrored in Y and comes back out unmirrored.
+        const double sign = angle > 0 ? -1.0 : 1.0;
+        manifold::Polygons profile = cs->ToPolygons();
+        if (sign < 0) {
+            for (manifold::SimplePolygon& o : profile) {
+                for (manifold::vec2& v : o) v.y = -v.y;
+                std::reverse(o.begin(), o.end());
+            }
+        }
+        const double rad = angle * std::numbers::pi / 180.0;
+        body = manifold::Manifold::Extrude(profile, 1.0, sections - 1).Warp([rad, sign](manifold::vec3& v) {
+            const double a = v.z * rad;
+            v = manifold::vec3(v.x * std::cos(a), v.x * std::sin(a), sign * v.y);
+        });
+    }
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 

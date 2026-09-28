@@ -1569,6 +1569,36 @@ than the current pause point). Ported identically (same qualifier syntax, same e
 - `tools/cli/main.cpp` — a 3-line wrapper: builds `args` from `argv`, calls `runCli(args)` with the
   real `std::cin`/`std::cout`/`std::cerr`, returns its exit code.
 
+## Curve discretization: `$fn`/`$fe`/`$fa`/`$fs` (`Discretizer`, segments.hpp)
+
+A port of upstream's `CurveDiscretizer` (src/core/CurveDiscretizer.cc): circle/arc segment counts,
+`linear_extrude` slice counts (helix, conical helix, diagonal) and outline splitting. Every count was
+checked against the 2026.02.01 binary (`--enable=discretization-by-error`), including volumes, since
+the side-quad diagonal choice changes a twisted solid without changing its triangle count.
+
+- **`$fe`** (max radial error): `n = pi/acos(1 - fe/r)`, 5 once `fe/r >= 0.1909830056`, capped at the
+  `$fa`/`$fs`=0.01 count; replaces `$fa`/`$fs` entirely; arcs scale the UNceiled n. Upstream gates it
+  behind `--enable=discretization-by-error`; here it is always on (`supported_feature
+  ("discretization-by-error")`). Not predefined in the root ctx, as upstream: a bare read warns.
+- **Bugs this fixed**, all pre-existing and all silent:
+  - `linear_extrude(twist=)` without `slices` was ONE slice: 180 degrees collapsed to a straight prism.
+  - `slices=N` gave N+1 slices (Manifold's `nDivisions` is the copies between the ends).
+  - Twisted and non-uniformly-scaled extrusions never split their outline edges.
+  - Partial `rotate_extrude(angle=)` packed the full circle's count into the arc (Manifold's
+    `Revolve` takes the count for the arc it is given).
+  - Text curves used `$fn` at radius 0, halved, instead of `circular(size)/8 + 1`.
+  - A fractional `$fn` truncated instead of rounding up.
+- **Twisted/non-uniform extrusions are built by hand** (`extrudeTwisted`, extrude.cpp), not by
+  `Manifold::Extrude`: their side quads are not planar and upstream splits each along its SHORTER
+  diagonal (`sgn_vdiff`, ties broken by twist direction and hole-ness). `Manifold::Extrude` always picks
+  the same diagonal: same triangle count, different volume (241 vs 254 for a 180-degree twist).
+  Planar cases (no twist, uniform scale) and a top scaled to zero stay on `Manifold::Extrude`.
+- **1-2 section arcs** (short `rotate_extrude` angles at coarse settings): `Revolve` substitutes its own
+  default below 3, so these are an extrude warped round Z. The warp inverts the solid for a positive
+  angle, hence the mirror-in-Y dance.
+- Kept departure: `$fa`/`$fs` <= 0 fall back to 12/2 rather than upstream's clamp-to-0.01 with a warning.
+- Not ported: `linear_extrude(v=)` (accepted, ignored); DXF/SVG import arcs don't read the discretizer.
+
 ## Cancel and the module recursion limit (#554)
 
 - **`Evaluator::setCancelFlag(shared_ptr<atomic<bool>>)`** -- bound as `CancelSignal` /
