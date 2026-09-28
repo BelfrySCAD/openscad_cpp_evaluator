@@ -55,7 +55,7 @@ wheels = [
 
 [[package]]
 name = "openscad-cpp-evaluator"
-version = "1.28.6"
+version = "1.29.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
