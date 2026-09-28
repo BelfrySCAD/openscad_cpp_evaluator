@@ -58,7 +58,10 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     const FontHandle handle = fp.resolveFont(fontSpec);
     const FontMetrics fm = fp.metrics(handle);
     const double scale = size * (100.0 / 72.0) / fm.unitsPerEm;
-    const int segs = std::max(2, fnSegmentsFromCtx(effCtx) / 2);
+    // Steps per glyph curve: an eighth of a circle's segments at the text's
+    // size, plus one (upstream FreetypeRenderer). This read $fn at radius 0
+    // and halved it, so default text came out at 2 steps per curve, not 4.
+    const int segs = std::max(Discretizer::fromCtx(effCtx).circular(size).value_or(3) / 8 + 1, 2);
     const TextMeasurement m = measureText(fp, handle, text, size, spacing, shape);
     const auto [offsetX, offsetY] = textAlignOffset(
         halign, valign, m, [&](const std::string& w) { ev.warn(w, &node.position()); });
