@@ -1,16 +1,18 @@
 #include "openscad_cpp_evaluator/css_colors.hpp"
+#include "xkcd_colors.hpp"
 
 #include <cctype>
+#include <optional>
 #include <unordered_map>
 
 namespace oscadeval {
 
 namespace {
 
-// Generated (not hand-transcribed) from the Python reference's own
-// _css_colors.py, itself generated from a live PySide6 install -- see that
-// file's docstring for the regeneration recipe and the Qt-vs-CSS3 list
-// discrepancy (British-spelling aliases included, `rebeccapurple` excluded).
+// Originally generated from the Python reference's _css_colors.py (itself
+// from a live PySide6 install). Now OpenSCAD's own WebColors.h list: every
+// RGB here matches it, `rebeccapurple` (CSS Color Level 4) is added, and
+// `transparent`, which needs an alpha of 0, is handled in parseColor.
 const std::unordered_map<std::string, std::array<double, 3>>& colorTable() {
     static const std::unordered_map<std::string, std::array<double, 3>> table = {
         {"aliceblue", {0.9411764740943909, 0.9725490212440491, 1.0}},
@@ -132,6 +134,7 @@ const std::unordered_map<std::string, std::array<double, 3>>& colorTable() {
         {"plum", {0.8666666746139526, 0.6274510025978088, 0.8666666746139526}},
         {"powderblue", {0.6901960968971252, 0.8784313797950745, 0.9019607901573181}},
         {"purple", {0.501960813999176, 0.0, 0.501960813999176}},
+        {"rebeccapurple", {0.4, 0.2, 0.6}},
         {"red", {1.0, 0.0, 0.0}},
         {"rosybrown", {0.7372549176216125, 0.5607843399047852, 0.5607843399047852}},
         {"royalblue", {0.2549019753932953, 0.4117647111415863, 0.8823529481887817}},
@@ -153,7 +156,6 @@ const std::unordered_map<std::string, std::array<double, 3>>& colorTable() {
         {"teal", {0.0, 0.501960813999176, 0.501960813999176}},
         {"thistle", {0.8470588326454163, 0.7490196228027344, 0.8470588326454163}},
         {"tomato", {1.0, 0.38823530077934265, 0.27843138575553894}},
-        {"transparent", {0.0, 0.0, 0.0}},
         {"turquoise", {0.250980406999588, 0.8784313797950745, 0.8156862854957581}},
         {"violet", {0.9333333373069763, 0.5098039507865906, 0.9333333373069763}},
         {"wheat", {0.9607843160629272, 0.8705882430076599, 0.7019608020782471}},
@@ -171,38 +173,44 @@ std::string toLower(const std::string& s) {
     return r;
 }
 
-int hexDigit(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return 0;
+// OpenSCAD's parse_hex_color (ColorUtil.cc): "#rgb", "#rgba", "#rrggbb" or
+// "#rrggbbaa", every character after '#' a hex digit, or nothing at all.
+std::optional<std::array<double, 4>> parseHex(const std::string& hex) {
+    const bool shortForm = hex.size() == 4 || hex.size() == 5;
+    const bool longForm = hex.size() == 7 || hex.size() == 9;
+    if ((!shortForm && !longForm) || hex[0] != '#') return std::nullopt;
+    for (size_t i = 1; i < hex.size(); ++i)
+        if (!std::isxdigit(static_cast<unsigned char>(hex[i]))) return std::nullopt;
+    const size_t stride = shortForm ? 1 : 2;
+    const double channelMax = shortForm ? 15.0 : 255.0;
+    std::array<double, 4> rgba{0.0, 0.0, 0.0, 1.0};
+    for (size_t i = 0; i < (hex.size() - 1) / stride; ++i)
+        rgba[i] = std::stoi(hex.substr(1 + i * stride, stride), nullptr, 16) / channelMax;
+    return rgba;
 }
 
 } // namespace
 
-std::array<double, 4> cssColor(const std::string& name, double alpha) {
-    if (!name.empty() && name[0] == '#') {
-        const std::string h = name.substr(1);
-        if (h.size() == 6) {
-            const double r = (hexDigit(h[0]) * 16 + hexDigit(h[1])) / 255.0;
-            const double g = (hexDigit(h[2]) * 16 + hexDigit(h[3])) / 255.0;
-            const double b = (hexDigit(h[4]) * 16 + hexDigit(h[5])) / 255.0;
-            return {r, g, b, alpha};
-        }
-        if (h.size() == 3) {
-            const double r = hexDigit(h[0]) / 15.0;
-            const double g = hexDigit(h[1]) / 15.0;
-            const double b = hexDigit(h[2]) / 15.0;
-            return {r, g, b, alpha};
-        }
-        return {1.0, 1.0, 1.0, alpha};
+std::optional<std::array<double, 4>> parseColor(const std::string& text) {
+    // OpenSCAD's parse_color: a name first (case-insensitive; "xkcd:" reaches
+    // the xkcd survey table, falling back to the CSS table), then hex.
+    const std::string name = toLower(text);
+    if (name.rfind("xkcd:", 0) == 0) {
+        const auto& xk = xkcdColorTable();
+        if (auto it = xk.find(name.substr(5)); it != xk.end())
+            return std::array<double, 4>{it->second[0] / 255.0, it->second[1] / 255.0, it->second[2] / 255.0, 1.0};
     }
+    // OpenSCAD's own addition to the CSS list: fully transparent black.
+    if (name == "transparent") return std::array<double, 4>{0.0, 0.0, 0.0, 0.0};
+    if (auto it = colorTable().find(name); it != colorTable().end())
+        return std::array<double, 4>{it->second[0], it->second[1], it->second[2], 1.0};
+    return parseHex(text);
+}
 
-    auto it = colorTable().find(toLower(name));
-    if (it != colorTable().end()) {
-        return {it->second[0], it->second[1], it->second[2], alpha};
-    }
-    return {1.0, 1.0, 1.0, alpha};
+std::array<double, 4> cssColor(const std::string& name, double alpha) {
+    auto c = parseColor(name);
+    if (!c) return {1.0, 1.0, 1.0, alpha};
+    return {(*c)[0], (*c)[1], (*c)[2], alpha};
 }
 
 } // namespace oscadeval
