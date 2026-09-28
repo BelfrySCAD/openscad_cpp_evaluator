@@ -3,6 +3,10 @@
 #include "test_helpers.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <thread>
 #include <gtest/gtest.h>
 
 using namespace oscadeval;
@@ -1201,6 +1205,101 @@ TEST(UserModule, DeepNonTailRecursionHitsAControlledErrorInterpreted) {
         const std::string what = e.what();
         EXPECT_NE(what.find("Recursion too deep"), std::string::npos);
         EXPECT_NE(what.find("'recur'"), std::string::npos);
+    }
+}
+
+// #554: a module recursing without end used to run to kMaxVmCallStackDepth
+// (a million frames, 3.3 GB); OpenSCAD stops it near 14,000.
+TEST(UserModule, EndlessModuleRecursionStopsAtTheModuleDepthLimit) {
+    ScopedVm vm(true);
+    try {
+        evalSrc("module m() { m(); }\nm();");
+        FAIL() << "expected EvalError";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("Recursion detected calling module 'm'"), std::string::npos);
+    }
+}
+
+TEST(UserModule, ModuleRecursionJustUnderTheLimitSucceeds) {
+    ScopedVm vm(true);
+    Evaluated e = evalSrc("module recur(n) { if (n>0) recur(n-1); else cube(1); }\n"
+                          "recur(" + std::to_string(Evaluator::kMaxModuleCallDepth - 2) + ");");
+    EXPECT_EQ(e.bodies.size(), 1u);
+}
+
+// -- Evaluator::setCancelFlag (#554) ---------------------------------------
+
+namespace {
+std::string cancelledMessage(const std::string& src, std::shared_ptr<std::atomic<bool>> flag) {
+    auto ast = parseSrc(src);
+    auto scope = oscad::buildScopes(ast);
+    Evaluator ev;
+    ev.setCancelFlag(std::move(flag));
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.evaluate(ast, ctx);
+    } catch (const EvalError& e) {
+        return e.what();
+    }
+    return "";
+}
+} // namespace
+
+TEST(Cancel, AnArmedFlagStopsASilentScriptCompiledAndInterpreted) {
+    // Prints nothing, so a host's echo callback never gets a chance to stop it.
+    const std::string src = "function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\n"
+                            "x = [for (i = [0:200]) f(20)];\ncube(1);";
+    for (bool useVm : {true, false}) {
+        ScopedVm vm(useVm);
+        EXPECT_EQ(cancelledMessage(src, std::make_shared<std::atomic<bool>>(true)), "Render cancelled") << useVm;
+        EXPECT_EQ(cancelledMessage(src, std::make_shared<std::atomic<bool>>(false)), "") << useVm;
+    }
+}
+
+TEST(Cancel, StopsTheGeneratePass) {
+    auto ast = parseSrc("cube(1);\nsphere(1);");
+    auto scope = oscad::buildScopes(ast);
+    Evaluator ev;
+    auto flag = std::make_shared<std::atomic<bool>>(false);
+    ev.setCancelFlag(flag);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    auto tree = ev.resolveTree(ast, ctx);
+    flag->store(true);
+    EXPECT_THROW(ev.generateTree(tree), EvalError);
+}
+
+TEST(Cancel, AnotherThreadStopsARunningExpression) {
+    ScopedVm vm(true);
+    // ~minutes of silent work uncancelled; must stop within moments of the request.
+    auto flag = std::make_shared<std::atomic<bool>>(false);
+    std::thread canceller([flag] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        flag->store(true);
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::string msg = cancelledMessage("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\n"
+                                             "x = [for (i = [0:99999], j = [0:9999]) f(20)];", flag);
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    canceller.join();
+    EXPECT_EQ(msg, "Render cancelled");
+    EXPECT_LT(elapsed, std::chrono::seconds(2));
+}
+
+TEST(Cancel, AnotherThreadStopsARunningScriptCompiledAndInterpreted) {
+    for (bool useVm : {true, false}) {
+        ScopedVm vm(useVm);
+        auto flag = std::make_shared<std::atomic<bool>>(false);
+        std::thread canceller([flag] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            flag->store(true);
+        });
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::string msg = cancelledMessage("module m(n) { if (n > 0) m(n - 1); }\n"
+                                                 "for (i = [0:99999], j = [0:9999]) m(20);", flag);
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+        canceller.join();
+        EXPECT_EQ(msg, "Render cancelled") << useVm;
+        EXPECT_LT(elapsed, std::chrono::seconds(2)) << useVm;
     }
 }
 

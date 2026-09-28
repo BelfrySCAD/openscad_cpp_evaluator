@@ -503,10 +503,22 @@ nb::object coverageResultToPy(const std::optional<oscadeval::CoverageResult>& cr
     return result;
 }
 
+// A render's Cancel: .request() from any thread makes the evaluate() it was
+// passed to throw EvalError("Render cancelled") at its next check -- see
+// Evaluator::setCancelFlag. One per render; it is never cleared.
+class CancelSignal {
+public:
+    void request() { flag_->store(true, std::memory_order_relaxed); }
+    const std::shared_ptr<std::atomic<bool>>& flag() const { return flag_; }
+
+private:
+    std::shared_ptr<std::atomic<bool>> flag_ = std::make_shared<std::atomic<bool>>(false);
+};
+
 nb::object evaluate(const std::string& path, nb::dict viewportParams,
                      std::shared_ptr<oscadeval::ManifoldCache> manifoldCache, bool profile,
                      bool generate, bool strictCommas, bool coverage, bool keepMinuendColor,
-                     double flatPreviewHeight) {
+                     double flatPreviewHeight, CancelSignal* cancelSignal) {
     std::unordered_map<std::string, oscadeval::Value> vp = toViewportParams(viewportParams);
 
     std::vector<oscadeval::ColoredBody> bodies;
@@ -535,6 +547,7 @@ nb::object evaluate(const std::string& path, nb::dict viewportParams,
             oscadeval::ResolvedUseScopes used = oscadeval::resolveUseScopes(program.nodes, path, logFn);
             oscadeval::Evaluator ev(logFn, nullptr, manifoldCache, oscadeval::DebugHooks{}, profile, coverage);
             ev.keepMinuendColor = keepMinuendColor;
+            if (cancelSignal) ev.setCancelFlag(cancelSignal->flag());
             ev.setUsedFileGlobals(used.usedFileGlobals);
             oscadeval::EvalContext ctx = oscadeval::EvalContext::makeRoot(used.rootScope.get());
             std::vector<oscadeval::ColoredBody> raw = ev.evaluate(used.processedNodes, ctx, vp, generate);
@@ -924,6 +937,10 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
 
     // See FastContinueSignal's own doc comment, above -- only a
     // constructor and request() are ever called from Python.
+    nb::class_<CancelSignal>(m, "CancelSignal")
+        .def(nb::init<>())
+        .def("request", &CancelSignal::request);
+
     nb::class_<FastContinueSignal>(m, "FastContinueSignal")
         .def(nb::init<>())
         .def("request", &FastContinueSignal::request);
@@ -993,7 +1010,7 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
     m.def("evaluate", &evaluate, nb::arg("path"), nb::arg("viewport_params"), nb::arg("manifold_cache") = nullptr,
           nb::arg("profile") = false, nb::arg("generate") = true, nb::arg("strict_commas") = false,
           nb::arg("coverage") = false, nb::arg("keep_minuend_color") = false,
-          nb::arg("flat_preview_height") = oscadeval::kTopLevel2dHeight,
+          nb::arg("flat_preview_height") = oscadeval::kTopLevel2dHeight, nb::arg("cancel_signal") = nullptr,
           "Evaluate a .scad file; return (bodies, echoes, id_to_node, csg_tree, profile_result, dyn, dyn_explicit, "
           "geometry, coverage_result).\n"
           "coverage=True records which statements, branch arms and bodies ran: coverage_result is a dict "
@@ -1006,7 +1023,9 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "are populated.\n\n"
           "strict_commas=True makes a trailing comma in a call argument list or a let/for "
           "assignment list a syntax error, as OpenSCAD 2021.01 did. List literals and parameter "
-          "declarations keep theirs, which 2021.01 accepted too.");
+          "declarations keep theirs, which 2021.01 accepted too.\n\n"
+          "cancel_signal: a CancelSignal whose request(), from any thread, stops this call with "
+          "EvalError('Render cancelled') -- even for a script that prints nothing.");
     m.def("parse_decls", &parseDecls, nb::arg("path"),
           "Parse a .scad file; return top-level declaration (namespace, name, start, end, line, column, origin) tuples.");
     m.def("strip_slivers", &stripSliversPy, nb::arg("verts"), nb::arg("tris"),

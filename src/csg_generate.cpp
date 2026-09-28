@@ -35,6 +35,7 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
     const auto& dispatch = generateDispatch();
     for (CSGNode* nodePtr : tree) {
         CSGNode& node = *nodePtr;
+        checkCancel();
 
         // ManifoldCache lookup: node.uncacheable (rands() taint, set
         // during resolve -- see csg_resolve.cpp) always forces a miss,

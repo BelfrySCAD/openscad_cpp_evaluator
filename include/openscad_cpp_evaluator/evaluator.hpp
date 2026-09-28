@@ -703,6 +703,23 @@ public:
         fastContinueInterrupt_ = std::move(flag);
     }
 
+    // A host's Cancel button. Set from any thread; the running evaluate()
+    // then throws EvalError("Render cancelled") at its next check: every
+    // interpreted statement and loop pass (checkDebug, which all of them
+    // already call), every 1024th VM instruction, and between top-level
+    // generate-pass nodes. A single Manifold operation already under way
+    // still runs to its end. Before this existed a host could only stop a
+    // script from its echo callback, so one that printed nothing ran to
+    // completion however long that took (#554). Sticky: never cleared here.
+    void setCancelFlag(std::shared_ptr<std::atomic<bool>> flag) { cancel_ = std::move(flag); }
+    void checkCancel() const {
+        if (cancel_ && cancel_->load(std::memory_order_relaxed)) throw EvalError("Render cancelled");
+    }
+    // The VM's per-instruction form: one relaxed load per 1024 instructions.
+    void pollCancel() {
+        if (cancel_ && (++cancelTicks_ & 0x3FF) == 0) checkCancel();
+    }
+
     // Checks whether a debug pause should happen at `node` (via the
     // injected DebugHooks::debugHook, if any -- a no-op otherwise),
     // applying any `mods` the hook returns to `ctx.let_` and throwing
@@ -1759,6 +1776,16 @@ public:
     // recalibrating for real.
     static constexpr size_t kMaxVmCallStackDepth = 1'000'000;
 
+    // Nested user MODULE calls, of any modules. Functions keep
+    // kMaxVmCallStackDepth: a deep function recursion builds nothing, but a
+    // module frame holds its whole subtree, so `module m() { m(); }` used
+    // to run to a million frames and 3.3 GB before stopping. OpenSCAD stops
+    // the same script at ~14,000 ("Recursion detected calling module"),
+    // 45 MB; this is that order, and far past any real library (BOSL2
+    // nests tens deep). Checked in enterUserCall, which every module call
+    // -- interpreted or compiled -- goes through (#554).
+    static constexpr int kMaxModuleCallDepth = 16384;
+
     // Counts native C++ nesting of driveVm itself -- NOT logical call
     // depth (that's vmCallStack_.size()/callStack_.size(), both of which
     // grow just as much for a pure VM-internal Op::CallModule hop, which
@@ -2074,6 +2101,9 @@ private:
     // default) means hook-skippable mode, if ever engaged, can't be
     // interrupted from outside a hook call.
     std::shared_ptr<std::atomic<bool>> fastContinueInterrupt_;
+    // See setCancelFlag. nullptr (the default): nothing can cancel.
+    std::shared_ptr<std::atomic<bool>> cancel_;
+    unsigned cancelTicks_ = 0;
     // The root EvalContext resolveTree() was called with -- lets
     // checkDebug()'s locals snapshot fall back to top-level script
     // variables when paused inside a nested user call, the same way the

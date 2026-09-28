@@ -1155,3 +1155,25 @@ print("errors:", errors); sys.exit(1 if errors else 0)
     src.write_text("".join(f"x{i} = [{i}, {i} + 1, \"s{i}\"];\n" for i in range(200)))
     r = subprocess.run([sys.executable, "-c", code, str(src)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, (r.returncode, r.stdout[-500:], r.stderr[-1500:])
+
+
+def test_a_cancel_signal_stops_a_silent_script_from_another_thread(tmp_path):
+    """#554: a script that prints nothing never reaches a host's echo
+    callback, the only place Cancel could act before. CancelSignal.request()
+    reaches the evaluator directly; evaluate() releases the GIL, so the
+    requesting thread gets to run while it works."""
+    import threading
+    import time
+    from openscad_cpp_evaluator import CancelSignal, EvalError
+    src = tmp_path / "silent.scad"
+    src.write_text("function f(n) = n <= 0 ? 0 : 1 + f(n - 1);\n"
+                   "x = [for (i = [0:99999], j = [0:9999]) f(20)];\n")
+    signal = CancelSignal()
+    threading.Timer(0.1, signal.request).start()
+    t0 = time.perf_counter()
+    try:
+        Evaluator(cancel_signal=signal).evaluate(str(src))
+        raise AssertionError("expected EvalError")
+    except EvalError as e:
+        assert "Render cancelled" in str(e), e
+    assert time.perf_counter() - t0 < 5
