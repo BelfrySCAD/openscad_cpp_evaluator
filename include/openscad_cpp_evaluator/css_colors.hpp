@@ -1,19 +1,20 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <string>
 
 namespace oscadeval {
 
-// "#rrggbb"/"#rgb" hex, or a CSS/SVG color name (case-insensitive) -> RGBA
-// with the given alpha. The name table mirrors the Python reference's
-// CSS_COLORS exactly (148 entries generated from a live Qt install, not the
-// "standard" 147-entry CSS3/SVG list -- includes British-spelling aliases
-// like `grey`/`darkgrey`/`lightgrey` alongside their American-spelling
-// equivalents at identical RGB values, and does *not* include
-// `rebeccapurple`, a CSS Color Module Level 4 addition Qt never adopted).
-// An unrecognized name -> white (1,1,1), matching the reference's own
-// fallback.
+// A colour string as OpenSCAD's parse_color reads it (ColorUtil.cc):
+// a CSS Color Level 4 name or OpenSCAD's "transparent" (alpha 0), an
+// "xkcd:<name>" from the xkcd colour survey, all case-insensitive; else
+// "#rgb", "#rgba", "#rrggbb" or "#rrggbbaa". Nothing if it is none of
+// those -- color() then warns and leaves its children's colour alone.
+std::optional<std::array<double, 4>> parseColor(const std::string& text);
+
+// parseColor with the alpha replaced, and white for anything unparseable.
+// For export options (SVG/PDF fill and stroke), which have no warning path.
 std::array<double, 4> cssColor(const std::string& name, double alpha = 1.0);
 
 } // namespace oscadeval

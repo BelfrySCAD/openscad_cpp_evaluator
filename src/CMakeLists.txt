@@ -11,6 +11,7 @@ add_library(openscad_cpp_evaluator STATIC
   bytecode_vm.cpp
   colored_body.cpp
   css_colors.cpp
+  xkcd_colors.cpp
   csg_resolve.cpp
   coverage.cpp
   csg_generate.cpp

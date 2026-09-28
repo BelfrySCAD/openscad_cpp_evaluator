@@ -819,9 +819,15 @@ grep for `ponytail:`.
   geometric-correctness test in Phase 3, not a hypothetical.
 - `include/openscad_cpp_evaluator/segments.hpp`, `src/builtins/segments.cpp` — `$fn`/`$fa`/`$fs` ->
   circular-shape segment count (`fnSegments`/`fnSegmentsFromCtx`), used by sphere/cylinder/circle.
-- `include/openscad_cpp_evaluator/css_colors.hpp`, `src/css_colors.cpp` — the 148-entry CSS/SVG
-  color-name table (mechanically ported from the Python reference's own generated table) plus hex
-  parsing, backing `color()`'s string-name argument.
+- `include/openscad_cpp_evaluator/css_colors.hpp`, `src/css_colors.cpp`, `src/xkcd_colors.{hpp,cpp}` —
+  `parseColor`, OpenSCAD's `parse_color` (ColorUtil.cc): CSS Color Level 4 names (148, with
+  `rebeccapurple`) plus `transparent` (alpha 0), `"xkcd:<name>"` over the 949 xkcd survey names
+  (generated from OpenSCAD's `XkcdColors.h`, CC0), all case-insensitive, then strict `#rgb` /
+  `#rgba` / `#rrggbb` / `#rrggbbaa`. `color()` (`src/builtins/color.cpp`) follows `builtin_color`:
+  an unreadable string warns `Unable to parse color "…"` and sets NO colour (children keep their
+  own, or the outer one) -- it used to draw white; a list fills missing channels with 1 and warns
+  outside 0..1; a numeric `alpha` replaces any alpha, a 4-list's included (checked on the 2026.02.01
+  binary's 3MF export). `cssColor` (white fallback) is only for SVG/PDF export options.
 - `src/builtins/{primitives_2d,primitives_3d,transforms,color,booleans,modifiers,control}.cpp` —
   one file per builtin group, each a `ResolveFn`/`GenerateFn` pair (or a few, where several builtin
   names share one pair — circle/square/polygon, translate/rotate/scale/mirror/multmatrix/resize,
