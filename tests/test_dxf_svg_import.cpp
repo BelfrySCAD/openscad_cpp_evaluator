@@ -163,6 +163,50 @@ TEST(SvgImport, RectProducesExpectedArea) {
     std::filesystem::remove(path);
 }
 
+// A character no attribute can start with -- here a '/' not followed by '>'
+// -- used to stop the attribute scan without consuming anything, and the
+// loop came back to it forever. The rect after it must still be read.
+TEST(SvgImport, StrayCharactersInATagDoNotHang) {
+    const auto path = tempPath("stray.svg");
+    writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><g / =x><rect x="0" y="0" width="4" height="3"/></g></svg>)");
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
+    std::filesystem::remove(path);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
+}
+
+// A PDF under an .svg name is what hung for good: every "/Name" in it hit
+// that loop. It is not an SVG, so it is an error -- but an error, not a hang.
+TEST(SvgImport, APdfNamedSvgErrorsInsteadOfHanging) {
+    const auto path = tempPath("really_a_pdf.svg");
+    writeFile(path, "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+                    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n%%EOF\n");
+    Evaluator ev;
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::filesystem::remove(path);
+}
+
+// .pdf used to be handed to the SVG parser (and hung). Nothing reads PDF,
+// so it is refused like any other format import() does not know.
+TEST(SvgImport, PdfIsAnUnsupportedFileType) {
+    const auto path = tempPath("drawing.pdf");
+    writeFile(path, "%PDF-1.4\n<< /Type /Catalog >>\n%%EOF\n");
+    Evaluator ev;
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.resolveTree(ast, ctx);
+        ADD_FAILURE() << "expected an error";
+    } catch (const EvalError& e) {
+        EXPECT_NE(std::string(e.what()).find("unsupported file type '.pdf'"), std::string::npos) << e.what();
+    }
+    std::filesystem::remove(path);
+}
+
 TEST(SvgImport, PathWithGroupTransformIsTranslatedAndYFlipped) {
     const auto path = tempPath("group.svg");
     writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg">
