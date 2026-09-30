@@ -214,7 +214,10 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         params["dxf"] = Value{ext == ".dxf"};
         return params;
     }
-    if (ext == ".dxf" || ext == ".svg" || ext == ".pdf") {
+    // .pdf is not here: it used to be, handed to the SVG parser, which hung on
+    // a PDF's bytes. Nothing reads PDF (OpenSCAD does not either), so it takes
+    // the ordinary "unsupported file type" error below.
+    if (ext == ".dxf" || ext == ".svg") {
         std::vector<Contour2d> contours;
         bool filteredMiss = false;
         try {
@@ -440,7 +443,7 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
             for (const std::string& w : mesh.warnings) ev.warn("import: '" + path + "': " + w, &node.position());
             return meshToVnf(mesh);
         }
-        if (ext == ".dxf" || ext == ".svg" || ext == ".pdf") {
+        if (ext == ".dxf" || ext == ".svg") {
             std::vector<Contour2d> contours;
             if (ext == ".dxf") {
                 std::optional<std::string> layer;

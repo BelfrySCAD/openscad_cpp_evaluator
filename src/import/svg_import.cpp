@@ -131,6 +131,14 @@ std::optional<XmlNode> parseElement(const std::string& s, size_t& i) {
         }
         const size_t attrNameStart = i;
         while (i < s.size() && s[i] != '=' && !std::isspace(static_cast<unsigned char>(s[i])) && s[i] != '>' && s[i] != '/') ++i;
+        if (i == attrNameStart) {
+            // A character no attribute can start with -- a '/' not followed by
+            // '>', a stray '=' -- consumed nothing, and without this the loop
+            // came straight back to it forever: a PDF (all "/Type /Catalog")
+            // or a malformed `<a / b>` hung import() for good.
+            ++i;
+            continue;
+        }
         const std::string attrName = s.substr(attrNameStart, i - attrNameStart);
         skipWs(s, i);
         std::string attrValue;
