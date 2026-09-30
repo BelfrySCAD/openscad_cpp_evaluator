@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <locale>
+#include <sstream>
 #include <optional>
 #include <stdexcept>
 
@@ -1155,6 +1157,105 @@ void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies, c
 
 namespace {
 
+// The shortest decimal that reads back as exactly `v`, in the classic
+// locale (Qt sets the process locale from the environment, so printf could
+// write "1,5" on a German system and no DXF reader would take it). -0 is
+// written as 0, and a non-finite value -- which no contour should hold --
+// as 0 rather than as text a reader would choke on.
+std::string dxfNum(double v) {
+    if (!std::isfinite(v) || v == 0.0) return "0";
+    for (int digits = 6; digits <= 17; ++digits) {
+        std::ostringstream o;
+        o.imbue(std::locale::classic());
+        o.precision(digits);
+        o << v;
+        std::istringstream in(o.str());
+        in.imbue(std::locale::classic());
+        double back = 0.0;
+        in >> back;
+        if (back == v) return o.str();
+    }
+    std::ostringstream o;  // unreachable: 17 digits always round-trips a double
+    o.imbue(std::locale::classic());
+    o.precision(17);
+    o << v;
+    return o.str();
+}
+
+// The header, tables and (empty) blocks sections, verbatim from OpenSCAD's
+// export_dxf.cc -- its comments record which readers each piece was needed
+// for (Inkscape, LibreCAD, Illustrator, sharecad.org, generic cutters).
+void writeDxfHeader(std::ostream& out, double xMin, double yMin, double xMax, double yMax) {
+    out << "999\nDXF from OpenSCAD\n"
+        << "  0\nSECTION\n  2\nHEADER\n"
+        << "  9\n$ACADVER\n  1\nAC1006\n"
+        << "  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n";
+    for (const char* name : {"$EXTMIN", "$EXTMAX", "$LINMIN", "$LINMAX"}) {
+        const bool isMin = std::string(name).find("MIN") != std::string::npos;
+        out << "  9\n" << name << "\n 10\n" << dxfNum(isMin ? xMin : xMax) << "\n 20\n"
+            << dxfNum(isMin ? yMin : yMax) << "\n";
+    }
+    out << "  0\nENDSEC\n"
+        << "  0\nSECTION\n  2\nTABLES\n"
+        << "  0\nTABLE\n  2\nLTYPE\n 70\n1\n"
+        << "  0\nLTYPE\n  2\nCONTINUOUS\n 70\n64\n  3\nSolid line\n 72\n65\n 73\n0\n 40\n0.000000\n"
+        << "  0\nENDTAB\n"
+        << "  0\nTABLE\n  2\nLAYER\n 70\n6\n"
+        << "  0\nLAYER\n  2\n0\n 70\n64\n 62\n7\n  6\nCONTINUOUS\n"
+        << "  0\nENDTAB\n"
+        << "  0\nTABLE\n  2\nSTYLE\n 70\n0\n  0\nENDTAB\n"
+        << "  0\nENDSEC\n"
+        << "  0\nSECTION\n  2\nBLOCKS\n  0\nENDSEC\n";
+}
+
+} // namespace
+
+void writeDxf(const std::string& path, const std::vector<ColoredBody>& bodies) {
+    const Flat2d flat = collect2d(bodies);
+
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("Could not open '" + path + "' for writing");
+    // The vertex counts go through the stream itself, which otherwise takes
+    // the global C++ locale -- one with digit grouping writes 1500 as "1.500".
+    out.imbue(std::locale::classic());
+
+    // Extents from collect2d's own bounding box. OpenSCAD starts its maxima
+    // at numeric_limits<double>::min() -- the smallest POSITIVE double, not
+    // the most negative -- so a model lying entirely at negative x or y gets
+    // a wrong $EXTMAX there. That is a bug, not a format rule.
+    writeDxfHeader(out, flat.minx, flat.miny, flat.maxx, flat.maxy);
+
+    out << "  0\nSECTION\n  2\nENTITIES\n";
+    for (const manifold::Polygons& polys : flat.perBody) {
+        for (const manifold::SimplePolygon& contour : polys) {
+            const auto xy = [&](const char* xCode, const char* yCode, const manifold::vec2& p) {
+                out << xCode << "\n" << dxfNum(p.x) << "\n" << yCode << "\n" << dxfNum(p.y) << "\n";
+            };
+            switch (contour.size()) {
+            case 0:
+                break;
+            case 1:
+                out << "  0\nPOINT\n100\nAcDbEntity\n  8\n0\n100\nAcDbPoint\n";
+                xy(" 10", " 20", contour[0]);
+                break;
+            case 2:
+                // [X1 Y1 X2 Y2]: the order ezdxf and dxfgrabber can read.
+                out << "  0\nLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbLine\n";
+                xy(" 10", " 20", contour[0]);
+                xy(" 11", " 21", contour[1]);
+                break;
+            default:
+                out << "  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n"
+                    << " 90\n" << contour.size() << "\n 70\n1\n";  // 70 = 1: closed
+                for (const manifold::vec2& p : contour) xy(" 10", " 20", p);
+            }
+        }
+    }
+    out << "  0\nENDSEC\n  0\nEOF\n";
+}
+
+namespace {
+
 // PDF's own unit is 1/72 inch; models are millimetres.
 constexpr double kPtPerMm = 72.0 / 25.4;
 // Page margin the ruler is drawn on, in points. OpenSCAD's own MARGIN.
@@ -1497,7 +1598,7 @@ std::vector<std::string> writePdf(const std::string& path, const std::vector<Col
 }
 
 const std::vector<std::string>& exportExtensions() {
-    static const std::vector<std::string> exts = {".3mf", ".amf", ".pdf", ".stl", ".obj",
+    static const std::vector<std::string> exts = {".3mf", ".amf", ".dxf", ".pdf", ".stl", ".obj",
                                                   ".off", ".ply", ".svg", ".wrl", ".x3d"};
     return exts;
 }
@@ -1522,6 +1623,12 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
     if (ext == ".pdf") {
         // 2D like SVG, and equally outside the mesh pipeline.
         return writePdf(path, bodies, opts.pdf);
+    }
+
+    if (ext == ".dxf") {
+        // 2D, outside the mesh pipeline like SVG and PDF.
+        writeDxf(path, bodies);
+        return warnings;
     }
 
     if (ext == ".svg") {

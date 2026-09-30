@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <locale>
 #include <gtest/gtest.h>
 #include <sstream>
 #include <stb_image.h>
@@ -442,6 +443,130 @@ M 18.0866,-7.3806 L 16.4645,-8.46447 L 15.3806,-10.0866 L 15,-12 L 15.3806,-13.9
 )SVG";
     EXPECT_EQ(svgOf("difference() { square([40,25]); translate([20,12]) circle(5, $fn=16); }", "parity.svg"),
               expected);
+}
+
+// -- DXF (2D) --------------------------------------------------------------
+
+namespace {
+
+std::string dxfOf(const std::string& code, const std::string& name) {
+    const std::string path = tempPath(name).string();
+    writeDxf(path, evalToBodies(code));
+    const std::string text = readText(path);
+    std::remove(path.c_str());
+    return text;
+}
+
+// The value on the line after the first `code` line following `header`
+// (DXF is group-code / value pairs, one per line).
+std::string dxfValueAfter(const std::string& text, const std::string& header, const std::string& code) {
+    size_t at = text.find("\n" + header + "\n");
+    if (at == std::string::npos) return "";
+    at = text.find("\n" + code + "\n", at + 1);
+    if (at == std::string::npos) return "";
+    const size_t start = at + code.size() + 2;
+    return text.substr(start, text.find('\n', start) - start);
+}
+
+} // namespace
+
+// Byte-for-byte against real OpenSCAD 2026.02.01's `-o out.dxf` for the same
+// script: header, tables, entity layout, contour order and vertex order. The
+// coordinates are chosen to need no more than 6 significant digits, the only
+// place ours deliberately differs (see FullPrecisionNotSixDigits).
+TEST(ExportDxf, MatchesRealOpenscadByteForByte) {
+    const std::string expected =
+        "999\nDXF from OpenSCAD\n  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1006\n"
+        "  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n"
+        "  9\n$EXTMIN\n 10\n0\n 20\n0\n  9\n$EXTMAX\n 10\n40\n 20\n25\n"
+        "  9\n$LINMIN\n 10\n0\n 20\n0\n  9\n$LINMAX\n 10\n40\n 20\n25\n"
+        "  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n  0\nTABLE\n  2\nLTYPE\n 70\n1\n"
+        "  0\nLTYPE\n  2\nCONTINUOUS\n 70\n64\n  3\nSolid line\n 72\n65\n 73\n0\n 40\n0.000000\n"
+        "  0\nENDTAB\n  0\nTABLE\n  2\nLAYER\n 70\n6\n  0\nLAYER\n  2\n0\n 70\n64\n 62\n7\n  6\nCONTINUOUS\n"
+        "  0\nENDTAB\n  0\nTABLE\n  2\nSTYLE\n 70\n0\n  0\nENDTAB\n  0\nENDSEC\n"
+        "  0\nSECTION\n  2\nBLOCKS\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n"
+        "  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n4\n 70\n1\n"
+        " 10\n40\n 20\n25\n 10\n0\n 20\n25\n 10\n0\n 20\n0\n 10\n40\n 20\n0\n"
+        "  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n4\n 70\n1\n"
+        " 10\n10\n 20\n5\n 10\n10\n 20\n17.5\n 10\n30\n 20\n17.5\n 10\n30\n 20\n5\n"
+        "  0\nENDSEC\n  0\nEOF\n";
+    EXPECT_EQ(dxfOf("difference() { square([40,25]); translate([10,5]) square([20,12.5]); }", "parity.dxf"),
+              expected);
+}
+
+// OpenSCAD streams doubles at the default 6 significant digits, so 1234.5678
+// reaches the file as 1234.57 -- a 2 micron error on a cut part, from the
+// file format alone. Ours writes the shortest text that reads back exactly.
+TEST(ExportDxf, FullPrecisionNotSixDigits) {
+    const std::string text = dxfOf("square([1234.5678, 0.1]);", "precise.dxf");
+    EXPECT_EQ(dxfValueAfter(text, "$EXTMAX", " 10"), "1234.5678");
+    EXPECT_EQ(dxfValueAfter(text, "$EXTMAX", " 20"), "0.1");
+    EXPECT_EQ(countOf(text, "\n1234.5678\n"), 4u);  // $EXTMAX, $LINMAX and two vertices
+}
+
+// OpenSCAD starts its maxima at numeric_limits<double>::min(), the smallest
+// POSITIVE double, so a model entirely below zero reports $EXTMAX of ~0.
+TEST(ExportDxf, ExtentsOfAModelBelowZero) {
+    const std::string text = dxfOf("translate([-50,-30]) square(10);", "negative.dxf");
+    EXPECT_EQ(dxfValueAfter(text, "$EXTMIN", " 10"), "-50");
+    EXPECT_EQ(dxfValueAfter(text, "$EXTMIN", " 20"), "-30");
+    EXPECT_EQ(dxfValueAfter(text, "$EXTMAX", " 10"), "-40");
+    EXPECT_EQ(dxfValueAfter(text, "$EXTMAX", " 20"), "-20");
+}
+
+TEST(ExportDxf, EveryContourIsAClosedPolylineHolesIncluded) {
+    const std::string text =
+        dxfOf("difference() { circle(10, $fn=12); circle(5, $fn=12); } translate([30,0]) square(4);", "multi.dxf");
+    EXPECT_EQ(countOf(text, "LWPOLYLINE"), 3u);           // outer, hole, and the separate square
+    EXPECT_EQ(countOf(text, " 90\n12\n 70\n1\n"), 2u);    // both circles: 12 vertices, closed
+    EXPECT_EQ(countOf(text, " 90\n4\n 70\n1\n"), 1u);
+}
+
+namespace {
+// A locale that writes 1500.5 as "1.500,5" -- what a German global locale
+// would do to any number that reaches a stream without the classic locale.
+struct GermanishPunct : std::numpunct<char> {
+    char do_decimal_point() const override { return ','; }
+    char do_thousands_sep() const override { return '.'; }
+    std::string do_grouping() const override { return "\3"; }
+};
+}  // namespace
+
+TEST(ExportDxf, NumbersIgnoreTheGlobalLocale) {
+    const std::locale previous = std::locale::global(std::locale(std::locale::classic(), new GermanishPunct));
+    std::string text;
+    try {
+        text = dxfOf("translate([0.5,0]) circle(1000, $fn=1500);", "locale.dxf");
+    } catch (...) {
+        std::locale::global(previous);
+        throw;
+    }
+    std::locale::global(previous);
+    EXPECT_NE(text.find(" 90\n1500\n"), std::string::npos);
+    EXPECT_EQ(dxfValueAfter(text, "$EXTMAX", " 10"), "1000.5");
+    EXPECT_EQ(text.find(','), std::string::npos);
+}
+
+TEST(ExportDxf, RefusesA3dModel) {
+    std::vector<ColoredBody> bodies = evalToBodies("cube(10);");
+    EXPECT_THROW(writeDxf(tempPath("solid.dxf").string(), bodies), std::runtime_error);
+}
+
+TEST(ExportDxf, NoGeometryThrows) {
+    std::vector<ColoredBody> empty;
+    EXPECT_THROW(writeDxf(tempPath("empty.dxf").string(), empty), std::runtime_error);
+}
+
+TEST(ExportDxf, ReachableThroughExportModelAndListedAsAnExtension) {
+    const std::vector<std::string>& exts = exportExtensions();
+    EXPECT_NE(std::find(exts.begin(), exts.end(), ".dxf"), exts.end());
+    const std::string path = tempPath("via_export_model.dxf").string();
+    const std::vector<std::string> warnings = exportModel(path, evalToBodies("square(5);"), ExportOptions{});
+    EXPECT_TRUE(warnings.empty());
+    const std::string text = readText(path);
+    EXPECT_EQ(countOf(text, "LWPOLYLINE"), 1u);
+    EXPECT_NE(text.find("  0\nEOF\n"), std::string::npos);
+    std::remove(path.c_str());
 }
 
 // -- PDF (2D) --------------------------------------------------------------
