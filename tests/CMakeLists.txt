@@ -48,6 +48,22 @@ add_executable(oscad_eval_tests
 # put the archive on the link line twice ("ld: warning: ignoring duplicate
 # libraries").
 target_link_libraries(oscad_eval_tests PRIVATE oscad_cli_lib GTest::gtest_main)
+# Every test file includes gtest and nearly all include evaluator.hpp; parsing
+# those again for each of 35 files was 40-52% of a test file's compile time.
+# One precompiled header takes that off all of them -- the test executable is
+# the last stage of every build and, on MSVC, the longest (~178 s of CI's
+# Windows build).
+target_precompile_headers(oscad_eval_tests PRIVATE
+  <gtest/gtest.h>
+  <openscad_cpp_evaluator/evaluator.hpp>
+  <openscad_cpp_parser/api.hpp>
+  <algorithm>
+  <cmath>
+  <filesystem>
+  <fstream>
+  <set>
+  <string>
+  <vector>)
 # stb_image_write.h, used only by this test binary to generate a PNG
 # fixture for ToRenderableBodies/surface() image-loading tests.
 target_include_directories(oscad_eval_tests PRIVATE ${stb_SOURCE_DIR})
