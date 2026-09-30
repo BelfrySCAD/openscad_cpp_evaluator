@@ -79,6 +79,15 @@ if(MSVC)
   # unconditionally (a POSIX extension our code already relies on), so no
   # equivalent is needed there.
   add_compile_definitions(_USE_MATH_DEFINES)
+  # /MP: compile a target's source files in parallel. MSBuild's own /m (what
+  # `cmake --build -j` passes) runs PROJECTS in parallel but each project's
+  # files one at a time, and nearly everything here is one big library, so a
+  # Windows build was close to serial (CI's Build step ~665 s against Linux's
+  # ~250). Visual Studio generators only: under Ninja every compiler call is
+  # already one file, and Ninja does the parallelism itself.
+  if(CMAKE_GENERATOR MATCHES "Visual Studio")
+    add_compile_options(/MP)
+  endif()
 endif()
 
 # The nanobind Python extension (bindings/) links the static evaluator lib
