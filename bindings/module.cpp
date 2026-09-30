@@ -436,14 +436,30 @@ nb::list exportModelPy(const std::string& path, const Geometry& geom, const std:
                         bool stripSlivers, bool splitComponents, bool splitColors, bool svgFill,
                         const std::string& svgFillColor,
                         bool svgStroke, const std::string& svgStrokeColor, double svgStrokeWidth,
-                        nb::object pdfOptions) {
+                        nb::object pdfOptions, nb::object povCamera) {
     oscadeval::ExportPdfOptions pdf;
     if (!pdfOptions.is_none()) applyPdfOptions(nb::cast<nb::dict>(pdfOptions), pdf);
+    oscadeval::ExportPovOptions pov;
+    if (!povCamera.is_none()) {
+        const std::vector<double> c = nb::cast<std::vector<double>>(povCamera);
+        if (c.size() != 8) {
+            throw std::runtime_error("pov_camera takes 8 numbers: $vpt x, y, z, $vpr x, y, z, distance, fov");
+        }
+        oscadeval::ExportPovCamera cam;
+        for (int k = 0; k < 3; ++k) {
+            cam.vpt[k] = c[k];
+            cam.vpr[k] = c[3 + k];
+        }
+        cam.distance = c[6];
+        cam.fov = c[7];
+        pov.camera = cam;
+    }
     std::vector<std::string> warnings;
     {
         nb::gil_scoped_release rel;
         oscadeval::ExportOptions opts;
         opts.pdf = pdf;
+        opts.pov = pov;
         opts.format = format;
         opts.asciiStl = asciiStl;
         opts.stripSlivers = stripSlivers;
@@ -957,7 +973,7 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           nb::arg("svg_fill") = false,
           nb::arg("svg_fill_color") = std::string("white"), nb::arg("svg_stroke") = true,
           nb::arg("svg_stroke_color") = std::string("black"), nb::arg("svg_stroke_width") = 0.35,
-          nb::arg("pdf_options") = nb::none(),
+          nb::arg("pdf_options") = nb::none(), nb::arg("pov_camera") = nb::none(),
           "Write `geometry` to `path`, format taken from the extension unless `format` says otherwise. "
           "Returns the warnings to surface (open shells, mesh problems, slivers removed) rather than "
           "logging them. Raises RuntimeError when there is no geometry, the format is unknown, or the "
@@ -976,7 +992,10 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
           "(paper-size, orientation, show-scale, show-scale-message, show-grid, grid-size, "
           "show-filename, design-filename, fill, fill-color, stroke, stroke-color, stroke-width, "
           "add-meta-data, title, author, subject, keywords). An unknown key raises rather than "
-          "being ignored. .pdf is 2D-only too, and centres the drawing on a fixed paper size.");
+          "being ignored. .pdf is 2D-only too, and centres the drawing on a fixed paper size.\n\n"
+          "pov_camera is .pov's camera as 8 numbers -- $vpt x, y, z, $vpr x, y, z, distance, fov -- "
+          "so a POV-Ray render frames what the viewport showed. None frames the model from its "
+          "bounding box, as OpenSCAD does without a camera.");
 
     m.def("list_fonts", []() {
         nb::list out;

@@ -331,7 +331,8 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
                  split_colors: bool = True,
                  svg_fill: bool = False, svg_fill_color: str = "white",
                  svg_stroke: bool = True, svg_stroke_color: str = "black",
-                 svg_stroke_width: float = 0.35, pdf_options: dict | None = None) -> list:
+                 svg_stroke_width: float = 0.35, pdf_options: dict | None = None,
+                 pov_camera=None) -> list:
     """Write `geometry` to `path`. Returns the warnings to surface.
 
     `geometry` is the handle an Evaluator stashes on itself as
@@ -374,12 +375,17 @@ def export_model(path: str, geometry, format: str = "", ascii_stl: bool = False,
     size with nothing to explain it. `.pdf` is 2D-only like `.svg`, and
     centres the drawing on a fixed paper size instead of cutting the page
     to fit.
+
+    `pov_camera` is `.pov`'s camera as eight numbers -- `$vpt` x, y, z,
+    `$vpr` x, y, z, distance, field of view -- so a POV-Ray render frames
+    what the viewport showed. None frames the model from its bounding box,
+    as OpenSCAD does when it has no camera to pass.
     """
     try:
         return list(_ext.export_model(path, geometry, format, ascii_stl, strip_slivers,
                                        split_components, split_colors, svg_fill, svg_fill_color,
                                        svg_stroke, svg_stroke_color, svg_stroke_width,
-                                       pdf_options))
+                                       pdf_options, pov_camera))
     except Exception as e:
         raise EvalError(str(e)) from e
 
