@@ -158,6 +158,17 @@ struct ExportSvgOptions {
 void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies,
               const ExportSvgOptions& opts = {});
 
+// DXF, the third 2D writer: OpenSCAD's own export_dxf.cc layout (an AC1006
+// header with the model's extents, one CONTINUOUS linetype, layer 0) and
+// every contour of every body a closed LWPOLYLINE on layer 0 -- holes are
+// contours like any other, as in OpenSCAD. A 1-vertex contour is a POINT
+// and a 2-vertex one a LINE, again as OpenSCAD writes them. Shares
+// collect2d() with writeSvg/writePdf, so a 3D model is refused the same
+// way. Coordinates are written at full round-trip precision, NOT OpenSCAD's
+// 6 significant digits: a DXF goes to a cutter, where 1234.567 written as
+// 1234.57 is a real error.
+void writeDxf(const std::string& path, const std::vector<ColoredBody>& bodies);
+
 // Options for the PDF writer, named and defaulted after OpenSCAD's own
 // `-O export-pdf/...` set.
 struct ExportPdfOptions {

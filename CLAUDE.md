@@ -1091,8 +1091,8 @@ grep for `ponytail:`.
   — skip it and the mesh comes out non-manifold at the seam). Self-contained 2D geometry math here
   (`dot2`/`len2`/`norm2`, the parabola-canonical-frame rotation in `discretizeArc`) exists nowhere
   else in this codebase.
-- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all ten
-  formats `exportExtensions()` lists: 3MF, AMF, PDF, STL, OBJ, OFF, PLY, SVG, VRML, X3D (3MF via
+- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all eleven
+  formats `exportExtensions()` lists: 3MF, AMF, DXF, PDF, STL, OBJ, OFF, PLY, SVG, VRML, X3D (3MF via
   `zip_stored.hpp`'s `writeDeflateZip`). **`exportExtensions()` is the one source of truth for
   which formats exist** — the Python facade and BelfrySCAD's dialog/CLI all ask it rather than
   restating the list, because three hand-written copies had already drifted far enough that `.off`
@@ -1120,6 +1120,16 @@ grep for `ponytail:`.
   binary's, vertex order and 6-vertex line wrap included. A 3D body in the list throws
   ("Current top level object is not a 2D object"), as OpenSCAD refuses too: there is no projection
   to fall back on. `ExportOptions::svg` carries OpenSCAD's five `-O export-svg/...` settings.
+  **`writeDxf` is the third 2D writer**, also on `collect2d()`: OpenSCAD's own `export_dxf.cc`
+  layout verbatim (AC1006 header with the extents, one CONTINUOUS linetype, layer 0, every contour
+  a closed `LWPOLYLINE` on layer 0 with holes as ordinary contours; 1- and 2-vertex contours as
+  `POINT`/`LINE`), pinned byte-for-byte by `ExportDxf.MatchesRealOpenscadByteForByte`. Two
+  deliberate differences: coordinates are the **shortest text that round-trips the double**
+  (`dxfNum`), not OpenSCAD's 6 significant digits -- a DXF feeds a cutter, and its circles do not
+  survive a re-import otherwise; and `$EXTMAX` is right for a model below zero (OpenSCAD seeds its
+  maxima with `numeric_limits<double>::min()`, the smallest POSITIVE double). Every number goes
+  through the classic locale, the file stream included: Qt sets the process locale, and a grouping
+  locale writes a 1500-vertex count as `1.500`.
   **`writePdf` is the other 2D writer**, and shares `collect2d()` with `writeSvg` so the all-2D
   rule and its refusal have one implementation. Everything else differs from SVG: the drawing is
   **centred on a fixed paper size** rather than the page being cut to fit, and **PDF user space is

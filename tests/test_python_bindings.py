@@ -389,25 +389,6 @@ def test_format_source_raises_parse_error_on_bad_input():
     raise AssertionError("expected ParseError")
 
 
-def main():
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
-    failures = []
-    for t in tests:
-        try:
-            t()
-            print(f"PASS {t.__name__}")
-        except Exception as e:
-            failures.append((t.__name__, e))
-            print(f"FAIL {t.__name__}: {e}")
-    print(f"\n{len(tests) - len(failures)}/{len(tests)} passed")
-    if failures:
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
-
-
 def test_evaluate_generate_false_skips_geometry(tmp_path):
     """generate=False runs the script but builds no Manifold geometry.
 
@@ -700,6 +681,51 @@ def test_export_model_svg_refuses_a_3d_model(tmp_path):
     ev.evaluate(str(src), {})
     with pytest.raises(EvalError, match="not a 2D object"):
         export_model(str(tmp_path / "solid.svg"), ev.geometry)
+
+
+def test_export_model_writes_dxf_that_imports_back_unchanged(tmp_path):
+    """.dxf through the facade, then back in through import(): exporting what
+    was imported must give the same file, which only holds if every
+    coordinate survived at full precision (OpenSCAD's own writer keeps 6
+    significant digits, so its circles do not round-trip)."""
+    from openscad_cpp_evaluator import Evaluator, export_extensions, export_model
+
+    assert ".dxf" in export_extensions()
+
+    def export(script, name):
+        src = tmp_path / (name + ".scad")
+        src.write_text(script)
+        ev = Evaluator()
+        ev.evaluate(str(src), {})
+        out = tmp_path / (name + ".dxf")
+        assert export_model(str(out), ev.geometry) == []
+        return out
+
+    first = export("difference() { square([40,25]); translate([20,12]) circle(5, $fn=16); }", "first")
+    text = first.read_text()
+    assert text.startswith("999\nDXF from OpenSCAD\n") and text.endswith("  0\nEOF\n")
+    assert text.count("LWPOLYLINE") == 2
+    # The circle's vertices carry more than 6 significant digits -- the ones
+    # OpenSCAD's writer would cut them to. (Their exact values are whatever
+    # Manifold's 2D kernel rounded them to, so no literal is pinned here.)
+    lines = text.split("\n")
+    coords = [lines[i + 1] for i, code in enumerate(lines[:-1]) if code in (" 10", " 20")]
+    assert max(len(c.lstrip("-").replace(".", "").lstrip("0")) for c in coords) > 6
+
+    second = export(f'import("{first.as_posix()}");', "second")
+    assert second.read_text() == text
+
+
+def test_export_model_dxf_refuses_a_3d_model(tmp_path):
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError, export_model
+
+    src = tmp_path / "solid.scad"
+    src.write_text("cube(10);")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+    with pytest.raises(EvalError, match="not a 2D object"):
+        export_model(str(tmp_path / "solid.dxf"), ev.geometry)
 
 
 def test_export_model_writes_pdf_and_takes_its_options(tmp_path):
@@ -1177,3 +1203,18 @@ def test_a_cancel_signal_stops_a_silent_script_from_another_thread(tmp_path):
     except EvalError as e:
         assert "Render cancelled" in str(e), e
     assert time.perf_counter() - t0 < 5
+
+
+def main():
+    """`python tests/test_python_bindings.py` -- how cibuildwheel runs this
+    file -- runs the whole file under pytest. It used to loop over the test_
+    functions itself, from a main() placed part-way down: every test defined
+    below that point (37 of them, every export test included) never ran in a
+    wheel build, and the ones that take tmp_path could not have."""
+    import pytest
+
+    sys.exit(pytest.main([__file__, "-q"]))
+
+
+if __name__ == "__main__":
+    main()
