@@ -6,12 +6,12 @@ test_debug_hooks.cpp, test_viewport_params.cpp); this file only exercises the
 nanobind plumbing that exposes them to Python, which has no coverage of its
 own otherwise.
 
-No test framework: plain functions + assert, run via `python
-tests/test_python_bindings.py`. This project has no existing Python test
-infrastructure (pure C++/gtest via CMake/ctest) -- adding pytest just for
-this would be a new dependency for a handful of checks; wired into
-wheels.yml's CIBW_TEST_COMMAND instead, which already builds+installs the
-package on every release platform.
+Run with `python tests/test_python_bindings.py` (what wheels.yml's
+CIBW_TEST_COMMAND does on every release platform) or pytest directly; the
+entry point hands the file to pytest. It started as plain functions with a
+hand-rolled runner, but the file outgrew that: most tests now take tmp_path
+or use pytest.raises, and the runner, sitting part-way down, never reached
+them in a wheel build at all.
 """
 import os
 import sys
@@ -19,6 +19,25 @@ import tempfile
 from pathlib import Path
 
 from openscad_cpp_evaluator import Evaluator, ManifoldCache, format_csg_tree
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _scripts_are_utf8_with_lf(monkeypatch):
+    """Every .scad these tests write is UTF-8 with \\n line endings, as any
+    editor saves one. Path.write_text's own defaults are the platform's:
+    cp1252 and CRLF on Windows, which made "aé—z" undecodable and shifted
+    every source span after a line break by one character per line against
+    the test's own string -- failures of the test, not of the evaluator. An
+    explicit encoding or newline still wins."""
+    orig = Path.write_text
+
+    def write_text(self, data, encoding=None, errors=None, newline=None):
+        return orig(self, data, encoding=encoding or "utf-8", errors=errors,
+                    newline="\n" if newline is None else newline)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
 
 
 def _write(src: str) -> str:
@@ -1037,7 +1056,8 @@ def _svg_counts(tmp_path, args):
     svg = tmp_path / "f.svg"
     svg.write_text(SVG_FILTER)
     scad = tmp_path / "f.scad"
-    scad.write_text(f'echo(n = len(import("{svg}"{args})));\n')
+    # as_posix: a Windows path's backslashes would be escapes in a .scad string.
+    scad.write_text(f'echo(n = len(import("{svg.as_posix()}"{args})));\n')
     msgs = []
     Evaluator(echo_fn=msgs.append).evaluate(str(scad), generate=False)
     echoes = [m for m in msgs if m.startswith("ECHO:")]
