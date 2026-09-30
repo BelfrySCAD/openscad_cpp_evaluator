@@ -569,6 +569,124 @@ TEST(ExportDxf, ReachableThroughExportModelAndListedAsAnExtension) {
     std::remove(path.c_str());
 }
 
+// -- POV-Ray (mesh2) -------------------------------------------------------
+
+namespace {
+
+std::string povOf(const std::string& code, const std::string& name, const ExportOptions& opts = {}) {
+    const std::string path = tempPath(name).string();
+    ExportOptions o = opts;
+    o.format = ".pov";
+    exportModel(path, evalToBodies(code), o);
+    const std::string text = readText(path);
+    std::remove(path.c_str());
+    return text;
+}
+
+// The block following `header` up to and including its matching "}" line --
+// crude, but every block this writer emits closes on a line of its own.
+std::string povBlock(const std::string& text, const std::string& header, size_t from = 0) {
+    const size_t at = text.find(header, from);
+    if (at == std::string::npos) return "";
+    const size_t end = text.find("\n  }", at);
+    return text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+}
+
+} // namespace
+
+// One mesh2 per exported object -- here one per colour -- with a welded
+// vertex list (a cube is 8 vertices, not 36), 12 triangles, and the
+// inside_vector that makes POV-Ray treat it as a solid rather than a
+// surface. OpenSCAD writes the same scene as 12 separate polygon objects.
+TEST(ExportPov, OneWeldedSolidMesh2PerObject) {
+    const std::string text = povOf(
+        "color([1, 0.5, 0.25, 0.125]) translate([-10, 0, 0]) cube(10);\n"
+        "color(\"green\") translate([10, 0, 0]) cube(10);", "two.pov");
+    EXPECT_EQ(countOf(text, "mesh2 {"), 2u);
+    EXPECT_EQ(countOf(text, "polygon {"), 0u);
+    EXPECT_EQ(countOf(text, "vertex_vectors { 8,"), 2u);
+    EXPECT_EQ(countOf(text, "face_indices { 12,"), 2u);
+    EXPECT_EQ(countOf(text, "inside_vector <0, 0, 1>"), 2u);
+    // rgbf with filter = 1 - alpha, as OpenSCAD writes colour.
+    EXPECT_NE(text.find("color rgbf <1, 0.5, 0.25, 0.875>"), std::string::npos);
+    EXPECT_NE(text.find("#version 3.7;"), std::string::npos);
+    EXPECT_NE(text.find("#include \"rad_def.inc\""), std::string::npos);
+}
+
+// Per-triangle colour -- a CSG merge of two colours -- is a texture_list
+// with one entry per colour and a texture index on each triangle. The mesh
+// stays welded; PLY, by contrast, has to unweld to colour a triangle.
+TEST(ExportPov, PerTriangleColourIsATextureIndexNotAnUnweld) {
+    const std::string text =
+        povOf("color(\"red\") difference() { cube(20, center=true); color(\"blue\") sphere(13, $fn=24); }",
+              "tricolor.pov");
+    EXPECT_EQ(countOf(text, "mesh2 {"), 1u);
+    const std::string textures = povBlock(text, "texture_list {");
+    EXPECT_NE(textures.find("texture_list { 2"), std::string::npos);
+    EXPECT_NE(textures.find("rgbf <1, 0, 0, 0>"), std::string::npos);
+    EXPECT_NE(textures.find("rgbf <0, 0, 1, 0>"), std::string::npos);
+    const std::string faces = povBlock(text, "face_indices {");
+    EXPECT_NE(faces.find(">, 0"), std::string::npos);
+    EXPECT_NE(faces.find(">, 1"), std::string::npos);
+}
+
+// Checked by rendering in POV-Ray 3.7 against BelfrySCAD's own PNG of the
+// same camera, which agreed to a pixel. Two departures from OpenSCAD make
+// that true: rotate comes BEFORE translate (the eye orbits $vpt), and the
+// viewport's VERTICAL fov is turned into POV-Ray's HORIZONTAL angle from
+// the image's own aspect ratio.
+TEST(ExportPov, CameraOrbitsVptAndKeepsTheVerticalFieldOfView) {
+    ExportOptions opts;
+    opts.pov.camera = ExportPovCamera{{0, 5, 5}, {55, 0, 25}, 140, 22.5};
+    const std::string text = povOf("cube(10);", "camera.pov", opts);
+    const size_t cam = text.find("camera {");
+    ASSERT_NE(cam, std::string::npos);
+    const std::string block = text.substr(cam, text.find("\n}\n", cam) - cam);
+    EXPECT_NE(block.find(" location <0, 0, 140>"), std::string::npos);
+    EXPECT_NE(block.find("angle degrees(2 * atan(tan(radians(22.5 / 2)) * image_width / image_height))"),
+              std::string::npos);
+    const size_t rotate = block.find("rotate <55, 0 + clock * 3, 25 + clock>");
+    const size_t translate = block.find("translate <0, 5, 5>");
+    ASSERT_NE(rotate, std::string::npos);
+    ASSERT_NE(translate, std::string::npos);
+    EXPECT_LT(rotate, translate);
+}
+
+TEST(ExportPov, WithoutACameraFramesTheBoundingBoxAsOpenscadDoes) {
+    const std::string text = povOf("translate([-10, 0, 0]) cube([30, 10, 10]);", "nocam.pov");
+    EXPECT_NE(text.find("camera { look_at <5, 5, 5> location <50, -20, 20> up <0, 0, 1>"), std::string::npos);
+    // 27 lights: below, at and beyond the box on every axis.
+    EXPECT_EQ(countOf(text, "light_source {"), 27u);
+    EXPECT_NE(text.find("light_source { <-70, -20, -20> color rgb <0.2, 0.2, 0.2> }"), std::string::npos);
+}
+
+TEST(ExportPov, NumbersIgnoreTheGlobalLocale) {
+    const std::locale previous = std::locale::global(std::locale(std::locale::classic(), new GermanishPunct));
+    std::string text;
+    try {
+        text = povOf("translate([0.5, 0, 0]) sphere(10, $fn=64);", "locale.pov");
+    } catch (...) {
+        std::locale::global(previous);
+        throw;
+    }
+    std::locale::global(previous);
+    const std::string verts = povBlock(text, "vertex_vectors {");
+    ASSERT_FALSE(verts.empty());
+    const int count = std::stoi(verts.substr(std::string("vertex_vectors { ").size()));
+    EXPECT_GT(count, 1000);                                     // so grouping would show
+    EXPECT_EQ(verts.find('.', 0) < verts.find('\n') ? 1 : 0, 0); // the count has no separator
+    EXPECT_EQ(text.find("0,5"), std::string::npos);              // no decimal commas anywhere
+}
+
+TEST(ExportPov, ReachableThroughExportModelAndListedAsAnExtension) {
+    const std::vector<std::string>& exts = exportExtensions();
+    EXPECT_NE(std::find(exts.begin(), exts.end(), ".pov"), exts.end());
+    const std::string path = tempPath("via_export_model.pov").string();
+    EXPECT_TRUE(exportModel(path, evalToBodies("cube(5);"), ExportOptions{}).empty());
+    EXPECT_EQ(countOf(readText(path), "mesh2 {"), 1u);
+    std::remove(path.c_str());
+}
+
 // -- PDF (2D) --------------------------------------------------------------
 
 namespace {

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -233,6 +234,33 @@ std::vector<std::string> writePdf(const std::string& path, const std::vector<Col
 
 // -- one entry point ------------------------------------------------------
 
+// POV-Ray's camera, as OpenSCAD's viewport states it: $vpt, $vpr, $vpd and
+// the field of view. Without one the scene is framed from the model's
+// bounding box, as OpenSCAD frames it when it has no camera to pass.
+struct ExportPovCamera {
+    double vpt[3] = {0, 0, 0};
+    double vpr[3] = {0, 0, 0};
+    double distance = 0;
+    double fov = 22.5;
+};
+
+struct ExportPovOptions {
+    std::optional<ExportPovCamera> camera;
+};
+
+// POV-Ray scene description. Every object splitBodiesForExport produces is
+// one mesh2 -- a welded vertex list, a texture per colour, and a texture
+// index per triangle, so per-triangle colour needs no unwelding -- with
+// inside_vector, which makes it a SOLID to POV-Ray (refraction, CSG). That
+// is the difference from OpenSCAD's export_pov.cc, which writes every face
+// as its own flat polygon object. The rest of the scene is OpenSCAD's: its
+// header, MATERIAL finish and ior 1.32 interior, 27 lights around the
+// bounding box, its camera, and radiosity from rad_def.inc. Colour is rgbf
+// with filter = 1 - alpha, as OpenSCAD writes it. Numbers are the shortest
+// text that round-trips, in the classic locale.
+void writePov(const std::string& path, const std::vector<ExportObject>& objects,
+              const ExportPovOptions& opts = {});
+
 struct ExportOptions {
     // Empty means "decide from the path's extension".
     std::string format;
@@ -258,6 +286,8 @@ struct ExportOptions {
     ExportSvgOptions svg;
     // .pdf only.
     ExportPdfOptions pdf;
+    // .pov only.
+    ExportPovOptions pov;
 };
 
 // Writes `bodies` to `path`, choosing the writer from the extension (or

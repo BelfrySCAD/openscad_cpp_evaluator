@@ -747,6 +747,40 @@ def test_export_model_dxf_refuses_a_3d_model(tmp_path):
         export_model(str(tmp_path / "solid.dxf"), ev.geometry)
 
 
+def test_export_model_writes_pov_mesh2_with_the_viewport_camera(tmp_path):
+    """.pov through the facade: one solid mesh2 per object, and pov_camera
+    ($vpt, $vpr, distance, fov) reaching the camera block."""
+    from openscad_cpp_evaluator import Evaluator, export_extensions, export_model
+
+    assert ".pov" in export_extensions()
+    src = tmp_path / "scene.scad"
+    src.write_text('color("red") cube(10); color("green") translate([20, 0, 0]) cube(10);')
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+
+    out = tmp_path / "scene.pov"
+    assert export_model(str(out), ev.geometry, pov_camera=[1, 2, 3, 55, 0, 25, 140, 22.5]) == []
+    text = out.read_text()
+    assert text.count("mesh2 {") == 2 and text.count("inside_vector <0, 0, 1>") == 2
+    assert "rotate <55, 0 + clock * 3, 25 + clock>\ntranslate <1, 2, 3>" in text
+    assert "location <0, 0, 140>" in text
+
+    bare = tmp_path / "bare.pov"
+    export_model(str(bare), ev.geometry)
+    assert "rotate <-55, clock * 3, clock + 25>" in bare.read_text()   # the bounding-box camera
+
+
+def test_export_model_pov_camera_needs_eight_numbers(tmp_path):
+    from openscad_cpp_evaluator import Evaluator, EvalError, export_model
+
+    src = tmp_path / "c.scad"
+    src.write_text("cube(1);")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+    with pytest.raises(EvalError, match="8 numbers"):
+        export_model(str(tmp_path / "c.pov"), ev.geometry, pov_camera=[0, 0, 0])
+
+
 def test_export_model_writes_pdf_and_takes_its_options(tmp_path):
     """.pdf through the facade, plus the option dict. Same
     two-parameter-list trap as split_components and the svg_* set."""

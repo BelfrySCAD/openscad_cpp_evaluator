@@ -1091,8 +1091,8 @@ grep for `ponytail:`.
   — skip it and the mesh comes out non-manifold at the seam). Self-contained 2D geometry math here
   (`dot2`/`len2`/`norm2`, the parabola-canonical-frame rotation in `discretizeArc`) exists nowhere
   else in this codebase.
-- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all eleven
-  formats `exportExtensions()` lists: 3MF, AMF, DXF, PDF, STL, OBJ, OFF, PLY, SVG, VRML, X3D (3MF via
+- `include/openscad_cpp_evaluator/export.hpp`, `src/export.cpp` — the writers for all twelve
+  formats `exportExtensions()` lists: 3MF, AMF, DXF, PDF, STL, OBJ, OFF, PLY, POV, SVG, VRML, X3D (3MF via
   `zip_stored.hpp`'s `writeDeflateZip`). **`exportExtensions()` is the one source of truth for
   which formats exist** — the Python facade and BelfrySCAD's dialog/CLI all ask it rather than
   restating the list, because three hand-written copies had already drifted far enough that `.off`
@@ -1120,6 +1120,20 @@ grep for `ponytail:`.
   binary's, vertex order and 6-vertex line wrap included. A 3D body in the list throws
   ("Current top level object is not a 2D object"), as OpenSCAD refuses too: there is no projection
   to fall back on. `ExportOptions::svg` carries OpenSCAD's five `-O export-svg/...` settings.
+  **`writePov` writes POV-Ray, as `mesh2`** — one per object `splitBodiesForExport` produces, with
+  a welded vertex list, a `texture_list` of the object's colours and a texture index per triangle
+  (so per-triangle colour needs no unwelding, unlike PLY), and `inside_vector` so POV-Ray treats it
+  as a SOLID (the `ior 1.32` interior refracts; CSG works). OpenSCAD's `export_pov.cc` writes every
+  face as its own flat `polygon` object instead. The rest of the scene is OpenSCAD's: header,
+  MATERIAL finish, 27 lights around the bounding box, radiosity from `rad_def.inc`, colour as
+  `rgbf` with filter = 1 − alpha. `ExportPovOptions::camera` ($vpt, $vpr, distance, fov; Python
+  `pov_camera`, 8 numbers) writes OpenSCAD's camera block with **two fixes, both found by rendering
+  in POV-Ray 3.7 and comparing with BelfrySCAD's PNG of the same camera** (they now agree to a
+  pixel): `rotate` comes before `translate`, since the eye orbits `$vpt` (OpenSCAD translates first
+  and frames the wrong place when a view both pans and turns); and the viewport's **vertical** fov
+  becomes POV-Ray's **horizontal** `angle` through an expression on `image_width/image_height`
+  (OpenSCAD writes it across unchanged, zooming its renders in by the aspect ratio). No camera frames
+  the bounding box, as OpenSCAD does without one.
   **`writeDxf` is the third 2D writer**, also on `collect2d()`: OpenSCAD's own `export_dxf.cc`
   layout verbatim (AC1006 header with the extents, one CONTINUOUS linetype, layer 0, every contour
   a closed `LWPOLYLINE` on layer 0 with holes as ordinary contours; 1- and 2-vertex contours as
