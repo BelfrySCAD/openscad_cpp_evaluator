@@ -17,8 +17,10 @@
 #include "openscad_cpp_evaluator/zip_stored.hpp"
 
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
