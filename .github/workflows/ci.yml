@@ -50,8 +50,21 @@ jobs:
       # Linux/macOS use (CMAKE_BUILD_TYPE already picked the config), but
       # required on Windows's default multi-config Visual Studio
       # generator, which ignores CMAKE_BUILD_TYPE entirely.
+      # A bounded job count on the Unix runners. A bare `-j` becomes `make -j`,
+      # which starts EVERY compile at once; on macos-latest (3 vCPU, 7 GB) a
+      # pile of template-heavy translation units that size ran the build at
+      # 852-2000 s against Linux's ~300 s. Windows keeps the bare -j: MSBuild
+      # reads it as "use the cores", which is already bounded.
       - name: Build
-        run: cmake --build build --config Release -j
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            macOS) JOBS=$(sysctl -n hw.ncpu) ;;
+            Linux) JOBS=$(nproc) ;;
+            *)     JOBS= ;;
+          esac
+          echo "building with -j ${JOBS:-<unbounded: MSBuild>}"
+          cmake --build build --config Release -j $JOBS
 
       # Bytecode VM on (the default as of the Phase 5 rollout decision --
       # see evaluator.hpp's own bytecodeVmEnabled() comment) and off
