@@ -38,8 +38,16 @@ jobs:
             name: macos-arm64
           - runner: macos-15-intel
             name: macos-x86_64
+          # Two Windows jobs, one per architecture, both on the x86_64 runner
+          # (ARM64 is cross-compiled; see CIBW_ARCHS_WINDOWS). As one job they
+          # built one after the other -- 7 min each, 14.5 min for the job,
+          # the slowest in the release -- when neither needs the other.
           - runner: windows-latest
             name: windows-x86_64
+            archs: AMD64
+          - runner: windows-latest
+            name: windows-arm64
+            archs: ARM64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -65,7 +73,7 @@ jobs:
           # ARM64 build at all, so building on an ARM runner would have to
           # emulate it. cibuildwheel skips CIBW_TEST_COMMAND for the
           # cross-compiled wheel, since an x86_64 host cannot run it.
-          CIBW_ARCHS_WINDOWS: "AMD64 ARM64"
+          CIBW_ARCHS_WINDOWS: ${{ matrix.archs }}
           # delvewheel vendors the MSVC runtime into the wheel, but on an
           # x86_64 host it can only find the x86_64 copy -- repairing the
           # cross-built ARM64 wheel died with "Unable to find library:
