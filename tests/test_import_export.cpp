@@ -1,5 +1,6 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/export.hpp"
+#include "openscad_cpp_evaluator/zip_stored.hpp"
 
 #include "test_helpers.hpp"
 
@@ -113,6 +114,163 @@ TEST(ImportModuleContext, ThreeMfIsDeflateCompressed) {
     EXPECT_TRUE(sawModel) << "no 3dmodel.model entry in the archive";
 
     std::filesystem::remove(path);
+}
+
+// -- AMF, X3D, VRML: the multi-object formats export writes ------------------
+
+TEST(ImportModuleContext, AmfRoundTripPreservesVolume) {
+    const auto path = tempPath("cube.amf");
+    writeCubeAs(path);
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
+    std::filesystem::remove(path);
+}
+
+TEST(ImportModuleContext, X3dRoundTripPreservesVolume) {
+    const auto path = tempPath("cube.x3d");
+    writeCubeAs(path);
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
+    std::filesystem::remove(path);
+}
+
+TEST(ImportModuleContext, VrmlRoundTripPreservesVolume) {
+    const auto path = tempPath("cube.wrl");
+    writeCubeAs(path);
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-6);
+    std::filesystem::remove(path);
+}
+
+namespace {
+
+// A unit cube as six quads; the last polygon deliberately has no closing -1,
+// which both specs allow.
+const char* kCubePoints = "0 0 0, 1 0 0, 1 1 0, 0 1 0, 0 0 1, 1 0 1, 1 1 1, 0 1 1";
+const char* kCubeQuads = "0 3 2 1 -1 4 5 6 7 -1 0 1 5 4 -1 1 2 6 5 -1 2 3 7 6 -1 3 0 4 7";
+
+struct Imported {
+    double volume = 0;
+    manifold::Box box;
+    std::vector<std::string> messages;
+};
+
+Imported importText(const std::string& name, const std::string& text) {
+    const auto path = tempPath(name);
+    std::ofstream(path, std::ios::binary) << text;
+    Imported out;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");",
+                          [&](const std::string& m) { out.messages.push_back(m); });
+    std::filesystem::remove(path);
+    if (!e.bodies.empty() && e.bodies[0].body) {
+        out.volume = e.bodies[0].body->Volume();
+        out.box = e.bodies[0].body->BoundingBox();
+    }
+    return out;
+}
+
+bool anyContains(const std::vector<std::string>& messages, const std::string& needle) {
+    for (const std::string& m : messages) {
+        if (m.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+// A cube scaled x2 and moved, the same cube USEd again under a 90-degree
+// rotation, a tetrahedron written clockwise with ccw="false", and a Box
+// primitive that is skipped with a warning. 8 + 1 + 4.5 = 13.5.
+TEST(ImportModuleContext, X3dAppliesTransformsDefUseAndCcw) {
+    const std::string x3d = std::string(R"(<?xml version="1.0"?>
+<!DOCTYPE X3D PUBLIC "ISO//Web3D//DTD X3D 3.3//EN" "x">
+<X3D><Scene>
+  <!-- <Shape> in a comment is not a shape -->
+  <Transform translation="10 0 0" scale="2 2 2">
+    <Shape DEF="CUBE"><IndexedFaceSet coordIndex=")") + kCubeQuads + R"("><Coordinate point=")" + kCubePoints + R"("/></IndexedFaceSet></Shape>
+  </Transform>
+  <Transform translation="30 0 0" rotation="0 0 1 1.5707963267948966"><Shape USE="CUBE"/></Transform>
+  <Shape><IndexedTriangleSet ccw="false" index="0 1 2 0 3 1 0 2 3 1 3 2"><Coordinate point="50 0 0, 53 0 0, 50 3 0, 50 0 3"/></IndexedTriangleSet></Shape>
+  <Shape><Box size="4 4 4"/></Shape>
+</Scene></X3D>)";
+    const Imported r = importText("hand.x3d", x3d);
+    EXPECT_NEAR(r.volume, 13.5, 1e-9);
+    EXPECT_NEAR(r.box.min.x, 10, 1e-9);   // the scaled cube
+    EXPECT_NEAR(r.box.max.x, 53, 1e-9);   // the tetrahedron
+    EXPECT_TRUE(anyContains(r.messages, "skipped what is not a mesh: 1 Box")) << ::testing::PrintToString(r.messages);
+}
+
+// The same scene in VRML97, plus a PROTO, a ROUTE and comments the parser
+// has to step over. The rotated cube spans x 29..30 -- 31 would mean the
+// rotation was ignored.
+TEST(ImportModuleContext, VrmlAppliesTransformsAndSkipsProtoAndRoute) {
+    const std::string wrl = std::string("#VRML V2.0 utf8\n# a comment\n"
+        "PROTO Unused [ field SFFloat x 1 ] { Group { } }\n"
+        "Transform { translation 10 0 0 scale 2 2 2 children [\n"
+        "  DEF CUBE Shape { geometry IndexedFaceSet { coord Coordinate { point [ ") + kCubePoints +
+        " ] } coordIndex [ " + kCubeQuads + " ] } }\n] }\n"
+        "Transform { translation 30 0 0 rotation 0 0 1 1.5707963267948966 children [ USE CUBE ] }\n"
+        "Group { children [ Shape { geometry Sphere { radius 2 } } ] }\n"
+        "DEF T TimeSensor { }\nROUTE T.fraction_changed TO T.set_startTime\n";
+    const Imported r = importText("hand.wrl", wrl);
+    EXPECT_NEAR(r.volume, 9.0, 1e-9);
+    EXPECT_NEAR(r.box.max.x, 30, 1e-9);
+    EXPECT_TRUE(anyContains(r.messages, "skipped what is not a mesh: 1 Sphere")) << ::testing::PrintToString(r.messages);
+}
+
+TEST(ImportModuleContext, VrmlIndexPastItsPointsErrors) {
+    Evaluator ev;
+    const auto path = tempPath("bad.wrl");
+    std::ofstream(path) << "#VRML V2.0 utf8\nShape { geometry IndexedFaceSet { coord Coordinate { point [ 0 0 0, 1 0 0, 0 1 0 ] }"
+                           " coordIndex [ 0 1 7 -1 ] } }\n";
+    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::filesystem::remove(path);
+}
+
+namespace {
+
+std::string inchCubeAmf() {
+    const int tris[12][3] = {{0, 3, 2}, {0, 2, 1}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                             {1, 2, 6}, {1, 6, 5}, {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}};
+    const int pts[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+    std::string amf = "<?xml version=\"1.0\"?>\n<amf unit=\"inch\"><object id=\"1\"><mesh><vertices>";
+    for (const auto& p : pts)
+        amf += "<vertex><coordinates><x>" + std::to_string(p[0]) + "</x><y>" + std::to_string(p[1]) + "</y><z>" +
+               std::to_string(p[2]) + "</z></coordinates></vertex>";
+    amf += "</vertices><volume>";
+    for (const auto& t : tris)
+        amf += "<triangle><v1>" + std::to_string(t[0]) + "</v1><v2>" + std::to_string(t[1]) + "</v2><v3>" +
+               std::to_string(t[2]) + "</v3></triangle>";
+    amf += "</volume></mesh></object><constellation id=\"2\"><instance objectid=\"1\"/></constellation></amf>";
+    return amf;
+}
+
+} // namespace
+
+// unit="inch" scales to millimetres; a constellation is not applied, and
+// says so.
+TEST(ImportModuleContext, AmfUnitScalesToMillimetres) {
+    const Imported r = importText("inch.amf", inchCubeAmf());
+    EXPECT_NEAR(r.volume, 25.4 * 25.4 * 25.4, 1e-6);
+    EXPECT_NEAR(r.box.max.x, 25.4, 1e-9);
+    EXPECT_TRUE(anyContains(r.messages, "AMF constellations are not applied"));
+}
+
+// Compressed AMF: a zip holding one .amf, deflated.
+TEST(ImportModuleContext, ZippedAmfImports) {
+    const std::string amf = inchCubeAmf();
+    const auto path = tempPath("zipped.amf");
+    writeDeflateZip(path.string(), {ZipEntry{"model.amf", std::vector<uint8_t>(amf.begin(), amf.end())}});
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");", [](const std::string&) {});
+    std::filesystem::remove(path);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 25.4 * 25.4 * 25.4, 1e-6);
 }
 
 TEST(ImportModuleContext, UnsupportedExtensionErrors) {

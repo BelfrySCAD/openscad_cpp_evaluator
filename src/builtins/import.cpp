@@ -46,10 +46,16 @@ LoadedMesh loadMeshByExt(const std::string& path, const std::string& ext) {
     if (ext == ".stl") return loadStl(path);
     if (ext == ".obj") return loadObj(path);
     if (ext == ".off") return loadOff(path);
+    if (ext == ".amf") return loadAmf(path);
+    if (ext == ".x3d") return loadX3d(path);
+    if (ext == ".wrl") return loadVrml(path);
     return loadThreeMf(path);
 }
 
-bool isMeshExt(const std::string& ext) { return ext == ".stl" || ext == ".obj" || ext == ".off" || ext == ".3mf"; }
+bool isMeshExt(const std::string& ext) {
+    return ext == ".stl" || ext == ".obj" || ext == ".off" || ext == ".3mf" || ext == ".amf" || ext == ".x3d" ||
+           ext == ".wrl";
+}
 
 
 Value jsonToValue(const nlohmann::ordered_json& j) {
@@ -257,6 +263,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         } catch (const std::exception& e) {
             ev.error(std::string("import: ") + e.what(), node);
         }
+        for (const std::string& w : mesh.warnings) ev.warn("import: '" + path + "': " + w, &node.position());
         std::vector<Value> vertsFlat;
         vertsFlat.reserve(mesh.verts.size() * 3);
         for (const auto& v : mesh.verts) {
@@ -428,7 +435,11 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
 
     try {
         if (ext == ".json") return loadJsonAsValue(path);
-        if (isMeshExt(ext)) return meshToVnf(loadMeshByExt(path, ext));
+        if (isMeshExt(ext)) {
+            const LoadedMesh mesh = loadMeshByExt(path, ext);
+            for (const std::string& w : mesh.warnings) ev.warn("import: '" + path + "': " + w, &node.position());
+            return meshToVnf(mesh);
+        }
         if (ext == ".dxf" || ext == ".svg" || ext == ".pdf") {
             std::vector<Contour2d> contours;
             if (ext == ".dxf") {

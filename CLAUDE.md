@@ -1185,10 +1185,21 @@ grep for `ponytail:`.
 - `include/openscad_cpp_evaluator/mesh_import.hpp`, `src/import/mesh_import.cpp` — STL (ASCII +
   binary, exact-match vertex welding)/OBJ/OFF/3MF mesh loaders, returning plain `(verts, tris)` —
   no `Evaluator`/`Value` dependency, so these are reusable from both `import()` contexts below.
+- `src/import/scene_import.cpp` — AMF, X3D and VRML97 import, the three multi-object formats export
+  writes that nothing could read back (current upstream OpenSCAD removed its AMF importer, so all
+  three go beyond it). Geometry only, like the loaders above, but each format's scene structure is
+  honoured: X3D/VRML `Transform`s nest and apply in full (`T·C·R·SR·S·SR⁻¹·C⁻¹`), `DEF`/`USE`
+  resolves, `ccw FALSE` flips winding, `IndexedFaceSet` polygons fan-triangulate (a last polygon
+  without `-1` counts), and X3D's `IndexedTriangleSet`/`TriangleSet` are read. X3D goes through a
+  small real XML parser (comments, CDATA, DOCTYPE, entities); VRML through a tokenizer + generic
+  node parser that steps over `PROTO`/`EXTERNPROTO`/`ROUTE` (VRML 1.0 is refused by name). AMF's
+  `unit` scales to mm, and a zipped AMF (`PK` header) is read through `readStoredZipEntryBySuffix`.
+  What is not a mesh — primitives (Box, Sphere, ...), `Inline`, AMF constellations — lands in
+  `LoadedMesh::warnings`, which both `import()` faces emit as `import: '<file>': ...`.
 - `include/openscad_cpp_evaluator/import_builtin.hpp`, `include/openscad_cpp_evaluator/
   zip_stored.hpp` (+ `src/zip_stored.cpp`), `src/builtins/import.cpp` — `import()`'s two faces:
   `resolveImport`/`generateImport` (registered in `registry.cpp` like any other builtin *module* —
-  a geometry statement, STL/OBJ/OFF/3MF/DXF/SVG) and `importAsValue` (called directly from
+  a geometry statement, STL/OBJ/OFF/3MF/AMF/X3D/VRML/DXF/SVG) and `importAsValue` (called directly from
   `user_calls.cpp`'s `evalFunctionCall`, special-cased *before* the `isBuiltinFunctionName` gate
   since `import` isn't in that table — returns a VNF `[[verts],[faces]]` for a mesh file, a Region
   `[[[x,y],...],...]` for DXF/SVG, or the JSON file's content as native values).

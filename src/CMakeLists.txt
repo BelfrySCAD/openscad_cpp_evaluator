@@ -23,6 +23,7 @@ add_library(openscad_cpp_evaluator STATIC
   mesh_check.cpp
   zip_stored.cpp
   import/mesh_import.cpp
+  import/scene_import.cpp
   import/surface_load.cpp
   import/dxf_import.cpp
   import/svg_import.cpp
