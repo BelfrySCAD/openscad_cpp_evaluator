@@ -5,7 +5,7 @@ namespace oscadeval {
 Value colorToValue(const std::optional<std::array<double, 4>>& color) {
     if (!color) return Value{};
     std::vector<Value> items = {Value{(*color)[0]}, Value{(*color)[1]}, Value{(*color)[2]}, Value{(*color)[3]}};
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})};
+    return Value{makeList(std::move(items))};
 }
 
 std::optional<std::array<float, 4>> valueToColor(const Value& v) {

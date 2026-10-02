@@ -350,10 +350,21 @@ std::vector<Value> Evaluator::evalListCompBody(const oscad::ASTNode& body, EvalC
 }
 
 Value Evaluator::evalListLiteral(const oscad::ListComprehension& node, EvalContext& ctx) {
-    std::vector<Value> items;
-    items.reserve(node.elements.size());
-    for (const auto& elemPtr : node.elements) evalListElement(*elemPtr, ctx, items);
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})};
+    ListBuilder list;
+    list.rest.reserve(node.elements.size());
+    size_t first = 0;
+    // `[each acc, ...]`: start from acc itself (see ListBuilder), so the
+    // accumulator idiom appends in place rather than copying acc.
+    if (!node.elements.empty() && node.elements[0]->kind() == oscad::NodeKind::ListCompEach) {
+        auto& n = static_cast<const oscad::ListCompEach&>(*node.elements[0]);
+        if (!isListCompClauseKind(n.body->kind())) {
+            checkDebug(n, ctx, /*forced=*/false, /*exprLevel=*/true);
+            list.appendEach(evalExpr(static_cast<const oscad::Expression&>(*n.body), ctx));
+            first = 1;
+        }
+    }
+    for (size_t i = first; i < node.elements.size(); ++i) evalListElement(*node.elements[i], ctx, list.rest);
+    return Value{list.finish()};
 }
 
 Value Evaluator::evalRangeLiteral(const oscad::RangeLiteral& node, EvalContext& ctx) {

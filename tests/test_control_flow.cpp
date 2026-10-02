@@ -572,7 +572,8 @@ TEST(AssertExpression, FailingAssertionThrows) {
 
 TEST(ListComprehension, ForClauseExpandsRange) {
     RunResult r = runScript("x = [for (i = [0:4]) i];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 5u);
     EXPECT_DOUBLE_EQ(asNum(items[4]), 4.0);
 }
@@ -587,7 +588,8 @@ TEST(ListComprehension, ForClauseExpandsRange) {
 TEST(ListComprehension, LaterForClauseCanDependOnEarlierBindingCompiled) {
     ScopedVm vm(true);
     RunResult r = runScript("x = [for (p = [1:3], pt = p*10) pt];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 10.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 20.0);
@@ -597,7 +599,8 @@ TEST(ListComprehension, LaterForClauseCanDependOnEarlierBindingCompiled) {
 TEST(ListComprehension, LaterForClauseCanDependOnEarlierBindingInterpreted) {
     ScopedVm vm(false);
     RunResult r = runScript("x = [for (p = [1:3], pt = p*10) pt];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 10.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 20.0);
@@ -606,7 +609,8 @@ TEST(ListComprehension, LaterForClauseCanDependOnEarlierBindingInterpreted) {
 
 TEST(ListComprehension, ForIfFiltersElements) {
     RunResult r = runScript("x = [for (i = [0:4]) if (i % 2 == 0) i];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 0.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0);
@@ -615,7 +619,8 @@ TEST(ListComprehension, ForIfFiltersElements) {
 
 TEST(ListComprehension, ForIfElseMapsBothBranches) {
     RunResult r = runScript("x = [for (i = [0:3]) i % 2 == 0 ? \"even\" : \"odd\"];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 4u);
     EXPECT_EQ(std::get<std::string>(items[0]), "even");
     EXPECT_EQ(std::get<std::string>(items[1]), "odd");
@@ -679,7 +684,8 @@ TEST(ListComprehension, ForIfElseEvaluatesOnlyTheChosenBranchCompiled) {
 
 TEST(ListComprehension, EachFlattensNestedLists) {
     RunResult r = runScript("x = [each [1,2], each [3,4]];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 4u);
     EXPECT_DOUBLE_EQ(asNum(items[3]), 4.0);
 }
@@ -692,7 +698,8 @@ TEST(ListComprehension, LetClauseBindsIntoBody) {
     // followed by ANOTHER comprehension clause (see
     // ListCompLetPrecedingForBindsIntoLaterClause below for that shape).
     RunResult r = runScript("x = [for (i = [0:2]) let (sq = i*i) sq];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 4.0);
 }
@@ -704,7 +711,8 @@ TEST(ListComprehension, ListCompLetPrecedingForBindsIntoLaterClause) {
     // NodeKind::ListCompLet (LetClauseBindsIntoBody above's `for (...) let
     // (...) body` shape produces a plain LetOp instead).
     RunResult r = runScript("x = [let (a = 1) for (i = [0:2]) i + a];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 3.0);
@@ -712,7 +720,8 @@ TEST(ListComprehension, ListCompLetPrecedingForBindsIntoLaterClause) {
 
 TEST(ListComprehension, CStyleForAccumulates) {
     RunResult r = runScript("x = [for (a = 0, i = 0; i < 5; a = a + i, i = i + 1) a];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 5u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 0.0);
     EXPECT_DOUBLE_EQ(asNum(items[4]), 6.0); // 0,0,1,3,6
@@ -725,7 +734,8 @@ TEST(ListComprehension, IfElseClauseSyntax) {
     // is a different NodeKind and never reaches ListCompIfElse's own
     // evalListElement case.
     RunResult r = runScript("x = [for (i = [0:3]) if (i % 2 == 0) \"even\" else \"odd\"];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 4u);
     EXPECT_EQ(std::get<std::string>(items[0]), "even");
     EXPECT_EQ(std::get<std::string>(items[1]), "odd");
@@ -737,28 +747,32 @@ TEST(ListComprehension, EachWrappingAForClauseFlattensIt) {
     // EachFlattensNestedLists above already covers) takes a different path
     // in evalListElement's own ListCompEach case.
     RunResult r = runScript("x = [each for (i = [0:2]) i];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 2.0);
 }
 
 TEST(ListComprehension, EachWrappingAnIfOnlyClauseFlattensIt) {
     RunResult r = runScript("x = [each if (true) 5];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 1u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
 }
 
 TEST(ListComprehension, EachWrappingAnIfElseClauseFlattensIt) {
     RunResult r = runScript("x = [each if (false) 5 else 6];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 1u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 6.0);
 }
 
 TEST(ListComprehension, EachOnScalarAppendsSingleValue) {
     RunResult r = runScript("x = [each 5, each 6];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 2u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 6.0);
@@ -766,7 +780,8 @@ TEST(ListComprehension, EachOnScalarAppendsSingleValue) {
 
 TEST(ListComprehension, EachOnUndefDropsIt) {
     RunResult r = runScript("x = [1, each undef, 2];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 2u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0);
@@ -778,21 +793,26 @@ TEST(ListComprehension, ForClauseWithNestedListLiteralBody) {
     // another comprehension clause -- a separate code path from the
     // ordinary evalListCompBody() call every other `for` test here takes.
     RunResult r = runScript("x = [for (i = [0:1]) [i, i * 2]];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 2u);
-    auto first = std::get<ListPtr>(items[0])->items;
+    const ListPtr first_list = std::get<ListPtr>(items[0]);
+    const auto& first = first_list->items;
     EXPECT_DOUBLE_EQ(asNum(first[0]), 0.0);
     EXPECT_DOUBLE_EQ(asNum(first[1]), 0.0);
-    auto second = std::get<ListPtr>(items[1])->items;
+    const ListPtr second_list = std::get<ListPtr>(items[1]);
+    const auto& second = second_list->items;
     EXPECT_DOUBLE_EQ(asNum(second[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(second[1]), 2.0);
 }
 
 TEST(ListComprehension, CStyleForWithNestedListLiteralBody) {
     RunResult r = runScript("x = [for (a = 0; a < 2; a = a + 1) [a, a]];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 2u);
-    auto second = std::get<ListPtr>(items[1])->items;
+    const ListPtr second_list = std::get<ListPtr>(items[1]);
+    const auto& second = second_list->items;
     EXPECT_DOUBLE_EQ(asNum(second[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(second[1]), 1.0);
 }
@@ -810,7 +830,8 @@ TEST(ListComprehension, ForClauseWithEachScalarBody) {
     // via evalListElement's own isNestedLc==false ListCompFor path this
     // time, not evalListCompBody's generic dispatch.
     RunResult r = runScript("x = [for (i = [1:3]) each i];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 3.0);
@@ -902,11 +923,14 @@ TEST(ListComprehension, IfClauseWithNestedListLiteralBody) {
     // only reachable via a clause (ListCompIf here) that calls
     // evalListCompBody() on its own branch expression.
     RunResult r = runScript("x = [for (i = [0:2]) if (i > 0) [i, i]];");
-    auto items = std::get<ListPtr>(varValue(r, "x"))->items;
+    const ListPtr items_list = std::get<ListPtr>(varValue(r, "x"));
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 2u);
-    auto first = std::get<ListPtr>(items[0])->items;
+    const ListPtr first_list = std::get<ListPtr>(items[0]);
+    const auto& first = first_list->items;
     EXPECT_DOUBLE_EQ(asNum(first[0]), 1.0);
-    auto second = std::get<ListPtr>(items[1])->items;
+    const ListPtr second_list = std::get<ListPtr>(items[1]);
+    const auto& second = second_list->items;
     EXPECT_DOUBLE_EQ(asNum(second[0]), 2.0);
 }
 
@@ -1896,3 +1920,46 @@ TEST(RangeDirection, EveryRangeBuildingConstructWarns) {
 }
 
 
+
+// `[each acc, ...]` starts from acc itself and appends (ListBuilder), on the
+// VM and the interpreter alike. These pin the cases where it must NOT, or
+// where the result could go wrong if it did.
+namespace {
+std::vector<std::string> echoesWithVm(bool vm, const std::string& code) {
+    Evaluator::setBytecodeVmEnabledForTesting(vm);
+    std::vector<std::string> out;
+    runScript(code, [&](const std::string& msg) { out.push_back(msg); });
+    Evaluator::setBytecodeVmEnabledForTesting(std::nullopt);
+    return out;
+}
+} // namespace
+
+TEST(ListComprehension, EachSeedingKeepsEveryShapeOfEachRight) {
+    const std::string code =
+        "acc = [1, 2];\n"
+        "a = [each acc, 3];\n"
+        "b = [each acc, 4];\n"                  // a second branch from the same list
+        "echo(acc, a, b);\n"
+        "echo([each acc]);\n"                   // nothing after the seed
+        "echo([each \"ab\", 1]);\n"             // a string expands, it does not seed
+        "echo([each [0:2], 9]);\n"              // so does a range
+        "echo([each undef, 5]);\n"              // undef contributes nothing
+        "echo([5, each acc]);\n"                // not first: an ordinary each
+        "echo([each acc, each [7, 8], for (i = [0:1]) i]);\n"
+        "echo([for (k = [0:1]) each [k, k]]);\n"    // comprehension each (AccumMergeEach)
+        "function g(i, l) = i >= 5 ? l : g(i + 1, [each l, i]);\n"
+        "echo(g(0, []));\n";
+    const std::vector<std::string> expected = {
+        "ECHO: [1, 2], [1, 2, 3], [1, 2, 4]",
+        "ECHO: [1, 2]",
+        "ECHO: [\"a\", \"b\", 1]",
+        "ECHO: [0, 1, 2, 9]",
+        "ECHO: [5]",
+        "ECHO: [5, 1, 2]",
+        "ECHO: [1, 2, 7, 8, 0, 1]",
+        "ECHO: [0, 0, 1, 1]",
+        "ECHO: [0, 1, 2, 3, 4]",
+    };
+    EXPECT_EQ(echoesWithVm(true, code), expected);
+    EXPECT_EQ(echoesWithVm(false, code), expected);
+}

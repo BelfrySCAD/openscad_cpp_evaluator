@@ -32,7 +32,7 @@ namespace oscadeval {
 namespace {
 
 Value listOf(std::vector<Value> items) {
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})};
+    return Value{makeList(std::move(items))};
 }
 
 Value pointOf(double x, double y, double z) { return listOf({Value{x}, Value{y}, Value{z}}); }

@@ -14,8 +14,8 @@ namespace oscadeval {
 
 namespace {
 
-Value makeList(std::vector<Value> items) {
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})};
+Value listValue(std::vector<Value> items) {
+    return Value{makeList(std::move(items))};
 }
 
 } // namespace
@@ -119,7 +119,7 @@ Value scale(double scalarValue, const Value& value) {
         std::vector<Value> out;
         out.reserve((*list)->items.size());
         for (const Value& v : (*list)->items) out.push_back(scale(scalarValue, v));
-        return makeList(std::move(out));
+        return listValue(std::move(out));
     }
     if (std::holds_alternative<bool>(value)) return Value{};
     if (const double* d = std::get_if<double>(&value)) return Value{scalarValue * *d};
@@ -132,7 +132,7 @@ Value divScale(const Value& value, double divisor) {
         std::vector<Value> out;
         out.reserve((*list)->items.size());
         for (const Value& v : (*list)->items) out.push_back(divScale(v, divisor));
-        return makeList(std::move(out));
+        return listValue(std::move(out));
     }
     if (std::holds_alternative<bool>(value)) return Value{};
     if (const double* d = std::get_if<double>(&value)) {
@@ -150,7 +150,7 @@ Value divInto(double numerator, const Value& value) {
         std::vector<Value> out;
         out.reserve((*list)->items.size());
         for (const Value& v : (*list)->items) out.push_back(divInto(numerator, v));
-        return makeList(std::move(out));
+        return listValue(std::move(out));
     }
     if (std::holds_alternative<bool>(value)) return Value{};
     if (const double* d = std::get_if<double>(&value)) {
@@ -179,7 +179,7 @@ Value vecCombine(const Value& a, const Value& b, NumericOp numericOp) {
         std::vector<Value> out;
         out.reserve(n);
         for (size_t i = 0; i < n; ++i) out.push_back(vecCombine(ia[i], ib[i], numericOp));
-        return makeList(std::move(out));
+        return listValue(std::move(out));
     }
     if (std::holds_alternative<bool>(a) || std::holds_alternative<bool>(b)) return Value{};
     const double* da = std::get_if<double>(&a);
@@ -252,7 +252,7 @@ Value multMatVec(const ListItems& mat, const ListItems& vec, std::string* error)
         }
         out.push_back(Value{re});
     }
-    return makeList(std::move(out));
+    return listValue(std::move(out));
 }
 
 Value multVecMat(const ListItems& vec, const ListItems& mat, std::string* error) {
@@ -277,7 +277,7 @@ Value multVecMat(const ListItems& vec, const ListItems& mat, std::string* error)
         }
         out.push_back(Value{re});
     }
-    return makeList(std::move(out));
+    return listValue(std::move(out));
 }
 
 } // namespace
@@ -338,7 +338,7 @@ Value matmul(const Value& a, const Value& b, std::string* error) {
                 }
                 rows.push_back(std::move(row));
             }
-            return makeList(std::move(rows));
+            return listValue(std::move(rows));
         }
     }
     return fail(error, "undefined vector*vector multiplication where first elements are types " + oscTypeName(e1) +
@@ -619,37 +619,78 @@ void appendEachInto(std::vector<Value>& out, const Value& v) {
     if (!std::holds_alternative<std::monostate>(v)) out.push_back(v);
 }
 
+void ListBuilder::appendEach(const Value& v) {
+    if (!seed && rest.empty()) {
+        if (const ListPtr* l = std::get_if<ListPtr>(&v); l && *l) {
+            seed = *l;
+            return;
+        }
+    }
+    appendEachInto(rest, v);
+}
+
+ListPtr ListBuilder::finish() {
+    if (seed) return listAppend(seed, std::move(rest));
+    return makeList(std::move(rest));
+}
+
 const Value& ListItems::at(size_t i) const {
     if (i >= n_) throw std::out_of_range("list index out of range");
     return data()[i];
 }
 
+namespace {
+struct ListBlock {
+    ValueList list;
+    ListBuffer buffer;
+};
+} // namespace
+
+ListPtr makeList(std::vector<Value> items) {
+    auto block = std::make_shared<ListBlock>();
+    ListBuffer& buf = block->buffer;
+    buf.v = std::move(items);
+    buf.used.store(static_cast<uint32_t>(buf.v.size()), std::memory_order_relaxed);
+    ListItems& view = block->list.items;
+    view.buf_ = &buf;
+    view.data_ = buf.v.data();
+    view.n_ = buf.v.size();
+    return ListPtr(block, &block->list);   // shares the block's ownership
+}
+
 ListPtr listAppend(const ListPtr& base, std::vector<Value>&& extra) {
-    if (!base) return std::make_shared<const ValueList>(ValueList{std::move(extra)});
+    if (!base) return makeList(std::move(extra));
     if (extra.empty()) return base;
     const ListItems& items = base->items;
     const size_t n = items.n_, k = extra.size();
-    if (const auto& buf = items.buf_; buf && buf->v.capacity() - n >= k) {
-        size_t expected = n;
-        if (buf->used.compare_exchange_strong(expected, n + k)) {
+    if (ListBuffer* buf = items.buf_; buf && buf->v.capacity() - n >= k && n + k <= UINT32_MAX) {
+        uint32_t expected = static_cast<uint32_t>(n);
+        if (buf->used.compare_exchange_strong(expected, static_cast<uint32_t>(n + k), std::memory_order_acq_rel)) {
             // This list ended at the buffer's frontier and now owns the
             // slots after it. Within capacity, push_back never reallocates,
             // so every other view's elements stay where they are.
             for (Value& x : extra) buf->v.push_back(std::move(x));
-            return std::make_shared<const ValueList>(ValueList{ListItems(buf, n + k)});
+            auto list = std::make_shared<ValueList>();
+            ListItems& view = list->items;
+            // Keep alive whatever owns the buffer: base's own allocation, or
+            // whatever base itself was keeping.
+            view.keep_ = items.keep_ ? items.keep_ : std::shared_ptr<const void>(base);
+            view.buf_ = buf;
+            view.data_ = buf->v.data();
+            view.n_ = n + k;
+            return list;
         }
     }
-    // Copy: a fresh buffer, given room to grow if this list has been
-    // appended to before (the accumulator case), exact otherwise.
+    // Copy: a fresh buffer with half again the room if this list has been
+    // appended to before (the accumulator case), exactly sized if not.
     const bool growing = items.buf_ && items.buf_->fromAppend;
     std::vector<Value> out;
-    out.reserve(growing ? std::max<size_t>(2 * (n + k), 16) : n + k);
+    out.reserve(growing ? (n + k) + (n + k) / 2 + 1 : n + k);
     out.insert(out.end(), items.begin(), items.end());
     for (Value& x : extra) out.push_back(std::move(x));
-    auto buf = std::make_shared<ListBuffer>(std::move(out));
-    buf->fromAppend = true;
-    const size_t len = buf->v.size();
-    return std::make_shared<const ValueList>(ValueList{ListItems(std::move(buf), len)});
+    ListPtr list = makeList(std::move(out));
+    list->items.buf_->fromAppend = true;
+    return list;
 }
 
 } // namespace oscadeval

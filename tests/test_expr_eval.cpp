@@ -140,7 +140,8 @@ TEST(ExprEvalArithmetic, BoolOperandsAreUndef) {
 TEST(ExprEvalArithmetic, VectorPlusVector) {
     Evaluator ev;
     Value v = evalSrc("[1,2,3] + [10,20,30]", ev);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 11.0);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 33.0);
 }
@@ -153,7 +154,8 @@ TEST(ExprEvalArithmetic, StringPlusStringIsUndef) {
 TEST(ExprEvalArithmetic, ScalarTimesVector) {
     Evaluator ev;
     Value v = evalSrc("2 * [1,2,3]", ev);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[1]), 4.0);
 }
 
@@ -171,8 +173,10 @@ TEST(ExprEvalArithmetic, ScalarTimesMatrixAndMatrixTimesScalar) {
     Evaluator ev;
     Value a = evalSrc("2 * [[1,2],[3,4]]", ev);
     Value b = evalSrc("[[1,2],[3,4]] * 2", ev);
-    auto rowsA = std::get<ListPtr>(a)->items;
-    auto rowsB = std::get<ListPtr>(b)->items;
+    const ListPtr rowsA_list = std::get<ListPtr>(a);
+    const auto& rowsA = rowsA_list->items;
+    const ListPtr rowsB_list = std::get<ListPtr>(b);
+    const auto& rowsB = rowsB_list->items;
     EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rowsA[0])->items[0]), 2.0);
     EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rowsA[1])->items[1]), 8.0);
     EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rowsB[0])->items[0]), 2.0);
@@ -183,13 +187,15 @@ TEST(ExprEvalArithmetic, MatrixTimesVectorAndVectorTimesMatrix) {
     Evaluator ev;
     // [[1,2],[3,4]] * [1,1] -> row-wise dot products: [3, 7]
     Value mv = evalSrc("[[1,2],[3,4]] * [1,1]", ev);
-    auto mvItems = std::get<ListPtr>(mv)->items;
+    const ListPtr mvItems_list = std::get<ListPtr>(mv);
+    const auto& mvItems = mvItems_list->items;
     ASSERT_EQ(mvItems.size(), 2u);
     EXPECT_DOUBLE_EQ(asNum(mvItems[0]), 3.0);
     EXPECT_DOUBLE_EQ(asNum(mvItems[1]), 7.0);
     // [1,1] * [[1,2],[3,4]] -> column-wise dot products: [4, 6]
     Value vm = evalSrc("[1,1] * [[1,2],[3,4]]", ev);
-    auto vmItems = std::get<ListPtr>(vm)->items;
+    const ListPtr vmItems_list = std::get<ListPtr>(vm);
+    const auto& vmItems = vmItems_list->items;
     ASSERT_EQ(vmItems.size(), 2u);
     EXPECT_DOUBLE_EQ(asNum(vmItems[0]), 4.0);
     EXPECT_DOUBLE_EQ(asNum(vmItems[1]), 6.0);
@@ -198,7 +204,8 @@ TEST(ExprEvalArithmetic, MatrixTimesVectorAndVectorTimesMatrix) {
 TEST(ExprEvalArithmetic, MatrixTimesMatrix) {
     Evaluator ev;
     Value v = evalSrc("[[1,2],[3,4]] * [[5,6],[7,8]]", ev);
-    auto rows = std::get<ListPtr>(v)->items;
+    const ListPtr rows_list = std::get<ListPtr>(v);
+    const auto& rows = rows_list->items;
     // Standard matrix product: [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]] = [[19,22],[43,50]]
     EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rows[0])->items[0]), 19.0);
     EXPECT_DOUBLE_EQ(asNum(std::get<ListPtr>(rows[0])->items[1]), 22.0);
@@ -209,7 +216,8 @@ TEST(ExprEvalArithmetic, MatrixTimesMatrix) {
 TEST(ExprEvalArithmetic, UnaryMinusOnListNegatesElementwise) {
     Evaluator ev;
     Value v = evalSrc("-[1,-2,3]", ev);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), -1.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 2.0);
 }
@@ -223,7 +231,8 @@ TEST(ExprEvalArithmetic, SubtractionNumericAndVector) {
     Evaluator ev;
     EXPECT_DOUBLE_EQ(asNum(evalSrc("5 - 3", ev)), 2.0);
     Value v = evalSrc("[10,20,30] - [1,2,3]", ev);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 9.0);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 27.0);
 }
@@ -243,7 +252,8 @@ TEST(ExprEvalArithmetic, DivisionNumeric) {
 TEST(ExprEvalArithmetic, DivisionListByNumberScalesElementwise) {
     Evaluator ev;
     Value v = evalSrc("[10,20] / 2", ev);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 5.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 10.0);
 }
@@ -401,7 +411,8 @@ TEST(ExprEvalRanges, DefaultStepIsOne) {
 TEST(ExprEvalVectorLiterals, PlainElements) {
     Evaluator ev;
     Value v = evalSrc("[1, 2, 3]", ev);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 3.0);
@@ -410,10 +421,12 @@ TEST(ExprEvalVectorLiterals, PlainElements) {
 TEST(ExprEvalVectorLiterals, NestedAndMixedTypes) {
     Evaluator ev;
     Value v = evalSrc("[1, \"a\", [2, 3]]", ev);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_EQ(std::get<std::string>(items[1]), "a");
-    auto nested = std::get<ListPtr>(items[2])->items;
+    const ListPtr nested_list = std::get<ListPtr>(items[2]);
+    const auto& nested = nested_list->items;
     EXPECT_DOUBLE_EQ(asNum(nested[0]), 2.0);
 }
 

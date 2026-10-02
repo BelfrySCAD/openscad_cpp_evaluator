@@ -3,6 +3,7 @@
 #include "openscad_cpp_evaluator/osc_range.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <initializer_list>
 #include <memory>
@@ -114,47 +115,59 @@ inline std::shared_ptr<TrailView<Value>> capturedLetTrail(const Closure& c) {
 // with one compare-and-swap, so two lists sharing a prefix can never write
 // the same slot (the loser copies).
 struct ListBuffer {
-    std::vector<Value> v;
-    std::atomic<size_t> used;
+    std::vector<Value> v;      // never reallocated once a list views it
+    std::atomic<uint32_t> used{0};   // with fromAppend, packs into one word
     // Set when this buffer came from appending: a list that was appended
     // to once is likely to be again, so ITS copies grow geometrically,
     // while a one-off concat's result is allocated at exactly its size.
     bool fromAppend = false;
-    explicit ListBuffer(std::vector<Value>&& items) : v(std::move(items)), used(v.size()) {}
 };
 
+// A list's elements: the first `size()` of a buffer. A list made by
+// makeList keeps its buffer in its own allocation (keep_ empty); one made by
+// appending in place views the buffer of the list it extends, and keep_
+// holds that list's allocation alive. The element pointer is cached, so a
+// read is one hop, as with a plain vector. Neither copyable nor movable:
+// an own-buffer view must never outlive the allocation it sits in.
 class ListItems {
 public:
     ListItems() = default;
-    ListItems(std::vector<Value>&& items)                       // NOLINT: implicit, as the old vector was
-        : buf_(std::make_shared<ListBuffer>(std::move(items))), n_(buf_->v.size()) {}
-    ListItems(const std::vector<Value>& items) : ListItems(std::vector<Value>(items)) {}  // NOLINT
-    ListItems(std::initializer_list<Value> items) : ListItems(std::vector<Value>(items)) {}
+    ListItems(const ListItems&) = delete;
+    ListItems& operator=(const ListItems&) = delete;
 
     size_t size() const { return n_; }
     bool empty() const { return n_ == 0; }
-    const Value* data() const { return buf_ ? buf_->v.data() : nullptr; }
-    const Value* begin() const { return data(); }
-    const Value* end() const { return data() + n_; }
-    const Value& operator[](size_t i) const { return data()[i]; }
+    const Value* data() const { return data_; }
+    const Value* begin() const { return data_; }
+    const Value* end() const { return data_ + n_; }
+    const Value& operator[](size_t i) const { return data_[i]; }
     const Value& at(size_t i) const;
-    const Value& front() const { return data()[0]; }
-    const Value& back() const { return data()[n_ - 1]; }
+    const Value& front() const { return data_[0]; }
+    const Value& back() const { return data_[n_ - 1]; }
     // A copy as a plain vector, for the few callers that build on one.
     // Explicit, so a copy is never made by accident binding a reference.
     explicit operator std::vector<Value>() const { return std::vector<Value>(begin(), end()); }
     std::vector<Value> toVector() const { return std::vector<Value>(begin(), end()); }
 
 private:
-    ListItems(std::shared_ptr<ListBuffer> buf, size_t n) : buf_(std::move(buf)), n_(n) {}
-    std::shared_ptr<ListBuffer> buf_;
+    std::shared_ptr<const void> keep_;
+    ListBuffer* buf_ = nullptr;
+    const Value* data_ = nullptr;
     size_t n_ = 0;
+    friend ListPtr makeList(std::vector<Value> items);
     friend ListPtr listAppend(const ListPtr& base, std::vector<Value>&& extra);
 };
 
 struct ValueList {
     ListItems items;
 };
+
+// A new list holding `items` (adopted, not copied): one allocation for the
+// list and its buffer together, plus the elements' own -- as many as a list
+// that was a plain vector cost.
+ListPtr makeList(std::vector<Value> items);
+inline ListPtr makeList() { return makeList(std::vector<Value>{}); }
+
 
 // `base` followed by `extra`, sharing base's buffer whenever base is the
 // longest list using it and the buffer has room: amortized O(|extra|)
@@ -163,6 +176,19 @@ struct ValueList {
 // linear. Safe whatever else still holds `base`: base keeps seeing only
 // its own elements.
 ListPtr listAppend(const ListPtr& base, std::vector<Value>&& extra);
+
+// Builds a list literal or comprehension result from its contributions. When
+// the first contribution is `each <a list>`, the result starts AS that list
+// and everything after it is appended with listAppend -- so the other
+// accumulator idiom, f(i, [each acc, x]), extends acc in place just as
+// concat(acc, [x]) does, instead of copying it.
+struct ListBuilder {
+    ListPtr seed;              // the list an `each` started from, if any
+    std::vector<Value> rest;   // everything contributed after it
+    void push(Value v) { rest.push_back(std::move(v)); }
+    void appendEach(const Value& v);   // as appendEachInto
+    ListPtr finish();
+};
 
 // Insertion-ordered key/value pairs, not a map: object()'s iteration order
 // and `==` are order-sensitive (doc: openscad_evaluator/docs/evaluator.md,

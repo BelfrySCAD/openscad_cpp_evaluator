@@ -27,8 +27,8 @@ namespace {
 
 std::unordered_map<std::string, Value> vpSeed() {
     return {
-        {"$vpt", Value{std::make_shared<const ValueList>(ValueList{{Value{0.0}, Value{0.0}, Value{0.0}}})}},
-        {"$vpr", Value{std::make_shared<const ValueList>(ValueList{{Value{55.0}, Value{0.0}, Value{25.0}}})}},
+        {"$vpt", Value{makeList({Value{0.0}, Value{0.0}, Value{0.0}})}},
+        {"$vpr", Value{makeList({Value{55.0}, Value{0.0}, Value{25.0}})}},
         {"$vpd", Value{140.0}},
         {"$vpf", Value{22.5}},
     };

@@ -234,7 +234,7 @@ Value builtinDxfCross(Evaluator& ev, const CallArgs& args, const oscad::ASTNode&
             if (dem == 0.0) break;   // parallel: no cross, same as the reference
             const double ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / dem;
             std::vector<Value> xy{Value{x1 + ua * (x2 - x1)}, Value{y1 + ua * (y2 - y1)}};
-            return Value{std::make_shared<const ValueList>(ValueList{std::move(xy)})};
+            return Value{makeList(std::move(xy))};
         }
     }
     ev.warn("Can't find cross in '" + c.rawFile + "', layer '" + c.layer + "'!", &node.position());

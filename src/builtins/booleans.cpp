@@ -143,9 +143,9 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
 
     CSGParams params;
     params["op"] = Value{op};
-    params["group_sizes"] = Value{std::make_shared<const ValueList>(ValueList{std::move(groupSizes)})};
+    params["group_sizes"] = Value{makeList(std::move(groupSizes))};
     params["empty_is_a_group"] =
-        Value{std::make_shared<const ValueList>(ValueList{std::move(emptyIsAGroup)})};
+        Value{makeList(std::move(emptyIsAGroup))};
     return params;
 }
 

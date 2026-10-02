@@ -170,7 +170,7 @@ struct VmFrame {
     std::vector<Value> slots;
     std::vector<Value> stack;
     std::vector<bool> bound;
-    std::vector<std::vector<Value>> accumStack;
+    std::vector<ListBuilder> accumStack;
     std::vector<IterList> iterLists;
     // std::deque, NOT vector: Evaluator::enterUserCall stores
     // CallStackFrame::bodyCtx as a pointer to ctxChain.back() (see

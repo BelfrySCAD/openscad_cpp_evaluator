@@ -79,9 +79,9 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
         const double x = (pl && *pl && !(*pl)->items.empty()) ? toDoubleLenient((*pl)->items[0]) : 0.0;
         const double y = (pl && *pl && (*pl)->items.size() > 1) ? toDoubleLenient((*pl)->items[1]) : 0.0;
         std::vector<Value> xy = {Value{x}, Value{y}};
-        pts.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(xy)})});
+        pts.push_back(Value{makeList(std::move(xy))});
     }
-    params["pts"] = Value{std::make_shared<const ValueList>(ValueList{std::move(pts)})};
+    params["pts"] = Value{makeList(std::move(pts))};
 
     if (const ListPtr* pathsList = std::get_if<ListPtr>(&pathsArg); pathsList && *pathsList) {
         std::vector<Value> paths;
@@ -91,9 +91,9 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
             if (pathIdxList && *pathIdxList) {
                 for (const Value& idx : (*pathIdxList)->items) idxVals.push_back(Value{toDoubleLenient(idx)});
             }
-            paths.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(idxVals)})});
+            paths.push_back(Value{makeList(std::move(idxVals))});
         }
-        params["paths"] = Value{std::make_shared<const ValueList>(ValueList{std::move(paths)})};
+        params["paths"] = Value{makeList(std::move(paths))};
     } else {
         params["paths"] = Value{}; // undef == "no paths given" -- pts is one single contour
     }

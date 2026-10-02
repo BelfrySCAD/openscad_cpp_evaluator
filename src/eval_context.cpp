@@ -63,9 +63,9 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope, const oscad::Sc
     // same script starts working there with no edit.
     ctx.dyn->set("$_SUPPORTED_FEATURE", Value{true});
     ctx.dyn->set("$_BELFRYSCAD",
-                 Value{std::make_shared<const ValueList>(ValueList{{Value{double{OSCAD_EVAL_VERSION_MAJOR}},
+                 Value{makeList({Value{double{OSCAD_EVAL_VERSION_MAJOR}},
                                                                     Value{double{OSCAD_EVAL_VERSION_MINOR}},
-                                                                    Value{double{OSCAD_EVAL_VERSION_PATCH}}}})});
+                                                                    Value{double{OSCAD_EVAL_VERSION_PATCH}}})});
     ctx.let_ = TrailView<Value>::makeRoot();
     ctx.dynPositions = TrailView<const oscad::Position*>::makeRoot();
     ctx.childrenNodes = emptyChildrenNodes();

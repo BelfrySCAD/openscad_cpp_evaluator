@@ -11,7 +11,7 @@ using namespace oscadeval;
 namespace {
 
 Value list(std::vector<Value> items) {
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})};
+    return Value{makeList(std::move(items))};
 }
 
 Value num(double d) { return Value{d}; }
@@ -97,14 +97,17 @@ TEST(OscComparable, MismatchedTypesAreNotComparable) {
 
 TEST(Scale, MultipliesFlatAndNestedLists) {
     Value v = scale(2.0, list({num(1), num(2), num(3)}));
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 3u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 2.0);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 6.0);
 
     Value nested = scale(2.0, list({list({num(1), num(1)}), num(5)}));
-    auto outer = std::get<ListPtr>(nested)->items;
-    auto inner = std::get<ListPtr>(outer[0])->items;
+    const ListPtr outer_list = std::get<ListPtr>(nested);
+    const auto& outer = outer_list->items;
+    const ListPtr inner_list = std::get<ListPtr>(outer[0]);
+    const auto& inner = inner_list->items;
     EXPECT_DOUBLE_EQ(asNum(inner[0]), 2.0);
     EXPECT_DOUBLE_EQ(asNum(outer[1]), 10.0);
 }
@@ -127,7 +130,8 @@ TEST(DivScale, DivisionByZeroFollowsIeee754) {
 
 TEST(DivScale, OrdinaryDivision) {
     Value v = divScale(list({num(2), num(4), num(6)}), 2.0);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(items[2]), 3.0);
 }
@@ -136,7 +140,8 @@ TEST(DivScale, OrdinaryDivision) {
 
 TEST(VecAdd, ElementwiseListAdditionZipsToShorterLength) {
     Value v = vecAdd(list({num(1), num(2), num(3)}), list({num(10), num(20)}));
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     ASSERT_EQ(items.size(), 2u);
     EXPECT_DOUBLE_EQ(asNum(items[0]), 11.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 22.0);
@@ -144,8 +149,10 @@ TEST(VecAdd, ElementwiseListAdditionZipsToShorterLength) {
 
 TEST(VecAdd, NestedListsRecurse) {
     Value v = vecAdd(list({list({num(0), num(0)})}), list({list({num(1), num(2)})}));
-    auto outer = std::get<ListPtr>(v)->items;
-    auto inner = std::get<ListPtr>(outer[0])->items;
+    const ListPtr outer_list = std::get<ListPtr>(v);
+    const auto& outer = outer_list->items;
+    const ListPtr inner_list = std::get<ListPtr>(outer[0]);
+    const auto& inner = inner_list->items;
     EXPECT_DOUBLE_EQ(asNum(inner[0]), 1.0);
     EXPECT_DOUBLE_EQ(asNum(inner[1]), 2.0);
 }
@@ -184,7 +191,8 @@ TEST(Matmul, MatrixTimesVector) {
     // [[1,0],[0,1]] * [3,4] = [3,4]
     Value m = list({list({num(1), num(0)}), list({num(0), num(1)})});
     Value v = matmul(m, list({num(3), num(4)}));
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 3.0);
     EXPECT_DOUBLE_EQ(asNum(items[1]), 4.0);
 }
@@ -192,7 +200,8 @@ TEST(Matmul, MatrixTimesVector) {
 TEST(Matmul, VectorTimesMatrix) {
     Value m = list({list({num(1), num(2)}), list({num(3), num(4)})});
     Value v = matmul(list({num(1), num(1)}), m);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 4.0); // 1*1 + 1*3
     EXPECT_DOUBLE_EQ(asNum(items[1]), 6.0); // 1*2 + 1*4
 }
@@ -201,9 +210,12 @@ TEST(Matmul, MatrixTimesMatrix) {
     Value a = list({list({num(1), num(2)}), list({num(3), num(4)})});
     Value b = list({list({num(5), num(6)}), list({num(7), num(8)})});
     Value r = matmul(a, b);
-    auto rows = std::get<ListPtr>(r)->items;
-    auto row0 = std::get<ListPtr>(rows[0])->items;
-    auto row1 = std::get<ListPtr>(rows[1])->items;
+    const ListPtr rows_list = std::get<ListPtr>(r);
+    const auto& rows = rows_list->items;
+    const ListPtr row0_list = std::get<ListPtr>(rows[0]);
+    const auto& row0 = row0_list->items;
+    const ListPtr row1_list = std::get<ListPtr>(rows[1]);
+    const auto& row1 = row1_list->items;
     EXPECT_DOUBLE_EQ(asNum(row0[0]), 19.0); // 1*5+2*7
     EXPECT_DOUBLE_EQ(asNum(row0[1]), 22.0); // 1*6+2*8
     EXPECT_DOUBLE_EQ(asNum(row1[0]), 43.0); // 3*5+4*7
@@ -287,14 +299,16 @@ TEST(Truthy, RangeAndFunctionLiteralAreAlwaysTrue) {
 
 TEST(Scale, NonNumericListElementIsUndef) {
     Value v = scale(2.0, list({num(1), Value{std::string("x")}, num(3)}));
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 2.0);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(items[1]));
 }
 
 TEST(DivScale, NonNumericListElementIsUndef) {
     Value v = divScale(list({num(4), Value{std::string("x")}}), 2.0);
-    auto items = std::get<ListPtr>(v)->items;
+    const ListPtr items_list = std::get<ListPtr>(v);
+    const auto& items = items_list->items;
     EXPECT_DOUBLE_EQ(asNum(items[0]), 2.0);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(items[1]));
 }
@@ -614,7 +628,7 @@ namespace {
 ListPtr numsList(std::initializer_list<double> xs) {
     std::vector<Value> v;
     for (double x : xs) v.push_back(Value{x});
-    return std::make_shared<const ValueList>(ValueList{std::move(v)});
+    return makeList(std::move(v));
 }
 std::vector<double> nums(const ListPtr& l) {
     std::vector<double> out;
@@ -633,8 +647,9 @@ TEST(ListAppend, LeavesTheBaseListAsItWas) {
 
 TEST(ListAppend, AnAccumulatorCopiesOnlyLogarithmicallyOften) {
     // Appends extend the same storage in place, copying only when it fills
-    // and then into double the room: 10,000 appends, a handful of copies --
-    // where copying every time (the old concat) made the loop quadratic.
+    // and then into half again the room: 10,000 appends, about
+    // log1.5(10000) = 23 copies -- where copying every time (the old
+    // concat) made the loop quadratic.
     ListPtr acc = numsList({0});
     int copies = 0;
     for (int i = 1; i < 10000; ++i) {
@@ -642,7 +657,7 @@ TEST(ListAppend, AnAccumulatorCopiesOnlyLogarithmicallyOften) {
         if (next->items.data() != acc->items.data()) ++copies;
         acc = next;   // the previous list is still alive here, as in a call chain
     }
-    EXPECT_LE(copies, 12);
+    EXPECT_LE(copies, 26);
     ASSERT_EQ(acc->items.size(), 10000u);
     for (size_t i = 0; i < 10000; ++i) EXPECT_EQ(std::get<double>(acc->items[i]), double(i));
 }
