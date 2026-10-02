@@ -133,7 +133,7 @@ CSGParams resolveCube(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     } else if (l && *l && (*l)->items.size() == 3 &&
                std::all_of((*l)->items.begin(), (*l)->items.end(),
                            [](const Value& v) { return std::holds_alternative<double>(v); })) {
-        sizeVec = (*l)->items;
+        sizeVec = (*l)->items.toVector();
     } else if (!std::holds_alternative<std::monostate>(sizeArg)) {
         ev.warn("Unable to convert cube(size=" + fmtValue(sizeArg) +
                     ", ...) parameter to a number or a vec3 of numbers",

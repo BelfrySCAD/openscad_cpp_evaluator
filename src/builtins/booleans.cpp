@@ -313,7 +313,7 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
     const std::string& op = std::get<std::string>(params.at("op"));
     const auto& groupSizes = std::get<ListPtr>(params.at("group_sizes"))->items;
     const auto emptyIsAGroupIt = params.find("empty_is_a_group");
-    const std::vector<Value>* emptyIsAGroup =
+    const ListItems* emptyIsAGroup =
         emptyIsAGroupIt == params.end()
             ? nullptr
             : &std::get<ListPtr>(emptyIsAGroupIt->second)->items;

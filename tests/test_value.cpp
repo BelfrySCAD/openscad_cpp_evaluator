@@ -607,3 +607,71 @@ TEST(StringEscapes, ABackslashBeforeANewlineTakesTheWholeLineEnding) {
     EXPECT_EQ(unescapeStringLiteral("x\\\r\ny"), "xy");   // reference keeps the CR
     EXPECT_EQ(unescapeStringLiteral("x\\\ry"), "xy");
 }
+
+// --- listAppend: lists that are prefixes of one another share a buffer ---
+
+namespace {
+ListPtr numsList(std::initializer_list<double> xs) {
+    std::vector<Value> v;
+    for (double x : xs) v.push_back(Value{x});
+    return std::make_shared<const ValueList>(ValueList{std::move(v)});
+}
+std::vector<double> nums(const ListPtr& l) {
+    std::vector<double> out;
+    for (const Value& v : l->items) out.push_back(std::get<double>(v));
+    return out;
+}
+std::vector<Value> one(double x) { return {Value{x}}; }
+} // namespace
+
+TEST(ListAppend, LeavesTheBaseListAsItWas) {
+    const ListPtr base = numsList({1, 2});
+    const ListPtr longer = listAppend(base, one(3));
+    EXPECT_EQ(nums(base), (std::vector<double>{1, 2}));
+    EXPECT_EQ(nums(longer), (std::vector<double>{1, 2, 3}));
+}
+
+TEST(ListAppend, AnAccumulatorCopiesOnlyLogarithmicallyOften) {
+    // Appends extend the same storage in place, copying only when it fills
+    // and then into double the room: 10,000 appends, a handful of copies --
+    // where copying every time (the old concat) made the loop quadratic.
+    ListPtr acc = numsList({0});
+    int copies = 0;
+    for (int i = 1; i < 10000; ++i) {
+        const ListPtr next = listAppend(acc, one(i));
+        if (next->items.data() != acc->items.data()) ++copies;
+        acc = next;   // the previous list is still alive here, as in a call chain
+    }
+    EXPECT_LE(copies, 12);
+    ASSERT_EQ(acc->items.size(), 10000u);
+    for (size_t i = 0; i < 10000; ++i) EXPECT_EQ(std::get<double>(acc->items[i]), double(i));
+}
+
+TEST(ListAppend, TwoBranchesFromOnePrefixStayApart) {
+    // Only the list ending at the buffer's frontier may extend it; a second
+    // extension of the same prefix must copy rather than overwrite the
+    // first one's element.
+    const ListPtr base = listAppend(listAppend(numsList({0}), one(1)), one(2));   // has spare capacity
+    const ListPtr a = listAppend(base, one(10));
+    const ListPtr b = listAppend(base, one(20));
+    EXPECT_EQ(nums(a), (std::vector<double>{0, 1, 2, 10}));
+    EXPECT_EQ(nums(b), (std::vector<double>{0, 1, 2, 20}));
+    EXPECT_EQ(nums(base), (std::vector<double>{0, 1, 2}));
+    // ...and each branch can go on growing independently.
+    EXPECT_EQ(nums(listAppend(a, one(11))), (std::vector<double>{0, 1, 2, 10, 11}));
+    EXPECT_EQ(nums(listAppend(b, one(21))), (std::vector<double>{0, 1, 2, 20, 21}));
+}
+
+TEST(ListAppend, AOneOffConcatIsAllocatedExactly) {
+    // Only a list that has been appended to grows geometrically, so a plain
+    // concat(a, b) costs no spare memory.
+    const ListPtr r = listAppend(numsList({1, 2, 3}), one(4));
+    EXPECT_EQ(r->items.size(), 4u);
+    EXPECT_EQ(nums(r), (std::vector<double>{1, 2, 3, 4}));
+}
+
+TEST(ListAppend, EmptyExtraAndNullBase) {
+    const ListPtr base = numsList({1});
+    EXPECT_EQ(listAppend(base, {}), base);
+    EXPECT_EQ(nums(listAppend(nullptr, one(5))), (std::vector<double>{5}));
+}

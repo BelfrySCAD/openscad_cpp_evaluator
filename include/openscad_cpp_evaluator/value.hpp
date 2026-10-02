@@ -2,7 +2,9 @@
 
 #include "openscad_cpp_evaluator/osc_range.hpp"
 
+#include <atomic>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -98,12 +100,69 @@ inline std::shared_ptr<TrailView<Value>> capturedLetTrail(const Closure& c) {
     return std::static_pointer_cast<TrailView<Value>>(c.capturedLet);
 }
 
-// Defined after Value so both can hold Value by value -- the standard
-// recursive-variant pattern (indirection through a forward-declared,
-// heap-allocated aggregate).
-struct ValueList {
-    std::vector<Value> items;
+// A list's elements: a read-only view of the first `size()` elements of a
+// buffer that other lists may share. Lists that are prefixes of one another
+// share one buffer, which is what makes repeated appending cheap: `acc`
+// and `concat(acc, [x])` are the same buffer, the second one element
+// longer (listAppend). Defined after Value so both can hold Value by value
+// -- the standard recursive-variant pattern.
+//
+// The buffer only ever grows within the capacity it was given, so element
+// addresses never move while any view of it is alive, and an element, once
+// written, is never changed. `used` is how far the longest view reaches;
+// only a list ending exactly there may extend it, claiming the new slots
+// with one compare-and-swap, so two lists sharing a prefix can never write
+// the same slot (the loser copies).
+struct ListBuffer {
+    std::vector<Value> v;
+    std::atomic<size_t> used;
+    // Set when this buffer came from appending: a list that was appended
+    // to once is likely to be again, so ITS copies grow geometrically,
+    // while a one-off concat's result is allocated at exactly its size.
+    bool fromAppend = false;
+    explicit ListBuffer(std::vector<Value>&& items) : v(std::move(items)), used(v.size()) {}
 };
+
+class ListItems {
+public:
+    ListItems() = default;
+    ListItems(std::vector<Value>&& items)                       // NOLINT: implicit, as the old vector was
+        : buf_(std::make_shared<ListBuffer>(std::move(items))), n_(buf_->v.size()) {}
+    ListItems(const std::vector<Value>& items) : ListItems(std::vector<Value>(items)) {}  // NOLINT
+    ListItems(std::initializer_list<Value> items) : ListItems(std::vector<Value>(items)) {}
+
+    size_t size() const { return n_; }
+    bool empty() const { return n_ == 0; }
+    const Value* data() const { return buf_ ? buf_->v.data() : nullptr; }
+    const Value* begin() const { return data(); }
+    const Value* end() const { return data() + n_; }
+    const Value& operator[](size_t i) const { return data()[i]; }
+    const Value& at(size_t i) const;
+    const Value& front() const { return data()[0]; }
+    const Value& back() const { return data()[n_ - 1]; }
+    // A copy as a plain vector, for the few callers that build on one.
+    // Explicit, so a copy is never made by accident binding a reference.
+    explicit operator std::vector<Value>() const { return std::vector<Value>(begin(), end()); }
+    std::vector<Value> toVector() const { return std::vector<Value>(begin(), end()); }
+
+private:
+    ListItems(std::shared_ptr<ListBuffer> buf, size_t n) : buf_(std::move(buf)), n_(n) {}
+    std::shared_ptr<ListBuffer> buf_;
+    size_t n_ = 0;
+    friend ListPtr listAppend(const ListPtr& base, std::vector<Value>&& extra);
+};
+
+struct ValueList {
+    ListItems items;
+};
+
+// `base` followed by `extra`, sharing base's buffer whenever base is the
+// longest list using it and the buffer has room: amortized O(|extra|)
+// rather than O(|base| + |extra|), which is what turns the idiomatic
+// tail-recursive accumulator, f(i, concat(acc, [x])), from quadratic into
+// linear. Safe whatever else still holds `base`: base keeps seeing only
+// its own elements.
+ListPtr listAppend(const ListPtr& base, std::vector<Value>&& extra);
 
 // Insertion-ordered key/value pairs, not a map: object()'s iteration order
 // and `==` are order-sensitive (doc: openscad_evaluator/docs/evaluator.md,

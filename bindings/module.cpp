@@ -73,9 +73,10 @@ oscadeval::Value pyToValue(nb::handle v) {
     if (nb::isinstance<nb::int_>(v) || nb::isinstance<nb::float_>(v)) return oscadeval::Value{nb::cast<double>(v)};
     if (nb::isinstance<nb::str>(v)) return oscadeval::Value{nb::cast<std::string>(v)};
     if (nb::isinstance<nb::list>(v) || nb::isinstance<nb::tuple>(v)) {
-        oscadeval::ValueList vl;
-        for (nb::handle item : nb::borrow<nb::sequence>(v)) vl.items.push_back(pyToValue(item));
-        return oscadeval::Value{oscadeval::ListPtr(std::make_shared<const oscadeval::ValueList>(std::move(vl)))};
+        std::vector<oscadeval::Value> items;
+        for (nb::handle item : nb::borrow<nb::sequence>(v)) items.push_back(pyToValue(item));
+        return oscadeval::Value{oscadeval::ListPtr(
+            std::make_shared<const oscadeval::ValueList>(oscadeval::ValueList{std::move(items)}))};
     }
     return oscadeval::Value{}; // monostate = undef
 }

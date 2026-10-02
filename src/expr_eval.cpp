@@ -42,7 +42,7 @@ std::optional<bool> valueLess(const Value& a, const Value& b) {
 
     const ListPtr& la = std::get<ListPtr>(a);
     const ListPtr& lb = std::get<ListPtr>(b);
-    static const std::vector<Value> kEmpty;
+    static const ListItems kEmpty;
     const auto& ia = la ? la->items : kEmpty;
     const auto& ib = lb ? lb->items : kEmpty;
     const size_t n = std::min(ia.size(), ib.size());

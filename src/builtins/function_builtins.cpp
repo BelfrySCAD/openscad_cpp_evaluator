@@ -616,11 +616,11 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
     const unsigned numReturns = static_cast<unsigned>(static_cast<long long>(nrRaw));
     const unsigned indexCol = static_cast<unsigned>(static_cast<long long>(icRaw));
 
-    static const std::vector<Value> kNoItems;
+    static const ListItems kNoItems;
     const ListPtr* tablePtr = std::get_if<ListPtr>(&tableArg);
-    const std::vector<Value>& table = (tablePtr && *tablePtr) ? (*tablePtr)->items : kNoItems;
+    const ListItems& table = (tablePtr && *tablePtr) ? (*tablePtr)->items : kNoItems;
 
-    const auto itemsOf = [](const Value& v) -> const std::vector<Value>& {
+    const auto itemsOf = [](const Value& v) -> const ListItems& {
         const ListPtr* l = std::get_if<ListPtr>(&v);
         return (l && *l) ? (*l)->items : kNoItems;
     };
@@ -629,7 +629,7 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
     // only when the entry really is a long enough vector.
     const auto hits = [&](const Value& needle, const Value& entry) {
         if (indexCol == 0 && oscEqual(needle, entry)) return true;
-        const std::vector<Value>& ev2 = itemsOf(entry);
+        const ListItems& ev2 = itemsOf(entry);
         return indexCol < ev2.size() && oscEqual(needle, ev2[indexCol]);
     };
     const auto num = [](size_t j) { return Value{static_cast<double>(j)}; };
@@ -682,7 +682,7 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
             unsigned matchCount = 0;
             std::vector<Value> resultvec;
             for (size_t j = 0; j < table.size(); ++j) {
-                const std::vector<Value>& entryVec = itemsOf(table[j]);
+                const ListItems& entryVec = itemsOf(table[j]);
                 if (entryVec.size() <= indexCol) {
                     ev.warn("Invalid entry in search vector at index " + std::to_string(j) +
                                 ", required number of values in the entry: " + std::to_string(indexCol + 1) +
@@ -1162,9 +1162,9 @@ bool checkMinMax(Evaluator& ev, const std::string& name, const CallArgs& args, c
         return false;
     }
     if (nPos == 1 && std::holds_alternative<ListPtr>(positionalAt(args, 0))) {
-        static const std::vector<Value> kEmptyItems;
+        static const ListItems kEmptyItems;
         const ListPtr& l = std::get<ListPtr>(positionalAt(args, 0));
-        const std::vector<Value>& items = l ? l->items : kEmptyItems;
+        const ListItems& items = l ? l->items : kEmptyItems;
         if (items.empty()) {
             warnArity(ev, name, "at least 1 vector element", 0, pos);
             return false;
@@ -1346,14 +1346,21 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
                                  toDoubleLenient(getArg(args, 2, "value_count", Value{})), getArg(args, 3, "seed", Value{}));
         }
         case BuiltinFnId::Concat: {
+            // Everything after the first argument, appended to the first
+            // when it is a list: listAppend extends its buffer in place when
+            // it can, so an accumulator loop is linear, not quadratic.
+            const size_t count = positionalCount(args);
+            const ListPtr* first = count ? std::get_if<ListPtr>(&positionalAt(args, 0)) : nullptr;
             std::vector<Value> out;
-            for (const Value& a : allPositional(args)) {
+            for (size_t i = (first && *first) ? 1 : 0; i < count; ++i) {
+                const Value& a = positionalAt(args, i);
                 if (const ListPtr* l = std::get_if<ListPtr>(&a); l && *l) {
                     out.insert(out.end(), (*l)->items.begin(), (*l)->items.end());
                 } else {
                     out.push_back(a);
                 }
             }
+            if (first && *first) return Value{listAppend(*first, std::move(out))};
             return listOf(std::move(out));
         }
         case BuiltinFnId::Len: {

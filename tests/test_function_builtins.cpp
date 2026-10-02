@@ -23,7 +23,7 @@ double asNum(const Value& v) { return std::get<double>(v); }
 bool asBool(const Value& v) { return std::get<bool>(v); }
 bool isUndef(const Value& v) { return std::holds_alternative<std::monostate>(v); }
 std::string asStr(const Value& v) { return std::get<std::string>(v); }
-const std::vector<Value>& asList(const Value& v) { return std::get<ListPtr>(v)->items; }
+const ListItems& asList(const Value& v) { return std::get<ListPtr>(v)->items; }
 
 } // namespace
 
@@ -742,7 +742,7 @@ TEST(LinearSolve, SolvesASquareSystem) {
     // asList() returns a reference INTO v, so v has to outlive it -- taking
     // asList(evalSrc(...)) directly dangles the moment the temporary dies.
     const Value v = evalSrc("linear_solve([[2,1],[1,3]], [5,10]).x", ev);
-    const std::vector<Value>& x = asList(v);
+    const ListItems& x = asList(v);
     ASSERT_EQ(x.size(), 2u);
     EXPECT_NEAR(asNum(x[0]), 1.0, 1e-12);
     EXPECT_NEAR(asNum(x[1]), 3.0, 1e-12);
@@ -779,7 +779,7 @@ TEST(LinearSolve, SingularityIsRelativeToTheMatrixNotAbsolute) {
     Evaluator ev;
     EXPECT_FALSE(asBool(evalSrc("linear_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).singular", ev)));
     const Value v = evalSrc("linear_solve([[2e-10,0],[0,2e-10]], [1e-10,1e-10]).x", ev);
-    const std::vector<Value>& x = asList(v);
+    const ListItems& x = asList(v);
     ASSERT_EQ(x.size(), 2u);
     EXPECT_NEAR(asNum(x[0]), 0.5, 1e-9);
 }
@@ -789,9 +789,9 @@ TEST(LinearSolve, AMatrixRightHandSideSolvesEveryColumn) {
     // Solving against the identity is the inverse; [[2,1],[1,3]] has
     // det 5, so the inverse is [[0.6,-0.2],[-0.2,0.4]].
     const Value v = evalSrc("linear_solve([[2,1],[1,3]], [[1,0],[0,1]]).x", ev);
-    const std::vector<Value>& rows = asList(v);
+    const ListItems& rows = asList(v);
     ASSERT_EQ(rows.size(), 2u);
-    const std::vector<Value>& r0 = asList(rows[0]);
+    const ListItems& r0 = asList(rows[0]);
     ASSERT_EQ(r0.size(), 2u);
     EXPECT_NEAR(asNum(r0[0]), 0.6, 1e-12);
     EXPECT_NEAR(asNum(r0[1]), -0.2, 1e-12);
@@ -814,7 +814,7 @@ TEST(LinearSolve, OverdeterminedGivesTheLeastSquaresFit) {
     // y = 1 + 2x, so the residual is zero and a=1, b=2.
     Evaluator ev;
     const Value v = evalSrc("linear_solve([[1,0],[1,1],[1,2],[1,3]], [1,3,5,7]).x", ev);
-    const std::vector<Value>& x = asList(v);
+    const ListItems& x = asList(v);
     ASSERT_EQ(x.size(), 2u);
     EXPECT_NEAR(asNum(x[0]), 1.0, 1e-10);
     EXPECT_NEAR(asNum(x[1]), 2.0, 1e-10);
@@ -826,7 +826,7 @@ TEST(LinearSolve, OverdeterminedWithNoExactSolutionMinimisesTheResidual) {
     // read off this implementation.
     Evaluator ev;
     const Value v = evalSrc("linear_solve([[1,0],[1,1],[1,2],[1,3]], [0,1,2,10]).x", ev);
-    const std::vector<Value>& x = asList(v);
+    const ListItems& x = asList(v);
     ASSERT_EQ(x.size(), 2u);
     EXPECT_NEAR(asNum(x[0]), -1.4, 1e-9);
     EXPECT_NEAR(asNum(x[1]), 3.1, 1e-9);
@@ -838,7 +838,7 @@ TEST(LinearSolve, UnderdeterminedGivesTheMinimUmNormSolution) {
     // asserts the NORM -- that is the whole claim of a minimum-norm solve.
     Evaluator ev;
     const Value v = evalSrc("linear_solve([[1,1]], [2]).x", ev);
-    const std::vector<Value>& x = asList(v);
+    const ListItems& x = asList(v);
     ASSERT_EQ(x.size(), 2u);
     EXPECT_NEAR(asNum(x[0]), 1.0, 1e-12);
     EXPECT_NEAR(asNum(x[1]), 1.0, 1e-12);
@@ -848,7 +848,7 @@ TEST(LinearSolve, UnderdeterminedSatisfiesEveryEquation) {
     // 2 x 3: the plane_intersection shape BOSL2 relies on.
     Evaluator ev;
     const Value v = evalSrc("linear_solve([[1,0,1],[0,1,1]], [3,5]).x", ev);
-    const std::vector<Value>& x = asList(v);
+    const ListItems& x = asList(v);
     ASSERT_EQ(x.size(), 3u);
     const double a = asNum(x[0]), b = asNum(x[1]), c = asNum(x[2]);
     EXPECT_NEAR(a + c, 3.0, 1e-12);
