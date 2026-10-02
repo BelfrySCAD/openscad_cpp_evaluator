@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 
 namespace oscadeval {
 
@@ -205,8 +206,8 @@ namespace {
 // matrix*matrix branch of multiply_visitor -- including which check fires
 // first, since that decides which diagnostic a malformed operand produces.
 // `fail` records the message and returns undef.
-const std::vector<Value>& itemsOf(const Value& v) {
-    static const std::vector<Value> kEmpty;
+const ListItems& itemsOf(const Value& v) {
+    static const ListItems kEmpty;
     const ListPtr* l = std::get_if<ListPtr>(&v);
     return (l && *l) ? (*l)->items : kEmpty;
 }
@@ -219,7 +220,7 @@ Value fail(std::string* error, std::string message) {
 }
 
 // Vector dot product. Sizes are equal by the caller's own check.
-Value multVecVec(const std::vector<Value>& v1, const std::vector<Value>& v2, std::string* error) {
+Value multVecVec(const ListItems& v1, const ListItems& v2, std::string* error) {
     double r = 0.0;
     for (size_t i = 0; i < v1.size(); ++i) {
         if (!isNum(v1[i]) || !isNum(v2[i])) {
@@ -230,11 +231,11 @@ Value multVecVec(const std::vector<Value>& v1, const std::vector<Value>& v2, std
     return Value{r};
 }
 
-Value multMatVec(const std::vector<Value>& mat, const std::vector<Value>& vec, std::string* error) {
+Value multMatVec(const ListItems& mat, const ListItems& vec, std::string* error) {
     std::vector<Value> out;
     out.reserve(mat.size());
     for (size_t i = 0; i < mat.size(); ++i) {
-        const std::vector<Value>& row = itemsOf(mat[i]);
+        const ListItems& row = itemsOf(mat[i]);
         if (!isVec(mat[i]) || row.size() != vec.size()) {
             return fail(error, "Matrix must be rectangular. Problem at row " + std::to_string(i));
         }
@@ -254,14 +255,14 @@ Value multMatVec(const std::vector<Value>& mat, const std::vector<Value>& vec, s
     return makeList(std::move(out));
 }
 
-Value multVecMat(const std::vector<Value>& vec, const std::vector<Value>& mat, std::string* error) {
+Value multVecMat(const ListItems& vec, const ListItems& mat, std::string* error) {
     const size_t firstRowSize = itemsOf(mat[0]).size();
     std::vector<Value> out;
     out.reserve(firstRowSize);
     for (size_t i = 0; i < firstRowSize; ++i) {
         double re = 0.0;
         for (size_t j = 0; j < vec.size(); ++j) {
-            const std::vector<Value>& row = itemsOf(mat[j]);
+            const ListItems& row = itemsOf(mat[j]);
             if (!isVec(mat[j]) || row.size() != firstRowSize) {
                 return fail(error, "Matrix must be rectangular. Problem at row " + std::to_string(j));
             }
@@ -282,8 +283,8 @@ Value multVecMat(const std::vector<Value>& vec, const std::vector<Value>& mat, s
 } // namespace
 
 Value matmul(const Value& a, const Value& b, std::string* error) {
-    const std::vector<Value>& al = itemsOf(a);
-    const std::vector<Value>& bl = itemsOf(b);
+    const ListItems& al = itemsOf(a);
+    const ListItems& bl = itemsOf(b);
     // The reference checks emptiness before anything else, so `[] * [1,2]`
     // is this message rather than a length mismatch.
     if (al.empty() || bl.empty()) return fail(error, "Multiplication is undefined on empty vectors");
@@ -323,7 +324,7 @@ Value matmul(const Value& a, const Value& b, std::string* error) {
             std::vector<Value> rows;
             rows.reserve(al.size());
             for (size_t i = 0; i < al.size(); ++i) {
-                const std::vector<Value>& srcRow = itemsOf(al[i]);
+                const ListItems& srcRow = itemsOf(al[i]);
                 if (srcRow.size() != bl.size()) {
                     return fail(error,
                                 "matrix*matrix left operand row length does not match right operand row count (" +
@@ -616,6 +617,39 @@ void appendEachInto(std::vector<Value>& out, const Value& v) {
         return;
     }
     if (!std::holds_alternative<std::monostate>(v)) out.push_back(v);
+}
+
+const Value& ListItems::at(size_t i) const {
+    if (i >= n_) throw std::out_of_range("list index out of range");
+    return data()[i];
+}
+
+ListPtr listAppend(const ListPtr& base, std::vector<Value>&& extra) {
+    if (!base) return std::make_shared<const ValueList>(ValueList{std::move(extra)});
+    if (extra.empty()) return base;
+    const ListItems& items = base->items;
+    const size_t n = items.n_, k = extra.size();
+    if (const auto& buf = items.buf_; buf && buf->v.capacity() - n >= k) {
+        size_t expected = n;
+        if (buf->used.compare_exchange_strong(expected, n + k)) {
+            // This list ended at the buffer's frontier and now owns the
+            // slots after it. Within capacity, push_back never reallocates,
+            // so every other view's elements stay where they are.
+            for (Value& x : extra) buf->v.push_back(std::move(x));
+            return std::make_shared<const ValueList>(ValueList{ListItems(buf, n + k)});
+        }
+    }
+    // Copy: a fresh buffer, given room to grow if this list has been
+    // appended to before (the accumulator case), exact otherwise.
+    const bool growing = items.buf_ && items.buf_->fromAppend;
+    std::vector<Value> out;
+    out.reserve(growing ? std::max<size_t>(2 * (n + k), 16) : n + k);
+    out.insert(out.end(), items.begin(), items.end());
+    for (Value& x : extra) out.push_back(std::move(x));
+    auto buf = std::make_shared<ListBuffer>(std::move(out));
+    buf->fromAppend = true;
+    const size_t len = buf->v.size();
+    return std::make_shared<const ValueList>(ValueList{ListItems(std::move(buf), len)});
 }
 
 } // namespace oscadeval
