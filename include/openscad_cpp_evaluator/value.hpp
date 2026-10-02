@@ -164,6 +164,19 @@ struct ValueList {
 // its own elements.
 ListPtr listAppend(const ListPtr& base, std::vector<Value>&& extra);
 
+// Builds a list literal or comprehension result from its contributions. When
+// the first contribution is `each <a list>`, the result starts AS that list
+// and everything after it is appended with listAppend -- so the other
+// accumulator idiom, f(i, [each acc, x]), extends acc in place just as
+// concat(acc, [x]) does, instead of copying it.
+struct ListBuilder {
+    ListPtr seed;              // the list an `each` started from, if any
+    std::vector<Value> rest;   // everything contributed after it
+    void push(Value v) { rest.push_back(std::move(v)); }
+    void appendEach(const Value& v);   // as appendEachInto
+    ListPtr finish();
+};
+
 // Insertion-ordered key/value pairs, not a map: object()'s iteration order
 // and `==` are order-sensitive (doc: openscad_evaluator/docs/evaluator.md,
 // the object() entry).

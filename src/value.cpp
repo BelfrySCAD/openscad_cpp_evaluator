@@ -619,6 +619,21 @@ void appendEachInto(std::vector<Value>& out, const Value& v) {
     if (!std::holds_alternative<std::monostate>(v)) out.push_back(v);
 }
 
+void ListBuilder::appendEach(const Value& v) {
+    if (!seed && rest.empty()) {
+        if (const ListPtr* l = std::get_if<ListPtr>(&v); l && *l) {
+            seed = *l;
+            return;
+        }
+    }
+    appendEachInto(rest, v);
+}
+
+ListPtr ListBuilder::finish() {
+    if (seed) return listAppend(seed, std::move(rest));
+    return std::make_shared<const ValueList>(ValueList{std::move(rest)});
+}
+
 const Value& ListItems::at(size_t i) const {
     if (i >= n_) throw std::out_of_range("list index out of range");
     return data()[i];

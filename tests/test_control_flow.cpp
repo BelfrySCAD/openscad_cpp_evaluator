@@ -1896,3 +1896,46 @@ TEST(RangeDirection, EveryRangeBuildingConstructWarns) {
 }
 
 
+
+// `[each acc, ...]` starts from acc itself and appends (ListBuilder), on the
+// VM and the interpreter alike. These pin the cases where it must NOT, or
+// where the result could go wrong if it did.
+namespace {
+std::vector<std::string> echoesWithVm(bool vm, const std::string& code) {
+    Evaluator::setBytecodeVmEnabledForTesting(vm);
+    std::vector<std::string> out;
+    runScript(code, [&](const std::string& msg) { out.push_back(msg); });
+    Evaluator::setBytecodeVmEnabledForTesting(std::nullopt);
+    return out;
+}
+} // namespace
+
+TEST(ListComprehension, EachSeedingKeepsEveryShapeOfEachRight) {
+    const std::string code =
+        "acc = [1, 2];\n"
+        "a = [each acc, 3];\n"
+        "b = [each acc, 4];\n"                  // a second branch from the same list
+        "echo(acc, a, b);\n"
+        "echo([each acc]);\n"                   // nothing after the seed
+        "echo([each \"ab\", 1]);\n"             // a string expands, it does not seed
+        "echo([each [0:2], 9]);\n"              // so does a range
+        "echo([each undef, 5]);\n"              // undef contributes nothing
+        "echo([5, each acc]);\n"                // not first: an ordinary each
+        "echo([each acc, each [7, 8], for (i = [0:1]) i]);\n"
+        "echo([for (k = [0:1]) each [k, k]]);\n"    // comprehension each (AccumMergeEach)
+        "function g(i, l) = i >= 5 ? l : g(i + 1, [each l, i]);\n"
+        "echo(g(0, []));\n";
+    const std::vector<std::string> expected = {
+        "ECHO: [1, 2], [1, 2, 3], [1, 2, 4]",
+        "ECHO: [1, 2]",
+        "ECHO: [\"a\", \"b\", 1]",
+        "ECHO: [0, 1, 2, 9]",
+        "ECHO: [5]",
+        "ECHO: [5, 1, 2]",
+        "ECHO: [1, 2, 7, 8, 0, 1]",
+        "ECHO: [0, 0, 1, 1]",
+        "ECHO: [0, 1, 2, 3, 4]",
+    };
+    EXPECT_EQ(echoesWithVm(true, code), expected);
+    EXPECT_EQ(echoesWithVm(false, code), expected);
+}

@@ -803,28 +803,28 @@ Value driveVm(Evaluator& ev, size_t floor) {
                 case Op::AccumAppendOne: {
                     Value v = std::move(f.stack.back());
                     f.stack.pop_back();
-                    f.accumStack.back().push_back(std::move(v));
+                    f.accumStack.back().push(std::move(v));
                     ++f.pc;
                     break;
                 }
                 case Op::AccumAppendEach: {
                     Value v = std::move(f.stack.back());
                     f.stack.pop_back();
-                    appendEachInto(f.accumStack.back(), v);
+                    f.accumStack.back().appendEach(v);
                     ++f.pc;
                     break;
                 }
                 case Op::AccumClose: {
-                    std::vector<Value> items = std::move(f.accumStack.back());
+                    ListPtr list = f.accumStack.back().finish();
                     f.accumStack.pop_back();
-                    f.stack.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(items)})});
+                    f.stack.push_back(Value{std::move(list)});
                     ++f.pc;
                     break;
                 }
                 case Op::AccumMergeEach: {
-                    std::vector<Value> inner = std::move(f.accumStack.back());
+                    const ListPtr inner = f.accumStack.back().finish();
                     f.accumStack.pop_back();
-                    for (const Value& item : inner) appendEachInto(f.accumStack.back(), item);
+                    for (const Value& item : inner->items) f.accumStack.back().appendEach(item);
                     ++f.pc;
                     break;
                 }
