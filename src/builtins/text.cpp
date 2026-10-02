@@ -69,8 +69,7 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     std::vector<Value> glyphs;
     glyphs.reserve(m.glyphs.size());
     for (const TextMeasurement::Placed& g : m.glyphs) {
-        glyphs.push_back(Value{std::make_shared<const ValueList>(
-            ValueList{{Value{static_cast<double>(g.glyph)}, Value{g.x}, Value{g.y}}})});
+        glyphs.push_back(Value{makeList({Value{static_cast<double>(g.glyph)}, Value{g.x}, Value{g.y}})});
     }
 
     CSGParams params;
@@ -89,7 +88,7 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     params["segs"] = Value{static_cast<double>(segs)};
     params["offset_x"] = Value{offsetX};
     params["offset_y"] = Value{offsetY};
-    params["glyphs"] = Value{std::make_shared<const ValueList>(ValueList{std::move(glyphs)})};
+    params["glyphs"] = Value{makeList(std::move(glyphs))};
     params["color"] = colorToValue(effCtx.color);
     return params;
 }

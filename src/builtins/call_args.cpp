@@ -93,10 +93,10 @@ Value callArgsToValue(const CallArgs& args) {
     std::vector<std::pair<std::string, Value>> namedVec(args.named.begin(), args.named.end());
 
     std::vector<Value> outer = {
-        Value{std::make_shared<const ValueList>(ValueList{std::move(posVec)})},
+        Value{makeList(std::move(posVec))},
         Value{std::make_shared<const ValueObject>(ValueObject{std::move(namedVec)})},
     };
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(outer)})};
+    return Value{makeList(std::move(outer))};
 }
 
 const oscad::Expression* argExpr(const oscad::Argument& arg) {

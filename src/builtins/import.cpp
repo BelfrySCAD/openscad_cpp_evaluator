@@ -66,7 +66,7 @@ Value jsonToValue(const nlohmann::ordered_json& j) {
         std::vector<Value> items;
         items.reserve(j.size());
         for (const auto& el : j) items.push_back(jsonToValue(el));
-        return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})};
+        return Value{makeList(std::move(items))};
     }
     if (j.is_object()) {
         std::vector<std::pair<std::string, Value>> items;
@@ -102,20 +102,19 @@ Value meshToVnf(const LoadedMesh& mesh) {
             if (it == vertMap.end()) {
                 idx = static_cast<int>(vertsOut.size());
                 vertMap.emplace(v, idx);
-                vertsOut.push_back(Value{std::make_shared<const ValueList>(
-                    ValueList{{Value{v[0]}, Value{v[1]}, Value{v[2]}}})});
+                vertsOut.push_back(Value{makeList({Value{v[0]}, Value{v[1]}, Value{v[2]}})});
             } else {
                 idx = it->second;
             }
             face.push_back(Value{static_cast<double>(idx)});
         }
-        facesOut.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(face)})});
+        facesOut.push_back(Value{makeList(std::move(face))});
     }
     std::vector<Value> outer = {
-        Value{std::make_shared<const ValueList>(ValueList{std::move(vertsOut)})},
-        Value{std::make_shared<const ValueList>(ValueList{std::move(facesOut)})},
+        Value{makeList(std::move(vertsOut))},
+        Value{makeList(std::move(facesOut))},
     };
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(outer)})};
+    return Value{makeList(std::move(outer))};
 }
 
 } // namespace
@@ -152,10 +151,10 @@ Value contoursToValue(const std::vector<Contour2d>& contours) {
     for (const auto& c : contours) {
         std::vector<Value> pts;
         pts.reserve(c.size());
-        for (const auto& p : c) pts.push_back(Value{std::make_shared<const ValueList>(ValueList{{Value{p[0]}, Value{p[1]}}})});
-        outer.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(pts)})});
+        for (const auto& p : c) pts.push_back(Value{makeList({Value{p[0]}, Value{p[1]}})});
+        outer.push_back(Value{makeList(std::move(pts))});
     }
-    return Value{std::make_shared<const ValueList>(ValueList{std::move(outer)})};
+    return Value{makeList(std::move(outer))};
 }
 
 std::vector<Contour2d> valueToContours(const Value& v) {
@@ -284,8 +283,8 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         params["kind"] = Value{std::string("mesh")};
         params["repair"] = Value{repair};
         params["tolerance"] = toleranceArg;
-        params["verts"] = Value{std::make_shared<const ValueList>(ValueList{std::move(vertsFlat)})};
-        params["tris"] = Value{std::make_shared<const ValueList>(ValueList{std::move(trisFlat)})};
+        params["verts"] = Value{makeList(std::move(vertsFlat))};
+        params["tris"] = Value{makeList(std::move(trisFlat))};
         return params;
     }
     if (ext == ".json") {

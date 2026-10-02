@@ -141,7 +141,7 @@ CSGParams resolveCube(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     }
 
     CSGParams params;
-    params["size"] = Value{std::make_shared<const ValueList>(ValueList{std::move(sizeVec)})};
+    params["size"] = Value{makeList(std::move(sizeVec))};
     params["center"] = Value{center};
     params["color"] = colorToValue(effCtx.color);
     return params;
@@ -402,8 +402,8 @@ CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         // Manifold::Sphere IS a subdivided octahedron (Shape::Octahedron,
         // then Subdivide), so this needs no mesh of our own -- generate
         // calls it directly.
-        params["verts"] = Value{std::make_shared<const ValueList>(ValueList{})};
-        params["tris"] = Value{std::make_shared<const ValueList>(ValueList{})};
+        params["verts"] = Value{makeList()};
+        params["tris"] = Value{makeList()};
         return params;
     }
 
@@ -418,8 +418,8 @@ CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     std::vector<Value> trisValues;
     trisValues.reserve(m.tris.size());
     for (int t : m.tris) trisValues.push_back(Value{static_cast<double>(t)});
-    params["verts"] = Value{std::make_shared<const ValueList>(ValueList{std::move(vertsValues)})};
-    params["tris"] = Value{std::make_shared<const ValueList>(ValueList{std::move(trisValues)})};
+    params["verts"] = Value{makeList(std::move(vertsValues))};
+    params["tris"] = Value{makeList(std::move(trisValues))};
     return params;
 }
 
@@ -832,8 +832,8 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
     for (uint32_t t : tris) trisValues.push_back(Value{static_cast<double>(t)});
 
     CSGParams params;
-    params["verts"] = Value{std::make_shared<const ValueList>(ValueList{std::move(vertsValues)})};
-    params["tris"] = Value{std::make_shared<const ValueList>(ValueList{std::move(trisValues)})};
+    params["verts"] = Value{makeList(std::move(vertsValues))};
+    params["tris"] = Value{makeList(std::move(trisValues))};
     params["color"] = colorToValue(effCtx.color);
     return params;
 }

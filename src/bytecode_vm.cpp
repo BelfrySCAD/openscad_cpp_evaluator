@@ -792,7 +792,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         items[count - 1 - i] = std::move(f.stack.back());
                         f.stack.pop_back();
                     }
-                    f.stack.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(items)})});
+                    f.stack.push_back(Value{makeList(std::move(items))});
                     ++f.pc;
                     break;
                 }
@@ -1492,9 +1492,8 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     CSGParams params;
                     if (site.includeOpParam) params["op"] = Value{pending.op};
                     params["group_sizes"] =
-                        Value{std::make_shared<const ValueList>(ValueList{std::move(pending.groupSizes)})};
-                    params["empty_is_a_group"] = Value{std::make_shared<const ValueList>(
-                        ValueList{std::move(pending.emptyIsAGroup)})};
+                        Value{makeList(std::move(pending.groupSizes))};
+                    params["empty_is_a_group"] = Value{makeList(std::move(pending.emptyIsAGroup))};
                     // Mirrors Evaluator::buildTreeNode's own post-
                     // resolveBody() half exactly (csg_resolve.cpp).
                     const bool uncacheable =

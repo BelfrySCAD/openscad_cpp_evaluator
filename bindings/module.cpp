@@ -76,7 +76,7 @@ oscadeval::Value pyToValue(nb::handle v) {
         std::vector<oscadeval::Value> items;
         for (nb::handle item : nb::borrow<nb::sequence>(v)) items.push_back(pyToValue(item));
         return oscadeval::Value{oscadeval::ListPtr(
-            std::make_shared<const oscadeval::ValueList>(oscadeval::ValueList{std::move(items)}))};
+            oscadeval::makeList(std::move(items)))};
     }
     return oscadeval::Value{}; // monostate = undef
 }

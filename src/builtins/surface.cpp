@@ -44,9 +44,9 @@ CSGParams resolveSurface(Evaluator& ev, const oscad::ModularCall& node, EvalCont
         std::vector<Value> rowVals;
         rowVals.reserve(row.size());
         for (double v : row) rowVals.push_back(Value{v});
-        rows.push_back(Value{std::make_shared<const ValueList>(ValueList{std::move(rowVals)})});
+        rows.push_back(Value{makeList(std::move(rowVals))});
     }
-    params["heights"] = Value{std::make_shared<const ValueList>(ValueList{std::move(rows)})};
+    params["heights"] = Value{makeList(std::move(rows))};
     return params;
 }
 

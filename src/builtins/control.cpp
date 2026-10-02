@@ -141,7 +141,7 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
     recurse(0, ctx);
 
     CSGParams params;
-    params["group_sizes"] = Value{std::make_shared<const ValueList>(ValueList{std::move(groupSizes)})};
+    params["group_sizes"] = Value{makeList(std::move(groupSizes))};
     return params;
 }
 

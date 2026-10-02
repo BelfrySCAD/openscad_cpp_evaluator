@@ -48,7 +48,7 @@ std::optional<std::vector<double>> allNumericList(const Value& v) {
     return out;
 }
 
-Value listOf(std::vector<Value> items) { return Value{std::make_shared<const ValueList>(ValueList{std::move(items)})}; }
+Value listOf(std::vector<Value> items) { return Value{makeList(std::move(items))}; }
 Value numList(const std::vector<double>& xs) {
     std::vector<Value> items;
     items.reserve(xs.size());
