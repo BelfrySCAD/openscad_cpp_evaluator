@@ -9,7 +9,14 @@ OpenSCAD AST and produces Manifold CSG geometry. This port builds on two depende
 
 - `openscad_cpp_parser` (git submodule, `external/openscad_cpp_parser`) for lexing/parsing/AST/scope
 - Manifold (https://github.com/elalish/manifold) v3.5.2, pulled in via CMake `FetchContent` (pinned
-  tag, not vendored) — wired in as of Phase 2
+  tag, not vendored) — wired in as of Phase 2. **Patched at fetch time** by
+  `cmake/patch_manifold.cmake`: it deletes the `combined.RemoveDegenerates()` call in
+  `CsgLeafNode::Compose`, which on some inputs leaves the face data inconsistent so the sort after
+  it reads past an array (heap-buffer-overflow under ASan, reached by
+  `MinkowskiDifference.ShrinksANonConvexBodyOnEverySide`). Bisected with a Manifold-only repro to
+  upstream #1789 (969b1417), which fixes it by deleting the same call; unreleased as of 3.5.4.
+  The script fails the configure if the source around the call has changed, so **drop the patch
+  when bumping past #1789** rather than letting it rot
 - Boost.Polygon (`boostorg/polygon` + `boostorg/config`, fetched individually — not the full Boost
   superproject) for `roof()`'s Voronoi-diagram construction — wired in as of Phase 6, see below
 - `nothings/stb` (`stb_image.h`; header-only, no build step) for `surface()`'s PNG loader — wired

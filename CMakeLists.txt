@@ -137,6 +137,9 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/elalish/manifold.git
   GIT_TAG v3.5.2
   GIT_SHALLOW TRUE
+  # Backports the one line of upstream #1789 that fixes a heap overflow in
+  # CsgLeafNode::Compose -- see cmake/patch_manifold.cmake.
+  PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_manifold.cmake
 )
 FetchContent_MakeAvailable(manifold)
 
