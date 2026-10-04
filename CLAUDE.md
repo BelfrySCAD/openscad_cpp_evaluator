@@ -730,7 +730,14 @@ grep for `ponytail:`.
   parameter names live in `builtinParamNames` (`registry.cpp`): each list is the union of real
   OpenSCAD's own `Parameters::parse` declaration and any extra name this port reads via `getArg`,
   so the port never warns about an argument it goes on to honour — **add to it whenever a builtin
-  gains a parameter**, or that parameter starts warning. Builtin *functions* deliberately have no
+  gains a parameter**, or that parameter starts warning. **An argument given as `undef` is not given**: `getArg`
+  returns the default for it, as every upstream builtin does (`if (v.isDefined())`). Wrappers
+  forward their own optional parameters as undef -- BOSL2's `rotate_extrude` override passes
+  `angle=angle`, and reading that as 0 degrees flattened every plain `rotate_extrude()` (#680).
+  Checked argument by argument against OpenSCAD 2026.02 (47 cases, `tests/test_undef_args.cpp`).
+  Aliases (`linear_extrude`'s `h`, `rotate_extrude`'s `a`) go through `getArgOrAlias`, which
+  warns `Specified both "height" and "h"` as upstream and lets the primary name win.
+  `linear_extrude`'s default height is 100, upstream's (it was 1). Builtin *functions* deliberately have no
   entries beyond `textmetrics`/`fontmetrics`: upstream reads their arguments positionally without
   `Parameters::parse`, so `sin(bogus=30)` warns about nothing there (verified against 2022.08.22)
   and warning here would be a divergence. Not ported: the reference's `argument X supplied more

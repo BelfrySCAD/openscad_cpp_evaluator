@@ -69,7 +69,19 @@ ResolvedCallArgs resolveCallArgs(Evaluator& ev, const std::vector<std::unique_pt
 // wins). `pos = std::nullopt` for an argument with no positional slot at
 // all (e.g. sphere's `d`, only ever named -- a later phase's need, plumbed
 // through now since the signature shape matters more than early callers).
+//
+// An argument given as undef counts as not given, as in every upstream
+// builtin (`if (v.isDefined()) ...`): rotate_extrude(angle=undef) is 360
+// degrees, not 0. It matters for wrappers that forward their own optional
+// parameters -- BOSL2's rotate_extrude override passes `angle=angle`, which
+// flattened every plain rotate_extrude() into its profile (#680).
 Value getArg(const CallArgs& args, std::optional<int> pos, const std::string& name, Value defaultValue = Value{});
+
+// getArg for a parameter with an alternative name (linear_extrude's
+// height/h, rotate_extrude's angle/a): `name` wins when both are given,
+// with upstream's warning.
+Value getArgOrAlias(Evaluator& ev, const oscad::Position* where, const CallArgs& args, std::optional<int> pos,
+                    const std::string& name, const std::string& alias, Value defaultValue);
 
 // Encodes a CallArgs as a single Value (positional -> a list indexed 0..N,
 // named -> an object) so a resolve function can carry a call's raw
