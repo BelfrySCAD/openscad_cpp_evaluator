@@ -56,12 +56,29 @@ CallArgs resolveArgs(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Arg
     return result;
 }
 
+namespace {
+bool isUndef(const Value& v) { return std::holds_alternative<std::monostate>(v); }
+} // namespace
+
 Value getArg(const CallArgs& args, std::optional<int> pos, const std::string& name, Value defaultValue) {
-    if (const Value* named = args.findNamed(name)) return *named;
+    if (const Value* named = args.findNamed(name); named && !isUndef(*named)) return *named;
     if (pos.has_value()) {
-        if (const Value* positional = args.findPositional(*pos)) return *positional;
+        if (const Value* positional = args.findPositional(*pos); positional && !isUndef(*positional))
+            return *positional;
     }
     return defaultValue;
+}
+
+Value getArgOrAlias(Evaluator& ev, const oscad::Position* where, const CallArgs& args, std::optional<int> pos,
+                    const std::string& name, const std::string& alias, Value defaultValue) {
+    const Value primary = getArg(args, pos, name, Value{});
+    const Value other = getArg(args, std::nullopt, alias, Value{});
+    if (!isUndef(primary)) {
+        if (!isUndef(other))
+            ev.warn("Specified both \"" + name + "\" and \"" + alias + "\"", where);
+        return primary;
+    }
+    return isUndef(other) ? defaultValue : other;
 }
 
 ResolvedCallArgs resolveCallArgs(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments,

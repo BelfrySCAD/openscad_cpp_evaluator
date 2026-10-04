@@ -118,7 +118,9 @@ manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height
 BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    const double height = toDoubleLenient(getArg(args, 0, "height", Value{1.0}));
+    // 100 when not given, as upstream (the old 1 was a guess), and `h` as
+    // upstream's alias -- BOSL2's linear_extrude override forwards it.
+    const double height = toDoubleLenient(getArgOrAlias(ev, &node.position(), args, 0, "height", "h", Value{100.0}));
     const bool center = truthy(getArg(args, std::nullopt, "center", Value{false}));
     const double twist = toDoubleLenient(getArg(args, std::nullopt, "twist", Value{0.0}));
     // Upstream's validate_integral: any finite number counts as given, and is
@@ -239,7 +241,7 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
 BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    const double angle = toDoubleLenient(getArg(args, 0, "angle", Value{360.0}));
+    const double angle = toDoubleLenient(getArgOrAlias(ev, &node.position(), args, 0, "angle", "a", Value{360.0}));
 
     CSGParams params;
     params["angle"] = Value{angle};

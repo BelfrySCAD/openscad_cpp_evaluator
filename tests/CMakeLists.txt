@@ -31,6 +31,7 @@ add_executable(oscad_eval_tests
   test_use.cpp
   test_coverage.cpp
   test_extrude_roof.cpp
+  test_undef_args.cpp
   test_discretizer.cpp
   test_surface.cpp
   test_dxf_svg_import.cpp
