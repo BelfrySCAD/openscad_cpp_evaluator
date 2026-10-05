@@ -1259,6 +1259,24 @@ def test_a_cancel_signal_stops_a_silent_script_from_another_thread(tmp_path):
     assert time.perf_counter() - t0 < 5
 
 
+def test_no_break_space_in_code_is_whitespace_and_errors_stay_decodable(tmp_path):
+    """U+00A0 and U+FEFF in code are whitespace, as in OpenSCAD (BelfrySCAD#679),
+    and a parse error naming a non-ASCII character reaches Python as a
+    readable EvalError -- it was `nanobind::str(): conversion error`, since
+    the message quoted the character's first byte alone."""
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError
+
+    ok = tmp_path / "nbsp.scad"
+    ok.write_bytes(b"\xef\xbb\xbfcube(1);\xc2\xa0\nsphere(\xc2\xa02);\n")
+    Evaluator(echo_fn=lambda _m: None).evaluate(str(ok), {})
+
+    bad = tmp_path / "bad.scad"
+    bad.write_bytes("cube(1) \u00e9;\n".encode("utf-8"))
+    with pytest.raises(EvalError, match="unexpected character '\u00e9'"):
+        Evaluator(echo_fn=lambda _m: None).evaluate(str(bad), {})
+
+
 def main():
     """`python tests/test_python_bindings.py` -- how cibuildwheel runs this
     file -- runs the whole file under pytest. It used to loop over the test_
