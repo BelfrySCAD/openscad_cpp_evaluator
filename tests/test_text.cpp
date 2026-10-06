@@ -192,6 +192,36 @@ TEST(Textmetrics, MultiByteUtf8CodepointsDecodeWithoutCrashing) {
     EXPECT_GT(asNum(items[0]), 0.0);
 }
 
+// em (upstream 2026-03, openscad #4304): `em` sets the em square, i.e.
+// size = em * 72/100, and wins over `size` with a warning. Positional at
+// index 9 in textmetrics and 2 in fontmetrics, as upstream's parameter
+// lists put it; text() takes it by name only, like its other options.
+TEST(Text, EmIsSizeTimes72Over100) {
+    const std::pair<const char*, std::vector<std::string>> cases[] = {
+        {"echo(str(textmetrics(\"Hi\", em=10)) == str(textmetrics(\"Hi\", size=7.2)));", {"ECHO: true"}},
+        {"echo(str(textmetrics(\"Hi\", 3, \"\", \"ltr\", \"en\", \"latin\", \"left\", \"baseline\", 1, 10))"
+         " == str(textmetrics(\"Hi\", size=7.2)));",
+         {"WARNING: textmetrics: \"size\" ignored when \"em\" is set in file <string>, line 1", "ECHO: true"}},
+        {"echo(str(fontmetrics(em=10)) == str(fontmetrics(size=7.2)));", {"ECHO: true"}},
+        // Inside a function, so the compiled (VM) call path is covered too.
+        {"function f() = textmetrics(\"Hi\", em=10); echo(str(f()) == str(textmetrics(\"Hi\", size=7.2)));",
+         {"ECHO: true"}},
+        {"echo(str(fontmetrics(undef, \"\", 10)) == str(fontmetrics(size=7.2)));", {"ECHO: true"}},
+        {"m = fontmetrics(size=3, em=10);",
+         {"WARNING: fontmetrics: \"size\" ignored when \"em\" is set in file <string>, line 1"}},
+        {"text(\"Hi\", size=3, em=10);",
+         {"WARNING: text: \"size\" ignored when \"em\" is set in file <string>, line 1"}},
+    };
+    for (const auto& [src, want] : cases) {
+        std::vector<std::string> log;
+        evalSrc(src, [&](const std::string& m) { log.push_back(m); });
+        EXPECT_EQ(log, want) << src;
+    }
+    Evaluated em = evalSrc("text(\"A\", em=10, $fn=32);");
+    Evaluated size = evalSrc("text(\"A\", size=7.2, $fn=32);");
+    EXPECT_NEAR(em.bodies[0].section->Area(), size.bodies[0].section->Area(), 1e-9);
+}
+
 // -- fontmetrics() --------------------------------------------------------
 
 TEST(Fontmetrics, ReturnsAllExpectedKeysInOrder) {

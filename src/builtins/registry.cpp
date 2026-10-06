@@ -138,14 +138,14 @@ const std::vector<std::string>* builtinParamNames(const std::string& name) {
         {"levelset", {"field", "bounds", "isovalue", "invert", "edge"}},
         {"offset", {"r", "delta", "chamfer"}},
         {"surface", {"file", "center", "convexity", "invert"}},
-        {"text", {"text", "size", "font", "direction", "language", "script", "halign", "valign", "spacing"}},
+        {"text", {"text", "size", "font", "direction", "language", "script", "halign", "valign", "spacing", "em"}},
         // breakpoint() is this port's own debugger extension, no upstream
         // equivalent to mirror.
         {"breakpoint", {"condition"}},
 
         // -- the three builtin FUNCTIONS that do use Parameters::parse ----
-        {"textmetrics", {"text", "size", "font", "direction", "language", "script", "halign", "valign", "spacing"}},
-        {"fontmetrics", {"size", "font"}},
+        {"textmetrics", {"text", "size", "font", "direction", "language", "script", "halign", "valign", "spacing", "em"}},
+        {"fontmetrics", {"size", "font", "em"}},
     };
     auto it = table.find(name);
     return it == table.end() ? nullptr : &it->second;
