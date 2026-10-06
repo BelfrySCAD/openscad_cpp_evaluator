@@ -26,6 +26,7 @@ const std::unordered_map<std::string_view, ResolveFn>& resolveDispatch() {
         {"intersection", &resolveCsg},
         {"children", &resolveChildren},
         {"render", &resolveRender},
+        {"profile_time", &resolveProfileTime},
         {"breakpoint", &resolveBreakpoint},
         {"import", &resolveImport},
         {"hull", &resolveHull},
@@ -118,6 +119,7 @@ const std::vector<std::string>* builtinParamNames(const std::string& name) {
         {"minkowski", {"convexity"}},
         {"children", {"index", "separate"}},
         {"render", {"convexity"}},
+        {"profile_time", {"label"}},
         // "repair" and "class" are this port's own additions, not upstream
         // parameters. ("id" IS upstream's, and was declared here long before
         // anything read it -- so a script filtering by id was accepted in

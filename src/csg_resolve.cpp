@@ -93,10 +93,17 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     treeStack_.emplace_back();
     const std::uint64_t randsBefore = randsCallCount_;
     CSGParams params;
+    const bool profiled = hasResolveFn && name == "profile_time";
+    double profileScriptMs = -1.0;
     try {
         if (hasResolveFn) {
             warnUnexpectedBuiltinArgs(*this, node);
+            const auto profileStart = profiled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             params = it->second(*this, node, ctx);
+            if (profiled) {
+                profileScriptMs =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - profileStart).count();
+            }
         } else if (!isBuiltin) {
             evalUserModule(static_cast<const oscad::ModuleDeclaration&>(*userModuleDecl), node, ctx);
         } else {
@@ -144,7 +151,13 @@ void Evaluator::evalModularCall(const oscad::ModularCall& node, EvalContext& ctx
     treeNode->uncacheable = uncacheable;
     treeNode->children = std::move(children);
     treeNode->params = std::move(params);
+    treeNode->profileScriptMs = profileScriptMs;
     setTreeDepthOrThrow(*treeNode, node);
+    if (profiled) {
+        ++profileNodeCount_;
+        // No geometry pass will follow to report it, so report it now.
+        if (!generateRequested_) reportProfile(*treeNode, -1.0, false);
+    }
     treeStack_.back().push_back(std::move(treeNode));
 }
 
@@ -271,6 +284,12 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
 
     using Clock = std::chrono::steady_clock;
     const Clock::time_point resolveStart = profiling_ ? Clock::now() : Clock::time_point{};
+    profileNodeCount_ = 0;
+    generateRequested_ = generate;
+    struct GenerateRequestedGuard {
+        bool& flag;
+        ~GenerateRequestedGuard() { flag = true; }
+    } generateRequestedGuard{generateRequested_};
     std::vector<std::unique_ptr<CSGNode>> tree = resolveTreeImpl(nodes, ctx);
     rerootAtShowOnly(tree);
     const Clock::time_point resolveEnd = profiling_ ? Clock::now() : Clock::time_point{};

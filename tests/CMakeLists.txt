@@ -19,6 +19,7 @@ add_executable(oscad_eval_tests
   test_primitives.cpp
   test_transforms.cpp
   test_render_expr.cpp
+  test_profile_time.cpp
   test_booleans.cpp
   test_children_separate.cpp
   test_feature_detection.cpp

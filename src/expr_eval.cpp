@@ -2,6 +2,7 @@
 #include "openscad_cpp_evaluator/utf8.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
+#include "builtins/builtins.hpp"
 #include "openscad_cpp_evaluator/eval_error.hpp"
 #include "openscad_cpp_evaluator/freetype_font_provider.hpp"
 
@@ -444,6 +445,18 @@ Value Evaluator::evalEchoExpr(const oscad::EchoOp& node, EvalContext& ctx) {
     return evalExpr(*node.body, ctx);
 }
 
+// `x = profile_time("label") expr;` -- times evaluating `expr` and prints
+// it. The label is evaluated before the clock starts, so it isn't counted.
+Value Evaluator::evalProfileTimeExpr(const oscad::ProfileTimeOp& node, EvalContext& ctx) {
+    checkDebug(node, ctx);
+    const Value label = getArg(resolveArgs(*this, node.arguments, ctx), 0, "label");
+    const auto start = std::chrono::steady_clock::now();
+    Value result = evalExpr(*node.body, ctx);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (echoFn_) echoFn_("PROFILE: " + profileLabel(label, node.position()) + ": " + fmtMs(ms));
+    return result;
+}
+
 Value Evaluator::evalAssertExpr(const oscad::AssertOp& node, EvalContext& ctx) {
     // Unlike the statement form (evalAssertStatement), which supports named
     // arguments via getArg()/CallArgs, the expression form indexes raw
@@ -518,6 +531,8 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             return evalEchoExpr(static_cast<const oscad::EchoOp&>(node), ctx);
         case NodeKind::AssertOp:
             return evalAssertExpr(static_cast<const oscad::AssertOp&>(node), ctx);
+        case NodeKind::ProfileTimeOp:
+            return evalProfileTimeExpr(static_cast<const oscad::ProfileTimeOp&>(node), ctx);
 
         case NodeKind::PrimaryIndex: {
             auto& n = static_cast<const oscad::PrimaryIndex&>(node);

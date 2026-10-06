@@ -263,6 +263,12 @@ private:
                 expr(*o.body);
                 break;
             }
+            case NodeKind::ProfileTimeOp: {
+                auto& o = static_cast<const oscad::ProfileTimeOp&>(e);
+                args(o.arguments);
+                expr(*o.body);
+                break;
+            }
             case NodeKind::FunctionLiteral: {
                 auto& f = static_cast<const oscad::FunctionLiteral&>(e);
                 emit(&e, CoverageKind::Body);

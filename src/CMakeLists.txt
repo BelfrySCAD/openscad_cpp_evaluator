@@ -43,6 +43,7 @@ add_library(openscad_cpp_evaluator STATIC
   builtins/booleans.cpp
   builtins/modifiers.cpp
   builtins/control.cpp
+  builtins/profile_time.cpp
   builtins/function_builtins.cpp
   builtins/import.cpp
   builtins/topology.cpp

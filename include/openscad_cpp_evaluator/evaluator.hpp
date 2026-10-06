@@ -422,6 +422,22 @@ public:
     // subtree, not just direct children, since hull() consumes all of it.
     bool insideHull = false;
 
+    // profile_time(). generateRequested_ is false only inside an
+    // evaluate(generate = false) run, where no geometry pass follows to
+    // report a profiled block, so resolve reports the script time alone.
+    // profileNodeCount_ counts this run's profile_time() nodes so a cache
+    // hit only walks its subtree for them when there are any (see
+    // reportCachedProfiles).
+    bool generateRequested_ = true;
+    std::size_t profileNodeCount_ = 0;
+    // Prints "PROFILE: <label>: ..." for a profile_time() node. geometryMs
+    // < 0 means no geometry pass; `cached` means its geometry came from the
+    // ManifoldCache rather than being built.
+    void reportProfile(const CSGNode& node, double geometryMs, bool cached);
+    // A cache hit at `node` skips its whole subtree, so a profile_time()
+    // inside it would otherwise print nothing at all.
+    void reportCachedProfiles(const CSGNode& node);
+
     ColoredBody tagGenerated(manifold::Manifold body, const oscad::ASTNode& node, const Value& colorValue);
 
     // tagGenerated()'s counterpart for a mesh Manifold refused to build --
@@ -837,6 +853,7 @@ private:
     Value evalLetExpr(const oscad::LetOp& node, EvalContext& ctx);
     Value evalEchoExpr(const oscad::EchoOp& node, EvalContext& ctx);
     Value evalAssertExpr(const oscad::AssertOp& node, EvalContext& ctx);
+    Value evalProfileTimeExpr(const oscad::ProfileTimeOp& node, EvalContext& ctx);
     void bindLetName(EvalContext& ctx, const std::string& name, const Value& v);
 
     // Bracketed public in place: Stage 2's Op::NativeStatement

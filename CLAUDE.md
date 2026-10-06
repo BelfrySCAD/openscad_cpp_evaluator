@@ -1866,3 +1866,33 @@ A compiled function keeps its parameters in frame slots, which no `EvalContext`
 can see, and the children are statement opcodes that resolve names through the
 context — without this, `function f(w) = render() { cube(w); }.volume;` finds no
 `w` and silently measures nothing.
+
+## `profile_time()`
+
+`profile_time([label]) { ... }` prints `PROFILE: label: T ms (script S ms, geometry G ms)`;
+`x = profile_time([label]) expr;` prints `PROFILE: label: T ms` and evaluates to `expr`'s value.
+`supported_feature("profile-time")` is 1. The label is optional (default `line N of file`), and
+is evaluated before the clock starts. Times under 1 ms print in microseconds (`fmtMs`), so a fast part never reads `0.00 ms`.
+
+### Implementation notes
+
+- **Parser:** `profile_time` is a reserved keyword (`KW_PROFILE_TIME`) for the same reason as
+  `render`. The statement form is a plain `ModularCall` named `profile_time`; the expression form
+  is a `ProfileTimeOp` node shaped like `EchoOp`, with a required body.
+- **Script time** is taken around the resolve function's call in `Evaluator::evalModularCall`
+  (csg_resolve.cpp), not inside `resolveProfileTime`, so argument evaluation and every child
+  count. It is stored on `CSGNode::profileScriptMs`, which is deliberately not in `cacheKey()` --
+  a timing in the key would make every profiled subtree a permanent miss.
+- **Geometry time** is taken in `generateTreeImpl`, from *before* the cache lookup, and printed
+  when the node finishes, so a hit reports `geometry cached` rather than vanishing. A hit on an
+  **ancestor** never visits the profile_time() node at all; `reportCachedProfiles` walks the hit
+  subtree for them, but only when the run resolved any (`profileNodeCount_`), so a model without
+  profile_time() pays nothing on its hits.
+- **Resolve-only runs** (`evaluate(..., generate=false)`) print `script S ms (no geometry built)`
+  at resolve time instead (`generateRequested_`).
+- **Expression form** is interpreter-only: the bytecode compiler has no case for
+  `ProfileTimeOp`, so its `default:` throws `NotCompilable` and the containing function falls back
+  to the interpreter. It is also deliberately absent from `simplifyTailStep` -- the clock must stop
+  after the body, which a tail step would not wait for.
+- `PROFILE:` lines go straight to `echoFn_`, not through `emitWarning`, so the ManifoldCache never
+  stores or replays them (a replay would print a stale time as if it were current).
