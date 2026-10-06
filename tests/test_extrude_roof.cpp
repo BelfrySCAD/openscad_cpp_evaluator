@@ -82,6 +82,76 @@ TEST(LinearExtrude, ScaleShrinksTheTopFace) {
     EXPECT_NEAR(e.bodies[0].body->Volume(), straight / 3.0, straight * 0.02);
 }
 
+// linear_extrude's `v`, and its argument checks, as upstream's
+// LinearExtrudeNode has them; each case below matched OpenSCAD 2026.02's
+// bounding box and volume. `v` was ignored here before.
+namespace {
+struct Extruded {
+    manifold::Box box;
+    double volume = 0;
+    std::vector<std::string> msgs;
+};
+Extruded linearExtrude(const std::string& args) {
+    Extruded r;
+    Evaluated e = evalSrc("linear_extrude(" + args + ") translate([5,0]) square([4,2]);",
+                          [&](const std::string& m) { r.msgs.push_back(m); });
+    if (!e.bodies.empty() && e.bodies[0].body) {
+        r.box = e.bodies[0].body->BoundingBox();
+        r.volume = e.bodies[0].body->Volume();
+    }
+    return r;
+}
+} // namespace
+
+TEST(LinearExtrude, VAloneIsTheWholeExtrusion) {
+    const Extruded r = linearExtrude("v=[1,0,1]");  // length |v|, leaning +X
+    EXPECT_NEAR(r.box.max.x, 10.0, 1e-6);
+    EXPECT_NEAR(r.box.max.z, 1.0, 1e-6);
+    EXPECT_NEAR(r.volume, 8.0, 1e-6);
+}
+
+TEST(LinearExtrude, HeightWithVSetsOnlyTheDirection) {
+    const Extruded r = linearExtrude("v=[1,1,1], height=10");
+    const double side = 10.0 / std::sqrt(3.0);
+    EXPECT_NEAR(r.box.max.x, 9.0 + side, 1e-3);
+    EXPECT_NEAR(r.box.max.y, 2.0 + side, 1e-3);
+    EXPECT_NEAR(r.box.max.z, side, 1e-3);
+}
+
+TEST(LinearExtrude, CenteringShiftsByHalfOfV) {
+    const Extruded r = linearExtrude("v=[2,3,10], center=true");
+    EXPECT_NEAR(r.box.min.x, 4.0, 1e-6);
+    EXPECT_NEAR(r.box.max.x, 10.0, 1e-6);
+    EXPECT_NEAR(r.box.min.y, -1.5, 1e-6);
+    EXPECT_NEAR(r.box.min.z, -5.0, 1e-6);
+}
+
+TEST(LinearExtrude, DownwardVExtrudesNothing) {
+    EXPECT_EQ(linearExtrude("v=[0,0,-1]").volume, 0.0);
+}
+
+TEST(LinearExtrude, OnlyARealBooleanCenters) {
+    EXPECT_NEAR(linearExtrude("height=10, center=\"yes\"").box.min.z, 0.0, 1e-6);
+    EXPECT_NEAR(linearExtrude("height=10, center=true").box.min.z, -5.0, 1e-6);
+}
+
+TEST(LinearExtrude, BadArgumentsWarnAndFallBack) {
+    const Extruded h = linearExtrude("height=\"a\"");
+    EXPECT_NEAR(h.box.max.z, 100.0, 1e-6);
+    ASSERT_EQ(h.msgs.size(), 1u);
+    EXPECT_EQ(h.msgs[0].rfind("WARNING: height when specified should be a number", 0), 0u) << h.msgs[0];
+
+    const Extruded v = linearExtrude("v=[1,2]");
+    EXPECT_NEAR(v.box.max.z, 1.0, 1e-6);
+    ASSERT_EQ(v.msgs.size(), 1u);
+    EXPECT_EQ(v.msgs[0].rfind("WARNING: v when specified should be a 3d vector", 0), 0u) << v.msgs[0];
+
+    const Extruded s = linearExtrude("height=10, scale=\"x\"");
+    EXPECT_NEAR(s.volume, 80.0, 1e-6);
+    ASSERT_EQ(s.msgs.size(), 1u);
+    EXPECT_EQ(s.msgs[0].rfind("WARNING: linear_extrude(..., scale=\"x\") could not be converted", 0), 0u) << s.msgs[0];
+}
+
 // -- rotate_extrude -----------------------------------------------------
 
 TEST(RotateExtrude, FullRevolveOfASquareMatchesPappusTheorem) {
@@ -94,6 +164,52 @@ TEST(RotateExtrude, FullRevolveOfASquareMatchesPappusTheorem) {
     ASSERT_TRUE(e.bodies[0].body.has_value());
     const double analytic = 2.0 * std::numbers::pi * 3.5 * 1.0; // R_centroid=3.5, area=1
     EXPECT_NEAR(e.bodies[0].body->Volume(), analytic, analytic * 0.01);
+}
+
+// The sweep runs from `start` through start + angle, as upstream's
+// RotateExtrudeNode has it; start was ignored here until this was checked
+// against OpenSCAD 2026.02 (every case below matched it bounding box for
+// bounding box).
+namespace {
+manifold::Box rotateExtrudeBox(const std::string& args, std::vector<std::string>* msgs = nullptr) {
+    Evaluated e = evalSrc("rotate_extrude(" + args + ") translate([10,0]) square(2);",
+                          [&](const std::string& m) { if (msgs) msgs->push_back(m); });
+    EXPECT_EQ(e.bodies.size(), 1u);
+    return e.bodies.empty() ? manifold::Box{} : e.bodies[0].body->BoundingBox();
+}
+} // namespace
+
+TEST(RotateExtrude, StartTurnsWhereTheSweepBegins) {
+    const manifold::Box b = rotateExtrudeBox("angle=90, start=90");  // the +Y/-X quadrant
+    EXPECT_NEAR(b.min.x, -12.0, 1e-6);
+    EXPECT_NEAR(b.max.x, 0.0, 1e-6);
+    EXPECT_NEAR(b.min.y, 0.0, 1e-6);
+    const manifold::Box neg = rotateExtrudeBox("angle=-90, start=90");  // sweeps back to +X
+    EXPECT_NEAR(neg.min.x, 0.0, 1e-6);
+    EXPECT_NEAR(neg.min.y, 0.0, 1e-6);
+    EXPECT_NEAR(neg.max.y, 12.0, 1e-6);
+}
+
+TEST(RotateExtrude, AFullTurnWithNoAngleStartsOnMinusXAndSaysItWillChange) {
+    std::vector<std::string> msgs;
+    const manifold::Box b = rotateExtrudeBox("$fn=5", &msgs);  // a pentagon: the start shows
+    EXPECT_NEAR(b.min.x, -12.0, 1e-6);
+    EXPECT_NEAR(b.max.x, 12.0 * std::cos(std::numbers::pi / 5), 1e-3);
+    ASSERT_EQ(msgs.size(), 1u);
+    EXPECT_EQ(msgs[0].rfind("DEPRECATED: In future releases, rotational extrusion without \"angle\"", 0), 0u) << msgs[0];
+    // Given an angle or a start, it starts where told and says nothing.
+    msgs.clear();
+    EXPECT_NEAR(rotateExtrudeBox("angle=360, $fn=5", &msgs).max.x, 12.0, 1e-6);
+    EXPECT_NEAR(rotateExtrudeBox("start=0, $fn=5", &msgs).max.x, 12.0, 1e-6);
+    EXPECT_TRUE(msgs.empty());
+}
+
+TEST(RotateExtrude, AnAngleOutsideAFullTurnIsAFullTurn) {
+    for (const char* a : {"angle=400", "angle=-400", "angle=-360"}) {
+        const manifold::Box b = rotateExtrudeBox(a);
+        EXPECT_NEAR(b.min.x, -12.0, 1e-3) << a;
+        EXPECT_NEAR(b.max.x, 12.0, 1e-3) << a;
+    }
 }
 
 // -- projection -----------------------------------------------------------
