@@ -118,6 +118,9 @@ manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height
 BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
+    // Positional order is upstream's: height, v, scale, center, twist,
+    // slices, segments. Only height used to be read positionally.
+    //
     // Upstream's LinearExtrudeNode: the extrusion runs along a vector, (0,0,1)
     // unless `v` gives one. Its length is `height` (`h` its alias, BOSL2's
     // override forwards it) when given -- `v` then only sets the direction --
@@ -126,7 +129,7 @@ BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::Modular
     // `v` was ignored here, so an oblique extrusion came out straight.
     double hv[3] = {0.0, 0.0, 1.0};
     double length = 100.0;
-    const Value vArg = getArg(args, std::nullopt, "v", Value{});
+    const Value vArg = getArg(args, 1, "v", Value{});
     if (!std::holds_alternative<std::monostate>(vArg)) {
         const ListPtr* l = std::get_if<ListPtr>(&vArg);
         bool ok = l && *l && (*l)->items.size() == 3;
@@ -156,22 +159,22 @@ BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::Modular
     if (hv[2] <= 0) hv[2] = 0;
     const double height = hv[2];
     // Only a real boolean counts, as upstream: center="yes" is not true.
-    const Value centerArg = getArg(args, std::nullopt, "center", Value{false});
+    const Value centerArg = getArg(args, 3, "center", Value{false});
     const bool* centerBool = std::get_if<bool>(&centerArg);
     const bool center = centerBool && *centerBool;
-    const double twist = toDoubleLenient(getArg(args, std::nullopt, "twist", Value{0.0}));
+    const double twist = toDoubleLenient(getArg(args, 4, "twist", Value{0.0}));
     // Upstream's validate_integral: any finite number counts as given, and is
     // truncated and clamped (slices >= 1, segments >= 0). Not given, the
     // discretizer decides.
-    const auto integral = [&](const char* name, double lo) -> std::optional<double> {
-        const Value v = getArg(args, std::nullopt, name, Value{});
+    const auto integral = [&](int pos, const char* name, double lo) -> std::optional<double> {
+        const Value v = getArg(args, pos, name, Value{});
         const double* d = std::get_if<double>(&v);
         if (!d || !std::isfinite(*d)) return std::nullopt;
         return *d < lo ? lo : std::trunc(*d);
     };
-    const std::optional<double> slices = integral("slices", 1.0);
-    const std::optional<double> segments = integral("segments", 0.0);
-    const Value scaleArg = getArg(args, std::nullopt, "scale", Value{});
+    const std::optional<double> slices = integral(5, "slices", 1.0);
+    const std::optional<double> segments = integral(6, "segments", 0.0);
+    const Value scaleArg = getArg(args, 2, "scale", Value{});
 
     double scaleX = 1.0, scaleY = 1.0;
     bool scaleOk = true;
@@ -298,6 +301,8 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
 BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
+    // Positional order is upstream's: angle, start.
+    //
     // Upstream's RotateExtrudeNode: the sweep runs from `start` through
     // `start + angle`. With an angle, start defaults to 0 (the +X axis) and
     // an angle outside (-360, 360] becomes a full turn; with none, the turn
@@ -305,7 +310,7 @@ BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::Modular
     // says so for an odd $fn, where the start shows. An explicit start
     // always wins. It was ignored here: a quarter turn from 90 drew 0..90.
     const Value angleArg = getArgOrAlias(ev, &node.position(), args, 0, "angle", "a", Value{});
-    const Value startArg = getArg(args, std::nullopt, "start", Value{});
+    const Value startArg = getArg(args, 1, "start", Value{});
     const bool hasAngle = !std::holds_alternative<std::monostate>(angleArg) && std::isfinite(toDoubleLenient(angleArg));
     const bool hasStart = !std::holds_alternative<std::monostate>(startArg) && std::isfinite(toDoubleLenient(startArg));
     double angle = 360.0;

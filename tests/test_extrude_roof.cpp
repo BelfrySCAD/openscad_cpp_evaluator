@@ -152,6 +152,15 @@ TEST(LinearExtrude, BadArgumentsWarnAndFallBack) {
     EXPECT_EQ(s.msgs[0].rfind("WARNING: linear_extrude(..., scale=\"x\") could not be converted", 0), 0u) << s.msgs[0];
 }
 
+TEST(LinearExtrude, ArgumentsArePositionalInUpstreamsOrder) {
+    // height, v, scale, center, twist, slices, segments
+    EXPECT_NEAR(linearExtrude("10, [1,0,1]").box.max.x, 9.0 + 10.0 / std::sqrt(2.0), 1e-3);
+    EXPECT_NEAR(linearExtrude("10, undef, 0.5").volume, 46.67, 0.01);
+    EXPECT_NEAR(linearExtrude("10, undef, 1, true").box.min.z, -5.0, 1e-6);
+    EXPECT_NEAR(linearExtrude("10, undef, 1, false, 90").box.min.y, -9.0, 1e-6);
+    EXPECT_NEAR(linearExtrude("10, undef, 1, false, 90, 2").volume, 81.62, 0.01);
+}
+
 // -- rotate_extrude -----------------------------------------------------
 
 TEST(RotateExtrude, FullRevolveOfASquareMatchesPappusTheorem) {
@@ -202,6 +211,10 @@ TEST(RotateExtrude, AFullTurnWithNoAngleStartsOnMinusXAndSaysItWillChange) {
     EXPECT_NEAR(rotateExtrudeBox("angle=360, $fn=5", &msgs).max.x, 12.0, 1e-6);
     EXPECT_NEAR(rotateExtrudeBox("start=0, $fn=5", &msgs).max.x, 12.0, 1e-6);
     EXPECT_TRUE(msgs.empty());
+}
+
+TEST(RotateExtrude, StartIsTheSecondPositionalArgument) {
+    EXPECT_NEAR(rotateExtrudeBox("90, 90").min.x, -12.0, 1e-6);  // angle, start
 }
 
 TEST(RotateExtrude, AnAngleOutsideAFullTurnIsAFullTurn) {
