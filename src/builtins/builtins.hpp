@@ -268,6 +268,14 @@ std::vector<ColoredBody> generateSurface(Evaluator& ev, const CSGParams& params,
 
 // text() -- text.cpp.
 CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+
+// The font size text()/textmetrics()/fontmetrics() draw at: `size`
+// (default 10), or `em` * 72/100 when `em` is given -- upstream's
+// correction for the 100/72 factor that makes `size` the cap height
+// rather than the em square (openscad #4304). `size` given alongside
+// `em` is ignored, with upstream's warning naming `caller`.
+double textSizeArg(Evaluator& ev, const CallArgs& args, std::optional<int> sizePos, std::optional<int> emPos,
+                   const char* caller, const oscad::Position* where);
 std::vector<ColoredBody> generateText(Evaluator& ev, const CSGParams& params,
                                        const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
 

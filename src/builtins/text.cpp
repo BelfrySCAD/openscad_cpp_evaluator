@@ -7,7 +7,7 @@
 
 #include <algorithm>
 
-// text(text=, size=10, font=, halign="default", valign="default", spacing=1,
+// text(text=, size=10 | em=, font=, halign="default", valign="default", spacing=1,
 // direction=, language=, script=) -- renders `text` as 2D glyph outlines
 // through the FontProvider (Evaluator::fontProvider(), lazily the built-in
 // FreetypeFontProvider if none was injected).
@@ -30,10 +30,24 @@ std::string asStringOr(const Value& v, const std::string& fallback) {
 }
 } // namespace
 
+double textSizeArg(Evaluator& ev, const CallArgs& args, std::optional<int> sizePos, std::optional<int> emPos,
+                   const char* caller, const oscad::Position* where) {
+    const Value em = getArg(args, emPos, "em");
+    const Value size = getArg(args, sizePos, "size");
+    if (std::holds_alternative<std::monostate>(em)) {
+        return std::holds_alternative<std::monostate>(size) ? 10.0 : toDoubleLenient(size);
+    }
+    if (!std::holds_alternative<std::monostate>(size)) {
+        ev.warn(std::string(caller) + ": \"size\" ignored when \"em\" is set", where);
+    }
+    return toDoubleLenient(em) * 72.0 / 100.0;
+}
+
 CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     const std::string text = asStringOr(getArg(args, 0, "text", Value{std::string("")}), "");
-    const double size = toDoubleLenient(getArg(args, 1, "size", Value{10.0}));
+    // em is name-only, like everything after font here.
+    const double size = textSizeArg(ev, args, 1, std::nullopt, "text", &node.position());
     // font is POSITIONAL, at index 2: `text("Hi", 10, "Liberation Sans")`
     // is how people write it and how the reference reads it -- measured
     // against the 2026.02.01 binary, whose bounding box for the

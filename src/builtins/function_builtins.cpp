@@ -776,7 +776,7 @@ Value objectOf(std::vector<std::pair<std::string, Value>> items) {
 }
 
 // textmetrics(text=, size=10, font=, direction=, language=, script=,
-// halign=, valign=, spacing=) -- measures `text` against the
+// halign=, valign=, spacing=, em=) -- measures `text` against the
 // FontProvider-resolved font, laid out by exactly the same shaping call
 // text() makes, and returns an OscObject with position/size/ascent/
 // descent/offset/advance in real OpenSCAD's key order. Going through the
@@ -784,10 +784,10 @@ Value objectOf(std::vector<std::pair<std::string, Value>> items) {
 // a script positions against cannot disagree with what it draws.
 Value builtinTextmetrics(Evaluator& ev, const CallArgs& args, const oscad::Position* pos) {
     const std::string text = asStringOr(getArg(args, 0, "text", Value{std::string("")}), "");
-    const double size = toDoubleLenient(getArg(args, 1, "size", Value{10.0}));
+    const double size = textSizeArg(ev, args, 1, 9, "textmetrics", pos);
     // Positional indices, all of them: OpenSCAD's own signature is
     // textmetrics(text, size, font, direction, language, script, halign,
-    // valign, spacing) and it honours every one of those positionally --
+    // valign, spacing, em) and it honours every one of those positionally --
     // verified against the 2026.02.01 binary, not read off a doc page.
     // `font` being name-only here is what made
     // `textmetrics("Hi", 10, "Liberation Sans:style=Bold")` silently
@@ -817,10 +817,10 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args, const oscad::Posit
     });
 }
 
-// fontmetrics(size=10, font=) -- global metrics of the FontProvider-
+// fontmetrics(size=10, font=, em=) -- global metrics of the FontProvider-
 // resolved font, scaled for `size`. Mirrors _builtin_fontmetrics.
-Value builtinFontmetrics(Evaluator& ev, const CallArgs& args) {
-    const double size = toDoubleLenient(getArg(args, 0, "size", Value{10.0}));
+Value builtinFontmetrics(Evaluator& ev, const CallArgs& args, const oscad::Position* pos) {
+    const double size = textSizeArg(ev, args, 0, 2, "fontmetrics", pos);
     // Positional too: fontmetrics(10, "Liberation Sans:style=Bold") is
     // how the bug report was written, and how the real binary reads it.
     const std::string fontSpec = asStringOr(getArg(args, 1, "font", Value{std::string("")}), "");
@@ -1255,7 +1255,7 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
     switch (id) {
         case BuiltinFnId::None: return Value{}; // unreachable: handled above
         case BuiltinFnId::TextMetrics: return builtinTextmetrics(ev, args, &node.position());
-        case BuiltinFnId::FontMetrics: return builtinFontmetrics(ev, args);
+        case BuiltinFnId::FontMetrics: return builtinFontmetrics(ev, args, &node.position());
         case BuiltinFnId::Abs: return Value{std::fabs(toDoubleLenient(getArg(args, 0, "x", Value{})))};
         case BuiltinFnId::Sign: {
             const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
