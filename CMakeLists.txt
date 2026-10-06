@@ -141,6 +141,16 @@ FetchContent_Declare(
   # CsgLeafNode::Compose -- see cmake/patch_manifold.cmake.
   PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_manifold.cmake
 )
+# FetchContent runs PATCH_COMMAND only for a source it downloads itself, so
+# a build handed Manifold's source (FETCHCONTENT_SOURCE_DIR_MANIFOLD, as an
+# offline Flatpak build does) would otherwise compile it unpatched. The
+# script is idempotent, so running it here too is safe.
+if(FETCHCONTENT_SOURCE_DIR_MANIFOLD)
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_manifold.cmake
+    WORKING_DIRECTORY ${FETCHCONTENT_SOURCE_DIR_MANIFOLD}
+    COMMAND_ERROR_IS_FATAL ANY)
+endif()
 FetchContent_MakeAvailable(manifold)
 
 # Boost.Polygon's Voronoi diagram builder, for roof()'s general (multi-
@@ -158,7 +168,13 @@ FetchContent_MakeAvailable(boost_config boost_polygon)
 # path, not add_subdirectory/MakeAvailable's target machinery. (It used to
 # supply stb_truetype.h for the font backend too; FreeType/HarfBuzz below
 # replaced that.)
-FetchContent_Declare(stb GIT_REPOSITORY https://github.com/nothings/stb.git GIT_TAG master GIT_SHALLOW TRUE)
+#
+# Pinned to a commit, as everything here is: stb has no releases, and
+# following master made two builds of the same tag differ, which also rules
+# out an offline (Flathub) build listing its sources by checksum.
+FetchContent_Declare(stb
+  URL https://github.com/nothings/stb/archive/2c980bb59875b0d32144a71867fbdebb2f77cd20.tar.gz
+  URL_HASH SHA256=9a955b1b49a4410088a2e0ee2a9c057c3c907d0c1d75454144cb980aca0ba515)
 FetchContent_MakeAvailable(stb)
 
 # FreeType (glyph outlines + face metrics) and HarfBuzz (shaping), the two
@@ -221,7 +237,10 @@ FetchContent_MakeAvailable(harfbuzz)
 # `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR`, so FetchContent_
 # MakeAvailable here only exposes its `linenoise` INTERFACE target, matching
 # the existing MANIFOLD_TEST-override pattern's intent for free.
-FetchContent_Declare(cpp_linenoise GIT_REPOSITORY https://github.com/yhirose/cpp-linenoise.git GIT_TAG master GIT_SHALLOW TRUE)
+# Pinned to a commit for the same reason as stb: no releases.
+FetchContent_Declare(cpp_linenoise
+  URL https://github.com/yhirose/cpp-linenoise/archive/b0e8b88f53be0de26252180b1b959c6dd67ec4a9.tar.gz
+  URL_HASH SHA256=e3e67ea401a9e6e19c300f025c51faab197b83254c83e6bef8ef452ee184548b)
 FetchContent_MakeAvailable(cpp_linenoise)
 
 # Embeds the bundled default font's (resources/fonts/) raw bytes into a

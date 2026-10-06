@@ -507,6 +507,30 @@ Requires the same toolchain as `openscad_cpp_parser`: CMake ≥3.24, a C++20 com
 (macOS: `brew install bison`, the submodule's own CMakeLists auto-detects Homebrew's), Flex.
 GoogleTest is fetched automatically via `FetchContent`.
 
+### Building offline (Flathub)
+
+Every dependency is a `FetchContent` download pinned to a tag, commit or checksummed tarball --
+**keep it that way**: an unpinned `master` makes two builds of one tag differ and rules out a
+build that lists its sources by checksum. A build with no network (Flathub's) hands each one in as
+a source directory and forbids downloading:
+
+```bash
+cmake -S . -B build -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DBUILD_TESTING=OFF \
+  -DFETCHCONTENT_SOURCE_DIR_MANIFOLD=...      -DFETCHCONTENT_SOURCE_DIR_CLIPPER2=... \
+  -DFETCHCONTENT_SOURCE_DIR_BOOST_CONFIG=...  -DFETCHCONTENT_SOURCE_DIR_BOOST_POLYGON=... \
+  -DFETCHCONTENT_SOURCE_DIR_FREETYPE=...      -DFETCHCONTENT_SOURCE_DIR_HARFBUZZ=... \
+  -DFETCHCONTENT_SOURCE_DIR_STB=...           -DFETCHCONTENT_SOURCE_DIR_CPP_LINENOISE=... \
+  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=...
+```
+
+That is the whole list for a wheel build (tests off; GoogleTest is the only other download, and
+TBB only with `MANIFOLD_PAR`). Clipper2 is Manifold's own download, pinned in Manifold's
+`cmake/manifoldDeps.cmake`; nlohmann_json is the parser's. FetchContent skips `PATCH_COMMAND` for a
+supplied source, so the root `CMakeLists.txt` runs `cmake/patch_manifold.cmake` itself when
+`FETCHCONTENT_SOURCE_DIR_MANIFOLD` is set -- otherwise an offline build would quietly ship the heap
+overflow that patch fixes. Verified 2026-10-06: a fully disconnected configure + build produced the
+Python module and CLI, and rendered text (freetype + harfbuzz).
+
 Run a single test binary or filter:
 
 ```bash
