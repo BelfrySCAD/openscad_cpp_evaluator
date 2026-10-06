@@ -118,10 +118,47 @@ manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height
 BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    // 100 when not given, as upstream (the old 1 was a guess), and `h` as
-    // upstream's alias -- BOSL2's linear_extrude override forwards it.
-    const double height = toDoubleLenient(getArgOrAlias(ev, &node.position(), args, 0, "height", "h", Value{100.0}));
-    const bool center = truthy(getArg(args, std::nullopt, "center", Value{false}));
+    // Upstream's LinearExtrudeNode: the extrusion runs along a vector, (0,0,1)
+    // unless `v` gives one. Its length is `height` (`h` its alias, BOSL2's
+    // override forwards it) when given -- `v` then only sets the direction --
+    // else |v| when `v` is given, else 100. A vector pointing down (z <= 0)
+    // extrudes nothing. Bad values warn and fall back as upstream's do.
+    // `v` was ignored here, so an oblique extrusion came out straight.
+    double hv[3] = {0.0, 0.0, 1.0};
+    double length = 100.0;
+    const Value vArg = getArg(args, std::nullopt, "v", Value{});
+    if (!std::holds_alternative<std::monostate>(vArg)) {
+        const ListPtr* l = std::get_if<ListPtr>(&vArg);
+        bool ok = l && *l && (*l)->items.size() == 3;
+        double t[3] = {0, 0, 0};
+        for (int i = 0; ok && i < 3; ++i) {
+            const double* d = std::get_if<double>(&(*l)->items[i]);
+            ok = d && std::isfinite(*d);
+            if (ok) t[i] = *d;
+        }
+        if (ok) std::copy(t, t + 3, hv);
+        else ev.warn("v when specified should be a 3d vector", &node.position());
+        length = 1.0;
+    }
+    const Value heightArg = getArgOrAlias(ev, &node.position(), args, 0, "height", "h", Value{});
+    if (!std::holds_alternative<std::monostate>(heightArg)) {
+        const double* d = std::get_if<double>(&heightArg);
+        if (d && std::isfinite(*d)) {
+            length = *d;
+        } else {
+            ev.warn("height when specified should be a number", &node.position());
+            length = 100.0;
+        }
+        const double norm = std::sqrt(hv[0] * hv[0] + hv[1] * hv[1] + hv[2] * hv[2]);
+        for (double& c : hv) c /= norm;
+    }
+    for (double& c : hv) c *= length;
+    if (hv[2] <= 0) hv[2] = 0;
+    const double height = hv[2];
+    // Only a real boolean counts, as upstream: center="yes" is not true.
+    const Value centerArg = getArg(args, std::nullopt, "center", Value{false});
+    const bool* centerBool = std::get_if<bool>(&centerArg);
+    const bool center = centerBool && *centerBool;
     const double twist = toDoubleLenient(getArg(args, std::nullopt, "twist", Value{0.0}));
     // Upstream's validate_integral: any finite number counts as given, and is
     // truncated and clamped (slices >= 1, segments >= 0). Not given, the
@@ -137,15 +174,27 @@ BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::Modular
     const Value scaleArg = getArg(args, std::nullopt, "scale", Value{});
 
     double scaleX = 1.0, scaleY = 1.0;
+    bool scaleOk = true;
     if (const double* s = std::get_if<double>(&scaleArg)) {
         scaleX = scaleY = *s;
+        scaleOk = std::isfinite(*s);
     } else if (const ListPtr* l = std::get_if<ListPtr>(&scaleArg); l && *l && (*l)->items.size() >= 2) {
         scaleX = toDoubleLenient((*l)->items[0]);
         scaleY = toDoubleLenient((*l)->items[1]);
+        scaleOk = std::isfinite(scaleX) && std::isfinite(scaleY);
+    } else if (!std::holds_alternative<std::monostate>(scaleArg)) {
+        scaleOk = false;
+    }
+    if (!scaleOk) {
+        ev.warn("linear_extrude(..., scale=" + fmtValue(scaleArg) + ") could not be converted", &node.position());
+        scaleX = scaleY = 1.0;
     }
 
     CSGParams params;
     params["height"] = Value{height};
+    // How far the top slides sideways per unit of height (0 unless `v`).
+    params["shear_x"] = Value{height > 0 ? hv[0] / height : 0.0};
+    params["shear_y"] = Value{height > 0 ? hv[1] / height : 0.0};
     params["center"] = Value{center};
     params["twist"] = Value{twist};
     params["slices"] = slices ? Value{*slices} : Value{};
@@ -227,6 +276,14 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
             ? extrudeTwisted(polys, height, slices, twist, scaleX, scaleY)
             : manifold::Manifold::Extrude(polys, height, slices - 1, -twist, manifold::vec2(scaleX, scaleY));
     if (std::get<bool>(params.at("center"))) body = body.Translate(manifold::vec3(0, 0, -height / 2));
+    // `v`: slide each point sideways in proportion to its height -- upstream
+    // places slice k at bottom + v*k/n, and centring subtracts v/2, so the
+    // same shear is right either way.
+    const double shearX = std::get<double>(params.at("shear_x"));
+    const double shearY = std::get<double>(params.at("shear_y"));
+    if (shearX != 0.0 || shearY != 0.0) {
+        body = body.Transform(manifold::mat3x4({1, 0, 0}, {0, 1, 0}, {shearX, shearY, 1}, {0, 0, 0}));
+    }
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 
@@ -241,11 +298,34 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
 BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    const double angle = toDoubleLenient(getArgOrAlias(ev, &node.position(), args, 0, "angle", "a", Value{360.0}));
+    // Upstream's RotateExtrudeNode: the sweep runs from `start` through
+    // `start + angle`. With an angle, start defaults to 0 (the +X axis) and
+    // an angle outside (-360, 360] becomes a full turn; with none, the turn
+    // is 360 and starts at 180 (-X), which upstream says will change, and
+    // says so for an odd $fn, where the start shows. An explicit start
+    // always wins. It was ignored here: a quarter turn from 90 drew 0..90.
+    const Value angleArg = getArgOrAlias(ev, &node.position(), args, 0, "angle", "a", Value{});
+    const Value startArg = getArg(args, std::nullopt, "start", Value{});
+    const bool hasAngle = !std::holds_alternative<std::monostate>(angleArg) && std::isfinite(toDoubleLenient(angleArg));
+    const bool hasStart = !std::holds_alternative<std::monostate>(startArg) && std::isfinite(toDoubleLenient(startArg));
+    double angle = 360.0;
+    double start = 180.0;
+    if (hasAngle) {
+        angle = toDoubleLenient(angleArg);
+        start = 0.0;
+        if (angle <= -360.0 || angle > 360.0) angle = 360.0;
+    }
+    if (hasStart) start = toDoubleLenient(startArg);
+    const Discretizer disc = Discretizer::fromCtx(effCtx);
+    if (!hasAngle && !hasStart && (static_cast<int>(disc.fn) & 1)) {
+        ev.emitWarning("DEPRECATED: In future releases, rotational extrusion without \"angle\" will start at zero, "
+                       "the +X axis.  Set start=180 to explicitly start on the -X axis.");
+    }
 
     CSGParams params;
     params["angle"] = Value{angle};
-    Discretizer::fromCtx(effCtx).store(params);
+    params["start"] = Value{start};
+    disc.store(params);
     params["color"] = colorToValue(effCtx.color);
     return BuiltinWrapParams{std::move(params), std::move(effCtx)};
 }
@@ -299,6 +379,9 @@ std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& p
             v = manifold::vec3(v.x * std::cos(a), v.x * std::sin(a), sign * v.y);
         });
     }
+    // The arc above runs from +X; turn it to begin at `start`.
+    const double start = std::get<double>(params.at("start"));
+    if (start != 0.0) body = body.Rotate(0.0, 0.0, start);
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 
