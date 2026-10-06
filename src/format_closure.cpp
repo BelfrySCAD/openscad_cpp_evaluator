@@ -163,6 +163,10 @@ std::string fmt(const ASTNode& n) {
         const auto& a = static_cast<const oscad::AssertOp&>(n);
         return "assert(" + join(a.arguments, ", ") + ") " + fmt(*a.body);
     }
+    case NodeKind::ProfileTimeOp: {
+        const auto& p = static_cast<const oscad::ProfileTimeOp&>(n);
+        return "profile_time(" + join(p.arguments, ", ") + ") " + fmt(*p.body);
+    }
 
     case NodeKind::ListComprehension: {
         const auto& c = static_cast<const oscad::ListComprehension&>(n);

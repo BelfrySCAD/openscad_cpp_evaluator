@@ -71,6 +71,13 @@ struct CSGNode {
     // stack risk the moment this node is ever destroyed.
     int treeDepth = 1;
 
+    // profile_time() only: how long resolving this node (its arguments and
+    // its children's script code) took, in ms; < 0 for every other node.
+    // Measured fresh on every run, so -- like warnEntry -- deliberately NOT
+    // part of cacheKey(): putting a timing in the key would make every
+    // profiled subtree a permanent cache miss.
+    double profileScriptMs = -1.0;
+
     // Memoizes manifold_cache.cpp's cacheKey(*this) -- that function
     // recurses into every descendant to build its own key, so without this
     // memo a generate-time walk that calls cacheKey() at every node (not

@@ -36,6 +36,10 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
     for (CSGNode* nodePtr : tree) {
         CSGNode& node = *nodePtr;
         checkCancel();
+        // profile_time(): timed from before the cache lookup, so a hit
+        // still reports (as cached) rather than vanishing.
+        const bool profiled = node.isBuiltin && node.kind == "profile_time";
+        const auto profileStart = profiled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
         // ManifoldCache lookup: node.uncacheable (rands() taint, set
         // during resolve -- see csg_resolve.cpp) always forces a miss,
@@ -69,6 +73,8 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             // one (BelfrySCAD #521). Goes through emitWarning so an enclosing
             // capture records them too, exactly as a fresh generate would.
             for (const std::string& w : cached->warnings) emitWarning(w);
+            // A hit skips the subtree, profile_time() calls and all.
+            if (profileNodeCount_ > 0) reportCachedProfiles(node);
             // Skipped entirely while measuring: restampCachedIds writes
             // idToNode/idToColor, and geometry that is about to be discarded
             // has no click-to-source identity worth recording. See
@@ -170,6 +176,11 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             // Move-assign a fresh vector, not clear() or `= {}`: both keep the
             // capacity, and 35K nodes' worth of 592-byte slots was 230MB.
             for (const std::unique_ptr<CSGNode>& c : node.children) c->bodies = std::vector<ColoredBody>();
+        }
+        if (profiled) {
+            reportProfile(node,
+                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - profileStart).count(),
+                          cached.has_value());
         }
         for (const ColoredBody& b : node.bodies) topLevelBodies.push_back(b);
     }
