@@ -94,7 +94,9 @@ std::string attrValue(std::string_view tag, std::string_view attrName) {
 
 LoadedMesh loadStl(const std::string& path) {
     const std::vector<uint8_t> bytes = readWholeFile(path);
-    if (bytes.size() < 80) throw std::runtime_error("'" + path + "' is too small to be an STL file");
+    // OpenSCAD's wording for every file it cannot read as STL.
+    const std::string notRecognized = "STL format not recognized in '" + path + "'.";
+    if (bytes.size() < 80) throw std::runtime_error(notRecognized);
 
     const std::string sniff(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(bytes.size(), 336)));
     const bool isAscii = sniff.find("facet normal") != std::string::npos;
@@ -119,11 +121,11 @@ LoadedMesh loadStl(const std::string& path) {
             }
         }
     } else {
-        if (bytes.size() < 84) throw std::runtime_error("'" + path + "' is not a valid binary STL file");
+        if (bytes.size() < 84) throw std::runtime_error(notRecognized);
         uint32_t count;
         std::memcpy(&count, &bytes[80], 4);
         const size_t needed = 84 + static_cast<size_t>(count) * 50;
-        if (bytes.size() < needed) throw std::runtime_error("'" + path + "' is truncated");
+        if (bytes.size() < needed) throw std::runtime_error(notRecognized);
         verts.reserve(static_cast<size_t>(count) * 3);
         tris.reserve(count);
         for (uint32_t t = 0; t < count; ++t) {
@@ -164,33 +166,69 @@ LoadedMesh loadObj(const std::string& path) {
 }
 
 LoadedMesh loadOff(const std::string& path) {
-    std::vector<std::string> lines;
+    std::vector<std::vector<std::string>> lines;
     for (const std::string& raw : splitLines(readWholeFileText(path))) {
-        const std::string line = trim(raw);
-        if (!line.empty() && line[0] != '#') lines.push_back(line);
+        std::string line = raw.substr(0, raw.find('#'));
+        std::vector<std::string> tokens = splitWs(trim(line));
+        if (!tokens.empty()) lines.push_back(std::move(tokens));
     }
-    if (lines.empty()) throw std::runtime_error("'" + path + "' is empty");
+    const auto bad = [&](const std::string& why) { return std::runtime_error("OFF file '" + path + "': " + why); };
+    if (lines.empty()) throw bad("empty file");
 
+    // The header keyword may carry prefixes (COFF, NOFF, STOFF, ...), and the
+    // counts may follow it on the same line, as OpenSCAD accepts.
     size_t idx = 0;
-    if (lines[idx].rfind("OFF", 0) == 0 || lines[idx].rfind("off", 0) == 0) ++idx;
-    if (idx >= lines.size()) throw std::runtime_error("'" + path + "' is missing its vertex/face count line");
-    const std::vector<std::string> counts = splitWs(lines[idx++]);
-    if (counts.size() < 2) throw std::runtime_error("'" + path + "' has a malformed vertex/face count line");
-    const int nv = std::stoi(counts[0]);
-    const int nf = std::stoi(counts[1]);
+    std::vector<std::string> counts = lines[0];
+    const std::string& kw = counts[0];
+    if (kw.size() >= 3 && kw.compare(kw.size() - 3, 3, "OFF") == 0) {
+        counts.erase(counts.begin());
+        if (counts.empty()) {
+            if (lines.size() < 2) throw bad("missing the vertex/face count line");
+            counts = lines[1];
+            idx = 2;
+        } else {
+            idx = 1;
+        }
+    }
+    const auto toInt = [&](const std::string& t) {
+        try {
+            size_t used = 0;
+            const int v = std::stoi(t, &used);
+            if (used == t.size() && v >= 0) return v;
+        } catch (const std::exception&) {
+        }
+        throw bad("'" + t + "' is not a count or index");
+    };
+    const auto toNum = [&](const std::string& t) {
+        try {
+            return std::stod(t);
+        } catch (const std::exception&) {
+            throw bad("'" + t + "' is not a number");
+        }
+    };
+    if (counts.size() < 2) throw bad("malformed vertex/face count line");
+    const int nv = toInt(counts[0]);
+    const int nf = toInt(counts[1]);
+    if (lines.size() - idx < static_cast<size_t>(nv) + static_cast<size_t>(nf)) throw bad("file is truncated");
 
     LoadedMesh out;
     out.verts.reserve(static_cast<size_t>(nv));
     for (int i = 0; i < nv; ++i) {
-        const std::vector<std::string> p = splitWs(lines[idx++]);
-        out.verts.push_back({std::stod(p[0]), std::stod(p[1]), std::stod(p[2])});
+        const std::vector<std::string>& p = lines[idx++];
+        if (p.size() < 3) throw bad("a vertex needs three coordinates");
+        out.verts.push_back({toNum(p[0]), toNum(p[1]), toNum(p[2])});  // any further values are a colour
     }
     for (int i = 0; i < nf; ++i) {
-        const std::vector<std::string> p = splitWs(lines[idx++]);
-        const int cnt = std::stoi(p[0]);
+        const std::vector<std::string>& p = lines[idx++];
+        const int cnt = toInt(p[0]);
+        if (p.size() < static_cast<size_t>(cnt) + 1) throw bad("a face lists fewer indices than its count");
         std::vector<int> faceIdx;
         faceIdx.reserve(static_cast<size_t>(cnt));
-        for (int k = 0; k < cnt; ++k) faceIdx.push_back(std::stoi(p[static_cast<size_t>(k) + 1]));
+        for (int k = 0; k < cnt; ++k) {
+            const int v = toInt(p[static_cast<size_t>(k) + 1]);
+            if (v >= nv) throw bad("face index " + std::to_string(v) + " is out of range");
+            faceIdx.push_back(v);
+        }
         for (int k = 1; k + 1 < cnt; ++k) out.tris.push_back({faceIdx[0], faceIdx[static_cast<size_t>(k)], faceIdx[static_cast<size_t>(k) + 1]});
     }
     return out;

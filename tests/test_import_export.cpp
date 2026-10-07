@@ -172,13 +172,6 @@ Imported importText(const std::string& name, const std::string& text) {
     return out;
 }
 
-bool anyContains(const std::vector<std::string>& messages, const std::string& needle) {
-    for (const std::string& m : messages) {
-        if (m.find(needle) != std::string::npos) return true;
-    }
-    return false;
-}
-
 } // namespace
 
 // A cube scaled x2 and moved, the same cube USEd again under a 90-degree
@@ -222,14 +215,11 @@ TEST(ImportModuleContext, VrmlAppliesTransformsAndSkipsProtoAndRoute) {
 }
 
 TEST(ImportModuleContext, VrmlIndexPastItsPointsErrors) {
-    Evaluator ev;
     const auto path = tempPath("bad.wrl");
     std::ofstream(path) << "#VRML V2.0 utf8\nShape { geometry IndexedFaceSet { coord Coordinate { point [ 0 0 0, 1 0 0, 0 1 0 ] }"
                            " coordIndex [ 0 1 7 -1 ] } }\n";
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_EQ(err.rfind("ERROR: ", 0), 0u) << err;
     std::filesystem::remove(path);
 }
 
@@ -280,50 +270,66 @@ TEST(ImportModuleContext, ZippedAmfImports) {
 TEST(ImportModuleContext, UnsupportedExtensionErrors) {
     const auto path = tempPath("unsupported.xyz");
     std::ofstream(path) << "x";
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_NE(err.find("Unsupported file format while trying to import file '\"" + path.generic_string() +
+                       "\"', import() at line 1"),
+              std::string::npos)
+        << err;
 }
 
 TEST(ImportModuleContext, MissingFileArgumentErrors) {
-    Evaluator ev;
-    auto ast = parseSrc("import();");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    EXPECT_EQ(importFailure("import();"),
+              "ERROR: Unsupported file format while trying to import file '\"\"', import() at line 1");
+}
+
+// filename= still works, with OpenSCAD's deprecation notice.
+TEST(ImportModuleContext, FilenameIsADeprecatedSpellingOfFile) {
+    const auto path = tempPath("legacy.off");
+    std::ofstream(path) << "OFF\n4 4 0\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n3 0 2 1\n3 0 1 3\n3 1 2 3\n3 0 3 2\n";
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("import(filename=\"" + path.generic_string() + "\");", [&](const std::string& m) { log.push_back(m); });
+    std::filesystem::remove(path);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0 / 6, 1e-9);
+    EXPECT_TRUE(anyContains(log, "DEPRECATED: filename= is deprecated. Please use file=")) << ::testing::PrintToString(log);
+}
+
+// COFF (per-vertex colours) and counts on the header line both import.
+TEST(ImportModuleContext, OffVariantsImport) {
+    for (const std::string off : {"COFF\n4 4 0\n0 0 0 1 0 0 1\n1 0 0 1 0 0 1\n0 1 0 1 0 0 1\n0 0 1 1 0 0 1\n",
+                                  "OFF 4 4 0\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n"}) {
+        const auto path = tempPath("variant.off");
+        std::ofstream(path) << off << "3 0 2 1\n3 0 1 3\n3 1 2 3\n3 0 3 2\n";
+        Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
+        std::filesystem::remove(path);
+        ASSERT_EQ(e.bodies.size(), 1u) << off;
+        EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0 / 6, 1e-9) << off;
+    }
+}
+
+// A truncated OFF read past the end of its lines.
+TEST(ImportModuleContext, TruncatedOffFailsCleanly) {
+    const auto path = tempPath("trunc.off");
+    std::ofstream(path) << "OFF\n4 4 0\n0 0 0\n";
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    std::filesystem::remove(path);
+    EXPECT_NE(err.find("file is truncated"), std::string::npos) << err;
 }
 
 TEST(ImportModuleContext, JsonExtensionErrorsAsGeometryStatement) {
     const auto path = tempPath("data_as_module.json");
-    {
-        std::ofstream out(path);
-        out << R"({"a": 1})";
-    }
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::ofstream(path) << R"({"a": 1})";
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_NE(err.find("Unsupported file format"), std::string::npos) << err;
     std::filesystem::remove(path);
 }
 
 TEST(ImportModuleContext, MalformedMeshFileErrors) {
-    // loadMeshByExt's own exception -> caught and rethrown as ev.error()
-    // inside resolveImport's try/catch -- every other STL/OBJ/OFF/3MF test
-    // here round-trips a well-formed file written by this project's own
-    // exporter.
+    // OpenSCAD's wording, and the render goes on.
     const auto path = tempPath("malformed.stl");
-    {
-        std::ofstream out(path);
-        out << "this is not a valid STL file at all";
-    }
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::ofstream(path) << "this is not a valid STL file at all";
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_NE(err.find("STL format not recognized in '"), std::string::npos) << err;
     std::filesystem::remove(path);
 }
 
@@ -350,17 +356,13 @@ TEST(ImportModuleContext, NonManifoldMeshWarns) {
     std::filesystem::remove(path);
 }
 
-TEST(ImportModuleContext, EmptyMeshHasNoTrianglesErrors) {
-    // generateImport's own "tris.empty()" check -- only reachable at
-    // generate time (not resolveTree()'s own try/catch, which only guards
-    // loadMeshByExt itself), so this needs the full resolve+generate
-    // pipeline, unlike every other error test in this file.
+TEST(ImportModuleContext, EmptyMeshDrawsNothing) {
     const auto path = tempPath("empty.off");
-    {
-        std::ofstream out(path);
-        out << "OFF\n0 0 0\n";
-    }
-    EXPECT_THROW(evalSrc("import(\"" + path.generic_string() + "\");"), EvalError);
+    std::ofstream(path) << "OFF\n0 0 0\n";
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");", [&](const std::string& m) { log.push_back(m); });
+    EXPECT_TRUE(e.bodies.empty());
+    EXPECT_TRUE(log.empty()) << ::testing::PrintToString(log);
     std::filesystem::remove(path);
 }
 
