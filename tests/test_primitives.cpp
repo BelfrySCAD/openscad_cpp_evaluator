@@ -153,8 +153,17 @@ TEST(Polyhedron, TetrahedronVolumeMatchesAnalyticFormula) {
     EXPECT_NEAR(e.bodies[0].body->Volume(), 4.0 / 3.0, 1e-6);
 }
 
-TEST(Polyhedron, MissingPointsOrFacesRaisesEvalError) {
-    EXPECT_THROW(evalSrc("polyhedron(points=[[0,0,0]]);"), EvalError);
+TEST(Polyhedron, MissingFacesWarnsAndDrawsNothing) {
+    // Upstream builtin_polyhedron warns and draws nothing; the rest of the
+    // script carries on (this used to stop the render).
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("polyhedron(points=[[0,0,0]]); cube(1);", [&](const std::string& m) { log.push_back(m); });
+    ASSERT_FALSE(log.empty());
+    EXPECT_NE(log[0].find("Unable to convert faces = undef to a vector of vector of point indices"), std::string::npos);
+    double volume = 0;
+    for (const ColoredBody& b : e.bodies)
+        if (b.body) volume += b.body->Volume();
+    EXPECT_NEAR(volume, 1.0, 1e-9);
 }
 
 // -- 2D primitives ------------------------------------------------------
@@ -293,9 +302,11 @@ TEST(Polyhedron, NonFiniteVertexIsDiscardedNotDisplayed) {
     std::string warning;
     Evaluated e = evalSrc("polyhedron(points=[[0,0,0],[2,0,0],[0,2,0],[0/0,0,2]],"
                           "           faces=[[0,1,2],[0,3,1],[0,2,3],[1,3,2]]);",
-                          [&](const std::string& m) { warning = m; });
+                          [&](const std::string& m) { if (warning.empty()) warning = m; });
+    // Upstream makes a non-finite point [0,0,0], with its own warning.
     for (const ColoredBody& b : e.bodies) EXPECT_FALSE(b.isDisplayOnly());
-    EXPECT_NE(warning.find("NonFiniteVertex"), std::string::npos) << warning;
+    EXPECT_NE(warning.find("Unable to convert points[3] = [nan, 0, 2] to a vec3 of numbers"), std::string::npos)
+        << warning;
 }
 
 // It has no Manifold, so a boolean would have nothing to operate on. It is
@@ -498,7 +509,6 @@ TEST(Primitives, CubeBadSizeIsAUnitCube) {
         {"undef", ""},
         {"\"a\"", "size=\"a\""},
         {"[1,2]", "size=[1, 2]"},
-        {"[1,2,undef]", "size=[1, 2, undef]"},
         {"true", "size=true"},
         {"[1,\"a\",3]", "size=[1, \"a\", 3]"},
     };
@@ -516,5 +526,19 @@ TEST(Primitives, CubeBadSizeIsAUnitCube) {
                                   ", ...) parameter to a number or a vec3 of numbers in file <string>, line 1")
                 << arg;
         }
+    }
+}
+
+TEST(Primitives, CubeKeepsTheSidesItReadBeforeABadOne) {
+    // Value::getVec3 assigns element by element and stops at the first that
+    // is not a number, so the sides before it stay set. Checked against
+    // OpenSCAD 2026.02.01: cube([1,2,undef]) and cube([1,2,"x"]) are 1x2x1
+    // (and warn); cube([1,"a",3]) is 1x1x1.
+    for (const char* arg : {"[1,2,undef]", "[1,2,\"x\"]"}) {
+        std::vector<std::string> log;
+        Evaluated e = evalSrc(std::string("cube(") + arg + ");", [&](const std::string& m) { log.push_back(m); });
+        ASSERT_EQ(e.bodies.size(), 1u) << arg;
+        EXPECT_NEAR(e.bodies[0].body->Volume(), 2.0, 1e-9) << arg;
+        EXPECT_EQ(log.size(), 1u) << arg;
     }
 }

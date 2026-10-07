@@ -136,16 +136,44 @@ manifold::SimplePolygon splitByFs(const manifold::SimplePolygon& o, double twist
 
 } // namespace
 
-Discretizer Discretizer::fromCtx(const EvalContext& ctx) {
+namespace {
+// Value::toDouble on a set special variable: the number, or 0 for anything
+// that is not one. Unset falls back to the default OpenSCAD's root context
+// gives it.
+double dynToDouble(const EvalContext& ctx, const char* name, double unset) {
+    const Value* v = ctx.dyn->find(name);
+    if (!v) return unset;
+    const double* d = std::get_if<double>(v);
+    return d ? *d : 0.0;
+}
+} // namespace
+
+// upstream's CurveDiscretizer: $fn below 0 is 0, and $fa/$fs below 0.01
+// (zero, negative, or not a number at all) are clamped to 0.01 -- with a
+// warning where the node was built with a location (circle, sphere,
+// cylinder, the extrusions), silently otherwise (offset, text). This used
+// to reset them to the 12/2 defaults: cylinder(r=10, $fa=0) had 30
+// segments where OpenSCAD has 32, and $fs=0.001 was never clamped at all.
+Discretizer Discretizer::fromCtx(const EvalContext& ctx, const std::function<void(const std::string&)>& warn) {
+    constexpr double kFMinimum = 0.01;
     Discretizer d;
-    d.fn = dynNumberOr(ctx, "$fn", 0.0);
-    d.fe = dynNumberOr(ctx, "$fe", 0.0);
-    d.fa = dynNumberOr(ctx, "$fa", 12.0);
-    d.fs = dynNumberOr(ctx, "$fs", 2.0);
-    if (d.fa <= 0) d.fa = 12.0;
-    if (d.fs <= 0) d.fs = 2.0;
-    if (d.fn < 0) d.fn = 0.0;
+    d.fn = dynToDouble(ctx, "$fn", 0.0);
+    d.fe = dynToDouble(ctx, "$fe", 0.0);
+    d.fa = dynToDouble(ctx, "$fa", 12.0);
+    d.fs = dynToDouble(ctx, "$fs", 2.0);
+    if (d.fn < 0) {
+        if (warn) warn("$fn negative - setting to 0");
+        d.fn = 0.0;
+    }
     if (d.fe < 0) d.fe = 0.0;
+    if (d.fs < kFMinimum) {
+        if (warn) warn("$fs too small - clamping to 0.010000");
+        d.fs = kFMinimum;
+    }
+    if (d.fa < kFMinimum) {
+        if (warn) warn("$fa too small - clamping to 0.010000");
+        d.fa = kFMinimum;
+    }
     return d;
 }
 
@@ -249,8 +277,8 @@ manifold::SimplePolygon Discretizer::splitOutline(const manifold::SimplePolygon&
     return byFs.size() >= faSegs ? splitByFn(o, twist, scaleX, scaleY, faSegs, slices) : byFs;
 }
 
-int fnSegmentsFromCtx(const EvalContext& ctx, double r) {
-    return Discretizer::fromCtx(ctx).circular(r).value_or(3);
+int fnSegmentsFromCtx(const EvalContext& ctx, double r, const std::function<void(const std::string&)>& warn) {
+    return Discretizer::fromCtx(ctx, warn).circular(r).value_or(3);
 }
 
 } // namespace oscadeval

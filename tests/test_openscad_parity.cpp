@@ -246,3 +246,57 @@ TEST(Parity, IntersectionForIntersectsEveryStatementFlat) {
     EXPECT_NEAR(run("intersection_for(i=[0:1]){ translate([i*0.5,0,0]) cube(1); translate([3,0,0]) cube(1); }").volume,
                 0.0, 1e-9);
 }
+
+// -- 3D primitives -------------------------------------------------------------
+
+// Non-positive or non-finite sizes draw nothing, as each upstream
+// createGeometry does. sphere(-1) was an inside-out sphere that added
+// material to any difference(); cylinder(r2=-2) drew a prism.
+TEST(Parity, InvalidPrimitiveSizesDrawNothing) {
+    EXPECT_NEAR(run("difference(){ cube(4, center=true); sphere(-1, $fn=12); }").volume, 64.0, 1e-9);
+    for (const char* src : {"sphere(-1);", "sphere(0);", "sphere(1/0);", "cylinder(h=2, r1=1, r2=-2);",
+                            "cylinder(h=-2, r=1);", "cylinder(h=2, r1=0, r2=0);", "cube([1,1,0]);", "cube(-1);",
+                            "hull() cube([1,1,0]);"}) {
+        const Outcome r = run(src);
+        EXPECT_EQ(r.bodies, 0u) << src;
+    }
+}
+
+// Arguments that are not numbers keep the defaults rather than becoming 0.
+TEST(Parity, PrimitiveArgumentsFollowUpstream) {
+    EXPECT_GT(run("sphere(\"a\", $fn=8);").volume, 1.0);  // r = 1, not 0
+    EXPECT_NEAR(run("cylinder(h=\"a\", r=1, $fn=4);").volume, 2.0, 1e-9);  // h = 1
+    // center= counts only as a real bool.
+    EXPECT_NEAR(solidBounds("cube(2, center=1);").min.x, 0.0, 1e-12);
+    EXPECT_NEAR(solidBounds("cylinder(h=2, r=1, center=1);").min.z, 0.0, 1e-12);
+    // d beats r, with upstream's warnings.
+    Outcome r = run("sphere(r=2, d=10, $fn=8);");
+    EXPECT_TRUE(logged(r, "Ignoring radius variable \"r\" as diameter \"d\" is defined too."));
+    r = run("cylinder(h=1, r=1, r1=2, $fn=8);");
+    EXPECT_TRUE(logged(r, "Cylinder parameters ambiguous"));
+}
+
+// $fa/$fs below 0.01 are clamped to 0.01 with upstream's warning; they were
+// reset to the 12/2 defaults (30 segments here, not OpenSCAD's 32).
+TEST(Parity, FragmentAngleAndSizeAreClampedNotReset) {
+    Evaluated e = evaluateSrc("cylinder(h=1, r=10, $fa=0);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(e.bodies[0].body->NumVert(), 64u);  // 32 segments, top and bottom
+    const Outcome r = run("cylinder(h=1, r=10, $fa=0);");
+    EXPECT_TRUE(logged(r, "$fa too small - clamping to 0.010000"));
+}
+
+TEST(Parity, PolyhedronBadInputIsReportedAndDroppedNotGuessed) {
+    // An out-of-range index is dropped with upstream's warning; it was
+    // silently remapped to point 0.
+    Outcome r = run("polyhedron([[0,0,0],[10,0,0],[0,10,0],[0,0,10]], [[0,1,2],[0,3,1],[0,2,3],[1,3,9]]);");
+    EXPECT_TRUE(logged(r, "Point index 9 is out of bounds (from faces[3][2])"));
+    // Missing faces warns and the script carries on.
+    r = run("polyhedron([[0,0,0],[1,0,0],[0,1,0]]); cube(1);");
+    EXPECT_TRUE(logged(r, "Unable to convert faces = undef to a vector of vector of point indices"));
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    // The legacy triangles= alias still works, with 2026.02.01's notice.
+    r = run("polyhedron(points=[[0,0,0],[10,0,0],[0,10,0],[0,0,10]], triangles=[[0,1,2],[0,3,1],[0,2,3],[1,3,2]]);");
+    EXPECT_TRUE(logged(r, "DEPRECATED: polyhedron(triangles=[]) will be removed in future releases."));
+    EXPECT_GT(r.volume, 100.0);
+}

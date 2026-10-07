@@ -497,7 +497,11 @@ TEST(RenderExpr, ExplicitFacesAlwaysWinOverVnfInterpretation) {
 TEST(RenderExpr, TwoPointListIsNotMistakenForAVnf) {
     // A points list that happens to have length 2 has a POINT as its second
     // element -- bare numbers, not lists -- so it must not be taken over.
-    // It is still not a valid polyhedron, so it errors rather than silently
-    // building something.
-    EXPECT_THROW(evalSrc("polyhedron([[0,0,0],[1,1,1]]);"), std::exception);
+    // It is still not a valid polyhedron: with no faces it draws nothing,
+    // with upstream's warning.
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("polyhedron([[0,0,0],[1,1,1]]);", [&](const std::string& m) { log.push_back(m); });
+    ASSERT_FALSE(log.empty());
+    EXPECT_NE(log[0].find("Unable to convert faces = undef"), std::string::npos) << log[0];
+    for (const ColoredBody& b : e.bodies) EXPECT_TRUE(!b.body || b.body->IsEmpty());
 }
