@@ -5,6 +5,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <cmath>
 #include <gtest/gtest.h>
 
 using namespace oscadeval;
@@ -98,10 +100,9 @@ TEST(DxfImport, ClosedPolylineVertexEntityProducesExpectedArea) {
     std::filesystem::remove(path);
 }
 
-TEST(DxfImport, OpenPolylineIsIgnored) {
-    // closed=false (group code 70 bit 0 unset, or absent entirely) means
-    // the entity is dropped -- exercises the "!closed" half of the final
-    // guard, distinct from every other DXF fixture here which is closed.
+TEST(DxfImport, TwoPointOpenPolylineDrawsNothing) {
+    // An open path is closed with a straight edge, so two points enclose
+    // nothing -- and that is silent.
     const std::string dxf =
         "0\nSECTION\n2\nENTITIES\n"
         "0\nPOLYLINE\n8\n0\n"
@@ -118,11 +119,9 @@ TEST(DxfImport, OpenPolylineIsIgnored) {
     std::filesystem::remove(path);
 }
 
-TEST(DxfImport, UnrecognizedEntityIsSkipped) {
-    // The trailing "else { ++i; }" branch in loadDxfContours' top-level
-    // loop -- a group-0 entity name that's neither LWPOLYLINE nor
-    // POLYLINE (e.g. LINE) must be skipped without disturbing the real
-    // closed contour that follows it.
+TEST(DxfImport, LoneLineDoesNotDisturbAContour) {
+    // A single LINE joins nothing, so it encloses nothing and leaves the
+    // closed contour beside it alone.
     const std::string dxf =
         "0\nSECTION\n2\nENTITIES\n"
         "0\nLINE\n8\n0\n10\n0.0\n20\n0.0\n11\n1.0\n21\n1.0\n"
@@ -148,6 +147,160 @@ TEST(DxfImport, NoClosedContoursIsSilent) {
                           [&](const std::string& m) { log.push_back(m); });
     EXPECT_EQ(log, std::vector<std::string>{"ECHO: \"after\""});
     std::filesystem::remove(path);
+}
+
+// The rest of these were checked against OpenSCAD 2026.02.01 running the
+// same files: areas, vertex counts and warning text are its.
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+std::string dxfFile(const std::string& entities, const std::string& blocks = "") {
+    return "0\nSECTION\n2\nBLOCKS\n" + blocks + "0\nENDSEC\n0\nSECTION\n2\nENTITIES\n" + entities +
+           "0\nENDSEC\n0\nEOF\n";
+}
+
+std::string num(double v) {
+    std::ostringstream ss;
+    ss.precision(17);
+    ss << v;
+    return ss.str();
+}
+
+std::string lineEnt(double x1, double y1, double x2, double y2, const std::string& layer = "0") {
+    return "0\nLINE\n8\n" + layer + "\n10\n" + num(x1) + "\n20\n" + num(y1) + "\n11\n" + num(x2) + "\n21\n" + num(y2) +
+           "\n";
+}
+
+// Imports `dxf` with `args` appended to the call; returns the region (empty
+// when nothing was drawn) and every message printed.
+struct DxfRun {
+    manifold::CrossSection section;
+    std::vector<std::string> log;
+};
+
+DxfRun importDxf(const std::string& dxf, const std::string& args = "", const std::string& name = "case.dxf") {
+    const auto path = tempPath(name);
+    writeFile(path, dxf);
+    DxfRun run;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\"" + args + ");",
+                          [&](const std::string& m) { run.log.push_back(m); });
+    if (!e.bodies.empty() && e.bodies[0].section) run.section = *e.bodies[0].section;
+    std::filesystem::remove(path);
+    return run;
+}
+
+} // namespace
+
+TEST(DxfImport, LinesJoinIntoAPolygon) {
+    // Out of order and pointing either way: joined end to end regardless.
+    const DxfRun r = importDxf(dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10, 10, 0, 10) + lineEnt(10, 10, 10, 0) +
+                                       lineEnt(0, 0, 0, 10)));
+    EXPECT_NEAR(r.section.Area(), 100.0, 1e-9);
+    EXPECT_TRUE(r.log.empty()) << ::testing::PrintToString(r.log);
+}
+
+TEST(DxfImport, OpenChainIsClosedWithAStraightEdge) {
+    const DxfRun r = importDxf(dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10, 0, 10, 10)));
+    EXPECT_NEAR(r.section.Area(), 50.0, 1e-9);
+}
+
+TEST(DxfImport, OverlapsAreFilledEvenOdd) {
+    std::string ents;
+    for (double o : {0.0, 5.0})
+        ents += lineEnt(o, o, o + 10, o) + lineEnt(o + 10, o, o + 10, o + 10) + lineEnt(o + 10, o + 10, o, o + 10) +
+                lineEnt(o, o + 10, o, o);
+    EXPECT_NEAR(importDxf(dxfFile(ents)).section.Area(), 150.0, 1e-9);
+}
+
+TEST(DxfImport, PointsSnapToAGridOf1024ths) {
+    // 10.1 lands on 10342/1024, and the gap to 10 stays open.
+    const DxfRun r = importDxf(dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10.1, 0, 10, 10) + lineEnt(10, 10, 0, 0)));
+    EXPECT_NEAR(r.section.Area(), 0.5 * 10 * (10342.0 / 1024), 1e-9);
+    // Endpoints a hair apart (in neighbouring cells) are one point.
+    const DxfRun near = importDxf(
+        dxfFile(lineEnt(0, 0, 10 + 1.49 / 1024, 0) + lineEnt(10 + 2.4 / 1024, 0, 10, 10) + lineEnt(10, 10, 0, 0)));
+    EXPECT_NEAR(near.section.Area(), 0.5 * 10 * (10241.0 / 1024), 1e-9);
+}
+
+TEST(DxfImport, CirclesAndArcsUseTheFragmentRules) {
+    const std::string circle = dxfFile("0\nCIRCLE\n8\n0\n10\n0\n20\n0\n40\n100\n");
+    EXPECT_EQ(importDxf(circle).section.NumVert(), 30u);
+    EXPECT_EQ(importDxf(circle, ", $fn=6").section.NumVert(), 6u);
+    EXPECT_EQ(importDxf(circle, ", $fa=30, $fs=0.1").section.NumVert(), 12u);
+    // scale= is applied first, so a scaled-up small circle gets more.
+    EXPECT_EQ(importDxf(dxfFile("0\nCIRCLE\n8\n0\n10\n0\n20\n0\n40\n1\n"), ", scale=50").section.NumVert(), 30u);
+    // 100 degrees of a 30-fragment circle: ceil(8.33) = 9 segments, plus the
+    // centre the two radii meet at.
+    const double c = 100 * std::cos(100 * kPi / 180), s = 100 * std::sin(100 * kPi / 180);
+    const DxfRun arc = importDxf(dxfFile("0\nARC\n8\n0\n10\n0\n20\n0\n40\n100\n50\n0\n51\n100\n" +
+                                         lineEnt(0, 0, 100, 0) + lineEnt(0, 0, c, s)));
+    EXPECT_EQ(arc.section.NumVert(), 11u);
+}
+
+TEST(DxfImport, EllipseCountsByItsMajorRadius) {
+    // Major radius 5 (16 fragments) though the minor one is 10; an unset
+    // end parameter would make it empty, so it is given.
+    const DxfRun r =
+        importDxf(dxfFile("0\nELLIPSE\n8\n0\n10\n0\n20\n0\n11\n5\n21\n0\n40\n2\n41\n0\n42\n6.283185307179586\n"));
+    EXPECT_EQ(r.section.NumVert(), 16u);
+    const manifold::Rect box = r.section.Bounds();
+    EXPECT_NEAR(box.max.y, 10.0, 1e-3);
+}
+
+TEST(DxfImport, InsertPlacesABlock) {
+    const std::string block = "0\nBLOCK\n8\n0\n2\nb\n70\n0\n10\n5\n20\n5\n" + lineEnt(0, 0, 10, 0) +
+                              lineEnt(10, 0, 10, 10) + lineEnt(10, 10, 0, 0) + "0\nENDBLK\n";
+    // x scaled by 2, then turned 90 degrees, then moved; the block's base
+    // point (5,5) plays no part, as in OpenSCAD.
+    const DxfRun r = importDxf(dxfFile("0\nINSERT\n8\n0\n2\nb\n10\n100\n20\n0\n41\n2\n50\n90\n", block));
+    EXPECT_NEAR(r.section.Area(), 100.0, 1e-9);
+    const manifold::Rect box = r.section.Bounds();
+    EXPECT_NEAR(box.min.x, 90.0, 1e-9);
+    EXPECT_NEAR(box.max.y, 20.0, 1e-9);
+    // A block on its own draws nothing.
+    EXPECT_TRUE(importDxf(dxfFile("", block)).section.IsEmpty());
+}
+
+TEST(DxfImport, LayerFiltersTheInsertNotTheBlock) {
+    const std::string block = "0\nBLOCK\n8\n0\n2\nb\n70\n0\n10\n0\n20\n0\n0\nCIRCLE\n8\ninner\n10\n0\n20\n0\n40\n10\n0\nENDBLK\n";
+    const std::string file = dxfFile("0\nINSERT\n8\nouter\n2\nb\n10\n0\n20\n0\n", block);
+    EXPECT_FALSE(importDxf(file, ", layer=\"outer\"").section.IsEmpty());
+    EXPECT_TRUE(importDxf(file, ", layer=\"inner\"").section.IsEmpty());
+}
+
+TEST(DxfImport, OriginAndScale) {
+    const std::string tri = dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10, 0, 10, 10) + lineEnt(10, 10, 0, 0));
+    const manifold::Rect box = importDxf(tri, ", origin=[1,2], scale=3").section.Bounds();
+    EXPECT_NEAR(box.min.x, -3.0, 1e-9);
+    EXPECT_NEAR(box.min.y, -6.0, 1e-9);
+    EXPECT_NEAR(box.max.x, 27.0, 1e-9);
+    // A scale that is not a positive number is 1.
+    EXPECT_NEAR(importDxf(tri, ", scale=-2").section.Area(), 50.0, 1e-9);
+    const DxfRun bad = importDxf(tri, ", origin=[1,2,3]");
+    EXPECT_NEAR(bad.section.Area(), 50.0, 1e-9);
+    ASSERT_EQ(bad.log.size(), 1u);
+    EXPECT_NE(bad.log[0].find("WARNING: Unable to convert import(..., origin=[1, 2, 3]) parameter to vec2"),
+              std::string::npos)
+        << bad.log[0];
+}
+
+TEST(DxfImport, DecimalCommasWarnAsOpenSCADDoes) {
+    // A LINE short of a coordinate is not drawn; OpenSCAD names the NEXT
+    // entity's type in the warning, and pours the next entity's values into
+    // the unfinished one.
+    const std::string file = dxfFile("0\nLINE\n8\n0\n10\n0,1\n20\n0\n11\n2\n21\n0\n" + lineEnt(0, 0, 1, 1));
+    const auto path = tempPath("comma.dxf");
+    const DxfRun r = importDxf(file, "", "comma.dxf");
+    const std::string p = path.generic_string();
+    EXPECT_EQ(r.log, (std::vector<std::string>{"WARNING: Illegal value '0,1'in `" + p + "'",
+                                               "WARNING: Not enough input values for LINE. in '" + p + "'"}));
+}
+
+TEST(DxfImport, UnsupportedEntitiesAreCountedAfterTheFile) {
+    const DxfRun r = importDxf(dxfFile("0\nSPLINE\n8\n0\n0\nSPLINE\n8\n0\n0\nDIMENSION\n8\n0\n"), "", "spline.dxf");
+    ASSERT_EQ(r.log.size(), 1u);
+    EXPECT_EQ(r.log[0].rfind("WARNING: Unsupported DXF Entity 'SPLINE' (2) in \"", 0), 0u) << r.log[0];
 }
 
 // -- SVG import -----------------------------------------------------------

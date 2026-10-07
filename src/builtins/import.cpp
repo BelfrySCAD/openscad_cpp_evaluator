@@ -59,6 +59,31 @@ bool isMeshExt(const std::string& ext) {
            ext == ".wrl";
 }
 
+// layer=, origin= and scale= as OpenSCAD reads them: an empty layer is no
+// filter, a non-string one is matched as its text; an origin that is not two
+// numbers warns and is ignored; a scale that is not a positive number is 1.
+DxfOptions dxfOptions(Evaluator& ev, const CallArgs& args, const Value& layerArg, const oscad::ASTNode& node) {
+    DxfOptions opts;
+    if (const std::string* s = std::get_if<std::string>(&layerArg)) {
+        if (!s->empty()) opts.layer = *s;
+    } else if (!std::holds_alternative<std::monostate>(layerArg)) {
+        opts.layer = fmtValue(layerArg);
+    }
+    const Value originArg = getArg(args, std::nullopt, "origin", Value{});
+    const ListPtr* origin = std::get_if<ListPtr>(&originArg);
+    if (origin && *origin && (*origin)->items.size() == 2 && std::holds_alternative<double>((*origin)->items[0]) &&
+        std::holds_alternative<double>((*origin)->items[1])) {
+        opts.xorigin = std::get<double>((*origin)->items[0]);
+        opts.yorigin = std::get<double>((*origin)->items[1]);
+    } else if (!std::holds_alternative<std::monostate>(originArg)) {
+        ev.warn("Unable to convert import(..., origin=" + fmtValue(originArg) + ") parameter to vec2",
+                &node.position());
+    }
+    const Value scaleArg = getArg(args, std::nullopt, "scale", Value{});
+    if (const double* s = std::get_if<double>(&scaleArg); s && *s > 0) opts.scale = *s;
+    return opts;
+}
+
 
 Value jsonToValue(const nlohmann::ordered_json& j) {
     if (j.is_boolean()) return Value{j.get<bool>()};
@@ -252,6 +277,10 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     // on its bounding box (optionally_center). Only SVG used to honour it.
     const Value centerArg = getArg(args, std::nullopt, "center", Value{false});
     const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
+    // OpenSCAD checks these for every import, whatever the file type, as the
+    // node is built -- so before the script's later echoes.
+    DxfOptions dxfOpts = dxfOptions(ev, args, layerArg, node);
+    dxfOpts.disc = Discretizer::fromCtx(effCtx, [&](const std::string& m) { ev.warn(m, &node.position()); });
 
     CSGParams params;
     params["color"] = colorToValue(effCtx.color);
@@ -291,9 +320,13 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         std::vector<Contour2d> contours;
         try {
             if (ext == ".dxf") {
-                std::optional<std::string> layer;
-                if (const std::string* s = std::get_if<std::string>(&layerArg)) layer = *s;
-                contours = loadDxfContours(path, layer);
+                DxfImport dxf = loadDxf(path, dxfOpts);
+                contours = std::move(dxf.contours);
+                // Printed at generate, after the script's echoes, as OpenSCAD
+                // prints them.
+                std::vector<Value> warnings;
+                for (std::string& w : dxf.warnings) warnings.push_back(Value{std::move(w)});
+                params["dxfWarnings"] = Value{makeList(std::move(warnings))};
             } else {
                 contours = importSvg(ev, args, layerArg, path, center, Discretizer::fromCtx(effCtx), node);
             }
@@ -389,6 +422,8 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         return {};
     }
     if (kind == "region") {
+        if (const auto it = params.find("dxfWarnings"); it != params.end())
+            for (const Value& w : std::get<ListPtr>(it->second)->items) ev.warn(std::get<std::string>(w), nullptr);
         const std::vector<Contour2d> contours = valueToContours(params.at("contours"));
         manifold::Polygons polys;
         polys.reserve(contours.size());
@@ -400,6 +435,9 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         }
         ColoredBody result;
         result.section = manifold::CrossSection(polys, manifold::CrossSection::FillRule::EvenOdd);
+        // A DXF's outlines come out as OpenSCAD's do: no collinear points,
+        // holes that touch merged into one outline.
+        if (params.count("dxfWarnings")) result.section = result.section->Simplify();
         result.color = valueToColor(params.at("color"));
         return {result};
     }
@@ -517,9 +555,11 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
         if (ext == ".dxf" || ext == ".svg") {
             std::vector<Contour2d> contours;
             if (ext == ".dxf") {
-                std::optional<std::string> layer;
-                if (const std::string* s = std::get_if<std::string>(&layerArg)) layer = *s;
-                contours = loadDxfContours(path, layer);
+                // ponytail: no context here, so arcs take the default
+                // $fn/$fa/$fs; pass the caller's if anyone needs them.
+                DxfImport dxf = loadDxf(path, dxfOptions(ev, args, layerArg, node));
+                for (const std::string& w : dxf.warnings) ev.warn(w, nullptr);
+                contours = std::move(dxf.contours);
             } else {
                 // $fn and friends from the call's own arguments, else the scope's.
                 Discretizer disc = Discretizer::fromCtx(ctx);
