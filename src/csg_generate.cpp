@@ -2,6 +2,8 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
 #include <algorithm>
+#include <cstring>
+#include <exception>
 
 namespace oscadeval {
 
@@ -130,7 +132,23 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 const uint32_t savedCallChain = generateCallChain;
                 generateWarnEntry = node.warnEntry;
                 generateCallChain = node.callChain;
-                node.bodies = it->second(*this, node.params, node.children, *node.node);
+                try {
+                    node.bodies = it->second(*this, node.params, node.children, *node.node);
+                } catch (const std::exception& e) {
+                    // ponytail: matched on Clipper2's fixed message rather than
+                    // its Clipper2Exception type, whose header is internal to
+                    // Manifold's build; anything else is rethrown untouched.
+                    if (std::strcmp(e.what(), "Values exceed permitted range") != 0) throw;
+                    // Clipper2, under every 2D boolean and offset, refuses
+                    // coordinates beyond ~2.3e18 and throws. Uncaught, one
+                    // oversized shape -- union(){ square(1e20); ... } --
+                    // aborted the whole render. OpenSCAD itself silently
+                    // draws nothing for such a node; this draws nothing too,
+                    // but says why, and keeps the rest of the model.
+                    warn(node.kind + "(): " + e.what() + " -- coordinates too large for 2D geometry; skipped",
+                         &node.node->position());
+                    node.bodies.clear();
+                }
                 if (!measuring_) tagSections(node.bodies, *node.node, node.callChain);
                 generateWarnEntry = savedWarnEntry;
                 generateCallChain = savedCallChain;

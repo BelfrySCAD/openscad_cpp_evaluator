@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <limits>
 #include <numbers>
@@ -562,23 +564,71 @@ Value builtinLinearSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bo
     return objectOf(std::move(out));
 }
 
-Value builtinRands(double minv, double maxv, double nArg, const Value& seedArg) {
-    // ponytail: doesn't reproduce Python's Mersenne-Twister bit-for-bit --
-    // no script should depend on cross-language RNG equality, only on
-    // "seeded => deterministic, same seed => same sequence" within one
-    // process. A process-lifetime engine (reseeded only on an explicit
-    // seed argument) mirrors random.seed()'s "reseed the global stream"
-    // semantics closely enough.
-    static std::mt19937 engine(std::random_device{}());
-    if (!std::holds_alternative<std::monostate>(seedArg)) {
-        engine.seed(static_cast<unsigned>(static_cast<long long>(toDoubleLenient(seedArg))));
+// Python's float hash, as upstream ports it (linalg.cc hash_floating_point):
+// what a rands() seed actually seeds with. Truncating to an integer, as this
+// used to, sent seeds 1.5, 1e20, 2^32 and 2^32+1 to 1, -1, 0 and 1.
+int32_t hashFloatingPoint(double v) {
+    constexpr int kBits = 31;
+    constexpr uint32_t kModulus = (uint32_t{1} << kBits) - 1;
+    if (!std::isfinite(v)) return std::isinf(v) ? (v > 0 ? 314159 : -314159) : 0;
+    int e;
+    double m = std::frexp(v, &e);
+    int sign = 1;
+    if (m < 0) {
+        sign = -1;
+        m = -m;
     }
-    const int n = static_cast<int>(nArg);
+    uint32_t x = 0;
+    while (m) {
+        x = ((x << 28) & kModulus) | x >> (kBits - 28);
+        m *= 268435456.0;  // 2**28
+        e -= 28;
+        const uint32_t y = static_cast<uint32_t>(m);
+        m -= y;
+        x += y;
+        if (x >= kModulus) x -= kModulus;
+    }
+    e = e >= 0 ? e % kBits : kBits - 1 - ((-1 - e) % kBits);
+    x = ((x << e) & kModulus) | x >> (kBits - e);
+    x = x * static_cast<uint32_t>(sign);
+    return static_cast<int32_t>(x);
+}
+
+// Upstream builtin_rands, case for case: non-finite bounds are reset with
+// its two warnings, reversed bounds are swapped, the count is |count|
+// truncated, and a non-finite count becomes 1 -- it used to saturate to
+// INT_MAX and hang building two billion doubles.
+Value builtinRands(Evaluator& ev, double minv, double maxv, double nArg, const Value& seedArg,
+                   const oscad::Position* pos) {
+    static std::mt19937 engine(std::random_device{}());
+    const auto resetBound = [&](double& bound, const char* which, double to) {
+        ev.warn(std::string("rands() range ") + which + " cannot be infinite", pos);
+        bound = to;
+        char buf[400];
+        std::snprintf(buf, sizeof buf, "%f", to);
+        ev.warn(std::string("resetting to ") + buf, nullptr);
+    };
+    if (!std::isfinite(minv)) resetBound(minv, "min", -std::numeric_limits<double>::max() / 2);
+    if (!std::isfinite(maxv)) resetBound(maxv, "max", std::numeric_limits<double>::max() / 2);
+    if (maxv < minv) std::swap(minv, maxv);
+    double count = std::fabs(nArg);
+    if (!std::isfinite(count)) {
+        ev.warn("rands() cannot create an infinite number of results", pos);
+        ev.warn("resetting number of results to 1", nullptr);
+        count = 1;
+    }
+    if (!std::holds_alternative<std::monostate>(seedArg)) {
+        engine.seed(static_cast<uint32_t>(hashFloatingPoint(toDoubleLenient(seedArg))));
+    }
+    const size_t n = static_cast<size_t>(count);
     std::vector<double> out;
-    if (n <= 0) return numList(out);
-    out.reserve(static_cast<size_t>(n));
-    std::uniform_real_distribution<double> dist(minv, maxv);
-    for (int i = 0; i < n; ++i) out.push_back(dist(engine));
+    out.reserve(n);
+    if (minv >= maxv) {  // uniform_real_distribution needs min < max
+        out.assign(n, minv);
+    } else {
+        std::uniform_real_distribution<double> dist(minv, maxv);
+        for (size_t i = 0; i < n; ++i) out.push_back(dist(engine));
+    }
     return numList(out);
 }
 
@@ -1343,8 +1393,10 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
         }
         case BuiltinFnId::Rands: {
             ev.noteRandsCall();
-            return builtinRands(toDoubleLenient(getArg(args, 0, "min_value", Value{})), toDoubleLenient(getArg(args, 1, "max_value", Value{})),
-                                 toDoubleLenient(getArg(args, 2, "value_count", Value{})), getArg(args, 3, "seed", Value{}));
+            return builtinRands(ev, toDoubleLenient(getArg(args, 0, "min_value", Value{})),
+                                toDoubleLenient(getArg(args, 1, "max_value", Value{})),
+                                toDoubleLenient(getArg(args, 2, "value_count", Value{})), getArg(args, 3, "seed", Value{}),
+                                &node.position());
         }
         case BuiltinFnId::Concat: {
             // Everything after the first argument, appended to the first
