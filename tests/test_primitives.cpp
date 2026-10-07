@@ -3,7 +3,11 @@
 
 #include "test_helpers.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <set>
+#include <string>
 #include <gtest/gtest.h>
 #include <numbers>
 
@@ -398,14 +402,45 @@ TEST(SphereStyle, EveryStyleMatchesBosl2sCounts) {
 }
 
 TEST(SphereStyle, EveryStyleMatchesBosl2sVolume) {
-    // aligned/stagger/icosa agree with BOSL2 to the last digit. "octa" comes
-    // from Manifold::Sphere, whose octahedral subdivision distributes its
-    // vertices a little differently than BOSL2's -- same 146/288 topology,
-    // ~0.05% apart in volume.
+    // aligned/stagger/icosa agree with BOSL2 to the last digit. "octa" is
+    // upstream OpenSCAD's construction (sphere(style="octa"), 2026-09), not
+    // BOSL2's -- same 146/288 topology. 4026.4886 is the hull volume of an
+    // independent port of upstream's createGeometryOcta.
     EXPECT_NEAR(sphereStats("sphere(r=10, style=\"aligned\", $fn=24);").volume, 4070.5524, 1e-3);
     EXPECT_NEAR(sphereStats("sphere(r=10, style=\"stagger\", $fn=24);").volume, 4082.1246, 1e-3);
     EXPECT_NEAR(sphereStats("sphere(r=10, style=\"icosa\", $fn=24);").volume, 4097.2467, 1e-3);
-    EXPECT_NEAR(sphereStats("sphere(r=10, style=\"octa\", $fn=24);").volume, 4024.3239, 1e-3);
+    EXPECT_NEAR(sphereStats("sphere(r=10, style=\"octa\", $fn=24);").volume, 4026.4886, 1e-3);
+}
+
+// "octa" must be EXACTLY symmetric under the octahedron's 48 symmetries, not
+// to rounding: a copy rotated 90 degrees otherwise lands a hair off the
+// original, and difference() of the two leaves a mass of sliver shards
+// instead of nothing. It used to be Manifold::Sphere, symmetric to ~1e-15.
+TEST(SphereStyle, OctaIsExactlyOctahedrallySymmetric) {
+    for (int fn : {3, 8, 16, 21, 37, 64}) {
+        const std::string sphere = "sphere(d=100, style=\"octa\", $fn=" + std::to_string(fn) + ")";
+        Evaluated e = evalSrc(sphere + ";");
+        const manifold::MeshGL64 mesh = e.bodies[0].body->GetMeshGL64();
+        const size_t n = static_cast<size_t>(std::max(1, (fn + 3) / 4));
+        EXPECT_EQ(mesh.vertProperties.size() / 3, 4 * n * n + 2) << fn;
+        std::set<std::array<double, 3>> verts;
+        for (size_t v = 0; v < mesh.vertProperties.size(); v += 3)
+            verts.insert({mesh.vertProperties[v] + 0.0, mesh.vertProperties[v + 1] + 0.0, mesh.vertProperties[v + 2] + 0.0});
+        std::array<int, 3> perm{0, 1, 2};
+        do {
+            for (int signs = 0; signs < 8; ++signs) {
+                for (const std::array<double, 3>& p : verts) {
+                    std::array<double, 3> q{};
+                    for (int a = 0; a < 3; ++a) q[a] = ((signs >> a) & 1 ? -p[perm[a]] : p[perm[a]]) + 0.0;
+                    EXPECT_TRUE(verts.count(q)) << fn;
+                }
+            }
+        } while (std::next_permutation(perm.begin(), perm.end()));
+        for (const char* rot : {"[90,0,0]", "[0,90,0]", "[0,0,90]", "[180,0,0]"}) {
+            Evaluated d = evalSrc("difference() { " + sphere + "; rotate(" + rot + ") " + sphere + "; }");
+            for (const ColoredBody& b : d.bodies) EXPECT_TRUE(!b.body || b.body->IsEmpty()) << fn << " " << rot;
+        }
+    }
 }
 
 TEST(SphereStyle, EveryStyleIsAClosedSolidUnderTheTrueVolume) {

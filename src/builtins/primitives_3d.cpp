@@ -275,6 +275,121 @@ SphereMesh buildAligned(double r, int hsides, int vsides, bool stagger) {
     return m;
 }
 
+// "octa": an octahedron with each face cut into an n x n triangular grid,
+// n = ceil(segments / 4), pushed out to the sphere -- 4n^2 + 2 vertices,
+// one on each pole of all three axes. Vertex placement is upstream
+// OpenSCAD's (primitives.cc, SphereNode::createGeometryOcta): an interior
+// vertex is where the great-circle arcs through equally spaced edge points
+// meet, the three pairwise intersections averaged.
+//
+// The mesh is EXACTLY symmetric under all 48 symmetries of the octahedron,
+// not merely to rounding: every vertex is computed once, for its
+// barycentric weights sorted largest first, and the other copies are that
+// one point with its coordinates permuted and negated, which is exact.
+// Within a rounding error is not good enough. Manifold::Sphere, which this
+// used to be, is symmetric only to ~1e-15, so a copy rotated 90 degrees
+// landed a hair off the original and difference() of the two left a mass of
+// sliver shards where it should leave nothing.
+//
+// ponytail: the great-circle vertices are not bit-identical to circle()'s
+// (Manifold's Circle reduces angles by quadrant, not octant, so it is not
+// exactly symmetric itself); a sphere and a coaxial circle of the same $fn
+// agree to rounding only.
+namespace {
+// (cos, sin) of (90 * m / n) degrees, always computed from the angle at or
+// below 45 degrees, so the points at m and n - m are exact mirrors.
+std::array<double, 2> quarterArc(int m, int n) {
+    if (2 * m == n) return {std::sqrt(0.5), std::sqrt(0.5)};
+    if (2 * m > n) {
+        const std::array<double, 2> p = quarterArc(n - m, n);
+        return {p[1], p[0]};
+    }
+    const double t = (std::numbers::pi / 2.0) * m / n;
+    return {std::cos(t), std::sin(t)};
+}
+
+using V3 = std::array<double, 3>;
+V3 cross(const V3& a, const V3& b) {
+    return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+}
+V3 normalized(const V3& v) {
+    const double l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    return {v[0] / l, v[1] / l, v[2] / l};
+}
+
+// The unit-sphere point with barycentric weights a >= b >= c (a + b + c = n)
+// toward three orthogonal axes, as coordinates along those axes.
+V3 octaCanonical(int a, int b, int c, int n) {
+    if (b == 0) return {1.0, 0.0, 0.0};
+    if (c == 0) {
+        const std::array<double, 2> e = quarterArc(b, n);
+        return {e[0], e[1], 0.0};
+    }
+    // Upstream's construction, with its i, j, k = a, b, c.
+    const auto ac = [&](int m) { const auto e = quarterArc(m, n); return V3{e[0], 0.0, e[1]}; };
+    const auto bc = [&](int m) { const auto e = quarterArc(m, n); return V3{0.0, e[0], e[1]}; };
+    const auto ab = [&](int m) { const auto e = quarterArc(m, n); return V3{e[0], e[1], 0.0}; };
+    const auto meet = [](const V3& p, const V3& q, const V3& r, const V3& s) {
+        V3 x = normalized(cross(cross(p, q), cross(r, s)));
+        if (x[0] + x[1] + x[2] < 0) x = {-x[0], -x[1], -x[2]};  // the octant's side
+        return x;
+    };
+    const V3 xz_k = ac(c), yz_k = bc(c);
+    const V3 xy_j = ab(b), yz_j = bc(n - b);
+    const V3 xy_i = ab(n - a), xz_i = ac(n - a);
+    const V3 p1 = meet(xz_k, yz_k, xy_j, yz_j);
+    const V3 p2 = meet(xz_k, yz_k, xy_i, xz_i);
+    const V3 p3 = meet(xy_j, yz_j, xy_i, xz_i);
+    V3 p = normalized({p1[0] + p2[0] + p3[0], p1[1] + p2[1] + p3[1], p1[2] + p2[2] + p3[2]});
+    // Equal weights must give equal coordinates exactly, or the two
+    // permutations that swap them would disagree about this one vertex.
+    if (a == b) p[1] = p[0];
+    if (b == c) p[2] = p[1];
+    return p;
+}
+} // namespace
+
+SphereMesh buildOcta(double r, int segments) {
+    const int n = std::max(1, (segments + 3) / 4);
+    SphereMesh m;
+    std::map<std::array<int, 3>, int> index;  // signed barycentric weights -> vertex
+    const auto vertex = [&](int i, int j, int k, int sx, int sy, int sz) {
+        const std::array<int, 3> key{sx * i, sy * j, sz * k};
+        auto [it, fresh] = index.try_emplace(key, static_cast<int>(m.verts.size() / 3));
+        if (fresh) {
+            const std::array<int, 3> w{i, j, k};
+            std::array<int, 3> axis{0, 1, 2};
+            std::stable_sort(axis.begin(), axis.end(), [&](int p, int q) { return w[p] > w[q]; });
+            const V3 c = octaCanonical(w[axis[0]], w[axis[1]], w[axis[2]], n);
+            V3 p{};
+            for (int rank = 0; rank < 3; ++rank) p[axis[rank]] = c[rank];
+            pushVert(m, {r * sx * p[0], r * sy * p[1], r * sz * p[2]});
+        }
+        return it->second;
+    };
+    for (int sx : {1, -1})
+        for (int sy : {1, -1})
+            for (int sz : {1, -1}) {
+                const bool flip = sx * sy * sz < 0;
+                const auto tri = [&](int a, int b, int c) {
+                    if (flip) std::swap(b, c);
+                    m.tris.insert(m.tris.end(), {a, b, c});
+                };
+                // "Up" triangles toward +x, +y, +z, then the "down" ones
+                // between them; both wind outward in the (+,+,+) octant.
+                for (int i = 0; i < n; ++i)
+                    for (int j = 0; i + j < n; ++j) {
+                        const int k = n - 1 - i - j;
+                        tri(vertex(i + 1, j, k, sx, sy, sz), vertex(i, j + 1, k, sx, sy, sz),
+                            vertex(i, j, k + 1, sx, sy, sz));
+                        if (k >= 1)
+                            tri(vertex(i, j + 1, k, sx, sy, sz), vertex(i + 1, j, k, sx, sy, sz),
+                                vertex(i + 1, j + 1, k - 1, sx, sy, sz));
+                    }
+            }
+    return m;
+}
+
 // "icosa": subdivide every icosahedral face into a triangular grid and push
 // each sample out to the sphere. BOSL2 subsamples one face and rotates
 // copies onto the rest; sampling each face against its own corners is the
@@ -398,18 +513,10 @@ CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     params["segs"] = Value{static_cast<double>(hsides)};
     params["color"] = colorToValue(effCtx.color);
 
-    if (style == "octa") {
-        // Manifold::Sphere IS a subdivided octahedron (Shape::Octahedron,
-        // then Subdivide), so this needs no mesh of our own -- generate
-        // calls it directly.
-        params["verts"] = Value{makeList()};
-        params["tris"] = Value{makeList()};
-        return params;
-    }
-
     const SphereMesh m = style == "aligned"   ? buildAligned(r, hsides, vsides, false)
                          : style == "stagger" ? buildAligned(r, hsides, vsides, true)
                          : style == "icosa"   ? buildIcosa(r, hsides)
+                         : style == "octa"    ? buildOcta(r, hsides)
                                               : buildOrig(r, hsides, vsides);
 
     std::vector<Value> vertsValues;
@@ -432,11 +539,6 @@ std::vector<ColoredBody> generateSphere(Evaluator& ev, const CSGParams& params, 
     }
     for (const Value& t : std::get<ListPtr>(params.at("tris"))->items) {
         mesh.triVerts.push_back(static_cast<uint64_t>(std::get<double>(t)));
-    }
-    if (std::get<std::string>(params.at("style")) == "octa") {
-        manifold::Manifold octa = manifold::Manifold::Sphere(
-            std::get<double>(params.at("r")), static_cast<int>(std::get<double>(params.at("segs"))));
-        return {ev.tagGenerated(std::move(octa), node, params.at("color"))};
     }
     manifold::Manifold body(mesh);
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
