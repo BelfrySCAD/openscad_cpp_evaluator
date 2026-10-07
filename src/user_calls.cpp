@@ -380,8 +380,7 @@ EvalContext Evaluator::buildModuleChildCtx(const oscad::ModuleDeclaration& decl,
     applyDefaults(decl.parameters, bound, childCtx);
 
     // OpenSCAD's $parent_modules is the user modules on the stack INCLUDING
-    // this one (ScopeContext.cc: StaticModuleNameStack::size(), pushed
-    // before the body's context) -- 1 in a module called from top level.
+    // this one -- 1 in a module called from top level.
     // moduleCallDepth_ (maintained incrementally by enterUserCall/
     // exitUserCall*) counts the Module frames already on callStack_, and
     // this call's own frame isn't pushed yet, hence + 1. This read one lower
@@ -1086,8 +1085,8 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     picked.reserve(indexValues.size());
     for (const Value& v : indexValues) {
         if (!std::holds_alternative<double>(v)) {
-            // Skipped like an out-of-range index, and printed unquoted
-            // (Value::toString upstream): children(["x", 0]) is child 0.
+            // Skipped like an out-of-range index, and printed unquoted, as
+            // OpenSCAD prints it: children(["x", 0]) is child 0.
             const std::string* s = std::get_if<std::string>(&v);
             warn("Bad parameter type (" + (s ? *s : fmtValue(v)) +
                      ") for children, only accept: empty, number, vector, range.",

@@ -507,7 +507,7 @@ void sixDigits(double av, char digits[6], int& exp10) {
 }
 } // namespace
 
-// OpenSCAD's number formatting (Value.cc DoubleConvert): double-conversion
+// OpenSCAD's number formatting: double-conversion
 // ToPrecision(v, 6) with up to 5 leading zeros and no trailing padding, so
 // exponent form below 1e-5 and from 1e6 up; trailing zeros trimmed; -0 is
 // 0. This used to round ties to even (123456.5 printed as 123456, not

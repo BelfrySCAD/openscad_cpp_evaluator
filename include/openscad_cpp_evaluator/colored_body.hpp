@@ -188,7 +188,7 @@ std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodi
                                             double flatHeight = kTopLevel2dHeight);
 
 // A 3D affine transform as it acts on the XY plane: rows x and y, columns
-// x, y and translation -- what OpenSCAD's GeometryEvaluator applies to 2D
+// x, y and translation -- what OpenSCAD applies to 2D
 // geometry (z, and everything out of the plane, simply drops away).
 manifold::mat2x3 projectTo2d(const manifold::mat3x4& m);
 
@@ -203,10 +203,10 @@ bool projectSectionXform(ColoredBody& b);
 
 // Applies `m`, projected onto the plane, to a CrossSection. A singular
 // projection -- scale([0,1]), a quarter turn about X -- empties it, as
-// upstream's Polygon2d::transform does, and returns false.
+// OpenSCAD does, and returns false.
 bool transformSection(manifold::CrossSection& cs, const manifold::mat3x4& m);
 
-// Upstream's warning for that case, word for word.
+// OpenSCAD's warning for that case, word for word.
 inline constexpr const char* kZeroScale2dWarning = "Scaling a 2D object with 0 - removing object";
 
 } // namespace oscadeval

@@ -388,9 +388,8 @@ Value Evaluator::evalRangeLiteral(const oscad::RangeLiteral& node, EvalContext& 
 // Value functions.
 Value Evaluator::applyRange(const Value& startV, const Value& endV, const Value& stepV, bool implicitStep,
                             const oscad::Position* pos) {
-    // Bounds and step must be numbers, as upstream's Range::evaluate requires
-    // (its warnings are from 2026-02-17, just after 2026.02.01, which returns
-    // undef silently): [0:"a"] and [undef:1] are undef, so a loop over one
+    // Bounds and step must be numbers, as OpenSCAD requires (it warns since
+    // 2026-02-17, just after 2026.02.01, which returns undef silently): [0:"a"] and [undef:1] are undef, so a loop over one
     // runs zero times. They were coerced -- undef to 0, "a" to 0 -- so
     // [for (i=[0:"a"]) i] was [0].
     const double* startD = std::get_if<double>(&startV);

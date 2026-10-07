@@ -119,35 +119,10 @@ std::string describeEdge(const M& mesh, std::pair<uint32_t, uint32_t> edge) {
 
 CSGParams resolveCube(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    const Value sizeArg = getArg(args, 0, "size", Value{});
-    // Only a real bool centres (upstream builtin_cube): center=1 does not.
-    const Value centerArg = getArg(args, 1, "center", Value{false});
-    const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
-
-    // As OpenSCAD reads it: undef (absent or explicit) is the default of 1, a
-    // number or three numbers are the size, and anything else warns and
-    // falls back to 1. Explicit undef built a zero-size cube -- nothing --
-    // and a 2-vector or a string was converted leniently, without a word.
+    // size/center reading.
+    // CLEAN-ROOM: reimplement from spec section B4.
     std::vector<Value> sizeVec(3, Value{1.0});
-    const ListPtr* l = std::get_if<ListPtr>(&sizeArg);
-    bool converted = false;
-    if (const double* s = std::get_if<double>(&sizeArg)) {
-        sizeVec = {Value{*s}, Value{*s}, Value{*s}};
-        converted = true;
-    } else if (l && *l && (*l)->items.size() == 3) {
-        // Value::getVec3: element by element, stopping at the first that is
-        // not a number -- so cube([1,2,"x"]) warns AND is 1x2x1.
-        converted = true;
-        for (size_t i = 0; i < 3 && converted; ++i) {
-            if (std::holds_alternative<double>((*l)->items[i])) sizeVec[i] = (*l)->items[i];
-            else converted = false;
-        }
-    }
-    if (!converted && !std::holds_alternative<std::monostate>(sizeArg)) {
-        ev.warn("Unable to convert cube(size=" + fmtValue(sizeArg) +
-                    ", ...) parameter to a number or a vec3 of numbers",
-                &node.position());
-    }
+    const bool center = false;
 
     CSGParams params;
     params["size"] = Value{makeList(std::move(sizeVec))};
@@ -161,7 +136,7 @@ std::vector<ColoredBody> generateCube(Evaluator& ev, const CSGParams& params, co
     const auto& sizeItems = std::get<ListPtr>(params.at("size"))->items;
     const manifold::vec3 size{std::get<double>(sizeItems[0]), std::get<double>(sizeItems[1]), std::get<double>(sizeItems[2])};
     const bool center = std::get<bool>(params.at("center"));
-    // CubeNode::createGeometry: any side <= 0 or non-finite is nothing at
+    // Any side <= 0 or non-finite is nothing at
     // all -- not a zero-volume sheet.
     const bool valid = size.x > 0 && size.y > 0 && size.z > 0 && std::isfinite(size.x) && std::isfinite(size.y) &&
                        std::isfinite(size.z);
@@ -494,8 +469,7 @@ SphereMesh buildIcosa(double r, int hsides) {
 
 CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    // upstream builtin_sphere: lookup_radius over r and d (both numbers
-    // only; anything else keeps the r=1 default rather than becoming 0).
+    // r/d: see lookupRadius (spec section B1); r=1 by default.
     const double r = lookupRadius(ev, args, 0, 1, "r", "d", &node.position()).value_or(1.0);
 
     const Value styleArg = getArg(args, 2, "style", Value{});
@@ -521,7 +495,7 @@ CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     params["segs"] = Value{static_cast<double>(hsides)};
     params["color"] = colorToValue(effCtx.color);
 
-    // SphereNode::createGeometry: nothing for r <= 0 or a non-finite r. A
+    // Nothing for r <= 0 or a non-finite r. A
     // negative r built an inside-out sphere that corrupted any boolean.
     const bool valid = r > 0 && std::isfinite(r);
     const SphereMesh m = !valid               ? SphereMesh{}
@@ -557,47 +531,16 @@ std::vector<ColoredBody> generateSphere(Evaluator& ev, const CSGParams& params, 
 }
 
 // cylinder(h, r1, r2, center) -- via manifold::Manifold::Cylinder directly
-// (unlike sphere, its tessellation already matches real OpenSCAD). Mirrors
-// _resolve_cylinder/_generate_cylinder, including the r/r1/r2/d/d1/d2
-// precedence order (order-dependent -- see the reference source before
-// reordering any of these ifs).
+// (unlike sphere, its tessellation already matches real OpenSCAD).
 
 CSGParams resolveCylinder(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    // Numbers only, as upstream reads h: cylinder(h="a") keeps h=1.
-    const Value hArg = getArg(args, 0, "h", Value{1.0});
-    const double h = std::holds_alternative<double>(hArg) ? std::get<double>(hArg) : 1.0;
-    // Positional order is (h, r1, r2, center); r/d/d1/d2 are named-only.
-    // NOTE r1/r2 -- not r -- own positions 1 and 2, so `cylinder(10, 5, 2)`
-    // is a cone, and `cylinder(10, 5)` is a cone tapering to the r2 default
-    // of 1 rather than a straight r=5 cylinder. Both match the reference.
-    const Value centerArg = getArg(args, 3, "center", Value{false});
-    const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
-
-    // Application order is significant and mirrors the reference's own
-    // sequence of independent `if (x.isNumber()) ...` assignments: r, then
-    // d (which overrides r outright rather than deferring to it), then the
-    // per-end r1/r2, then the per-end d1/d2. So `cylinder(h=10, d=8, r1=5)`
-    // is r1=5/r2=4, and `cylinder(h=10, r=5, r2=2)` is r1=5/r2=2. Both ends
-    // default to 1 independently -- r2 does NOT fall back to r1.
-    //
-    // NUMBERS only, as the reference's isNumber() tests: a stray positional
-    // in a radius slot -- `cylinder(30, r=5, true)`, a mistyped center= --
-    // is ignored, not coerced. Lenient conversion turned that `true` into
-    // r1=1 and drew a cone where OpenSCAD draws the r=5 cylinder
-    // (BelfrySCAD #409).
-    // upstream builtin_cylinder: three lookup_radius pairs (each warning
-    // when both of its pair are given), r/d positional after center, and
-    // "Cylinder parameters ambiguous" when r meets r1 or r2.
-    const oscad::Position* where = &node.position();
-    const std::optional<double> r = lookupRadius(ev, args, 4, 5, "r", "d", where);
-    const std::optional<double> rr1 = lookupRadius(ev, args, 1, 6, "r1", "d1", where);
-    const std::optional<double> rr2 = lookupRadius(ev, args, 2, 7, "r2", "d2", where);
-    if (r && (rr1 || rr2)) ev.warn("Cylinder parameters ambiguous", where);
-    double r1 = 1.0, r2 = 1.0;
-    if (r) r1 = r2 = *r;
-    if (rr1) r1 = *rr1;
-    if (rr2) r2 = *rr2;
+    // h, center and the three radius/diameter pairs.
+    // CLEAN-ROOM: reimplement from spec section B5 (the pairs through
+    // lookupRadius, spec section B1).
+    const double h = 1.0;
+    const bool center = false;
+    const double r1 = 1.0, r2 = 1.0;
 
     const int segs =
         fnSegmentsFromCtx(effCtx, std::max(r1, r2), [&](const std::string& m) { ev.warn(m, &node.position()); });
@@ -619,7 +562,7 @@ std::vector<ColoredBody> generateCylinder(Evaluator& ev, const CSGParams& params
     const double r2 = std::get<double>(params.at("r2"));
     const bool center = std::get<bool>(params.at("center"));
     const int segs = static_cast<int>(std::get<double>(params.at("segs")));
-    // CylinderNode::createGeometry: nothing for h <= 0, a negative radius,
+    // Nothing for h <= 0, a negative radius,
     // both radii zero, or anything non-finite. A negative r2 drew a prism.
     const bool valid = h > 0 && std::isfinite(h) && r1 >= 0 && r2 >= 0 && std::isfinite(r1) && std::isfinite(r2) &&
                        (r1 > 0 || r2 > 0);
@@ -792,13 +735,24 @@ void triangulateFace(const std::vector<std::array<double, 3>>& verts, const std:
 
 } // namespace
 
+namespace {
+// Validates polyhedron()'s points and faces (after the object()/VNF forms
+// have been unpacked): `points` gets one [x, y, z] per input point, `faces`
+// the faces to draw, each a list of indices in range for `points`. False
+// when nothing at all can be drawn.
+// CLEAN-ROOM: reimplement from spec section B6.
+bool readPolyhedronInput(Evaluator&, const Value&, const Value&, const oscad::Position*,
+                         std::vector<std::array<double, 3>>&, std::vector<std::vector<size_t>>&) {
+    return false;
+}
+} // namespace
+
 CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     Value pointsArg = getArg(args, 0, "points", Value{});
     Value facesArg = getArg(args, 1, "faces", Value{});
     if (isUndef(facesArg)) {
-        // The legacy alias, with OpenSCAD 2026.02.01's own notice (upstream
-        // master has since dropped the alias altogether).
+        // The legacy alias, with OpenSCAD 2026.02.01's own notice.
         facesArg = getArg(args, std::nullopt, "triangles", Value{});
         if (!isUndef(facesArg))
             ev.emitWarning("DEPRECATED: polyhedron(triangles=[]) will be removed in future releases. Use "
@@ -856,53 +810,14 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
         }
     }
 
-    // Upstream builtin_polyhedron, warning for warning: bad input is
-    // reported and repaired or dropped -- a bad point is [0,0,0], a bad or
-    // out-of-range index is skipped, a face left with under 3 points is
-    // dropped -- and never stops the script. An out-of-range index used to
-    // become point 0 silently, and a malformed point stopped the render.
-    const oscad::Position* where = &node.position();
-    const ListPtr* pointsList = std::get_if<ListPtr>(&pointsArg);
-    const ListPtr* facesList = std::get_if<ListPtr>(&facesArg);
-    const auto emptyResult = [&]() {
+    std::vector<std::array<double, 3>> rawVerts;
+    std::vector<std::vector<size_t>> faces;
+    if (!readPolyhedronInput(ev, pointsArg, facesArg, &node.position(), rawVerts, faces)) {
         CSGParams params;
         params["verts"] = Value{makeList({})};
         params["tris"] = Value{makeList({})};
         params["color"] = colorToValue(effCtx.color);
         return params;
-    };
-    if (!pointsList || !*pointsList) {
-        ev.warn("Unable to convert points = " + fmtValue(pointsArg) + " to a vector of coordinates", where);
-        return emptyResult();
-    }
-
-    std::vector<std::array<double, 3>> rawVerts;
-    rawVerts.reserve((*pointsList)->items.size());
-    for (const Value& p : (*pointsList)->items) {
-        // Value::getVec3(x, y, z, 0.0): three numbers, or two with z = 0.
-        std::array<double, 3> v{0, 0, 0};
-        bool ok = false;
-        if (const ListPtr* pl = std::get_if<ListPtr>(&p); pl && *pl) {
-            const auto& it = (*pl)->items;
-            if (it.size() == 2 || it.size() == 3) {
-                ok = true;
-                for (size_t k = 0; k < it.size() && ok; ++k) {
-                    if (const double* d = std::get_if<double>(&it[k])) v[k] = *d;
-                    else ok = false;
-                }
-            }
-        }
-        if (!ok || !std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])) {
-            ev.warn("Unable to convert points[" + std::to_string(rawVerts.size()) + "] = " + fmtValue(p) +
-                        " to a vec3 of numbers",
-                    where);
-            v = {0, 0, 0};
-        }
-        rawVerts.push_back(v);
-    }
-    if (!facesList || !*facesList) {
-        ev.warn("Unable to convert faces = " + fmtValue(facesArg) + " to a vector of vector of point indices", where);
-        return emptyResult();
     }
 
     std::vector<std::array<double, 3>> uniqueVerts;
@@ -930,41 +845,8 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
     // way -- which means the welded triangles can be derived afterwards by
     // remapping, rather than triangulating twice.
     std::vector<uint32_t> rawTris;
-    size_t faceIndex = 0;
-    for (const Value& faceVal : (*facesList)->items) {
-        const ListPtr* faceList = std::get_if<ListPtr>(&faceVal);
-        if (!faceList || !*faceList) {
-            ev.warn("Unable to convert faces[" + std::to_string(faceIndex) + "] = " + fmtValue(faceVal) +
-                        " to a vector of numbers",
-                    where);
-            ++faceIndex;
-            continue;
-        }
-        std::vector<size_t> face;
-        face.reserve((*faceList)->items.size());
-        size_t k = 0;
-        for (const Value& idxVal : (*faceList)->items) {
-            const double* n = std::get_if<double>(&idxVal);
-            if (!n) {
-                ev.warn("Unable to convert faces[" + std::to_string(faceIndex) + "][" + std::to_string(k) + "] = " +
-                            fmtValue(idxVal) + " to a number",
-                        where);
-            } else {
-                // (size_t) as upstream builds it: a negative index is 0.
-                const size_t idx = *n < 0 ? 0 : (*n < 1.8e19 ? static_cast<size_t>(*n) : SIZE_MAX);
-                if (idx < rawVerts.size()) {
-                    face.push_back(idx);
-                } else {
-                    ev.warn("Point index " + std::to_string(idx) + " is out of bounds (from faces[" +
-                                std::to_string(faceIndex) + "][" + std::to_string(k) + "])",
-                            where);
-                }
-            }
-            ++k;
-        }
+    for (const std::vector<size_t>& face : faces)
         if (face.size() >= 3) triangulateFace(rawVerts, face, rawTris);
-        ++faceIndex;
-    }
 
     std::vector<uint32_t> weldedTris;
     weldedTris.reserve(rawTris.size());

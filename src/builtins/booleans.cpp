@@ -392,8 +392,8 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         }
 
         RoleSplit split = splitByRole(stmtBodies);
-        // A `%` statement is scenery, not an operand: upstream leaves it out
-        // of the CSG entirely (collectChildren skips isBackground()), so the
+        // A `%` statement is scenery, not an operand: OpenSCAD leaves it out
+        // of the CSG entirely, so the
         // NEXT statement is the minuend of a difference(), and an
         // intersection() is not cancelled by it. It was taken as an empty
         // operand, which emptied both. Only the `%` statement itself: a

@@ -547,72 +547,10 @@ Value builtinLinearSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bo
     return objectOf(std::move(out));
 }
 
-// Python's float hash, as upstream ports it (linalg.cc hash_floating_point):
-// what a rands() seed actually seeds with. Truncating to an integer, as this
-// used to, sent seeds 1.5, 1e20, 2^32 and 2^32+1 to 1, -1, 0 and 1.
-int32_t hashFloatingPoint(double v) {
-    constexpr int kBits = 31;
-    constexpr uint32_t kModulus = (uint32_t{1} << kBits) - 1;
-    if (!std::isfinite(v)) return std::isinf(v) ? (v > 0 ? 314159 : -314159) : 0;
-    int e;
-    double m = std::frexp(v, &e);
-    int sign = 1;
-    if (m < 0) {
-        sign = -1;
-        m = -m;
-    }
-    uint32_t x = 0;
-    while (m) {
-        x = ((x << 28) & kModulus) | x >> (kBits - 28);
-        m *= 268435456.0;  // 2**28
-        e -= 28;
-        const uint32_t y = static_cast<uint32_t>(m);
-        m -= y;
-        x += y;
-        if (x >= kModulus) x -= kModulus;
-    }
-    e = e >= 0 ? e % kBits : kBits - 1 - ((-1 - e) % kBits);
-    x = ((x << e) & kModulus) | x >> (kBits - e);
-    x = x * static_cast<uint32_t>(sign);
-    return static_cast<int32_t>(x);
-}
-
-// Upstream builtin_rands, case for case: non-finite bounds are reset with
-// its two warnings, reversed bounds are swapped, the count is |count|
-// truncated, and a non-finite count becomes 1 -- it used to saturate to
-// INT_MAX and hang building two billion doubles.
-Value builtinRands(Evaluator& ev, double minv, double maxv, double nArg, const Value& seedArg,
-                   const oscad::Position* pos) {
-    static std::mt19937 engine(std::random_device{}());
-    const auto resetBound = [&](double& bound, const char* which, double to) {
-        ev.warn(std::string("rands() range ") + which + " cannot be infinite", pos);
-        bound = to;
-        char buf[400];
-        std::snprintf(buf, sizeof buf, "%f", to);
-        ev.warn(std::string("resetting to ") + buf, nullptr);
-    };
-    if (!std::isfinite(minv)) resetBound(minv, "min", -std::numeric_limits<double>::max() / 2);
-    if (!std::isfinite(maxv)) resetBound(maxv, "max", std::numeric_limits<double>::max() / 2);
-    if (maxv < minv) std::swap(minv, maxv);
-    double count = std::fabs(nArg);
-    if (!std::isfinite(count)) {
-        ev.warn("rands() cannot create an infinite number of results", pos);
-        ev.warn("resetting number of results to 1", nullptr);
-        count = 1;
-    }
-    if (!std::holds_alternative<std::monostate>(seedArg)) {
-        engine.seed(static_cast<uint32_t>(hashFloatingPoint(toDoubleLenient(seedArg))));
-    }
-    const size_t n = static_cast<size_t>(count);
-    std::vector<double> out;
-    out.reserve(n);
-    if (minv >= maxv) {  // uniform_real_distribution needs min < max
-        out.assign(n, minv);
-    } else {
-        std::uniform_real_distribution<double> dist(minv, maxv);
-        for (size_t i = 0; i < n; ++i) out.push_back(dist(engine));
-    }
-    return numList(out);
+// rands(min_value, max_value, value_count[, seed_value]).
+// CLEAN-ROOM: reimplement from spec section A1.
+Value builtinRands(Evaluator&, double, double, double, const Value&, const oscad::Position*) {
+    return Value{};
 }
 
 // Ported branch-for-branch from the reference's builtin_search plus its
@@ -767,49 +705,10 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
     return Value{};
 }
 
-// upstream builtin_lookup, line for line: a non-finite key warns; the
-// first row must be exactly two numbers or the answer is undef; later rows
-// that aren't are skipped; the low/high candidates are picked in table
-// order (the first of equal keys wins), then interpolated. This used to
-// sort the table, coerce malformed rows, and accept inf/nan keys silently.
-Value builtinLookup(Evaluator& ev, const CallArgs& args, const oscad::Position* pos) {
-    const Value keyArg = getArg(args, 0, "key", Value{});
-    const double p = std::get<double>(keyArg);  // checkBuiltinArgs: a number
-    if (!std::isfinite(p)) {
-        ev.warn("lookup(" + fmtValue(keyArg) + ", ...) first argument is not a number", pos);
-        return Value{};
-    }
-    const auto& vec = std::get<ListPtr>(getArg(args, 1, "table", Value{}))->items;  // checkBuiltinArgs: a vector
-    const auto vec2 = [](const Value& v, double& a, double& b) {
-        const ListPtr* l = std::get_if<ListPtr>(&v);
-        if (!l || !*l || (*l)->items.size() != 2) return false;
-        const double* x = std::get_if<double>(&(*l)->items[0]);
-        const double* y = std::get_if<double>(&(*l)->items[1]);
-        if (!x || !y) return false;
-        a = *x;
-        b = *y;
-        return true;
-    };
-    double lowP, lowV, highP, highV;
-    if (vec.empty() || !vec2(vec[0], lowP, lowV)) return Value{};
-    highP = lowP;
-    highV = lowV;
-    for (size_t k = 1; k < vec.size(); ++k) {
-        double thisP, thisV;
-        if (!vec2(vec[k], thisP, thisV)) continue;
-        if (thisP <= p && (thisP > lowP || lowP > p)) {
-            lowP = thisP;
-            lowV = thisV;
-        }
-        if (thisP >= p && (thisP < highP || highP < p)) {
-            highP = thisP;
-            highV = thisV;
-        }
-    }
-    if (p <= lowP) return Value{highV};
-    if (p >= highP) return Value{lowV};
-    const double f = (p - lowP) / (highP - lowP);
-    return Value{highV * f + lowV * (1 - f)};
+// lookup(key, table).
+// CLEAN-ROOM: reimplement from spec section A2.
+Value builtinLookup(Evaluator&, const CallArgs&, const oscad::Position*) {
+    return Value{};
 }
 
 std::string asStringOr(const Value& v, const std::string& fallback) {
@@ -1157,7 +1056,7 @@ const std::unordered_map<int, BuiltinCheck>& builtinChecks() {
             add(id, {1, 1, "1", {kNum}});
         }
         add(BuiltinFnId::Atan2, {2, 2, "2", {kNum, kNum}});
-        // log(x) or log(base, x); upstream's count warning names 2.
+        // log(x) or log(base, x); the count warning names 2.
         add(BuiltinFnId::Log, {1, 2, "2", {kNum, kNum}});
         add(BuiltinFnId::Pow, {2, 2, "2", {kNum, kNum}});
         add(BuiltinFnId::Cross, {2, 2, "2", {kVec, kVec}});
@@ -1287,7 +1186,7 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
     if (id == BuiltinFnId::None) return Value{};
 
     // Only textmetrics/fontmetrics have an entry -- every other builtin
-    // function reads its arguments positionally upstream and warns about
+    // function reads its arguments positionally in OpenSCAD and warns about
     // nothing. See builtinParamNames (registry.cpp).
     if (const std::vector<std::string>* declared = declaredParams) {
         for (const auto& [argName, _] : args.named) {
@@ -1299,13 +1198,12 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
     }
 
     // Every other builtin function reads its arguments IN ORDER and ignores
-    // their names, exactly as upstream's builtin_* functions index
-    // `arguments[i]`: sin(a=90) is sin(90), pow(y=3, x=2) is 3^2, and
-    // rands(0, 1, 2, seed_value=5) is seeded. Names used to bind by this
-    // port's own spelling and drop the rest silently -- sin(a=90) was 0,
-    // concat(a=[1], b=[2]) was [], rands(seed_value=) went unseeded.
+    // their names, as OpenSCAD does: sin(a=90) is sin(90), pow(y=3, x=2) is
+    // 3^2, and rands(0, 1, 2, seed_value=5) is seeded. Names used to bind by
+    // this evaluator's own spelling and drop the rest silently -- sin(a=90)
+    // was 0, concat(a=[1], b=[2]) was [], rands(seed_value=) went unseeded.
     // (textmetrics/fontmetrics -- with declaredParams -- and dxf_dim/
-    // dxf_cross parse names upstream, through Parameters::parse.)
+    // dxf_cross bind by name in OpenSCAD too.)
     const bool byName = declaredParams || id == BuiltinFnId::DxfDim || id == BuiltinFnId::DxfCross;
     CallArgs ordered;
     if (!byName && node.kind() == oscad::NodeKind::PrimaryCall && !args.named.empty()) {
@@ -1352,7 +1250,7 @@ Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::strin
         }
         case BuiltinFnId::Round: {
             const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-            // std::round, as upstream: halves away from zero, exactly. The
+            // std::round: halves away from zero, exactly. The
             // floor(x + 0.5) this was rounded 0.49999999999999994 up to 1
             // (the sum rounds to 1.0) and broke integers above 2^52.
             return Value{std::round(x)};
@@ -1367,13 +1265,9 @@ Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::strin
             return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log(x)};
         }
         case BuiltinFnId::Log: {
-            // upstream builtin_log: log(y) / log(base), base 10 by default --
-            // that formula, not log10(), so results agree to the last bit.
-            // The two-argument form was missing (log(2, 8) was undef).
-            const bool twoArgs = positionalCount(args) == 2;
-            const double base = twoArgs ? toDoubleLenient(getArg(args, 0, "base", Value{})) : 10.0;
-            const double y = toDoubleLenient(getArg(args, twoArgs ? 1 : 0, "x", Value{}));
-            return Value{std::log(y) / std::log(base)};
+            // log(x) / log(base, x).
+            // CLEAN-ROOM: reimplement from spec section A3.
+            return Value{};
         }
         case BuiltinFnId::Exp: return Value{std::exp(toDoubleLenient(getArg(args, 0, "x", Value{})))};
         case BuiltinFnId::Sin: return Value{sinDegrees(toDoubleLenient(getArg(args, 0, "x", Value{})))};
@@ -1407,44 +1301,10 @@ Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::strin
             for (double x : *v) sum += x * x;
             return Value{std::sqrt(sum)};
         }
-        case BuiltinFnId::Cross: {
-            // upstream builtin_cross, check for check: two 2-vectors are
-            // multiplied as they are (a non-number counts as 0, inf and nan
-            // propagate -- no checks at all); otherwise both must be
-            // 3-vectors, and each element pair is checked in order for a
-            // non-number, then NaN, then infinity, each with its own warning.
-            const Value a = getArg(args, 0, "a", Value{});
-            const Value b = getArg(args, 1, "b", Value{});
-            const auto& va = std::get<ListPtr>(a)->items;
-            const auto& vb = std::get<ListPtr>(b)->items;
-            const auto num = [](const Value& v) {
-                const double* d = std::get_if<double>(&v);
-                return d ? *d : 0.0;
-            };
-            if (va.size() == 2 && vb.size() == 2) return Value{num(va[0]) * num(vb[1]) - num(va[1]) * num(vb[0])};
-            if (va.size() != 3 || vb.size() != 3) {
-                ev.warn("Invalid vector size of parameter for cross()", &node.position());
-                return Value{};
-            }
-            for (size_t k = 0; k < 3; ++k) {
-                if (!std::holds_alternative<double>(va[k]) || !std::holds_alternative<double>(vb[k])) {
-                    ev.warn("Invalid value in parameter vector for cross()", &node.position());
-                    return Value{};
-                }
-                const double d0 = std::get<double>(va[k]), d1 = std::get<double>(vb[k]);
-                if (std::isnan(d0) || std::isnan(d1)) {
-                    ev.warn("Invalid value (NaN) in parameter vector for cross()", &node.position());
-                    return Value{};
-                }
-                if (std::isinf(d0) || std::isinf(d1)) {
-                    ev.warn("Invalid value (INF) in parameter vector for cross()", &node.position());
-                    return Value{};
-                }
-            }
-            return numList({num(va[1]) * num(vb[2]) - num(va[2]) * num(vb[1]),
-                            num(va[2]) * num(vb[0]) - num(va[0]) * num(vb[2]),
-                            num(va[0]) * num(vb[1]) - num(va[1]) * num(vb[0])});
-        }
+        case BuiltinFnId::Cross:
+            // cross(a, b).
+            // CLEAN-ROOM: reimplement from spec section A4.
+            return Value{};
         case BuiltinFnId::Rands: {
             ev.noteRandsCall();
             return builtinRands(ev, toDoubleLenient(getArg(args, 0, "min_value", Value{})),

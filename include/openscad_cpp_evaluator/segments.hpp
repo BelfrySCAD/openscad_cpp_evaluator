@@ -20,16 +20,13 @@ namespace oscadeval {
 // 2^-20) it replaces $fa/$fs entirely. Upstream reads $fe only behind
 // --enable=discretization-by-error; this evaluator always honours it, and
 // advertises that as supported_feature("discretization-by-error").
-//
-// Departures from upstream, kept from before this port: $fa/$fs <= 0 fall
-// back to their defaults (12/2) rather than clamping to 0.01 with a warning.
 struct Discretizer {
     double fn = 0.0;
     double fe = 0.0;
     double fa = 12.0;
     double fs = 2.0;
 
-    // `warn`, when given, receives upstream's clamping warnings.
+    // `warn`, when given, receives the clamping warnings (spec section B7).
     static Discretizer fromCtx(const EvalContext& ctx, const std::function<void(const std::string&)>& warn = {});
     // Stored in, and read back from, a node's params -- they are part of its
     // cache key, and generate has only the params to go on.

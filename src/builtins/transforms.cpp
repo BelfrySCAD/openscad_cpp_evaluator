@@ -11,7 +11,7 @@ namespace oscadeval {
 
 namespace {
 
-using Mat4 = std::array<std::array<double, 4>, 4>;  // row-major, as OpenSCAD's Matrix4d
+using Mat4 = std::array<std::array<double, 4>, 4>;  // row-major
 
 Mat4 identity4() {
     Mat4 m{};
@@ -19,179 +19,12 @@ Mat4 identity4() {
     return m;
 }
 
-// Value::getDouble: a number, nothing else.
-bool getNum(const Value& v, double& out) {
-    if (const double* d = std::get_if<double>(&v)) {
-        out = *d;
-        return true;
-    }
-    return false;
-}
-
-// Value::getVec3(x, y, z, default), assignments and all: a 2-vector sets
-// x and y and the default z; a 3-vector assigns element by element and
-// stops at the first that is not a number -- so translate([1,"a",3]) has
-// already written its 1 when it fails. Anything else writes nothing.
-bool getVec3(const Value& v, double& x, double& y, double& z, double defaultZ) {
-    const ListPtr* l = std::get_if<ListPtr>(&v);
-    if (!l || !*l) return false;
-    const auto& it = (*l)->items;
-    if (it.size() == 2) {
-        double a, b;
-        if (getNum(it[0], a) && getNum(it[1], b)) {
-            x = a;
-            y = b;
-        }
-        z = defaultZ;
-        return true;
-    }
-    if (it.size() != 3) return false;
-    return getNum(it[0], x) && getNum(it[1], y) && getNum(it[2], z);
-}
-
-// OpenSCAD's angle_axis_degrees(): Rodrigues, without normalising v where
-// it can be avoided, and the identity for a zero axis.
-std::array<std::array<double, 3>, 3> angleAxisDegrees(double a, double vx, double vy, double vz) {
-    std::array<std::array<double, 3>, 3> M{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
-    const double s = sinDeg(a), c = cosDeg(a);
-    const double m = vx * vx + vy * vy + vz * vz;
-    if (m > 0) {
-        const double k = (1 - c) / m;
-        const double Cv[3] = {vx * k, vy * k, vz * k};
-        const double n = std::sqrt(m);
-        const double us[3] = {vx / n * s, vy / n * s, vz / n * s};
-        const double v[3] = {vx, vy, vz};
-        M = {{{Cv[0] * v[0] + c, Cv[1] * v[0] - us[2], Cv[2] * v[0] + us[1]},
-              {Cv[0] * v[1] + us[2], Cv[1] * v[1] + c, Cv[2] * v[1] - us[0]},
-              {Cv[0] * v[2] - us[1], Cv[1] * v[2] + us[0], Cv[2] * v[2] + c}}};
-    }
-    return M;
-}
-
-Mat4 fromLinear(const std::array<std::array<double, 3>, 3>& r) {
-    Mat4 m = identity4();
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) m[i][j] = r[i][j];
-    return m;
-}
-
-// The 4x4 matrix a transform module applies, built exactly as upstream's
-// builtin_translate/rotate/scale/mirror/multmatrix build it (TransformNode.cc),
-// with the same warnings for arguments they cannot use. Previously each
-// argument was coerced leniently: translate(5) moved by [5,0,0],
-// scale([2]) scaled only x, mirror([0,0,0]) deleted the object, and
-// multmatrix filled missing entries with 0 rather than the identity and
-// ignored the [3][3] normaliser.
-Mat4 transformMatrix(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::Position* where) {
-    Mat4 m = identity4();
-    if (name == "translate") {
-        const Value v = getArg(args, 0, "v");
-        double x = 0, y = 0, z = 0;
-        const bool ok = getVec3(v, x, y, z, 0.0) && std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
-        if (ok) {
-            m[0][3] = x;
-            m[1][3] = y;
-            m[2][3] = z;
-        } else {
-            ev.warn("Unable to convert translate(" + fmtValue(v) + ") parameter to a vec3 or vec2 of numbers", where);
-        }
-    } else if (name == "scale") {
-        const Value v = getArg(args, 0, "v");
-        double sx = 1, sy = 1, sz = 1;
-        if (!getVec3(v, sx, sy, sz, 1.0)) {
-            double num;
-            if (getNum(v, num)) {
-                sx = sy = sz = num;
-            } else {
-                ev.warn("Unable to convert scale(" + fmtValue(v) +
-                            ") parameter to a number, a vec3 or vec2 of numbers or a number",
-                        where);
-            }
-        }
-        m[0][0] = sx;
-        m[1][1] = sy;
-        m[2][2] = sz;
-    } else if (name == "mirror") {
-        const Value v = getArg(args, 0, "v");
-        double x = 1, y = 0, z = 0;
-        if (!getVec3(v, x, y, z, 0.0)) {
-            ev.warn("Unable to convert mirror(" + fmtValue(v) + ") parameter to a vec3 or vec2 of numbers", where);
-        }
-        if (x != 0.0 || y != 0.0 || z != 0.0) {
-            const double a = x * x + y * y + z * z;
-            m = {{{1 - 2 * x * x / a, -2 * y * x / a, -2 * z * x / a, 0},
-                  {-2 * x * y / a, 1 - 2 * y * y / a, -2 * z * y / a, 0},
-                  {-2 * x * z / a, -2 * y * z / a, 1 - 2 * z * z / a, 0},
-                  {0, 0, 0, 1}}};
-        }
-    } else if (name == "rotate") {
-        const Value valA = getArg(args, 0, "a");
-        const Value valV = getArg(args, 1, "v");
-        const bool vSupplied = !std::holds_alternative<std::monostate>(valV);
-        if (const ListPtr* la = std::get_if<ListPtr>(&valA); la && *la) {
-            const auto& va = (*la)->items;
-            double sx = 0, sy = 0, sz = 0, cx = 1, cy = 1, cz = 1, a = 0;
-            bool ok = true;
-            const auto axis = [&](size_t i, double& s, double& c) {
-                ok &= getNum(va[i], a);
-                ok &= std::isfinite(a);
-                s = sinDeg(a);
-                c = cosDeg(a);
-            };
-            switch (va.size()) {
-            default: ok = false; [[fallthrough]];
-            case 3: axis(2, sz, cz); [[fallthrough]];
-            case 2: axis(1, sy, cy); [[fallthrough]];
-            case 1: axis(0, sx, cx); break;
-            case 0: break;
-            }
-            if (ok) {
-                if (vSupplied)
-                    ev.warn("When parameter a is supplied as vector, v is ignored rotate(a=" + fmtValue(valA) +
-                                ", v=" + fmtValue(valV) + ")",
-                            where);
-            } else if (vSupplied) {
-                ev.warn("Problem converting rotate(a=" + fmtValue(valA) + ", v=" + fmtValue(valV) + ") parameter",
-                        where);
-            } else {
-                ev.warn("Problem converting rotate(a=" + fmtValue(valA) + ") parameter", where);
-            }
-            m = fromLinear({{{cy * cz, cz * sx * sy - cx * sz, cx * cz * sy + sx * sz},
-                             {cy * sz, cx * cz + sx * sy * sz, -cz * sx + cx * sy * sz},
-                             {-sy, cy * sx, cx * cy}}});
-        } else {
-            double a = 0.0;
-            bool aConverted = getNum(valA, a);
-            aConverted &= std::isfinite(a);
-            double vx = 0, vy = 0, vz = 1;
-            const bool vConverted = getVec3(valV, vx, vy, vz, 0.0);
-            m = fromLinear(angleAxisDegrees(aConverted ? a : 0, vx, vy, vz));
-            if (vSupplied && !vConverted) {
-                ev.warn(aConverted ? "Problem converting rotate(..., v=" + fmtValue(valV) + ") parameter"
-                                   : "Problem converting rotate(a=" + fmtValue(valA) + ", v=" + fmtValue(valV) +
-                                         ") parameter",
-                        where);
-            } else if (!aConverted) {
-                ev.warn("Problem converting rotate(a=" + fmtValue(valA) + ") parameter", where);
-            }
-        }
-    } else if (name == "multmatrix") {
-        const Value mv = getArg(args, 0, "m");
-        if (const ListPtr* rows = std::get_if<ListPtr>(&mv); rows && *rows) {
-            const auto& r = (*rows)->items;
-            for (size_t i = 0; i < std::min<size_t>(r.size(), 4); ++i) {
-                const ListPtr* row = std::get_if<ListPtr>(&r[i]);
-                if (!row || !*row) continue;
-                const auto& cols = (*row)->items;
-                for (size_t j = 0; j < std::min<size_t>(cols.size(), 4); ++j) getNum(cols[j], m[i][j]);
-            }
-            const double w = m[3][3];
-            if (w != 1.0)
-                for (auto& row : m)
-                    for (double& e : row) e /= w;
-        }
-    }
-    return m;
+// The row-major 4x4 matrix translate/rotate/scale/mirror/multmatrix
+// applies (`name` is the module), with its argument warnings. Identity for
+// any other name.
+// CLEAN-ROOM: reimplement from spec section D1.
+Mat4 transformMatrix(Evaluator&, const std::string&, const CallArgs&, const oscad::Position*) {
+    return identity4();
 }
 
 // The affine part of a row-major 4x4, as Manifold's column-major 3x4.
@@ -254,53 +87,26 @@ void transformMeshInPlace(manifold::MeshGL& mesh, const manifold::mat3x4& m) {
 }
 
 
-// upstream's resize newsize/auto parsing (CgalAdvNode.cc): newsize only
-// from a vector (resize(10) is ignored), auto from a bool or a vector.
-void resizeArgs(const CallArgs& args, double ns[3], bool autoAxes[3]) {
+// resize(newsize, auto): the requested size per axis and which axes are
+// auto-scaled.
+// CLEAN-ROOM: reimplement from spec section D2.
+void resizeArgs(const CallArgs&, double ns[3], bool autoAxes[3]) {
     for (int i = 0; i < 3; ++i) {
         ns[i] = 0;
         autoAxes[i] = false;
     }
-    const Value nv = getArg(args, 0, "newsize");
-    if (const ListPtr* l = std::get_if<ListPtr>(&nv); l && *l)
-        for (size_t i = 0; i < 3 && i < (*l)->items.size(); ++i) {
-            const double* d = std::get_if<double>(&(*l)->items[i]);
-            ns[i] = d ? *d : 0.0;
-        }
-    const Value av = getArg(args, 1, "auto");
-    if (const bool* b = std::get_if<bool>(&av)) {
-        for (int i = 0; i < 3; ++i) autoAxes[i] = *b;
-    } else if (const ListPtr* l = std::get_if<ListPtr>(&av); l && *l) {
-        for (size_t i = 0; i < 3 && i < (*l)->items.size(); ++i) autoAxes[i] = truthy((*l)->items[i]);
-    }
 }
 
-// GeometryUtils::getResizeTransform: only a positive newsize scales its
-// axis; an auto axis takes the scale of the largest requested one.
-manifold::vec3 resizeScale3d(const manifold::Box& bbox, const double ns[3], const bool autoAxes[3]) {
-    const manifold::vec3 span = bbox.max - bbox.min;
-    const double sp[3] = {span.x, span.y, span.z};
-    int maxdim = 0;
-    for (int i = 1; i < 3; ++i)
-        if (ns[i] > ns[maxdim]) maxdim = i;
-    double scale[3] = {1, 1, 1};
-    for (int i = 0; i < 3; ++i)
-        if (ns[i] > 0) scale[i] = ns[i] / sp[i];
-    const double autoscale = scale[maxdim];
-    double out[3];
-    for (int i = 0; i < 3; ++i) out[i] = (!autoAxes[i] || ns[i] > 0) ? scale[i] : autoscale;
-    return manifold::vec3(out[0], out[1], out[2]);
+// The per-axis scale resize applies to a 3D body with bounding box `bbox`.
+// CLEAN-ROOM: reimplement from spec section D2.
+manifold::vec3 resizeScale3d(const manifold::Box&, const double[3], const bool[3]) {
+    return manifold::vec3(1.0, 1.0, 1.0);
 }
 
-// Polygon2d::resize: the same rule over two axes. resize() of a 2D shape
-// used to pass it through untouched.
-manifold::vec2 resizeScale2d(const manifold::Rect& bbox, const double ns[3], const bool autoAxes[3]) {
-    const double sp[2] = {bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y};
-    const int maxdim = (ns[1] != 0 && ns[1] > ns[0]) ? 1 : 0;
-    const double scale[2] = {ns[0] > 0 ? ns[0] / sp[0] : 1, ns[1] > 0 ? ns[1] / sp[1] : 1};
-    const double autoscale = ns[maxdim] > 0 ? ns[maxdim] / sp[maxdim] : 1;
-    return manifold::vec2((!autoAxes[0] || ns[0] > 0) ? scale[0] : autoscale,
-                          (!autoAxes[1] || ns[1] > 0) ? scale[1] : autoscale);
+// The per-axis scale resize applies to a 2D shape with bounding box `bbox`.
+// CLEAN-ROOM: reimplement from spec section D2.
+manifold::vec2 resizeScale2d(const manifold::Rect&, const double[3], const bool[3]) {
+    return manifold::vec2(1.0, 1.0);
 }
 
 } // namespace
@@ -396,8 +202,8 @@ std::vector<ColoredBody> generateTransform(Evaluator& ev, const CSGParams& param
         return result;
     }
 
-    // A matrix with NaN or infinity in it removes its children, as
-    // upstream's GeometryEvaluator does (warned at resolve).
+    // A matrix with NaN or infinity in it removes its children (warned at
+    // resolve).
     if (std::get<bool>(params.at("remove"))) return {};
     const manifold::mat3x4 m = paramsMatrix(params);
 

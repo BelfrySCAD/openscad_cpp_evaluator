@@ -10,42 +10,25 @@
 
 namespace oscadeval {
 
-namespace {
-// Value::getDouble: a number and nothing else -- no coercion.
-const double* asNumber(const Value& v) { return std::get_if<double>(&v); }
-
-// Value::getVec2: exactly two numbers.
-bool asVec2(const Value& v, double& x, double& y) {
-    const ListPtr* l = std::get_if<ListPtr>(&v);
-    if (!l || !*l || (*l)->items.size() != 2) return false;
-    const double* a = asNumber((*l)->items[0]);
-    const double* b = asNumber((*l)->items[1]);
-    if (!a || !b) return false;
-    x = *a;
-    y = *b;
-    return true;
-}
-} // namespace
-
-// OpenSCAD's lookup_radius(): `d` wins when it is a number, with a warning
-// if `r` is one too; otherwise `r` if it is a number; otherwise nothing,
-// and the caller keeps its default. Anything that is not a number is not a
-// radius -- it does not become 0.
-std::optional<double> lookupRadius(Evaluator& ev, const CallArgs& args, std::optional<int> rPos,
-                                   std::optional<int> dPos, const std::string& rName, const std::string& dName,
-                                   const oscad::Position* where) {
-    const Value r = getArg(args, rPos, rName);
-    const Value d = getArg(args, dPos, dName);
-    if (const double* dv = asNumber(d)) {
-        if (asNumber(r)) {
-            ev.warn("Ignoring radius variable \"" + rName + "\" as diameter \"" + dName + "\" is defined too.",
-                    where);
-        }
-        return *dv / 2.0;
-    }
-    if (const double* rv = asNumber(r)) return *rv;
+// Reads one radius/diameter argument pair (r/d, r1/d1, r2/d2) for circle,
+// sphere and cylinder. nullopt: neither gives a radius, and the caller keeps
+// its default.
+// CLEAN-ROOM: reimplement from spec section B1.
+std::optional<double> lookupRadius(Evaluator&, const CallArgs&, std::optional<int>, std::optional<int>,
+                                   const std::string&, const std::string&, const oscad::Position*) {
     return std::nullopt;
 }
+
+namespace {
+// Validates polygon()'s points and paths and stores them in `params`:
+// "pts" a list of [x, y] numbers, "paths" undef (the points are one outline)
+// or a list of lists of indices, every one in range for "pts".
+// CLEAN-ROOM: reimplement from spec section B3.
+void readPolygonInput(Evaluator&, const Value&, const Value&, const oscad::Position*, CSGParams& params) {
+    params["pts"] = Value{makeList({})};
+    params["paths"] = Value{};
+}
+} // namespace
 
 // circle/square/polygon share one dispatch entry (registered under all 3
 // names), matching the reference's _resolve_2d/_generate_2d name-based
@@ -59,8 +42,7 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
     params["color"] = colorToValue(effCtx.color);
 
     if (name == "circle") {
-        // circle(r, d): both positional, as upstream's Parameters::parse
-        // reads them, so circle(3, 5) is d=5.
+        // circle(r, d): both positional, so circle(3, 5) is d=5.
         const double r = lookupRadius(ev, args, 0, 1, "r", "d", &node.position()).value_or(1.0);
         params["r"] = Value{r};
         params["segs"] = Value{static_cast<double>(
@@ -69,23 +51,10 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
     }
 
     if (name == "square") {
-        // Upstream builtin_square: a number or exactly two numbers; anything
-        // else warns and keeps the 1x1 default. center counts only as a
-        // real bool.
-        const Value sizeArg = getArg(args, 0, "size");
-        const Value centerArg = getArg(args, 1, "center");
-        const bool* centerBool = std::get_if<bool>(&centerArg);
-        const bool center = centerBool && *centerBool;
-        double sx = 1.0, sy = 1.0;
-        if (!std::holds_alternative<std::monostate>(sizeArg)) {
-            if (const double* s = asNumber(sizeArg)) {
-                sx = sy = *s;
-            } else if (!asVec2(sizeArg, sx, sy)) {
-                ev.warn("Unable to convert square(size=" + fmtValue(sizeArg) +
-                            ", ...) parameter to a number or a vec2 of numbers",
-                        &node.position());
-            }
-        }
+        // size/center reading.
+        // CLEAN-ROOM: reimplement from spec section B2.
+        const double sx = 1.0, sy = 1.0;
+        const bool center = false;
         params["size_x"] = Value{sx};
         params["size_y"] = Value{sy};
         params["center"] = Value{center};
@@ -112,79 +81,7 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
         pathsArg = std::move(newPaths);
     }
 
-    // Upstream builtin_polygon, warning for warning: bad input is reported
-    // and repaired or dropped, never fatal to the rest of the script, and
-    // every index that reaches generate2d is known to be in range.
-    const oscad::Position* where = &node.position();
-    std::vector<Value> pts;
-    const ListPtr* pointsList = std::get_if<ListPtr>(&pointsArg);
-    if (!pointsList || !*pointsList) {
-        ev.warn("Unable to convert points = " + fmtValue(pointsArg) + " to a vector of coordinates", where);
-        params["pts"] = Value{makeList({})};
-        params["paths"] = Value{};
-        return params;
-    }
-    for (const Value& p : (*pointsList)->items) {
-        double x = 0.0, y = 0.0;
-        if (!asVec2(p, x, y) || !std::isfinite(x) || !std::isfinite(y)) {
-            ev.warn("Unable to convert points[" + std::to_string(pts.size()) + "] = " + fmtValue(p) +
-                        " to a vec2 of numbers",
-                    where);
-            x = y = 0.0;
-        }
-        pts.push_back(Value{makeList({Value{x}, Value{y}})});
-    }
-    const size_t numPts = pts.size();
-    params["pts"] = Value{makeList(std::move(pts))};
-
-    if (const ListPtr* pathsList = std::get_if<ListPtr>(&pathsArg); pathsList && *pathsList) {
-        std::vector<Value> paths;
-        size_t pathIndex = 0;
-        for (const Value& path : (*pathsList)->items) {
-            const ListPtr* pathIdxList = std::get_if<ListPtr>(&path);
-            if (!pathIdxList || !*pathIdxList) {
-                ev.warn("Unable to convert paths[" + std::to_string(pathIndex) + "] = " + fmtValue(path) +
-                            " to a vector of numbers",
-                        where);
-            } else {
-                std::vector<Value> idxVals;
-                size_t k = 0;
-                for (const Value& idx : (*pathIdxList)->items) {
-                    const double* n = asNumber(idx);
-                    if (!n) {
-                        ev.warn("Unable to convert paths[" + std::to_string(pathIndex) + "][" + std::to_string(k) +
-                                    "] = " + fmtValue(idx) + " to a number",
-                                where);
-                    } else {
-                        // Upstream casts with (size_t), undefined below 0;
-                        // its builds saturate a negative index to 0, so
-                        // that is what scripts see. NaN is out of range.
-                        const size_t i = *n < 0 ? 0 : (*n < 1.8e19 ? static_cast<size_t>(*n) : SIZE_MAX);
-                        if (i < numPts) {
-                            idxVals.push_back(Value{static_cast<double>(i)});
-                        } else {
-                            ev.warn("Point index " + std::to_string(i) + " is out of bounds (from paths[" +
-                                        std::to_string(pathIndex) + "][" + std::to_string(k) + "])",
-                                    where);
-                        }
-                    }
-                    ++k;
-                }
-                paths.push_back(Value{makeList(std::move(idxVals))});
-            }
-            ++pathIndex;
-        }
-        // No path survived: upstream's PolygonNode draws the points as one
-        // outline, exactly as if paths had not been given.
-        params["paths"] = paths.empty() ? Value{} : Value{makeList(std::move(paths))};
-    } else if (!std::holds_alternative<std::monostate>(pathsArg)) {
-        // Upstream returns here with the points already read and no paths,
-        // so the points still draw as one outline.
-        ev.warn("Unable to convert paths = " + fmtValue(pathsArg) + " to a vector of vector of point indices", where);
-        params["paths"] = Value{};
-    } else {
-        params["paths"] = Value{}; // undef == "no paths given" -- pts is one single contour
-    }
+    readPolygonInput(ev, pointsArg, pathsArg, &node.position(), params);
     return params;
 }
 
@@ -196,7 +93,7 @@ std::vector<ColoredBody> generate2d(Evaluator&, const CSGParams& params, const s
     if (name == "circle") {
         const double r = std::get<double>(params.at("r"));
         const int segs = static_cast<int>(std::get<double>(params.at("segs")));
-        // Upstream draws nothing for r <= 0 or a non-finite r.
+        // Nothing for r <= 0 or a non-finite r.
         if (r > 0 && std::isfinite(r)) cs = manifold::CrossSection::Circle(r, segs);
     } else if (name == "square") {
         const double sx = std::get<double>(params.at("size_x"));
