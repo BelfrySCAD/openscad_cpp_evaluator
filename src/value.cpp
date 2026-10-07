@@ -205,10 +205,163 @@ Value vecSub(const Value& a, const Value& b) {
 // `a * b` for two lists: dot product, matrix*vector, vector*matrix or
 // matrix*matrix. Undef with `*error` set to the diagnostic when the operands
 // do not multiply.
-// CLEAN-ROOM: reimplement from spec section A6.
-Value matmul(const Value&, const Value&, std::string* error) {
-    if (error) error->clear();
+//
+// Only the first element of each operand decides which product is meant.
+// Every failure leaves its message in `*error`; a vector*matrix failure
+// inside matrix*matrix is reported once, as one message naming the row
+// (OpenSCAD also prints the bare inner message first; that copy is dropped).
+namespace {
+
+using Items = ListItems;
+
+const Items* listItems(const Value& v) {
+    const ListPtr* l = std::get_if<ListPtr>(&v);
+    return (l && *l) ? &(*l)->items : nullptr;
+}
+
+std::string sizeMismatch(size_t a, size_t b) {
+    return "(" + std::to_string(a) + " != " + std::to_string(b) + ")";
+}
+
+// Vector `v` times matrix `m`, once |v| is known to be m's row count: one
+// entry per column of m's first row.
+Value vectorTimesMatrix(const Items& v, const Items& m, std::string& error) {
+    const size_t cols = listItems(m[0])->size();
+    std::vector<Value> out;
+    out.reserve(cols);
+    for (size_t i = 0; i < cols; ++i) {
+        double sum = 0;
+        for (size_t j = 0; j < m.size(); ++j) {
+            const Items* row = listItems(m[j]);
+            if (!row || row->size() != cols) {
+                error = "Matrix must be rectangular. Problem at row " + std::to_string(j);
+                return Value{};
+            }
+            const double* x = std::get_if<double>(&v[j]);
+            if (!x) {
+                error = "Vector must contain only numbers. Problem at index " + std::to_string(j);
+                return Value{};
+            }
+            const double* y = std::get_if<double>(&(*row)[i]);
+            if (!y) {
+                error = "Matrix must contain only numbers. Problem at row " + std::to_string(j) + ", col " +
+                        std::to_string(i);
+                return Value{};
+            }
+            sum += *x * *y;
+        }
+        out.push_back(Value{sum});
+    }
+    return listValue(std::move(out));
+}
+
+Value multiplyLists(const Items& a, const Items& b, std::string& error) {
+    if (a.empty() || b.empty()) {
+        error = "Multiplication is undefined on empty vectors";
+        return Value{};
+    }
+    const bool aNumber = std::holds_alternative<double>(a[0]);
+    const bool bNumber = std::holds_alternative<double>(b[0]);
+    const Items* aRow0 = listItems(a[0]);
+    const Items* bRow0 = listItems(b[0]);
+
+    if (aNumber && bNumber) {
+        if (a.size() != b.size()) {
+            error = "vector*vector requires matching lengths " + sizeMismatch(a.size(), b.size());
+            return Value{};
+        }
+        double sum = 0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            const double* x = std::get_if<double>(&a[i]);
+            const double* y = std::get_if<double>(&b[i]);
+            if (!x || !y) {
+                error = "undefined operation (" + oscTypeName(a[i]) + " * " + oscTypeName(b[i]) + ")";
+                return Value{};
+            }
+            sum += *x * *y;
+        }
+        return Value{sum};
+    }
+    if (aNumber && bRow0) {
+        if (a.size() != b.size()) {
+            error = "vector*matrix requires vector length to match matrix row count " +
+                    sizeMismatch(a.size(), b.size());
+            return Value{};
+        }
+        return vectorTimesMatrix(a, b, error);
+    }
+    if (aRow0 && bNumber) {
+        if (aRow0->size() != b.size()) {
+            error = "matrix*vector requires matrix column count to match vector length " +
+                    sizeMismatch(aRow0->size(), b.size());
+            return Value{};
+        }
+        std::vector<Value> out;
+        out.reserve(a.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            const Items* row = listItems(a[i]);
+            if (!row || row->size() != b.size()) {
+                error = "Matrix must be rectangular. Problem at row " + std::to_string(i);
+                return Value{};
+            }
+            double sum = 0;
+            for (size_t j = 0; j < b.size(); ++j) {
+                const double* x = std::get_if<double>(&(*row)[j]);
+                if (!x) {
+                    error = "Matrix must contain only numbers. Problem at row " + std::to_string(i) + ", col " +
+                            std::to_string(j);
+                    return Value{};
+                }
+                const double* y = std::get_if<double>(&b[j]);
+                if (!y) {
+                    error = "Vector must contain only numbers. Problem at index " + std::to_string(j);
+                    return Value{};
+                }
+                sum += *x * *y;
+            }
+            out.push_back(Value{sum});
+        }
+        return listValue(std::move(out));
+    }
+    if (aRow0 && bRow0) {
+        if (aRow0->size() != b.size()) {
+            error = "matrix*matrix requires left operand column count to match right operand row count " +
+                    sizeMismatch(aRow0->size(), b.size());
+            return Value{};
+        }
+        std::vector<Value> out;
+        out.reserve(a.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            const Items* row = listItems(a[i]);
+            const size_t len = row ? row->size() : 0;
+            if (len != b.size()) {
+                error = "matrix*matrix left operand row length does not match right operand row count " +
+                        sizeMismatch(len, b.size()) + " at row " + std::to_string(i);
+                return Value{};
+            }
+            Value product = vectorTimesMatrix(*row, b, error);
+            if (std::holds_alternative<std::monostate>(product)) {
+                error += "\n\twhile processing left operand at row " + std::to_string(i);
+                return product;
+            }
+            out.push_back(std::move(product));
+        }
+        return listValue(std::move(out));
+    }
+    error = "undefined vector*vector multiplication where first elements are types " + oscTypeName(a[0]) + " and " +
+            oscTypeName(b[0]);
     return Value{};
+}
+
+} // namespace
+
+Value matmul(const Value& a, const Value& b, std::string* error) {
+    std::string message;
+    const Items* la = listItems(a);
+    const Items* lb = listItems(b);
+    Value r = (la && lb) ? multiplyLists(*la, *lb, message) : Value{};
+    if (error) *error = std::move(message);
+    return r;
 }
 
 namespace {

@@ -3,6 +3,7 @@
 #include "builtins.hpp"   // builtinDxfDim/builtinDxfCross
 
 #include "openscad_cpp_evaluator/dispatch.hpp"
+#include "openscad_cpp_evaluator/eval_error.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/segments.hpp"
 #include "openscad_cpp_evaluator/text_metrics.hpp"
@@ -16,7 +17,9 @@
 #include <cstdio>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <numbers>
+#include <optional>
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
@@ -50,6 +53,11 @@ std::optional<std::vector<double>> allNumericList(const Value& v) {
     return out;
 }
 
+double toNumberOrZero(const Value& v) {
+    const double* d = std::get_if<double>(&v);
+    return d ? *d : 0.0;
+}
+
 Value listOf(std::vector<Value> items) { return Value{makeList(std::move(items))}; }
 Value numList(const std::vector<double>& xs) {
     std::vector<Value> items;
@@ -59,15 +67,102 @@ Value numList(const std::vector<double>& xs) {
 }
 
 // Trigonometry in degrees: sin/cos/tan/asin/acos/atan/atan2, as the
-// builtins of the same names compute them.
-// CLEAN-ROOM: reimplement from spec section A7.
-double sinDegrees(double) { return std::numeric_limits<double>::quiet_NaN(); }
-double cosDegrees(double) { return std::numeric_limits<double>::quiet_NaN(); }
-double tanDegrees(double) { return std::numeric_limits<double>::quiet_NaN(); }
-double asinDegrees(double) { return std::numeric_limits<double>::quiet_NaN(); }
-double acosDegrees(double) { return std::numeric_limits<double>::quiet_NaN(); }
-double atanDegrees(double) { return std::numeric_limits<double>::quiet_NaN(); }
-double atan2Degrees(double, double) { return std::numeric_limits<double>::quiet_NaN(); }
+// builtins of the same names compute them. Angles are folded into the first
+// quadrant before converting to radians, and the angles whose results have a
+// simple closed form (multiples of 30 and 45 degrees) return that exact
+// value, so sin(30) == 0.5, cos(90) == 0 and sin(45) == cos(45).
+constexpr double kRadPerDeg = 0.017453292519943295769;
+constexpr double kDegPerRad = 57.2957795130823208767;
+constexpr double kSqrtHalf = 0.70710678118654752440;
+constexpr double kSqrtThreeQuarters = 0.86602540378443859659;
+
+// Beyond this magnitude a double cannot tell one revolution from the next.
+bool angleIsMeaningless(double x) {
+    return !std::isfinite(x) || std::fabs(x) >= 360.0 * 4503599627370496.0;
+}
+
+double wrapDegrees(double x, double period) {
+    return (x >= 0 && x < period) ? x : x - period * std::floor(x / period);
+}
+
+// sin and cos of an angle in [0, 90].
+double sinFirstQuadrant(double x) {
+    if (x < 45) return x == 30 ? 0.5 : std::sin(x * kRadPerDeg);
+    if (x == 45) return kSqrtHalf;
+    if (x == 60) return kSqrtThreeQuarters;
+    return std::cos((90 - x) * kRadPerDeg);
+}
+double cosFirstQuadrant(double x) {
+    if (x > 45) return x == 60 ? 0.5 : std::sin((90 - x) * kRadPerDeg);
+    if (x == 45) return kSqrtHalf;
+    if (x == 30) return kSqrtThreeQuarters;
+    return std::cos(x * kRadPerDeg);
+}
+
+double sinDegrees(double x) {
+    if (angleIsMeaningless(x)) return std::numeric_limits<double>::quiet_NaN();
+    x = wrapDegrees(x, 360);
+    bool negate = false;
+    if (x >= 180) {
+        x -= 180;
+        negate = true;
+    }
+    if (x > 90) x = 180 - x;
+    const double r = sinFirstQuadrant(x);
+    return negate ? -r : r;
+}
+
+double cosDegrees(double x) {
+    if (angleIsMeaningless(x)) return std::numeric_limits<double>::quiet_NaN();
+    x = wrapDegrees(x, 360);
+    bool negate = false;
+    if (x >= 180) {
+        x -= 180;
+        negate = true;
+    }
+    if (x > 90) {
+        x = 180 - x;
+        negate = !negate;
+    }
+    const double r = cosFirstQuadrant(x);
+    return negate ? -r : r;
+}
+
+double tanDegrees(double x) {
+    if (angleIsMeaningless(x)) return std::numeric_limits<double>::quiet_NaN();
+    const double halfTurns = std::floor(x / 180);
+    const bool oddHalfTurns = std::fmod(halfTurns, 2.0) != 0;
+    x = wrapDegrees(x, 180);
+    bool negate = false;
+    if (x > 90) {
+        x = 180 - x;
+        negate = true;
+    }
+    double r;
+    if (x == 0) r = oddHalfTurns ? -0.0 : 0.0;
+    else if (x == 30) r = 0.57735026918962573106;
+    else if (x == 45) r = 1;
+    else if (x == 60) r = 1.73205080756887719318;
+    else if (x == 90) r = oddHalfTurns ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
+    else r = std::tan(x * kRadPerDeg);
+    return negate ? -r : r;
+}
+
+// An inverse lands on the whole degree whose forward function gives `v`
+// back exactly, so asin(0.5) is 30 and not 30.000000000000004.
+double snapInverse(double degrees, double v, double (*forward)(double)) {
+    const double whole = std::round(degrees);
+    return forward(whole) == v ? whole : degrees;
+}
+double asinDegrees(double v) { return snapInverse(kDegPerRad * std::asin(v), v, sinDegrees); }
+double acosDegrees(double v) { return snapInverse(kDegPerRad * std::acos(v), v, cosDegrees); }
+double atanDegrees(double v) { return snapInverse(kDegPerRad * std::atan(v), v, tanDegrees); }
+
+double atan2Degrees(double y, double x) {
+    const double d = kDegPerRad * std::atan2(y, x);
+    const double whole = std::round(d);
+    return std::fabs(d - whole) < 3e-14 ? whole : d;
+}
 
 // utf8Encode lives in utf8.cpp -- the string-literal escape decoder
 // (\uXXXX) needs it too.
@@ -421,23 +516,237 @@ Value builtinLinearSolve(Evaluator& ev, const Value& aArg, const Value& bArg, bo
     return objectOf(std::move(out));
 }
 
-// rands(min_value, max_value, value_count[, seed_value]).
-// CLEAN-ROOM: reimplement from spec section A1.
-Value builtinRands(Evaluator&, double, double, double, const Value&, const oscad::Position*) {
-    return Value{};
+// The hash Python gives a float (Python Language Reference, "Built-in
+// Types -> Hashing of numeric types",
+// https://docs.python.org/3/library/stdtypes.html#hashing-of-numeric-types;
+// algorithm by CPython, PSF License), with the modulus 2^31 - 1 and without
+// Python's final substitution of -2 for -1. It turns any seed number,
+// fractional or huge, into a value that fits the generator's 32-bit seed.
+std::int64_t pythonFloatHash(double x) {
+    constexpr std::uint64_t P = (1ULL << 31) - 1;
+    if (std::isnan(x)) return 0;
+    if (std::isinf(x)) return x > 0 ? 314159 : -314159;
+    // |x| = mantissa * 2^exponent exactly, with an integer mantissa. Since
+    // 2^31 is 1 modulo P, a power of two reduces by its exponent modulo 31,
+    // and a negative exponent becomes the matching modular inverse.
+    int exponent = 0;
+    const double fraction = std::frexp(std::fabs(x), &exponent);
+    const auto mantissa = static_cast<std::uint64_t>(std::ldexp(fraction, 53));
+    exponent -= 53;
+    const int shift = ((exponent % 31) + 31) % 31;
+    const std::uint64_t h = ((mantissa % P) << shift) % P;
+    return x < 0 ? -static_cast<std::int64_t>(h) : static_cast<std::int64_t>(h);
+}
+
+// rands(min_value, max_value, value_count[, seed_value]). One generator for
+// the whole process: an unseeded call continues whatever stream the last
+// seeded call started.
+Value builtinRands(Evaluator& ev, double minv, double maxv, double count, const Value& seed,
+                   const oscad::Position* pos) {
+    static std::mutex generatorMutex;
+    static std::mt19937 generator{std::random_device{}()};
+
+    const double halfMax = std::numeric_limits<double>::max() / 2;
+    const auto resetBound = [&](double& bound, const char* which, double replacement) {
+        if (std::isfinite(bound)) return;
+        ev.warn(std::string("rands() range ") + which + " cannot be infinite", pos);
+        char buf[400];
+        std::snprintf(buf, sizeof buf, "resetting to %f", replacement);
+        ev.warn(buf, nullptr);
+        bound = replacement;
+    };
+    resetBound(minv, "min", -halfMax);
+    resetBound(maxv, "max", halfMax);
+    if (maxv < minv) std::swap(minv, maxv);
+
+    count = std::trunc(std::fabs(count));
+    if (!std::isfinite(count)) {
+        ev.warn("rands() cannot create an infinite number of results", pos);
+        ev.warn("resetting number of results to 1", nullptr);
+        count = 1;
+    }
+
+    std::vector<Value> out;
+    try {
+        if (count > static_cast<double>(out.max_size())) throw std::length_error("rands");
+        out.reserve(static_cast<size_t>(count));
+    } catch (const std::exception&) {
+        ev.emitWarning("ERROR: rands() cannot create " + formatNumber(count) + " results" + locSuffix(pos));
+        return Value{};
+    }
+
+    const std::lock_guard<std::mutex> lock(generatorMutex);
+    if (const double* s = std::get_if<double>(&seed)) {
+        generator.seed(static_cast<std::uint32_t>(pythonFloatHash(*s)));
+    }
+    std::uniform_real_distribution<double> distribution(minv, maxv);
+    const auto n = static_cast<size_t>(count);
+    for (size_t i = 0; i < n; ++i) out.push_back(Value{minv == maxv ? minv : distribution(generator)});
+    return listOf(std::move(out));
 }
 
 // search(match_value, string_or_vector, num_returns_per_match = 1,
 // index_col_num = 0).
-// CLEAN-ROOM: reimplement from spec section A5.
-Value builtinSearch(const CallArgs&, Evaluator&, const oscad::Position*) {
+Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* pos) {
+    const auto argAt = [&](int i, const char* name) -> Value {
+        if (const Value* v = args.findNamed(name)) return *v;
+        if (const Value* v = args.findPositional(i)) return *v;
+        return Value{};
+    };
+    // A count or column: whole, never negative, and 0 for a non-number.
+    const auto wholeArg = [&](int i, const char* name, size_t fallback) -> size_t {
+        if (!args.findNamed(name) && !args.findPositional(i)) return fallback;
+        const Value v = argAt(i, name);
+        const double* d = std::get_if<double>(&v);
+        if (!d || std::isnan(*d) || *d <= 0) return 0;
+        return *d >= 9e18 ? std::numeric_limits<size_t>::max() : static_cast<size_t>(*d);
+    };
+    const Value needle = argAt(0, "match_value");
+    const Value haystack = argAt(1, "string_or_vector");
+    const size_t wanted = wholeArg(2, "num_returns_per_match", 1);  // 0: every match
+    const size_t column = wholeArg(3, "index_col_num", 0);
+
+    static const ListPtr kNoEntries = makeList({});
+    const ListPtr* hayList = std::get_if<ListPtr>(&haystack);
+    const ListItems& entries = ((hayList && *hayList) ? *hayList : kNoEntries)->items;
+
+    // The entry's column `column` -- or, for column 0, the entry itself.
+    const auto entryMatches = [&](const Value& entry, const Value& value) {
+        if (column == 0 && oscEqual(entry, value)) return true;
+        const ListPtr* row = std::get_if<ListPtr>(&entry);
+        return row && *row && (*row)->items.size() > column && oscEqual((*row)->items[column], value);
+    };
+    // Up to `wanted` indices of entries satisfying `matches`.
+    const auto indicesWhere = [&](size_t total, const auto& matches) {
+        std::vector<Value> found;
+        for (size_t j = 0; j < total && (wanted == 0 || found.size() < wanted); ++j) {
+            if (matches(j)) found.push_back(Value{static_cast<double>(j)});
+        }
+        return found;
+    };
+    // Searching for several things at once: with one result wanted, each
+    // contributes its first index directly (or `missing` when it has none);
+    // otherwise each contributes the list of its indices.
+    std::vector<Value> result;
+    const auto collect = [&](std::vector<Value> found, bool skipMissing) {
+        if (wanted != 1) {
+            result.push_back(listOf(std::move(found)));
+        } else if (!found.empty()) {
+            result.push_back(found.front());
+        } else if (!skipMissing) {
+            result.push_back(listOf({}));
+        }
+    };
+
+    if (std::holds_alternative<double>(needle)) {
+        return listOf(indicesWhere(entries.size(), [&](size_t j) { return entryMatches(entries[j], needle); }));
+    }
+    if (const std::string* text = std::get_if<std::string>(&needle)) {
+        const std::vector<std::string> chars = utf8Chars(*text);
+        if (const std::string* hayText = std::get_if<std::string>(&haystack)) {
+            const std::vector<std::string> hayChars = utf8Chars(*hayText);
+            for (const std::string& c : chars) {
+                collect(indicesWhere(hayChars.size(), [&](size_t j) { return hayChars[j] == c; }), true);
+            }
+            return listOf(std::move(result));
+        }
+        if (!chars.empty()) {
+            for (size_t j = 0; j < entries.size(); ++j) {
+                const ListPtr* row = std::get_if<ListPtr>(&entries[j]);
+                if (!row || !*row || (*row)->items.size() <= column) {
+                    ev.warn("Invalid entry in search vector at index " + std::to_string(j) +
+                                ", required number of values in the entry: " + std::to_string(column + 1) +
+                                ". Invalid entry: " + fmtValue(entries[j]),
+                            pos);
+                    return listOf({});
+                }
+            }
+        }
+        for (const std::string& c : chars) {
+            collect(indicesWhere(entries.size(),
+                                 [&](size_t j) {
+                                     const Value& cell = std::get<ListPtr>(entries[j])->items[column];
+                                     const std::string* s = std::get_if<std::string>(&cell);
+                                     return s && !s->empty() && utf8CharAt(*s, 0) == c;
+                                 }),
+                    true);
+        }
+        return listOf(std::move(result));
+    }
+    if (const ListPtr* needles = std::get_if<ListPtr>(&needle); needles && *needles) {
+        for (const Value& n : (*needles)->items) {
+            collect(indicesWhere(entries.size(), [&](size_t j) { return entryMatches(entries[j], n); }), false);
+        }
+        return listOf(std::move(result));
+    }
     return Value{};
 }
 
-// lookup(key, table).
-// CLEAN-ROOM: reimplement from spec section A2.
-Value builtinLookup(Evaluator&, const CallArgs&, const oscad::Position*) {
-    return Value{};
+// lookup(key, table): linear interpolation between the rows whose keys
+// bracket `key`, clamped to the nearest row's value outside the table.
+Value builtinLookup(Evaluator& ev, const CallArgs& args, const oscad::Position* pos) {
+    const double key = std::get<double>(positionalAt(args, 0));
+    if (!std::isfinite(key)) {
+        ev.warn("lookup(" + fmtValue(Value{key}) + ", ...) first argument is not a number", pos);
+        return Value{};
+    }
+    // A row is two numbers: [key, value].
+    const auto asRow = [](const Value& v) -> std::optional<std::pair<double, double>> {
+        const ListPtr* l = std::get_if<ListPtr>(&v);
+        if (!l || !*l || (*l)->items.size() != 2) return std::nullopt;
+        const double* k = std::get_if<double>(&(*l)->items[0]);
+        const double* x = std::get_if<double>(&(*l)->items[1]);
+        if (!k || !x) return std::nullopt;
+        return std::make_pair(*k, *x);
+    };
+    const auto& table = std::get<ListPtr>(positionalAt(args, 1))->items;
+    if (table.empty()) return Value{};
+    const auto first = asRow(table[0]);
+    if (!first) return Value{};
+
+    // The nearest rows at or below and at or above the key; each starts as
+    // the first row and is replaced only by a strictly nearer one.
+    auto low = *first;
+    auto high = *first;
+    for (size_t i = 1; i < table.size(); ++i) {
+        const auto row = asRow(table[i]);
+        if (!row) continue;
+        if (row->first <= key && (low.first > key || row->first > low.first)) low = *row;
+        if (row->first >= key && (high.first < key || row->first < high.first)) high = *row;
+    }
+    if (key <= low.first) return Value{high.second};
+    if (key >= high.first) return Value{low.second};
+    const double f = (key - low.first) / (high.first - low.first);
+    return Value{high.second * f + low.second * (1 - f)};
+}
+
+// cross(a, b): the 3D cross product, or for two 2D vectors the z component
+// of theirs (where anything that is not a number counts as 0).
+Value builtinCross(Evaluator& ev, const ListItems& a, const ListItems& b,
+                   const oscad::Position* pos) {
+    if (a.size() == 2 && b.size() == 2) {
+        return Value{toNumberOrZero(a[0]) * toNumberOrZero(b[1]) - toNumberOrZero(a[1]) * toNumberOrZero(b[0])};
+    }
+    if (a.size() != 3 || b.size() != 3) {
+        ev.warn("Invalid vector size of parameter for cross()", pos);
+        return Value{};
+    }
+    double x[3], y[3];
+    for (size_t i = 0; i < 3; ++i) {
+        const double* p = std::get_if<double>(&a[i]);
+        const double* q = std::get_if<double>(&b[i]);
+        const char* problem = nullptr;
+        if (!p || !q) problem = "Invalid value in parameter vector for cross()";
+        else if (std::isnan(*p) || std::isnan(*q)) problem = "Invalid value (NaN) in parameter vector for cross()";
+        else if (std::isinf(*p) || std::isinf(*q)) problem = "Invalid value (INF) in parameter vector for cross()";
+        if (problem) {
+            ev.warn(problem, pos);
+            return Value{};
+        }
+        x[i] = *p;
+        y[i] = *q;
+    }
+    return numList({x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]});
 }
 
 std::string asStringOr(const Value& v, const std::string& fallback) {
@@ -994,9 +1303,11 @@ Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::strin
             return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log(x)};
         }
         case BuiltinFnId::Log: {
-            // log(x) / log(base, x).
-            // CLEAN-ROOM: reimplement from spec section A3.
-            return Value{};
+            // log(x) is base 10; log(base, x). Both are a quotient of natural
+            // logarithms, so log(2, 8) is exactly 3 but log(1000) is not.
+            const double first = toDoubleLenient(positionalAt(args, 0));
+            if (positionalCount(args) < 2) return Value{std::log(first) / std::log(10.0)};
+            return Value{std::log(toDoubleLenient(positionalAt(args, 1))) / std::log(first)};
         }
         case BuiltinFnId::Exp: return Value{std::exp(toDoubleLenient(getArg(args, 0, "x", Value{})))};
         case BuiltinFnId::Sin: return Value{sinDegrees(toDoubleLenient(getArg(args, 0, "x", Value{})))};
@@ -1031,9 +1342,8 @@ Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::strin
             return Value{std::sqrt(sum)};
         }
         case BuiltinFnId::Cross:
-            // cross(a, b).
-            // CLEAN-ROOM: reimplement from spec section A4.
-            return Value{};
+            return builtinCross(ev, std::get<ListPtr>(positionalAt(args, 0))->items,
+                                std::get<ListPtr>(positionalAt(args, 1))->items, &node.position());
         case BuiltinFnId::Rands: {
             ev.noteRandsCall();
             return builtinRands(ev, toDoubleLenient(getArg(args, 0, "min_value", Value{})),
