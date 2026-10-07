@@ -77,7 +77,7 @@ manifold::mat2x3 projectTo2d(const manifold::mat3x4& m) {
 
 bool transformSection(manifold::CrossSection& cs, const manifold::mat3x4& m) {
     const manifold::mat2x3 p = projectTo2d(m);
-    // Polygon2d::transform: a singular 2D matrix removes the shape.
+    // A singular 2D matrix removes the shape.
     if (p[0].x * p[1].y - p[1].x * p[0].y == 0.0) {
         cs = manifold::CrossSection();
         return false;

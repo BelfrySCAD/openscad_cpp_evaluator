@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <queue>
 #include <vector>
@@ -10,18 +11,6 @@ namespace oscadeval {
 
 namespace {
 
-constexpr double kPi = std::numbers::pi;
-constexpr double kDeg2Rad = kPi / 180.0;
-constexpr double kGridFine = 0.00000095367431640625; // 2^-20, upstream's GRID_FINE
-constexpr double kFMinimum = 0.01;                   // upstream's F_MINIMUM
-
-double dynNumberOr(const EvalContext& ctx, const char* name, double fallback) {
-    const Value* v = ctx.dyn->find(name);
-    if (!v) return fallback;
-    const double* d = std::get_if<double>(v);
-    return d ? *d : fallback;
-}
-
 double paramOr(const CSGParams& params, const char* key, double fallback) {
     auto it = params.find(key);
     if (it == params.end()) return fallback;
@@ -29,150 +18,50 @@ double paramOr(const CSGParams& params, const char* key, double fallback) {
     return d ? *d : fallback;
 }
 
-double segmentsGivenFa(double fa) { return 360.0 / fa; }
-double segmentsGivenFs(double r, double fs) { return r * 2 * kPi / fs; }
-
-// https://mathworld.wolfram.com/Helix.html -- see upstream for the derivation.
-double helixArcLength(double rSqr, double height, double twistDegrees) {
-    const double t = twistDegrees * kDeg2Rad;
-    const double c = height / t;
-    return t * std::sqrt(rSqr + c * c);
-}
-
-double archimedesLength(double a, double theta) {
-    return 0.5 * a * (theta * std::sqrt(1 + theta * theta) + std::asinh(theta));
-}
-
-manifold::vec2 transformAt(const manifold::vec2& v, double twist, double scaleX, double scaleY, double t) {
-    // Eigen::Scaling(lerp(1, s, t)) * rotate_degrees(-twist * t), as upstream.
-    const double a = -twist * t * kDeg2Rad;
-    const double x = v.x * std::cos(a) - v.y * std::sin(a);
-    const double y = v.x * std::sin(a) + v.y * std::cos(a);
-    return {x * (1 + (scaleX - 1) * t), y * (1 + (scaleY - 1) * t)};
-}
-
-// The longest an outline edge gets over every slice of the extrusion.
-double maxEdgeLength(const manifold::vec2& v0, const manifold::vec2& v1, double twist, double scaleX,
-                     double scaleY, unsigned slices) {
-    if (scaleX == scaleY) return manifold::la::length(v1 - v0) * std::max(scaleX, 1.0);
-    double longest = 0.0;
-    for (unsigned j = 0; j <= slices; ++j) {
-        const double t = static_cast<double>(j) / slices;
-        longest = std::max(longest, manifold::la::length(transformAt(v1, twist, scaleX, scaleY, t) -
-                                               transformAt(v0, twist, scaleX, scaleY, t)));
-    }
-    return longest;
-}
-
-void addSegmentedEdge(manifold::SimplePolygon& out, const manifold::vec2& v0, const manifold::vec2& v1,
-                      unsigned segments) {
-    for (unsigned j = 0; j < segments; ++j) {
-        const double t = static_cast<double>(j) / segments;
-        out.push_back((1 - t) * v0 + t * v1);
-    }
-}
-
-// Upstream's splitOutlineByFn: while the outline has fewer than fn vertices,
-// split the edge whose segments are longest, a whole group of near-equal
-// edges at a time so the result stays symmetrical.
-manifold::SimplePolygon splitByFn(const manifold::SimplePolygon& o, double twist, double scaleX, double scaleY,
-                                  double fn, unsigned slices) {
-    struct Tracker {
-        size_t edge;
-        double maxLen;
-        unsigned count = 1;
-        double metric() const { return maxLen / (count + 0.5); }
-        bool operator<(const Tracker& rhs) const { return metric() < rhs.metric(); }
-        bool closeMatch(const Tracker& other) const {
-            const double l1 = metric(), l2 = other.metric();
-            return std::min(l1, l2) / std::max(l1, l2) >= 0.999;
-        }
-    };
-    const size_t n = o.size();
-    std::vector<unsigned> counts(n, 1);
-    std::priority_queue<Tracker> q;
-    for (size_t i = 1; i <= n; ++i) {
-        q.push(Tracker{i - 1, maxEdgeLength(o[i - 1], o[i % n], twist, scaleX, scaleY, slices)});
-    }
-    std::vector<Tracker> group;
-    size_t total = n;
-    while (total < fn) {
-        while (!q.empty() && (group.empty() || q.top().closeMatch(group.front()))) {
-            group.push_back(q.top());
-            q.pop();
-        }
-        if (total + group.size() <= fn) {
-            while (!group.empty()) {
-                Tracker cur = group.back();
-                group.pop_back();
-                ++cur.count;
-                ++counts[cur.edge];
-                ++total;
-                q.push(cur);
-            }
-        } else {
-            while (!group.empty()) {
-                q.push(group.back());
-                group.pop_back();
-            }
-            break;
-        }
-    }
-    manifold::SimplePolygon out;
-    for (size_t i = 1; i <= n; ++i) addSegmentedEdge(out, o[i - 1], o[i % n], counts[i - 1]);
-    return out;
-}
-
-manifold::SimplePolygon splitByFs(const manifold::SimplePolygon& o, double twist, double scaleX, double scaleY,
-                                  double fs, unsigned slices) {
-    const size_t n = o.size();
-    manifold::SimplePolygon out;
-    for (size_t i = 1; i <= n; ++i) {
-        const double len = maxEdgeLength(o[i - 1], o[i % n], twist, scaleX, scaleY, slices);
-        addSegmentedEdge(out, o[i - 1], o[i % n], static_cast<unsigned>(std::ceil(len / fs)));
-    }
-    return out;
-}
+// The smallest $fa and $fs honoured.
+constexpr double kMinFragmentSize = 0.01;
+// The smallest radius that gets a segment count, and the smallest $fe used: 2^-20.
+constexpr double kMinRadius = 1.0 / 1048576.0;
+// At or above this $fe/r a pentagon is already within tolerance.
+constexpr double kFeFiveSegmentRatio = 0.1909830056;
 
 } // namespace
 
-namespace {
-// Value::toDouble on a set special variable: the number, or 0 for anything
-// that is not one. Unset falls back to the default OpenSCAD's root context
-// gives it.
-double dynToDouble(const EvalContext& ctx, const char* name, double unset) {
-    const Value* v = ctx.dyn->find(name);
-    if (!v) return unset;
-    const double* d = std::get_if<double>(v);
-    return d ? *d : 0.0;
-}
-} // namespace
-
-// upstream's CurveDiscretizer: $fn below 0 is 0, and $fa/$fs below 0.01
-// (zero, negative, or not a number at all) are clamped to 0.01 -- with a
-// warning where the node was built with a location (circle, sphere,
-// cylinder, the extrusions), silently otherwise (offset, text). This used
-// to reset them to the 12/2 defaults: cylinder(r=10, $fa=0) had 30
-// segments where OpenSCAD has 32, and $fs=0.001 was never clamped at all.
+// Reads $fn/$fa/$fs/$fe from the context and clamps them, reporting each
+// clamp through `warn` when one is given. An unset variable takes its
+// default; one set to anything but a number counts as 0.
 Discretizer Discretizer::fromCtx(const EvalContext& ctx, const std::function<void(const std::string&)>& warn) {
-    constexpr double kFMinimum = 0.01;
+    auto read = [&](const char* name, double fallback) {
+        const Value* v = ctx.dyn.find(name);
+        if (!v) return fallback;
+        const double* d = std::get_if<double>(v);
+        return d ? *d : 0.0;
+    };
+    auto report = [&](const char* text) {
+        if (warn) warn(text);
+    };
+
     Discretizer d;
-    d.fn = dynToDouble(ctx, "$fn", 0.0);
-    d.fe = dynToDouble(ctx, "$fe", 0.0);
-    d.fa = dynToDouble(ctx, "$fa", 12.0);
-    d.fs = dynToDouble(ctx, "$fs", 2.0);
-    if (d.fn < 0) {
-        if (warn) warn("$fn negative - setting to 0");
+    d.fn = read("$fn", 0.0);
+    d.fe = read("$fe", 0.0);
+    d.fa = read("$fa", 12.0);
+    d.fs = read("$fs", 2.0);
+
+    if (d.fn < 0.0) {
+        report("$fn negative - setting to 0");
         d.fn = 0.0;
     }
-    if (d.fe < 0) d.fe = 0.0;
-    if (d.fs < kFMinimum) {
-        if (warn) warn("$fs too small - clamping to 0.010000");
-        d.fs = kFMinimum;
+    if (d.fe < 0.0) {
+        report("$fe negative - setting to 0");
+        d.fe = 0.0;
     }
-    if (d.fa < kFMinimum) {
-        if (warn) warn("$fa too small - clamping to 0.010000");
-        d.fa = kFMinimum;
+    if (d.fs < kMinFragmentSize) {
+        report("$fs too small - clamping to 0.010000");
+        d.fs = kMinFragmentSize;
+    }
+    if (d.fa < kMinFragmentSize) {
+        report("$fa too small - clamping to 0.010000");
+        d.fa = kMinFragmentSize;
     }
     return d;
 }
@@ -194,87 +83,167 @@ void Discretizer::store(CSGParams& params) const {
 }
 
 std::optional<int> Discretizer::circular(double r, double angleDegrees) const {
-    if (r < kGridFine || !std::isfinite(fn) || !std::isfinite(angleDegrees)) return std::nullopt;
-    double result;
+    if (r < kMinRadius || !std::isfinite(fn) || !std::isfinite(angleDegrees)) return std::nullopt;
+    const double share = std::abs(angleDegrees) / 360.0;
+
+    double full;
     if (fn > 0.0) {
-        // Ceiled before scaling to the arc, as upstream keeps for compatibility.
-        result = std::ceil(std::max(fn, 3.0)) * std::fabs(angleDegrees) / 360.0;
-    } else {
-        if (!std::isfinite(fe)) return std::nullopt;
-        if (fe >= kGridFine) {
-            // Apothem r - fe: r*cos(pi/n) = r - fe, so n = pi / acos(1 - fe/r).
-            // At the ratio giving exactly 5 (which also covers fe >= r), 5.
-            const double maxSegments =
-                std::max(std::min(segmentsGivenFa(kFMinimum), segmentsGivenFs(r, kFMinimum)), 5.0);
-            const double ratio = fe / r;
-            result = ratio >= 0.1909830056 ? 5.0 : std::min(maxSegments, kPi / std::acos(1 - ratio));
-            // NOT ceiled before scaling to the arc, unlike the $fa/$fs branch.
-        } else {
-            result = std::ceil(std::max(std::min(segmentsGivenFa(fa), segmentsGivenFs(r, fs)), 5.0));
-        }
-        result *= std::fabs(angleDegrees) / 360.0;
-    }
-    return std::max(1, static_cast<int>(std::ceil(result)));
-}
-
-std::optional<int> Discretizer::helixSlices(double rSqr, double height, double twistDegrees) const {
-    twistDegrees = std::fabs(twistDegrees);
-    // At least 3 slices per full turn: 180 degrees in one slice is never manifold.
-    const int minSlices = std::max(static_cast<int>(std::ceil(twistDegrees / 120.0)), 1);
-    if (std::sqrt(rSqr) < kGridFine || !std::isfinite(fn) || std::isnan(height) || std::isnan(twistDegrees))
+        full = std::ceil(std::max(fn, 3.0));
+    } else if (!std::isfinite(fe)) {
         return std::nullopt;
-    if (fn > 0.0) return std::max(static_cast<int>(std::ceil(twistDegrees / 360.0 * fn)), minSlices);
-    if (fe > 0.0) {
-        // Error of the chord between two slices' furthest vertex, from the
-        // helix it approximates; see upstream's helix_slices_given_fe.
-        const double r = std::sqrt(rSqr);
-        if (fe >= r) return minSlices;
-        const double theta = 2 * (kPi - std::acos(fe / r - 1));
-        return std::max(static_cast<int>(std::ceil(twistDegrees * kDeg2Rad / theta)), minSlices);
+    } else if (fe >= kMinRadius) {
+        // Enough segments that no chord strays more than $fe from the arc.
+        // Deliberately not rounded before scaling to the arc's share.
+        const double ratio = fe / r;
+        if (ratio >= kFeFiveSegmentRatio) {
+            full = 5.0;
+        } else {
+            const double cap = std::max(std::min(360.0 / kMinFragmentSize, 2.0 * std::numbers::pi * r / kMinFragmentSize), 5.0);
+            full = std::min(cap, std::numbers::pi / std::acos(1.0 - ratio));
+        }
+    } else {
+        full = std::ceil(std::max(std::min(360.0 / fa, 2.0 * std::numbers::pi * r / fs), 5.0));
     }
-    const int faSlices = static_cast<int>(std::ceil(twistDegrees / fa));
-    const int fsSlices = static_cast<int>(std::ceil(helixArcLength(rSqr, height, twistDegrees) / fs));
-    return std::max(std::min(faSlices, fsSlices), minSlices);
+    const double n = std::max(1.0, std::ceil(full * share));
+    return static_cast<int>(std::min(n, static_cast<double>(std::numeric_limits<int>::max())));
 }
 
+namespace {
+
+// Radii (and offsets) below this are treated as a point: no slices.
+constexpr double kTinyLength = 1.0 / (1 << 20);
+
+double degToRad(double degrees) { return degrees * std::numbers::pi / 180.0; }
+
+// At least one slice per 120 degrees of twist, so no slice turns far
+// enough to fold over itself.
+double minTwistSlices(double twistDegrees) { return std::max(std::ceil(twistDegrees / 120.0), 1.0); }
+
+int toCount(double n) { return static_cast<int>(std::min(n, static_cast<double>(std::numeric_limits<int>::max()))); }
+
+} // namespace
+
+// Slices for a twist with no scale: the outermost vertex traces a helix,
+// sliced like an arc of that length.
+std::optional<int> Discretizer::helixSlices(double rSqr, double height, double twistDegrees) const {
+    const double r = std::sqrt(rSqr);
+    const double twist = std::fabs(twistDegrees);
+    if (r < kTinyLength || !std::isfinite(fn) || std::isnan(height) || std::isnan(twist)) return std::nullopt;
+    const double least = minTwistSlices(twist);
+    if (fn > 0) return toCount(std::max(std::ceil(twist / 360.0 * fn), least));
+    if (fe > 0) {
+        if (fe >= r) return toCount(least);
+        const double stepRadians = 2.0 * (std::numbers::pi - std::acos(fe / r - 1.0));
+        return toCount(std::max(std::ceil(degToRad(twist) / stepRadians), least));
+    }
+    const double turn = degToRad(twist);
+    const double helixLength = turn * std::sqrt(rSqr + (height / turn) * (height / turn));
+    return toCount(std::max(std::min(std::ceil(twist / fa), std::ceil(helixLength / fs)), least));
+}
+
+// Slices for a twist with a uniform scale: the outermost vertex traces a
+// conical spiral, whose length (from the Archimedean spiral arc length)
+// stands in for the helix's. $fe is not used here.
 std::optional<int> Discretizer::conicalHelixSlices(double rSqr, double height, double twistDegrees,
                                                    double scale) const {
-    twistDegrees = std::fabs(twistDegrees);
     const double r = std::sqrt(rSqr);
-    const int minSlices = std::max(static_cast<int>(std::ceil(twistDegrees / 120.0)), 1);
-    if (r < kGridFine || !std::isfinite(fn)) return std::nullopt;
-    if (fn > 0.0) return std::max(static_cast<int>(std::ceil(twistDegrees * fn / 360)), minSlices);
-    // Upstream has no $fe case here: a scaled twist is sized by $fa/$fs.
-    // The vertex follows a section of an Archimedes spiral; see upstream.
-    const double rads = twistDegrees * kDeg2Rad;
-    const double angleEnd = scale > 1 ? rads * scale / (scale - 1) : rads / (1 - scale);
-    const double angleStart = angleEnd - rads;
-    const double a = r / angleEnd;
-    const double spiral = archimedesLength(a, angleEnd) - archimedesLength(a, angleStart);
-    const double total = std::sqrt(spiral * spiral + height * height);
-    const int fsSlices = static_cast<int>(std::ceil(total / fs));
-    const int faSlices = static_cast<int>(std::ceil(twistDegrees / fa));
-    return std::max(std::min(faSlices, fsSlices), minSlices);
+    const double twist = std::fabs(twistDegrees);
+    if (r < kTinyLength || !std::isfinite(fn)) return std::nullopt;
+    const double least = minTwistSlices(twist);
+    if (fn > 0) return toCount(std::max(std::ceil(twist * fn / 360.0), least));
+    const double turn = degToRad(twist);
+    const double end = scale > 1 ? turn * scale / (scale - 1) : turn / (1 - scale);
+    const double begin = end - turn;
+    const double a = r / end;
+    const auto arcLength = [a](double t) { return 0.5 * a * (t * std::sqrt(1 + t * t) + std::asinh(t)); };
+    const double flat = arcLength(end) - arcLength(begin);
+    const double length = std::sqrt(flat * flat + height * height);
+    return toCount(std::max(std::min(std::ceil(twist / fa), std::ceil(length / fs)), least));
 }
 
+// Slices for a non-uniform scale: enough that the straight line from a
+// vertex to its scaled copy is split into $fs-sized pieces.
 std::optional<int> Discretizer::diagonalSlices(double deltaSqr, double height) const {
-    if (std::sqrt(deltaSqr) < kGridFine || !std::isfinite(fn)) return std::nullopt;
-    if (fn > 0.0) return std::max(static_cast<int>(fn), 1);
-    return std::max(static_cast<int>(std::ceil(std::sqrt(deltaSqr + height * height) / fs)), 1);
+    if (std::sqrt(deltaSqr) < kTinyLength || !std::isfinite(fn)) return std::nullopt;
+    if (fn > 0) return toCount(std::max(std::trunc(fn), 1.0));
+    return toCount(std::max(std::ceil(std::sqrt(deltaSqr + height * height) / fs), 1.0));
 }
 
-manifold::SimplePolygon Discretizer::splitOutline(const manifold::SimplePolygon& o, double twist, double scaleX,
-                                                  double scaleY, unsigned slices, unsigned segments) const {
-    if (o.empty()) return o;
-    if (segments > 0 || fn > 0.0) {
-        const unsigned minVertices = segments > 0 ? segments : static_cast<unsigned>(std::max(fn, 3.0));
-        return o.size() >= minVertices ? o : splitByFn(o, twist, scaleX, scaleY, minVertices, slices);
+namespace {
+
+// Pieces per edge: start every edge at one, then repeatedly give one more
+// piece to every edge tied for the longest piece, while the total stays
+// within `target`.
+std::vector<unsigned> piecesForTarget(const std::vector<double>& edgeLengths, unsigned target) {
+    std::vector<unsigned> pieces(edgeLengths.size(), 1);
+    if (edgeLengths.size() >= target) return pieces;
+    size_t total = pieces.size();
+    while (true) {
+        const auto piece = [&](size_t i) { return edgeLengths[i] / (pieces[i] + 0.5); };
+        double longest = 0.0;
+        for (size_t i = 0; i < pieces.size(); ++i) longest = std::max(longest, piece(i));
+        std::vector<size_t> group;
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            if (piece(i) >= 0.999 * longest) group.push_back(i);
+        }
+        if (total + group.size() > target) return pieces;
+        for (size_t i : group) ++pieces[i];
+        total += group.size();
     }
-    // $fs, then check whether $fa gives fewer. (No $fe case upstream.)
-    const auto faSegs = static_cast<unsigned>(std::ceil(360.0 / fa));
-    if (o.size() >= faSegs) return o;
-    manifold::SimplePolygon byFs = splitByFs(o, twist, scaleX, scaleY, fs, slices);
-    return byFs.size() >= faSegs ? splitByFn(o, twist, scaleX, scaleY, faSegs, slices) : byFs;
+}
+
+} // namespace
+
+// Split an outline's edges so its twisted / scaled copies stay close to the
+// true surface between slices. Each edge's length is its longest over every
+// slice's copy of it.
+manifold::SimplePolygon Discretizer::splitOutline(const manifold::SimplePolygon& outline, double twistDegrees,
+                                                  double scaleX, double scaleY, unsigned slices,
+                                                  unsigned segments) const {
+    const size_t n = outline.size();
+    if (n == 0) return outline;
+
+    std::vector<double> lengths(n);
+    for (size_t i = 0; i < n; ++i) {
+        const manifold::vec2 edge = outline[(i + 1) % n] - outline[i];
+        if (scaleX == scaleY) {
+            lengths[i] = manifold::la::length(edge) * std::max(scaleX, 1.0);
+            continue;
+        }
+        double longest = 0.0;
+        for (unsigned j = 0; j <= slices; ++j) {
+            const double t = slices ? static_cast<double>(j) / slices : 0.0;
+            const double angle = degToRad(-twistDegrees * t);
+            const double c = std::cos(angle), s = std::sin(angle);
+            const manifold::vec2 turned(c * edge.x - s * edge.y, s * edge.x + c * edge.y);
+            const manifold::vec2 scaled(turned.x * (1 + (scaleX - 1) * t), turned.y * (1 + (scaleY - 1) * t));
+            longest = std::max(longest, manifold::la::length(scaled));
+        }
+        lengths[i] = longest;
+    }
+
+    std::vector<unsigned> pieces;
+    if (segments > 0 || fn > 0) {
+        const unsigned target = segments > 0 ? segments : static_cast<unsigned>(std::max(std::trunc(fn), 3.0));
+        pieces = piecesForTarget(lengths, target);
+    } else {
+        const double full = std::ceil(360.0 / fa);
+        if (n >= full) return outline;
+        pieces.resize(n);
+        double total = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            pieces[i] = static_cast<unsigned>(std::ceil(lengths[i] / fs));
+            total += pieces[i];
+        }
+        if (total >= full) pieces = piecesForTarget(lengths, static_cast<unsigned>(full));
+    }
+
+    manifold::SimplePolygon result;
+    for (size_t i = 0; i < n; ++i) {
+        const manifold::vec2 a = outline[i], b = outline[(i + 1) % n];
+        for (unsigned k = 0; k < pieces[i]; ++k) result.push_back(a + (b - a) * (static_cast<double>(k) / pieces[i]));
+    }
+    return result;
 }
 
 int fnSegmentsFromCtx(const EvalContext& ctx, double r, const std::function<void(const std::string&)>& warn) {

@@ -8,7 +8,9 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <sstream>
 
@@ -16,117 +18,107 @@ namespace oscadeval {
 
 namespace {
 
-std::string lowerExt(const std::string& path) {
+bool hasPngSignature(const std::string& bytes) {
+    static const char kSignature[8] = {'\x89', 'P', 'N', 'G', '\r', '\n', '\x1a', '\n'};
+    return bytes.size() >= 8 && std::memcmp(bytes.data(), kSignature, 8) == 0;
+}
+
+// Image formats besides PNG, recognised by extension only.
+bool hasImageExtension(const std::string& path) {
     std::string ext = std::filesystem::path(path).extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return ext;
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+    return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif";
 }
 
-bool hasPngHeader(const std::string& path) {
-    static const unsigned char kPng[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
-    std::ifstream in(path, std::ios::binary);
-    unsigned char head[8] = {};
-    in.read(reinterpret_cast<char*>(head), 8);
-    return in.gcount() == 8 && std::memcmp(head, kPng, 8) == 0;
-}
-
-// SurfaceNode::read_dat: row i of the file is y = i (the first line is
-// y = 0 -- this used to reverse them, mirroring every surface in Y); a
-// short row is padded with 0; an unparseable value warns and yields
-// nothing. min starts at 1, which with createGeometry's "min - 1" puts the
-// base at z = 0 for all-positive data, as it always was.
-SurfaceData loadDat(const std::string& path) {
-    SurfaceData out;
-    std::ifstream in(path);
-    if (!in) {
-        out.warnings.push_back("Can't open DAT file '" + path + "'.");
-        return out;
-    }
-    std::map<std::pair<int, int>, double> cells;
-    int lines = 0, columns = 0;
-    double minVal = 1;
-    std::string line;
-    while (std::getline(in, line)) {
-        const size_t b = line.find_first_not_of(" \t\r\n");
-        if (b == std::string::npos || line[b] == '#') continue;
-        std::istringstream ss(line);
-        std::string token;
-        int col = 0;
-        while (ss >> token) {
-            size_t used = 0;
-            double v = 0;
-            try {
-                v = std::stod(token, &used);
-            } catch (...) {
-                used = 0;
-            }
-            if (used != token.size()) {
-                out.warnings.push_back("Illegal value in '" + path + "': bad lexical cast: source type value could "
-                                       "not be interpreted as target");
-                return SurfaceData{{}, 0, 0, 0, out.warnings};
-            }
-            cells[{lines, col++}] = v;
-            columns = std::max(columns, col);
-            minVal = std::min(minVal, v);
-        }
-        ++lines;
-    }
-    out.rows = lines;
-    out.cols = columns;
-    out.minVal = minVal;
-    out.heights.assign(static_cast<size_t>(lines) * columns, 0.0);
-    for (const auto& [rc, v] : cells) out.heights[static_cast<size_t>(rc.first) * columns + rc.second] = v;
-    return out;
-}
-
-// SurfaceNode::convert_image: 16-bit luminance scaled to 0-100, inverted by
-// NEGATING it (this used 100 - z, a different solid); the bottom image row
-// is y = 0. stb_image widens 8-bit channels to 16 the way lodepng does.
-SurfaceData loadImage(const std::string& path, bool invert) {
-    SurfaceData out;
+// An image's heights: 0..100 by luminance on 16-bit channels, the bottom
+// image row at y = 0; negated by `invert`.
+void readImage(const std::string& path, const std::string& bytes, bool invert, SurfaceData& out) {
     int w = 0, h = 0, channels = 0;
-    stbi_us* data = stbi_load_16(path.c_str(), &w, &h, &channels, 3);
-    if (!data) {
+    stbi_us* px = stbi_load_16_from_memory(reinterpret_cast<const stbi_uc*>(bytes.data()), static_cast<int>(bytes.size()),
+                                           &w, &h, &channels, 3);
+    if (!px) {
         out.warnings.push_back("Can't read PNG image '" + path + "'");
-        return out;
+        return;
     }
     out.rows = h;
     out.cols = w;
-    out.heights.assign(static_cast<size_t>(w) * h, 0.0);
-    double minVal = 200;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            const stbi_us* px = data + (static_cast<size_t>(y) * w + x) * 3;
-            const double pixel = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
-            const double z = 100.0 / 65535.0 * (invert ? 0.0 - pixel : pixel);
-            out.heights[static_cast<size_t>(h - 1 - y) * w + x] = z;
-            minVal = std::min(minVal, z);
+    out.minVal = 200;
+    out.heights.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c) {
+            const stbi_us* p = px + 3 * (static_cast<size_t>(r) * w + c);
+            const double lum = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+            double z = 100.0 / 65535.0 * lum;
+            if (invert) z = -z;
+            out.heights[static_cast<size_t>(h - 1 - r) * w + c] = z;
+            out.minVal = std::min(out.minVal, z);
         }
+    stbi_image_free(px);
+}
+
+bool parseNumber(const std::string& token, double& value) {
+    char* end = nullptr;
+    value = std::strtod(token.c_str(), &end);
+    return !token.empty() && end == token.c_str() + token.size();
+}
+
+// A text grid: whitespace-separated numbers, the first data line at y = 0.
+// Blank lines and `#` lines are skipped; short rows are padded with 0.
+void readGrid(const std::string& path, const std::string& text, SurfaceData& out) {
+    std::vector<std::vector<double>> grid;
+    double minVal = 1;
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find('\n', start);
+        const bool lastLineUnterminated = end == std::string::npos;
+        if (lastLineUnterminated) end = text.size();
+        std::istringstream line(text.substr(start, end - start));
+        start = end + 1;
+
+        std::vector<double> row;
+        std::string token;
+        while (line >> token) {
+            if (row.empty() && token[0] == '#') break;
+            double v;
+            if (!parseNumber(token, v)) {
+                if (!lastLineUnterminated)
+                    out.warnings.push_back("Illegal value in '" + path +
+                                           "': bad lexical cast: source type value could not be interpreted as target");
+                return;
+            }
+            row.push_back(v);
+            minVal = std::min(minVal, v);
+        }
+        if (!row.empty()) grid.push_back(std::move(row));
     }
+
+    size_t cols = 0;
+    for (const auto& row : grid) cols = std::max(cols, row.size());
+    out.rows = static_cast<int>(grid.size());
+    out.cols = static_cast<int>(cols);
     out.minVal = minVal;
-    stbi_image_free(data);
-    return out;
+    out.heights.assign(grid.size() * cols, 0.0);
+    for (size_t r = 0; r < grid.size(); ++r)
+        std::copy(grid[r].begin(), grid[r].end(), out.heights.begin() + static_cast<std::ptrdiff_t>(r * cols));
 }
 
 } // namespace
 
+// Reads a surface() height file: a PNG (or JPEG/BMP/GIF) image, or a text
+// grid of numbers.
 SurfaceData loadSurface(const std::string& path, bool invert) {
-    if (!std::filesystem::exists(path)) {
-        SurfaceData out;
+    SurfaceData out;
+    std::ifstream in(path, std::ios::binary);
+    if (path.empty() || !std::filesystem::is_regular_file(path) || !in) {
         out.warnings.push_back("The file '" + path + "' couldn't be opened.");
         return out;
     }
-    // Upstream decides by the PNG signature, not the name. Other image
-    // types (a BelfrySCAD addition) still go by extension.
-    const std::string ext = lowerExt(path);
-    if (hasPngHeader(path) || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif")
-        return loadImage(path, invert);
-    if (ext == ".png") {
-        SurfaceData out;
-        out.warnings.push_back("Can't read PNG image '" + path + "'");
-        return out;
-    }
-    return loadDat(path);
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (hasPngSignature(bytes) || hasImageExtension(path))
+        readImage(path, bytes, invert, out);
+    else
+        readGrid(path, bytes, out);
+    return out;
 }
 
 } // namespace oscadeval

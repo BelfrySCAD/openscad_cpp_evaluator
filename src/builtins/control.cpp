@@ -124,10 +124,8 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
             // evalFor) -- mirrors _resolve_intersection_for's single
             // `_check_debug(body_node[0], loop_ctx, expr_level=True)`.
             if (!bodyNodes.empty()) ev.checkDebug(*bodyNodes.front(), parentCtx, /*forced=*/false, /*exprLevel=*/true);
-            // One operand per child STATEMENT of every iteration: upstream
-            // instantiates the children straight into the intersection
-            // node (control.cc), so they are intersected flat, not
-            // unioned per iteration first.
+            // One operand per child STATEMENT of every iteration: OpenSCAD
+            // intersects them flat, not unioned per iteration first.
             std::vector<const oscad::ASTNode*> assigns, stmts;
             for (const oscad::ASTNode* stmt : bodyNodes) {
                 if (stmt->kind() == oscad::NodeKind::Assignment) assigns.push_back(stmt);

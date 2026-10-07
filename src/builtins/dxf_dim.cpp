@@ -4,241 +4,217 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
 #include <cmath>
-#include <filesystem>
 #include <fstream>
-#include <map>
-#include <sstream>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace oscadeval {
 
 // dxf_dim() / dxf_cross() -- read a measurement straight out of a DXF file
-// rather than out of the model. Ported from the reference's io/dxfdim.cc
-// plus the DIMENSION/LINE half of io/DxfData.cc.
-//
-// These share the group-code walk with src/import/dxf_import.cpp but not its
-// output: that one only cares about closed contours, while these two need
-// the DIMENSION entities' seven coordinate slots and the raw LINE endpoints,
-// neither of which a contour list keeps.
+// rather than out of the model. This file has its own DXF reading; it does
+// not share src/import/dxf_import.cpp's.
 
 namespace {
 
-struct Entity {
-    std::string type;                  // "DIMENSION", "LINE", ...
-    std::string layer;
-    std::string name;                  // group 1: DIMENSION's text override
-    int dimType = 0;                   // group 70
-    double angle = 0.0;                // group 50 (an ARC's start angle)
-    double angle2 = 0.0;               // group 51: an ARC's end angle
-    double radius = 0.0;               // group 40: an ARC's radius
-    double coords[7][2] = {};          // groups 10-16 / 20-26
-    std::vector<double> xverts, yverts; // groups 10/11 and 20/21, in order
+constexpr double kPi = 3.14159265358979323846;
+
+// One entity's worth of group codes: only those the two functions read.
+struct DxfEntity {
+    std::string type, layer, name;
+    int flags = 0;
+    double angle = 0, endAngle = 0, radius = 0;
+    double x[7] = {}, y[7] = {};
 };
 
-std::string trimmed(const std::string& s) {
+// The placement both functions take: v -> (v - origin) * scale.
+struct Placement {
+    double ox = 0, oy = 0, scale = 1;
+};
+
+std::string trim(const std::string& s) {
     const size_t b = s.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) return "";
     return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
 }
 
-// One entity per group-0 marker. Coordinates carry the origin shift and
-// scale the reference applies while parsing, with its own exception: groups
-// 11, 12 and 16 (and their 21/22/26 partners) are scaled but NOT shifted,
-// since they are extents rather than positions.
-std::vector<Entity> readEntities(const std::string& path, double xorigin, double yorigin, double scale) {
+double toNumber(const std::string& s) {
+    try {
+        return std::stod(s);
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Every entity in file order, or nothing when the file cannot be opened.
+// Coordinates come back already placed; slots 1, 2 and 6 of a DIMENSION are
+// offsets rather than positions, so they are only scaled.
+std::optional<std::vector<DxfEntity>> readDxf(const std::string& path, const Placement& p) {
     std::ifstream in(path);
-    std::vector<Entity> out;
-    if (!in) return out;
-
-    std::string codeLine, dataLine;
-    Entity cur;
-    bool started = false;
-    while (std::getline(in, codeLine) && std::getline(in, dataLine)) {
-        const std::string codeStr = trimmed(codeLine);
-        const std::string data = trimmed(dataLine);
-        if (codeStr.empty()) continue;
-        int code = 0;
-        try {
-            code = std::stoi(codeStr);
-        } catch (...) {
-            break;
-        }
-        const auto num = [&]() -> double {
-            try {
-                return std::stod(data);
-            } catch (...) {
-                return 0.0;
-            }
-        };
-
+    if (!in) return std::nullopt;
+    std::vector<DxfEntity> entities;
+    std::string codeLine, value;
+    while (std::getline(in, codeLine) && std::getline(in, value)) {
+        value = trim(value);
+        const int code = static_cast<int>(toNumber(trim(codeLine)));
         if (code == 0) {
-            if (started) out.push_back(cur);
-            cur = Entity{};
-            cur.type = data;
-            started = true;
+            entities.push_back(DxfEntity{value});
             continue;
         }
-        if (!started) continue;
-
-        if (code >= 10 && code <= 16) {
-            cur.coords[code - 10][0] =
-                (code == 11 || code == 12 || code == 16) ? num() * scale : (num() - xorigin) * scale;
-        } else if (code >= 20 && code <= 26) {
-            cur.coords[code - 20][1] =
-                (code == 21 || code == 22 || code == 26) ? num() * scale : (num() - yorigin) * scale;
-        }
-        switch (code) {
-            case 1: cur.name = data; break;
-            case 8: cur.layer = data; break;
-            case 10:
-            case 11: cur.xverts.push_back((num() - xorigin) * scale); break;
-            case 20:
-            case 21: cur.yverts.push_back((num() - yorigin) * scale); break;
-            case 50: cur.angle = num(); break;
-            case 51: cur.angle2 = num(); break;
-            case 40: cur.radius = num() * scale; break;
-            case 70:
-                try {
-                    cur.dimType = std::stoi(data);
-                } catch (...) {
-                }
-                break;
-            default: break;
+        if (entities.empty()) continue;
+        DxfEntity& e = entities.back();
+        if (code == 8) e.layer = value;
+        else if (code == 1) e.name = value;
+        else if (code == 70) e.flags = static_cast<int>(toNumber(value));
+        else if (code == 50) e.angle = toNumber(value);
+        else if (code == 51) e.endAngle = toNumber(value);
+        else if (code == 40) e.radius = toNumber(value) * p.scale;
+        else if (code >= 10 && code <= 26 && code % 10 <= 6) {
+            const int slot = code % 10;
+            const bool isX = code < 20;
+            const bool offsetOnly = e.type == "DIMENSION" && (slot == 1 || slot == 2 || slot == 6);
+            const double origin = offsetOnly ? 0 : (isX ? p.ox : p.oy);
+            (isX ? e.x : e.y)[slot] = (toNumber(value) - origin) * p.scale;
         }
     }
-    if (started) out.push_back(cur);
-    return out;
+    return entities;
 }
 
-double deg(double r) { return r * 180.0 / 3.14159265358979323846; }
-double rad(double d) { return d * 3.14159265358979323846 / 180.0; }
+// The file as the script wrote it, for messages.
+std::string fileLabel(const Value& file) {
+    if (std::holds_alternative<std::monostate>(file)) return "";
+    if (std::holds_alternative<std::string>(file)) return std::get<std::string>(file);
+    return fmtValue(file);
+}
 
-struct CommonArgs {
-    std::string path;
-    std::string rawFile;
-    std::string layer;
-    double xorigin = 0.0, yorigin = 0.0, scale = 1.0;
-};
+std::string stringOr(const Value& v) {
+    return std::holds_alternative<std::string>(v) ? std::get<std::string>(v) : std::string();
+}
 
-CommonArgs commonArgs(const CallArgs& args, const oscad::ASTNode& node) {
-    CommonArgs c;
-    const Value fileArg = getArg(args, 0, "file", Value{});
-    c.rawFile = std::holds_alternative<std::string>(fileArg) ? std::get<std::string>(fileArg) : fmtValue(fileArg);
-    c.path = resolveFilePath(fileArg, node);
-    const Value layerArg = getArg(args, std::nullopt, "layer", Value{});
-    if (const std::string* s = std::get_if<std::string>(&layerArg)) c.layer = *s;
-    const Value originArg = getArg(args, std::nullopt, "origin", Value{});
-    if (const ListPtr* l = std::get_if<ListPtr>(&originArg); l && *l && (*l)->items.size() >= 2) {
-        c.xorigin = toDoubleLenient((*l)->items[0]);
-        c.yorigin = toDoubleLenient((*l)->items[1]);
+Placement readPlacement(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node, const char* fn) {
+    Placement p;
+    const Value origin = getArg(args, 2, "origin");
+    if (!std::holds_alternative<std::monostate>(origin)) {
+        const ListPtr* list = std::get_if<ListPtr>(&origin);
+        if (list && (*list)->items.size() == 2 && std::holds_alternative<double>((*list)->items[0]) &&
+            std::holds_alternative<double>((*list)->items[1])) {
+            p.ox = std::get<double>((*list)->items[0]);
+            p.oy = std::get<double>((*list)->items[1]);
+        } else {
+            ev.warn(std::string(fn) + "(..., origin=" + fmtValue(origin) + ") could not be converted", &node.position());
+        }
     }
-    const Value scaleArg = getArg(args, std::nullopt, "scale", Value{1.0});
-    if (std::holds_alternative<double>(scaleArg)) c.scale = std::get<double>(scaleArg);
-    return c;
+    const Value scale = getArg(args, 3, "scale");
+    if (std::holds_alternative<double>(scale)) p.scale = std::get<double>(scale);
+    return p;
 }
 
-} // namespace
+bool onLayer(const DxfEntity& e, const std::string& layer) { return layer.empty() || e.layer == layer; }
 
+// Direction of (dx, dy) in degrees, measured from +Y towards +X.
+double bearing(double dx, double dy) { return std::atan2(dx, dy) * 180 / kPi; }
+
+}  // namespace
+
+// dxf_dim(file, layer, origin, scale, name).
 Value builtinDxfDim(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node) {
-    const CommonArgs c = commonArgs(args, node);
-    const Value nameArg = getArg(args, std::nullopt, "name", Value{});
-    const std::string name = std::holds_alternative<std::string>(nameArg) ? std::get<std::string>(nameArg) : "";
+    const Value file = getArg(args, 0, "file");
+    const std::string layer = stringOr(getArg(args, 1, "layer"));
+    const std::string name = stringOr(getArg(args, 4, "name"));
+    const Placement placement = readPlacement(ev, args, node, "dxf_dim");
+    const std::string label = fileLabel(file);
 
-    if (!std::filesystem::exists(c.path)) {
-        ev.warn("Can't open DXF file '" + c.rawFile + "'!", &node.position());
+    const auto entities = readDxf(resolveFilePath(file, node), placement);
+    if (!entities) {
+        ev.warn("Can't open DXF file '" + label + "'!", &node.position());
         return Value{};
     }
-    for (const Entity& e : readEntities(c.path, c.xorigin, c.yorigin, c.scale)) {
-        if (e.type != "DIMENSION") continue;
-        if (!c.layer.empty() && c.layer != e.layer) continue;
-        if (!name.empty() && e.name != name) continue;
-
-        const int type = e.dimType & 7;
-        if (type == 0) {   // rotated, horizontal or vertical
-            const double x = e.coords[4][0] - e.coords[3][0];
-            const double y = e.coords[4][1] - e.coords[3][1];
-            return Value{std::fabs(x * std::cos(rad(e.angle)) + y * std::sin(rad(e.angle)))};
+    for (const DxfEntity& e : *entities) {
+        if (e.type != "DIMENSION" || !onLayer(e, layer) || (!name.empty() && e.name != name)) continue;
+        const double dx = e.x[4] - e.x[3], dy = e.y[4] - e.y[3];
+        switch (e.flags & 7) {
+            case 0: {
+                const double a = e.angle * kPi / 180;
+                return std::fabs(dx * std::cos(a) + dy * std::sin(a));
+            }
+            case 1: return std::hypot(dx, dy);
+            case 2:
+                return std::fabs(bearing(e.x[0] - e.x[5], e.y[0] - e.y[5]) - bearing(dx, dy));
+            case 3:
+            case 4: return std::hypot(e.x[5] - e.x[0], e.y[5] - e.y[0]);
+            case 6: return (e.flags & 64) ? e.x[3] : e.y[3];
+            default:
+                ev.warn("Dimension '" + name + "' in '" + label + "', layer '" + layer + "' has unsupported type!",
+                        &node.position());
+                return Value{};
         }
-        if (type == 1) {   // aligned
-            const double x = e.coords[4][0] - e.coords[3][0];
-            const double y = e.coords[4][1] - e.coords[3][1];
-            return Value{std::sqrt(x * x + y * y)};
-        }
-        if (type == 2) {   // angular
-            const double a1 = deg(std::atan2(e.coords[0][0] - e.coords[5][0], e.coords[0][1] - e.coords[5][1]));
-            const double a2 = deg(std::atan2(e.coords[4][0] - e.coords[3][0], e.coords[4][1] - e.coords[3][1]));
-            return Value{std::fabs(a1 - a2)};
-        }
-        if (type == 3 || type == 4) {   // diameter or radius
-            const double x = e.coords[5][0] - e.coords[0][0];
-            const double y = e.coords[5][1] - e.coords[0][1];
-            return Value{std::sqrt(x * x + y * y)};
-        }
-        if (type == 6) {   // ordinate
-            return Value{(e.dimType & 64) ? e.coords[3][0] : e.coords[3][1]};
-        }
-        // type 5 (angular 3-point) falls through, as in the reference.
-        ev.warn("Dimension '" + name + "' in '" + c.rawFile + "', layer '" + c.layer + "' has unsupported type!",
-                &node.position());
-        return Value{};
     }
-    ev.warn("Can't find dimension '" + name + "' in '" + c.rawFile + "', layer '" + c.layer + "'!",
-            &node.position());
+    ev.warn("Can't find dimension '" + name + "' in '" + label + "', layer '" + layer + "'!", &node.position());
     return Value{};
 }
 
+// dxf_cross(file, layer, origin, scale): where the first two free-standing
+// LINEs cross. A line touching another line or an arc is part of an outline.
 Value builtinDxfCross(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node) {
-    const CommonArgs c = commonArgs(args, node);
-    if (!std::filesystem::exists(c.path)) {
-        ev.warn("Can't open DXF file '" + c.rawFile + "'!", &node.position());
+    const Value file = getArg(args, 0, "file");
+    const std::string layer = stringOr(getArg(args, 1, "layer"));
+    const Placement placement = readPlacement(ev, args, node, "dxf_cross");
+    const std::string label = fileLabel(file);
+
+    const auto entities = readDxf(resolveFilePath(file, node), placement);
+    if (!entities) {
+        ev.warn("Can't open DXF file '" + label + "'!", &node.position());
         return Value{};
     }
 
-    // The first two 2-POINT PATHS on the layer are the cross, as the
-    // reference walks them: a LINE sharing an end with another LINE or an
-    // ARC is joined into a longer path, part of an outline, and no stroke of
-    // a cross. Taking the first two LINEs outright found a "cross" in any
-    // outline -- example009.dxf's fan_top, where the reference finds none.
-    // ponytail: LINE and ARC ends only; polylines and splines don't
-    // disqualify a LINE here.
-    const std::vector<Entity> entities = readEntities(c.path, c.xorigin, c.yorigin, c.scale);
-    std::map<std::pair<long long, long long>, int> ends;
-    const auto endKey = [](double x, double y) { return std::make_pair(std::llround(x * 1e6), std::llround(y * 1e6)); };
-    for (const Entity& e : entities) {
-        if (!c.layer.empty() && c.layer != e.layer) continue;
-        if (e.type == "LINE" && e.xverts.size() >= 2 && e.yverts.size() >= 2) {
-            ++ends[endKey(e.xverts[0], e.yverts[0])];
-            ++ends[endKey(e.xverts[1], e.yverts[1])];
+    struct Point { double x, y; };
+    struct Line { Point a, b; };
+    std::vector<Line> lines;
+    std::vector<Point> arcEnds;
+    for (const DxfEntity& e : *entities) {
+        if (!onLayer(e, layer)) continue;
+        if (e.type == "LINE") {
+            lines.push_back({{e.x[0], e.y[0]}, {e.x[1], e.y[1]}});
         } else if (e.type == "ARC") {
-            for (double a : {e.angle, e.angle2}) {
-                ++ends[endKey(e.coords[0][0] + e.radius * std::cos(rad(a)), e.coords[0][1] + e.radius * std::sin(rad(a)))];
+            for (const double deg : {e.angle, e.endAngle}) {
+                const double a = deg * kPi / 180;
+                arcEnds.push_back({e.x[0] + e.radius * std::cos(a), e.y[0] + e.radius * std::sin(a)});
             }
         }
     }
-    double p[4][2];
-    int found = 0;
-    for (const Entity& e : entities) {
-        if (e.type != "LINE") continue;
-        if (!c.layer.empty() && c.layer != e.layer) continue;
-        if (e.xverts.size() < 2 || e.yverts.size() < 2) continue;
-        if (ends[endKey(e.xverts[0], e.yverts[0])] > 1 || ends[endKey(e.xverts[1], e.yverts[1])] > 1) continue;
-        p[found][0] = e.xverts[0];
-        p[found][1] = e.yverts[0];
-        ++found;
-        p[found][0] = e.xverts[1];
-        p[found][1] = e.yverts[1];
-        ++found;
-        if (found == 4) {
-            const double x1 = p[0][0], y1 = p[0][1], x2 = p[1][0], y2 = p[1][1];
-            const double x3 = p[2][0], y3 = p[2][1], x4 = p[3][0], y4 = p[3][1];
-            const double dem = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
-            if (dem == 0.0) break;   // parallel: no cross, same as the reference
-            const double ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / dem;
-            std::vector<Value> xy{Value{x1 + ua * (x2 - x1)}, Value{y1 + ua * (y2 - y1)}};
-            return Value{makeList(std::move(xy))};
+
+    const auto same = [](const Point& p, const Point& q) {
+        return std::fabs(p.x - q.x) < 1e-6 && std::fabs(p.y - q.y) < 1e-6;
+    };
+    const auto touches = [&](size_t i) {
+        for (const Point& p : {lines[i].a, lines[i].b}) {
+            for (size_t j = 0; j < lines.size(); ++j) {
+                if (j != i && (same(p, lines[j].a) || same(p, lines[j].b))) return true;
+            }
+            for (const Point& q : arcEnds) {
+                if (same(p, q)) return true;
+            }
+        }
+        return false;
+    };
+    std::vector<Line> strokes;
+    for (size_t i = 0; i < lines.size() && strokes.size() < 2; ++i) {
+        if (!touches(i)) strokes.push_back(lines[i]);
+    }
+
+    if (strokes.size() == 2) {
+        const Line& l = strokes[0];
+        const Line& m = strokes[1];
+        const double rx = l.b.x - l.a.x, ry = l.b.y - l.a.y;
+        const double sx = m.b.x - m.a.x, sy = m.b.y - m.a.y;
+        const double denom = rx * sy - ry * sx;
+        if (std::fabs(denom) > 1e-12) {
+            const double t = ((m.a.x - l.a.x) * sy - (m.a.y - l.a.y) * sx) / denom;
+            return Value{makeList({l.a.x + t * rx, l.a.y + t * ry})};
         }
     }
-    ev.warn("Can't find cross in '" + c.rawFile + "', layer '" + c.layer + "'!", &node.position());
+    ev.warn("Can't find cross in '" + label + "', layer '" + layer + "'!", &node.position());
     return Value{};
 }
 
-} // namespace oscadeval
+}  // namespace oscadeval

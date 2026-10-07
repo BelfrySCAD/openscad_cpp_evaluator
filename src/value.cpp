@@ -202,150 +202,166 @@ Value vecSub(const Value& a, const Value& b) {
     return vecCombine(a, b, [](double x, double y) { return x - y; });
 }
 
+// `a * b` for two lists: dot product, matrix*vector, vector*matrix or
+// matrix*matrix. Undef with `*error` set to the diagnostic when the operands
+// do not multiply.
+//
+// Only the first element of each operand decides which product is meant.
+// Every failure leaves its message in `*error`; a vector*matrix failure
+// inside matrix*matrix is reported once, as one message naming the row
+// (OpenSCAD also prints the bare inner message first; that copy is dropped).
 namespace {
 
-// The four element-level products the reference splits `*` into, ported
-// shape-for-shape from Value.cc's multvecvec/multmatvec/multvecmat plus the
-// matrix*matrix branch of multiply_visitor -- including which check fires
-// first, since that decides which diagnostic a malformed operand produces.
-// `fail` records the message and returns undef.
-const ListItems& itemsOf(const Value& v) {
-    static const ListItems kEmpty;
+using Items = ListItems;
+
+const Items* listItems(const Value& v) {
     const ListPtr* l = std::get_if<ListPtr>(&v);
-    return (l && *l) ? (*l)->items : kEmpty;
+    return (l && *l) ? &(*l)->items : nullptr;
 }
-bool isNum(const Value& v) { return std::holds_alternative<double>(v); }
-bool isVec(const Value& v) { return std::holds_alternative<ListPtr>(v); }
 
-Value fail(std::string* error, std::string message) {
-    if (error) *error = std::move(message);
+std::string sizeMismatch(size_t a, size_t b) {
+    return "(" + std::to_string(a) + " != " + std::to_string(b) + ")";
+}
+
+// Vector `v` times matrix `m`, once |v| is known to be m's row count: one
+// entry per column of m's first row.
+Value vectorTimesMatrix(const Items& v, const Items& m, std::string& error) {
+    const size_t cols = listItems(m[0])->size();
+    std::vector<Value> out;
+    out.reserve(cols);
+    for (size_t i = 0; i < cols; ++i) {
+        double sum = 0;
+        for (size_t j = 0; j < m.size(); ++j) {
+            const Items* row = listItems(m[j]);
+            if (!row || row->size() != cols) {
+                error = "Matrix must be rectangular. Problem at row " + std::to_string(j);
+                return Value{};
+            }
+            const double* x = std::get_if<double>(&v[j]);
+            if (!x) {
+                error = "Vector must contain only numbers. Problem at index " + std::to_string(j);
+                return Value{};
+            }
+            const double* y = std::get_if<double>(&(*row)[i]);
+            if (!y) {
+                error = "Matrix must contain only numbers. Problem at row " + std::to_string(j) + ", col " +
+                        std::to_string(i);
+                return Value{};
+            }
+            sum += *x * *y;
+        }
+        out.push_back(Value{sum});
+    }
+    return listValue(std::move(out));
+}
+
+Value multiplyLists(const Items& a, const Items& b, std::string& error) {
+    if (a.empty() || b.empty()) {
+        error = "Multiplication is undefined on empty vectors";
+        return Value{};
+    }
+    const bool aNumber = std::holds_alternative<double>(a[0]);
+    const bool bNumber = std::holds_alternative<double>(b[0]);
+    const Items* aRow0 = listItems(a[0]);
+    const Items* bRow0 = listItems(b[0]);
+
+    if (aNumber && bNumber) {
+        if (a.size() != b.size()) {
+            error = "vector*vector requires matching lengths " + sizeMismatch(a.size(), b.size());
+            return Value{};
+        }
+        double sum = 0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            const double* x = std::get_if<double>(&a[i]);
+            const double* y = std::get_if<double>(&b[i]);
+            if (!x || !y) {
+                error = "undefined operation (" + oscTypeName(a[i]) + " * " + oscTypeName(b[i]) + ")";
+                return Value{};
+            }
+            sum += *x * *y;
+        }
+        return Value{sum};
+    }
+    if (aNumber && bRow0) {
+        if (a.size() != b.size()) {
+            error = "vector*matrix requires vector length to match matrix row count " +
+                    sizeMismatch(a.size(), b.size());
+            return Value{};
+        }
+        return vectorTimesMatrix(a, b, error);
+    }
+    if (aRow0 && bNumber) {
+        if (aRow0->size() != b.size()) {
+            error = "matrix*vector requires matrix column count to match vector length " +
+                    sizeMismatch(aRow0->size(), b.size());
+            return Value{};
+        }
+        std::vector<Value> out;
+        out.reserve(a.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            const Items* row = listItems(a[i]);
+            if (!row || row->size() != b.size()) {
+                error = "Matrix must be rectangular. Problem at row " + std::to_string(i);
+                return Value{};
+            }
+            double sum = 0;
+            for (size_t j = 0; j < b.size(); ++j) {
+                const double* x = std::get_if<double>(&(*row)[j]);
+                if (!x) {
+                    error = "Matrix must contain only numbers. Problem at row " + std::to_string(i) + ", col " +
+                            std::to_string(j);
+                    return Value{};
+                }
+                const double* y = std::get_if<double>(&b[j]);
+                if (!y) {
+                    error = "Vector must contain only numbers. Problem at index " + std::to_string(j);
+                    return Value{};
+                }
+                sum += *x * *y;
+            }
+            out.push_back(Value{sum});
+        }
+        return listValue(std::move(out));
+    }
+    if (aRow0 && bRow0) {
+        if (aRow0->size() != b.size()) {
+            error = "matrix*matrix requires left operand column count to match right operand row count " +
+                    sizeMismatch(aRow0->size(), b.size());
+            return Value{};
+        }
+        std::vector<Value> out;
+        out.reserve(a.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            const Items* row = listItems(a[i]);
+            const size_t len = row ? row->size() : 0;
+            if (len != b.size()) {
+                error = "matrix*matrix left operand row length does not match right operand row count " +
+                        sizeMismatch(len, b.size()) + " at row " + std::to_string(i);
+                return Value{};
+            }
+            Value product = vectorTimesMatrix(*row, b, error);
+            if (std::holds_alternative<std::monostate>(product)) {
+                error += "\n\twhile processing left operand at row " + std::to_string(i);
+                return product;
+            }
+            out.push_back(std::move(product));
+        }
+        return listValue(std::move(out));
+    }
+    error = "undefined vector*vector multiplication where first elements are types " + oscTypeName(a[0]) + " and " +
+            oscTypeName(b[0]);
     return Value{};
-}
-
-// Vector dot product. Sizes are equal by the caller's own check.
-Value multVecVec(const ListItems& v1, const ListItems& v2, std::string* error) {
-    double r = 0.0;
-    for (size_t i = 0; i < v1.size(); ++i) {
-        if (!isNum(v1[i]) || !isNum(v2[i])) {
-            return fail(error, "undefined operation (" + oscTypeName(v1[i]) + " * " + oscTypeName(v2[i]) + ")");
-        }
-        r += std::get<double>(v1[i]) * std::get<double>(v2[i]);
-    }
-    return Value{r};
-}
-
-Value multMatVec(const ListItems& mat, const ListItems& vec, std::string* error) {
-    std::vector<Value> out;
-    out.reserve(mat.size());
-    for (size_t i = 0; i < mat.size(); ++i) {
-        const ListItems& row = itemsOf(mat[i]);
-        if (!isVec(mat[i]) || row.size() != vec.size()) {
-            return fail(error, "Matrix must be rectangular. Problem at row " + std::to_string(i));
-        }
-        double re = 0.0;
-        for (size_t j = 0; j < row.size(); ++j) {
-            if (!isNum(row[j])) {
-                return fail(error, "Matrix must contain only numbers. Problem at row " + std::to_string(i) +
-                                        ", col " + std::to_string(j));
-            }
-            if (!isNum(vec[j])) {
-                return fail(error, "Vector must contain only numbers. Problem at index " + std::to_string(j));
-            }
-            re += std::get<double>(row[j]) * std::get<double>(vec[j]);
-        }
-        out.push_back(Value{re});
-    }
-    return listValue(std::move(out));
-}
-
-Value multVecMat(const ListItems& vec, const ListItems& mat, std::string* error) {
-    const size_t firstRowSize = itemsOf(mat[0]).size();
-    std::vector<Value> out;
-    out.reserve(firstRowSize);
-    for (size_t i = 0; i < firstRowSize; ++i) {
-        double re = 0.0;
-        for (size_t j = 0; j < vec.size(); ++j) {
-            const ListItems& row = itemsOf(mat[j]);
-            if (!isVec(mat[j]) || row.size() != firstRowSize) {
-                return fail(error, "Matrix must be rectangular. Problem at row " + std::to_string(j));
-            }
-            if (!isNum(vec[j])) {
-                return fail(error, "Vector must contain only numbers. Problem at index " + std::to_string(j));
-            }
-            if (!isNum(row[i])) {
-                return fail(error, "Matrix must contain only numbers. Problem at row " + std::to_string(j) +
-                                        ", col " + std::to_string(i));
-            }
-            re += std::get<double>(vec[j]) * std::get<double>(row[i]);
-        }
-        out.push_back(Value{re});
-    }
-    return listValue(std::move(out));
 }
 
 } // namespace
 
 Value matmul(const Value& a, const Value& b, std::string* error) {
-    const ListItems& al = itemsOf(a);
-    const ListItems& bl = itemsOf(b);
-    // The reference checks emptiness before anything else, so `[] * [1,2]`
-    // is this message rather than a length mismatch.
-    if (al.empty() || bl.empty()) return fail(error, "Multiplication is undefined on empty vectors");
-
-    const Value& e1 = al.front();
-    const Value& e2 = bl.front();
-
-    // Which of the four shapes this is comes from the FIRST element's type
-    // on each side, exactly as multiply_visitor decides it -- not from
-    // whether the whole operand happens to be a well-formed matrix. A
-    // ragged or non-numeric operand still enters the branch its first
-    // element chose, and fails inside it with that branch's own message.
-    if (isNum(e1)) {
-        if (isNum(e2)) {
-            if (al.size() == bl.size()) return multVecVec(al, bl, error);
-            return fail(error, "vector*vector requires matching lengths (" + std::to_string(al.size()) +
-                                    " != " + std::to_string(bl.size()) + ")");
-        }
-        if (isVec(e2)) {
-            if (al.size() == bl.size()) return multVecMat(al, bl, error);
-            return fail(error, "vector*matrix requires vector length to match matrix row count (" +
-                                    std::to_string(al.size()) + " != " + std::to_string(bl.size()) + ")");
-        }
-    } else if (isVec(e1)) {
-        const size_t cols = itemsOf(e1).size();
-        if (isNum(e2)) {
-            if (cols == bl.size()) return multMatVec(al, bl, error);
-            return fail(error, "matrix*vector requires matrix column count to match vector length (" +
-                                    std::to_string(cols) + " != " + std::to_string(bl.size()) + ")");
-        }
-        if (isVec(e2)) {
-            if (cols != bl.size()) {
-                return fail(error,
-                            "matrix*matrix requires left operand column count to match right operand row count (" +
-                                std::to_string(cols) + " != " + std::to_string(bl.size()) + ")");
-            }
-            std::vector<Value> rows;
-            rows.reserve(al.size());
-            for (size_t i = 0; i < al.size(); ++i) {
-                const ListItems& srcRow = itemsOf(al[i]);
-                if (srcRow.size() != bl.size()) {
-                    return fail(error,
-                                "matrix*matrix left operand row length does not match right operand row count (" +
-                                    std::to_string(srcRow.size()) + " != " + std::to_string(bl.size()) +
-                                    ") at row " + std::to_string(i));
-                }
-                std::string rowError;
-                Value row = multVecMat(srcRow, bl, &rowError);
-                if (!rowError.empty()) {
-                    return fail(error, rowError + ": while processing left operand at row " + std::to_string(i));
-                }
-                rows.push_back(std::move(row));
-            }
-            return listValue(std::move(rows));
-        }
-    }
-    return fail(error, "undefined vector*vector multiplication where first elements are types " + oscTypeName(e1) +
-                            " and " + oscTypeName(e2));
+    std::string message;
+    const Items* la = listItems(a);
+    const Items* lb = listItems(b);
+    Value r = (la && lb) ? multiplyLists(*la, *lb, message) : Value{};
+    if (error) *error = std::move(message);
+    return r;
 }
 
 namespace {
@@ -507,7 +523,7 @@ void sixDigits(double av, char digits[6], int& exp10) {
 }
 } // namespace
 
-// OpenSCAD's number formatting (Value.cc DoubleConvert): double-conversion
+// OpenSCAD's number formatting: double-conversion
 // ToPrecision(v, 6) with up to 5 leading zeros and no trailing padding, so
 // exponent form below 1e-5 and from 1e6 up; trailing zeros trimmed; -0 is
 // 0. This used to round ties to even (123456.5 printed as 123456, not

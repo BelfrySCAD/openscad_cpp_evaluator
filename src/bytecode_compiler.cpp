@@ -1478,8 +1478,8 @@ public:
                 if (!n.body.empty()) {
                     out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(n.body.front().get()), 0, nullptr});
                 }
-                // One operand per child statement, as upstream intersects
-                // them flat -- see resolveIntersectionFor.
+                // One operand per child statement, intersected flat, as
+                // OpenSCAD does -- see resolveIntersectionFor.
                 emitOperandGroups(n.body, out);
                 return;
             }

@@ -5,13 +5,15 @@
 #include "openscad_cpp_evaluator/segments.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <functional>
 #include <manifold/polygon.h>
 #include <cmath>
 #include <numbers>
 
 namespace oscadeval {
 
-// linear_extrude(height=1, center=false, twist=0, slices=0, scale=1) --
+// linear_extrude(height=100, v, scale=1, center=false, twist=0, slices, segments) --
 // mirrors _resolve_linear_extrude/_generate_linear_extrude. `scale` is
 // either a single number (applied to both X/Y) or a [x,y] pair for the top
 // face; the bottom face is always full-size.
@@ -30,178 +32,212 @@ namespace oscadeval {
 // in this group where that ISN'T true and a different split was needed.
 namespace {
 
-// Upstream's sgn_vdiff: which of two diagonals is shorter, treating lengths
-// within 1 part in 1e5 as a tie.
-int sgnVdiff(const manifold::vec2& v1, const manifold::vec2& v2) {
-    const double l1 = manifold::la::length(v1), l2 = manifold::la::length(v2);
-    return 2 * std::fabs(l1 - l2) * 1e5 > l1 + l2 ? (l1 < l2 ? -1 : 1) : 0;
-}
+// Picks the diagonal that splits one side quad: true for A0-B1, false for
+// B0-A1, where A->B is an outline edge and 0/1 are the lower/upper ring.
+using DiagonalChoice = std::function<bool(int slice, size_t contour, const manifold::vec3& a0, const manifold::vec3& b0,
+                                          const manifold::vec3& a1, const manifold::vec3& b1)>;
 
-// A twisted or non-uniformly scaled extrusion, built the way upstream's
-// linear_extrude.cc builds it. Its side quads are not planar, so which
-// diagonal splits each one changes the solid, and Manifold's own Extrude
-// always picks the same one: the result had OpenSCAD's triangle count and a
-// different volume (241 vs 254 for a 180-degree twist of square(5)).
-// Upstream splits along the SHORTER diagonal, breaking exact ties by twist
-// direction and whether the outline is a hole.
-manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height, int slices, double twist,
-                                  double scaleX, double scaleY) {
-    size_t stride = 0;
-    for (const manifold::SimplePolygon& o : polys) stride += o.size();
-    const auto ringPoint = [&](const manifold::vec2& v, int j) {
-        const double t = static_cast<double>(j) / slices;
-        const double a = -twist * t * std::numbers::pi / 180.0;
-        return manifold::vec2((v.x * std::cos(a) - v.y * std::sin(a)) * (1 - (1 - scaleX) * t),
-                              (v.x * std::sin(a) + v.y * std::cos(a)) * (1 - (1 - scaleY) * t));
-    };
+// A solid swept from a 2D profile: `rings` copies of every profile vertex,
+// placed by `place(ring, vertex)`, consecutive rings joined by side quads
+// (two triangles each, split as `diagonal` says). An open sweep is capped at
+// both ends with the triangulated profile; a closed one joins its last ring
+// back to its first. `inverted` is for placements that mirror the profile
+// (the triangles are then wound the other way round).
+manifold::Manifold sweepProfile(const manifold::Polygons& profile, int rings, bool closed, bool inverted,
+                                const std::function<manifold::vec3(int, const manifold::vec2&)>& place,
+                                const DiagonalChoice& diagonal) {
+    size_t n = 0;
+    for (const manifold::SimplePolygon& contour : profile) n += contour.size();
 
     manifold::MeshGL64 mesh;
     mesh.numProp = 3;
-    for (int j = 0; j <= slices; ++j) {
-        for (const manifold::SimplePolygon& o : polys) {
-            for (const manifold::vec2& v : o) {
-                const manifold::vec2 p = ringPoint(v, j);
-                mesh.vertProperties.insert(mesh.vertProperties.end(),
-                                           {p.x, p.y, height * j / slices});
-            }
+    std::vector<manifold::vec3> points;
+    points.reserve(n * rings);
+    for (int r = 0; r < rings; ++r) {
+        for (const manifold::SimplePolygon& contour : profile) {
+            for (const manifold::vec2& p : contour) points.push_back(place(r, p));
         }
     }
-    const auto tri = [&](size_t a, size_t b, size_t c) { mesh.triVerts.insert(mesh.triVerts.end(), {a, b, c}); };
+    for (const manifold::vec3& p : points) mesh.vertProperties.insert(mesh.vertProperties.end(), {p.x, p.y, p.z});
 
-    const bool backTwist = twist <= 0; // rotation_slice_top <= rotation_slice_bottom, every slice
-    // A top scaled to zero in either axis collapses the last ring to a line
-    // or a point. Upstream reverses its shorter-diagonal choice on that last
-    // slice (splitfirst xor any_zero), to avoid zero-thickness "ears", and
-    // has no top cap to add.
-    const bool anyZero = scaleX == 0.0 || scaleY == 0.0;
-    for (int j = 1; j <= slices; ++j) {
-        const size_t bot = (j - 1) * stride, top = j * stride;
-        const bool flipForZero = anyZero && j == slices;
-        size_t cur = 0;
-        for (const manifold::SimplePolygon& o : polys) {
-            const size_t n = o.size();
-            double area2 = 0;
-            for (size_t i = 0; i < n; ++i) area2 += o[i].x * o[(i + 1) % n].y - o[(i + 1) % n].x * o[i].y;
-            const bool flip = (area2 < 0) != backTwist; // !positive xor back_twist
-            manifold::vec2 prevBot = ringPoint(o[0], j - 1), prevTop = ringPoint(o[0], j);
-            for (size_t i = 1; i <= n; ++i) {
-                const manifold::vec2 vBot = ringPoint(o[i % n], j - 1), vTop = ringPoint(o[i % n], j);
-                const size_t idx = cur + i % n, prev = cur + i - 1;
-                const int diff = sgnVdiff(prevBot - vTop, vBot - prevTop);
-                if ((diff == -1 || (diff == 0 && !flip)) != flipForZero) {
-                    tri(bot + idx, top + idx, bot + prev);
-                    tri(top + prev, bot + prev, top + idx);
+    const auto addTri = [&](size_t a, size_t b, size_t c) {
+        if (inverted) std::swap(b, c);
+        mesh.triVerts.insert(mesh.triVerts.end(), {a, b, c});
+    };
+
+    if (!closed) {
+        const size_t top = n * (rings - 1);
+        for (const manifold::ivec3& t : manifold::Triangulate(profile)) {
+            addTri(t.x, t.z, t.y);
+            addTri(top + t.x, top + t.y, top + t.z);
+        }
+    }
+
+    const int slices = closed ? rings : rings - 1;
+    size_t first = 0;
+    for (size_t c = 0; c < profile.size(); ++c) {
+        const size_t size = profile[c].size();
+        for (int s = 0; s < slices; ++s) {
+            const size_t lower = s * n + first;
+            const size_t upper = ((s + 1) % rings) * n + first;
+            for (size_t i = 0; i < size; ++i) {
+                const size_t j = (i + 1) % size;
+                const size_t a0 = lower + i, b0 = lower + j, a1 = upper + i, b1 = upper + j;
+                if (diagonal(s, c, points[a0], points[b0], points[a1], points[b1])) {
+                    addTri(a0, b0, b1);
+                    addTri(a0, b1, a1);
                 } else {
-                    tri(bot + idx, top + prev, bot + prev);
-                    tri(bot + idx, top + idx, top + prev);
+                    addTri(a0, b0, a1);
+                    addTri(b0, b1, a1);
                 }
-                prevBot = vBot;
-                prevTop = vTop;
             }
-            cur += n;
         }
-    }
-
-    // Caps: one triangulation of the outline, reused at both ends.
-    manifold::PolygonsIdx indexed;
-    size_t cur = 0;
-    for (const manifold::SimplePolygon& o : polys) {
-        manifold::SimplePolygonIdx ring;
-        for (size_t i = 0; i < o.size(); ++i) ring.push_back({o[i], static_cast<int>(cur + i)});
-        indexed.push_back(std::move(ring));
-        cur += o.size();
-    }
-    const size_t topBase = static_cast<size_t>(slices) * stride;
-    // A collapsed top keeps its cap: zero-area triangles, but they close the
-    // mesh topologically, and Manifold collapses degenerate triangles itself.
-    // (Upstream simply skips the cap; its PolySet need not be manifold.)
-    for (const manifold::ivec3& t : manifold::TriangulateIdx(indexed)) {
-        tri(t.x, t.z, t.y);                                    // bottom faces down
-        tri(topBase + t.x, topBase + t.y, topBase + t.z);      // top faces up
+        first += size;
     }
     return manifold::Manifold(mesh);
 }
+
+double signedArea(const manifold::SimplePolygon& contour) {
+    double twice = 0.0;
+    for (size_t i = 0; i < contour.size(); ++i) {
+        const manifold::vec2& a = contour[i];
+        const manifold::vec2& b = contour[(i + 1) % contour.size()];
+        twice += a.x * b.y - b.x * a.y;
+    }
+    return twice / 2.0;
+}
+
+// A twisted and/or non-uniformly scaled extrusion of `polys` (outlines
+// already split as needed), `slices` slices over `height`. Ring j sits at
+// t = j/slices of the height, its outline turned clockwise by twist*t and
+// then scaled by 1 + (scale - 1)*t. Each side quad is split along its
+// shorter diagonal (a near-tie goes by the twist's direction), except that
+// a top shrunk to nothing flips the last slice's choice.
+manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height, int slices, double twist,
+                                  double scaleX, double scaleY) {
+    const auto place = [&](int ring, const manifold::vec2& p) {
+        const double t = static_cast<double>(ring) / slices;
+        const double angle = -twist * t * std::numbers::pi / 180.0;
+        const double c = std::cos(angle), s = std::sin(angle);
+        return manifold::vec3((c * p.x - s * p.y) * (1 + (scaleX - 1) * t),
+                              (s * p.x + c * p.y) * (1 + (scaleY - 1) * t), height * t);
+    };
+    std::vector<bool> counterClockwise;
+    for (const manifold::SimplePolygon& contour : polys) counterClockwise.push_back(signedArea(contour) > 0);
+    const bool pinchedTop = scaleX == 0 || scaleY == 0;
+
+    const auto diagonal = [&](int slice, size_t contour, const manifold::vec3& a0, const manifold::vec3& b0,
+                              const manifold::vec3& a1, const manifold::vec3& b1) {
+        const double l1 = manifold::la::length(b1 - a0), l2 = manifold::la::length(a1 - b0);
+        bool useA0B1 = 2.0 * std::fabs(l1 - l2) * 1e5 <= l1 + l2 ? counterClockwise[contour] == (twist > 0) : l1 < l2;
+        if (pinchedTop && slice == slices - 1) useA0B1 = !useA0B1;
+        return useA0B1;
+    };
+    return sweepProfile(polys, slices + 1, false, false, place, diagonal);
+}
+
+double sinDegrees(double degrees) {
+    const double turn = std::fmod(degrees, 360.0);
+    if (turn == 0.0 || std::fabs(turn) == 180.0) return 0.0;
+    if (turn == 90.0 || turn == -270.0) return 1.0;
+    if (turn == 270.0 || turn == -90.0) return -1.0;
+    return std::sin(turn * std::numbers::pi / 180.0);
+}
+
+double cosDegrees(double degrees) { return sinDegrees(degrees + 90.0); }
 
 } // namespace
 
 BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    // Positional order is upstream's: height, v, scale, center, twist,
-    // slices, segments. Only height used to be read positionally.
-    //
-    // Upstream's LinearExtrudeNode: the extrusion runs along a vector, (0,0,1)
-    // unless `v` gives one. Its length is `height` (`h` its alias, BOSL2's
-    // override forwards it) when given -- `v` then only sets the direction --
-    // else |v| when `v` is given, else 100. A vector pointing down (z <= 0)
-    // extrudes nothing. Bad values warn and fall back as upstream's do.
-    // `v` was ignored here, so an oblique extrusion came out straight.
+    // Argument reading (positional: height, v, scale, center, twist, slices,
+    // segments): the extrusion vector, center, twist, slices, segments and
+    // scale, with their warnings.
+    const oscad::Position* where = &node.position();
+    const auto isUndef = [](const Value& v) { return std::holds_alternative<std::monostate>(v); };
+    const auto finiteNumber = [](const Value& v) -> std::optional<double> {
+        const double* d = std::get_if<double>(&v);
+        return d && std::isfinite(*d) ? std::optional<double>(*d) : std::nullopt;
+    };
+    // A list of exactly `size` finite numbers.
+    const auto finiteNumbers = [&](const Value& v, size_t size) -> std::optional<std::vector<double>> {
+        const ListPtr* list = std::get_if<ListPtr>(&v);
+        if (!list || !*list || (*list)->items.size() != size) return std::nullopt;
+        std::vector<double> out;
+        for (size_t i = 0; i < size; ++i) {
+            const std::optional<double> d = finiteNumber((*list)->items[i]);
+            if (!d) return std::nullopt;
+            out.push_back(*d);
+        }
+        return out;
+    };
+
+    // The extrusion vector: `v` alone is the whole vector; a height, when
+    // given, keeps only v's direction.
     double hv[3] = {0.0, 0.0, 1.0};
     double length = 100.0;
-    const Value vArg = getArg(args, 1, "v", Value{});
-    if (!std::holds_alternative<std::monostate>(vArg)) {
-        const ListPtr* l = std::get_if<ListPtr>(&vArg);
-        bool ok = l && *l && (*l)->items.size() == 3;
-        double t[3] = {0, 0, 0};
-        for (int i = 0; ok && i < 3; ++i) {
-            const double* d = std::get_if<double>(&(*l)->items[i]);
-            ok = d && std::isfinite(*d);
-            if (ok) t[i] = *d;
+    const Value vArg = getArg(args, 1, "v");
+    if (!isUndef(vArg)) {
+        if (const auto v = finiteNumbers(vArg, 3)) {
+            std::copy(v->begin(), v->end(), hv);
+        } else {
+            ev.emitWarning("ERROR: v when specified should be a 3d vector.");
         }
-        if (ok) std::copy(t, t + 3, hv);
-        else ev.warn("v when specified should be a 3d vector", &node.position());
         length = 1.0;
     }
-    const Value heightArg = getArgOrAlias(ev, &node.position(), args, 0, "height", "h", Value{});
-    if (!std::holds_alternative<std::monostate>(heightArg)) {
-        const double* d = std::get_if<double>(&heightArg);
-        if (d && std::isfinite(*d)) {
-            length = *d;
+    const Value heightArg = getArgOrAlias(ev, where, args, 0, "height", "h", Value{});
+    if (!isUndef(heightArg)) {
+        if (const auto h = finiteNumber(heightArg)) {
+            length = *h;
         } else {
-            ev.warn("height when specified should be a number", &node.position());
+            ev.emitWarning("ERROR: height when specified should be a number.");
             length = 100.0;
         }
         const double norm = std::sqrt(hv[0] * hv[0] + hv[1] * hv[1] + hv[2] * hv[2]);
-        for (double& c : hv) c /= norm;
+        if (norm > 0) {
+            for (double& c : hv) c /= norm;
+        }
     }
     for (double& c : hv) c *= length;
-    if (hv[2] <= 0) hv[2] = 0;
+    if (!(hv[2] > 0)) hv[0] = hv[1] = hv[2] = 0.0;
     const double height = hv[2];
-    // Only a real boolean counts, as upstream: center="yes" is not true.
-    const Value centerArg = getArg(args, 3, "center", Value{false});
-    const bool* centerBool = std::get_if<bool>(&centerArg);
-    const bool center = centerBool && *centerBool;
-    const double twist = toDoubleLenient(getArg(args, 4, "twist", Value{0.0}));
-    // Upstream's validate_integral: any finite number counts as given, and is
-    // truncated and clamped (slices >= 1, segments >= 0). Not given, the
-    // discretizer decides.
-    const auto integral = [&](int pos, const char* name, double lo) -> std::optional<double> {
-        const Value v = getArg(args, pos, name, Value{});
+
+    const Value centerArg = getArg(args, 3, "center");
+    const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
+    const double twist = finiteNumber(getArg(args, 4, "twist")).value_or(0.0);
+
+    // slices/segments: whole numbers, at least `least`; absent (with a
+    // warning, for a bad value) leaves the count to the discretizer.
+    const auto count = [&](int pos, const std::string& name, double least) -> std::optional<double> {
+        const Value v = getArg(args, pos, name);
+        if (isUndef(v)) return std::nullopt;
+        const std::string prefix = "linear_extrude(..., " + name + "=" + fmtValue(v) + ") ";
         const double* d = std::get_if<double>(&v);
-        if (!d || !std::isfinite(*d)) return std::nullopt;
-        return *d < lo ? lo : std::trunc(*d);
+        if (!d) {
+            ev.warn(prefix + "Invalid type: expected number, found " + oscTypeName(v), where);
+            return std::nullopt;
+        }
+        if (!std::isfinite(*d)) {
+            ev.warn(prefix + "argument cannot be infinite or nan", where);
+            return std::nullopt;
+        }
+        return std::max(std::trunc(*d), least);
     };
-    const std::optional<double> slices = integral(5, "slices", 1.0);
-    const std::optional<double> segments = integral(6, "segments", 0.0);
-    const Value scaleArg = getArg(args, 2, "scale", Value{});
+    const std::optional<double> slices = count(5, "slices", 1.0);
+    const std::optional<double> segments = count(6, "segments", 0.0);
 
     double scaleX = 1.0, scaleY = 1.0;
-    bool scaleOk = true;
-    if (const double* s = std::get_if<double>(&scaleArg)) {
-        scaleX = scaleY = *s;
-        scaleOk = std::isfinite(*s);
-    } else if (const ListPtr* l = std::get_if<ListPtr>(&scaleArg); l && *l && (*l)->items.size() == 2) {
-        // Exactly two, as Value::getVec2 takes them: a 3-vector is the
-        // "could not be converted" case below, not its first two.
-        scaleX = toDoubleLenient((*l)->items[0]);
-        scaleY = toDoubleLenient((*l)->items[1]);
-        scaleOk = std::isfinite(scaleX) && std::isfinite(scaleY);
-    } else if (!std::holds_alternative<std::monostate>(scaleArg)) {
-        scaleOk = false;
-    }
-    if (!scaleOk) {
-        ev.warn("linear_extrude(..., scale=" + fmtValue(scaleArg) + ") could not be converted", &node.position());
-        scaleX = scaleY = 1.0;
+    const Value scaleArg = getArg(args, 2, "scale");
+    if (!isUndef(scaleArg)) {
+        if (const auto s = finiteNumber(scaleArg)) {
+            scaleX = scaleY = *s;
+        } else if (const auto xy = finiteNumbers(scaleArg, 2)) {
+            scaleX = (*xy)[0];
+            scaleY = (*xy)[1];
+        } else {
+            ev.warn("linear_extrude(..., scale=" + fmtValue(scaleArg) + ") could not be converted", where);
+        }
     }
 
     CSGParams params;
@@ -243,56 +279,52 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
     const Discretizer disc = Discretizer::fromParams(params);
     manifold::Polygons polys = cs->ToPolygons();
 
-    // Upstream's calc_num_slices (linear_extrude.cc).
-    const auto maxDeltaSqr = [&] {
-        double m = 0;
-        for (const manifold::SimplePolygon& o : polys)
-            for (const manifold::vec2& v : o) m = std::max(m, manifold::la::length2(v - manifold::vec2(v.x * scaleX, v.y * scaleY)));
-        return m;
-    };
-    const int twistFallback = std::max(static_cast<int>(std::ceil(twist / 120.0)), 1);
+    // The slice count, and the subdivision of outline edges (through
+    // disc.splitOutline) that a twisted or scaled extrusion needs.
+    const bool nonLinear = twist != 0.0 || scaleX != scaleY;
+    double rSqr = 0.0, deltaSqr = 0.0;
+    for (const manifold::SimplePolygon& contour : polys) {
+        for (const manifold::vec2& p : contour) {
+            rSqr = std::max(rSqr, manifold::la::dot(p, p));
+            const manifold::vec2 delta(p.x - scaleX * p.x, p.y - scaleY * p.y);
+            deltaSqr = std::max(deltaSqr, manifold::la::dot(delta, delta));
+        }
+    }
+    const double byTwist = std::max(std::ceil(twist / 120.0), 1.0);
     int slices = 1;
     if (givenSlices) {
         slices = static_cast<int>(*givenSlices);
+    } else if (twist != 0.0 && scaleX == 1.0 && scaleY == 1.0) {
+        slices = disc.helixSlices(rSqr, height, twist).value_or(byTwist);
+    } else if (twist != 0.0 && scaleX != scaleY) {
+        slices = std::max(disc.diagonalSlices(deltaSqr, height).value_or(1),
+                          disc.helixSlices(rSqr, height, twist).value_or(byTwist));
     } else if (twist != 0.0) {
-        double maxR1Sqr = 0;
-        for (const manifold::SimplePolygon& o : polys)
-            for (const manifold::vec2& v : o) maxR1Sqr = std::max(maxR1Sqr, manifold::la::length2(v));
-        if (scaleX == 1.0 && scaleY == 1.0) {
-            slices = disc.helixSlices(maxR1Sqr, height, twist).value_or(twistFallback);
-        } else if (scaleX != scaleY) {
-            slices = std::max(disc.diagonalSlices(maxDeltaSqr(), height).value_or(1),
-                              disc.helixSlices(maxR1Sqr, height, twist).value_or(twistFallback));
-        } else {
-            slices = disc.conicalHelixSlices(maxR1Sqr, height, twist, scaleX).value_or(twistFallback);
-        }
+        slices = disc.conicalHelixSlices(rSqr, height, twist, scaleX).value_or(byTwist);
     } else if (scaleX != scaleY) {
-        slices = disc.diagonalSlices(maxDeltaSqr(), height).value_or(1);
+        slices = disc.diagonalSlices(deltaSqr, height).value_or(1);
     }
 
-    // Split outline edges where a straight one would lose the shape between
-    // slices: twist or non-uniform scale, or `segments` asked for. segments=0
-    // turns it off.
-    const unsigned segments = givenSegments ? static_cast<unsigned>(*givenSegments) : 0;
-    const bool nonLinear = twist != 0.0 || scaleX != scaleY;
-    if (!(givenSegments && segments == 0) && (segments > 0 || nonLinear)) {
-        for (manifold::SimplePolygon& o : polys)
-            o = disc.splitOutline(o, twist, scaleX, scaleY, static_cast<unsigned>(slices), segments);
+    // Long outline edges are split so the twisted/scaled sides follow the
+    // true surface; segments=0 turns that off.
+    const bool split = givenSegments ? *givenSegments > 0 : nonLinear;
+    if (split) {
+        const unsigned segments = givenSegments ? static_cast<unsigned>(*givenSegments) : 0;
+        for (manifold::SimplePolygon& contour : polys) {
+            contour = disc.splitOutline(contour, twist, scaleX, scaleY, static_cast<unsigned>(slices), segments);
+        }
     }
 
     // Planar side quads (no twist, uniform scale) come out the same however
-    // they are split, so Manifold's own Extrude does. So does a top scaled to
-    // zero in either axis, where upstream's shorter-diagonal rule is
-    // reversed to avoid zero-thickness ears; a cone tip is Extrude's to make.
+    // they are split, so Manifold's own Extrude does them.
     // Manifold's nDivisions is the copies BETWEEN the ends: slices - 1.
     manifold::Manifold body =
         nonLinear && scaleX >= 0 && scaleY >= 0 && height > 0
             ? extrudeTwisted(polys, height, slices, twist, scaleX, scaleY)
             : manifold::Manifold::Extrude(polys, height, slices - 1, -twist, manifold::vec2(scaleX, scaleY));
     if (std::get<bool>(params.at("center"))) body = body.Translate(manifold::vec3(0, 0, -height / 2));
-    // `v`: slide each point sideways in proportion to its height -- upstream
-    // places slice k at bottom + v*k/n, and centring subtracts v/2, so the
-    // same shear is right either way.
+    // `v`: slide each point sideways in proportion to its height; centring
+    // subtracts v/2, so the same shear is right either way.
     const double shearX = std::get<double>(params.at("shear_x"));
     const double shearY = std::get<double>(params.at("shear_y"));
     if (shearX != 0.0 || shearY != 0.0) {
@@ -312,30 +344,25 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
 BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    // Positional order is upstream's: angle, start.
-    //
-    // Upstream's RotateExtrudeNode: the sweep runs from `start` through
-    // `start + angle`. With an angle, start defaults to 0 (the +X axis) and
-    // an angle outside (-360, 360] becomes a full turn; with none, the turn
-    // is 360 and starts at 180 (-X), which upstream says will change, and
-    // says so for an odd $fn, where the start shows. An explicit start
-    // always wins. It was ignored here: a quarter turn from 90 drew 0..90.
+    // angle/start reading (positional: angle, start).
+    const Discretizer disc = Discretizer::fromCtx(effCtx, [&](const std::string& m) { ev.warn(m, &node.position()); });
+    const auto finiteNumber = [](const Value& v) -> const double* {
+        const double* d = std::get_if<double>(&v);
+        return d && std::isfinite(*d) ? d : nullptr;
+    };
+    // With an angle the sweep starts on +X; without one it is a full turn
+    // starting on -X.
     const Value angleArg = getArgOrAlias(ev, &node.position(), args, 0, "angle", "a", Value{});
-    const Value startArg = getArg(args, 1, "start", Value{});
-    // Only a number is an angle (rotate_extrude(angle="x") is a full turn,
-    // as upstream reads it; it came out as 0, a flat sheet).
-    const bool hasAngle = std::holds_alternative<double>(angleArg) && std::isfinite(std::get<double>(angleArg));
-    const bool hasStart = !std::holds_alternative<std::monostate>(startArg) && std::isfinite(toDoubleLenient(startArg));
+    const double* givenAngle = finiteNumber(angleArg);
     double angle = 360.0;
     double start = 180.0;
-    if (hasAngle) {
-        angle = toDoubleLenient(angleArg);
+    if (givenAngle) {
+        angle = *givenAngle <= -360.0 || *givenAngle > 360.0 ? 360.0 : *givenAngle;
         start = 0.0;
-        if (angle <= -360.0 || angle > 360.0) angle = 360.0;
     }
-    if (hasStart) start = toDoubleLenient(startArg);
-    const Discretizer disc = Discretizer::fromCtx(effCtx, [&](const std::string& m) { ev.warn(m, &node.position()); });
-    if (!hasAngle && !hasStart && (static_cast<int>(disc.fn) & 1)) {
+    const double* givenStart = finiteNumber(getArg(args, 1, "start"));
+    if (givenStart) start = *givenStart;
+    if (!givenAngle && !givenStart && std::fmod(std::trunc(disc.fn), 2.0) == 1.0) {
         ev.emitWarning("DEPRECATED: In future releases, rotational extrusion without \"angle\" will start at zero, "
                        "the +X axis.  Set start=180 to explicitly start on the -X axis.");
     }
@@ -359,72 +386,59 @@ CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, Ev
 std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& params,
                                                 const std::vector<std::unique_ptr<CSGNode>>& children,
                                                 const oscad::ASTNode& node) {
-    std::optional<manifold::CrossSection> cs = toCrossSection(flattenCsgTree(children));
+    // The sweep itself: params "angle", "start" and the stored
+    // discretization settings, over the children's 2D profile.
+    const std::optional<manifold::CrossSection> cs = toCrossSection(flattenCsgTree(children));
     if (!cs || cs->IsEmpty()) return {};
+    double angle = std::get<double>(params.at("angle"));
+    double start = std::get<double>(params.at("start"));
+    if (angle == 0.0) return {};
 
-    // Upstream rotatePolygon (rotate_extrude.cc): no sweep at all draws
-    // nothing; a profile on both sides of the axis is an error (logged, not
-    // fatal) and draws nothing; one entirely left of it is swept as it lies.
-    // Manifold::Revolve only handles x >= 0, so a left-hand profile is
-    // mirrored in and the result turned half a revolution back: (-r, z) at
-    // angle a is (r, z) at a + 180. It used to draw nothing, or silently
-    // only the right-hand part of a profile across the axis.
-    const double rawAngle = std::get<double>(params.at("angle"));
-    if (rawAngle == 0.0) return {};
     const manifold::Rect bounds = cs->Bounds();
-    if (bounds.min.x < 0 && bounds.max.x > 0) {
+    const double xmin = std::min(bounds.min.x, 0.0), xmax = std::max(bounds.max.x, 0.0);
+    if (xmin < 0 && xmax > 0) {
         char buf[64];
-        std::snprintf(buf, sizeof buf, "[%.2f : %.2f]", bounds.min.x, bounds.max.x);
-        ev.emitWarning(std::string("ERROR: Children of rotate_extrude() may not lie across the Y axis (Range of X "
-                                   "coords for all children ") +
-                       buf + ")");
+        std::snprintf(buf, sizeof buf, "[%.2f : %.2f])", xmin, xmax);
+        ev.emitWarning(std::string("ERROR: Children of rotate_extrude() may not lie across the Y axis "
+                                   "(Range of X coords for all children ") + buf);
         return {};
     }
-    const bool leftOfAxis = bounds.max.x <= 0;
-    if (leftOfAxis) cs = cs->Mirror(manifold::vec2(1.0, 0.0));
-    // A negative angle is the same sweep run the other way: |angle| from
-    // start + angle. Handing Revolve the negative angle built the solid
-    // inside out, so subtracting it ADDED material.
-    const double angle = std::fabs(rawAngle);
 
-    // Upstream sizes the arc by the profile's extent in X, measured from the
-    // axis: both ends start at 0.
-    const manifold::Rect profileBounds = cs->Bounds();
-    const double width = std::max(profileBounds.max.x, 0.0) - std::min(profileBounds.min.x, 0.0);
-    const int sections = Discretizer::fromParams(params).circular(width, angle).value_or(
-        std::max(1, static_cast<int>(std::fabs(angle) / 360 * 3)));
-    // Revolve takes this as the section count for the arc it is given -- not
-    // per full circle, which is what it used to be handed, packing a whole
-    // circle's worth into a partial one.
-    manifold::Manifold body;
-    if (sections >= 3) {
-        body = manifold::Manifold::Revolve(cs->ToPolygons(), std::max(sections, 3), angle);
-    } else {
-        // Revolve substitutes its own default below 3 sections, but a short
-        // arc at coarse settings is 1 or 2 (upstream draws exactly that). So
-        // extrude the profile into that many sections and wrap them round the
-        // Z axis. The wrap turns the solid inside out for a positive angle, so
-        // then the profile goes in mirrored in Y and comes back out unmirrored.
-        const double sign = angle > 0 ? -1.0 : 1.0;
-        manifold::Polygons profile = cs->ToPolygons();
-        if (sign < 0) {
-            for (manifold::SimplePolygon& o : profile) {
-                for (manifold::vec2& v : o) v.y = -v.y;
-                std::reverse(o.begin(), o.end());
-            }
-        }
-        const double rad = angle * std::numbers::pi / 180.0;
-        body = manifold::Manifold::Extrude(profile, 1.0, sections - 1).Warp([rad, sign](manifold::vec3& v) {
-            const double a = v.z * rad;
-            v = manifold::vec3(v.x * std::cos(a), v.x * std::sin(a), sign * v.y);
-        });
+    const Discretizer disc = Discretizer::fromParams(params);
+    const int sections = disc.circular(xmax - xmin, std::fabs(angle))
+                             .value_or(std::max(1, static_cast<int>(std::floor(std::fabs(angle) / 360.0 * 3))));
+
+    // Sweep counter-clockwise from the lower end of the angle range; a
+    // profile left of the axis is the mirror image of one right of it,
+    // half a turn round.
+    if (angle < 0) {
+        start += angle;
+        angle = -angle;
     }
-    // The arc above runs from +X; turn it to begin at `start` (or at
-    // start + angle, for a negative sweep), and back round for a left-hand
-    // profile.
-    const double start = std::get<double>(params.at("start")) + (rawAngle < 0 ? rawAngle : 0.0) +
-                         (leftOfAxis ? 180.0 : 0.0);
-    if (start != 0.0) body = body.Rotate(0.0, 0.0, start);
+    manifold::Polygons profile = cs->ToPolygons();
+    const bool leftOfAxis = xmin < 0;
+    if (leftOfAxis) {
+        start += 180.0;
+        for (manifold::SimplePolygon& contour : profile) {
+            for (manifold::vec2& p : contour) p.x = -p.x;
+            std::reverse(contour.begin(), contour.end());
+        }
+    }
+
+    const bool fullTurn = angle >= 360.0;
+    const auto place = [&](int ring, const manifold::vec2& p) {
+        const double theta = start + angle * ring / sections;
+        return manifold::vec3(p.x * cosDegrees(theta), p.x * sinDegrees(theta), p.y);
+    };
+    const auto shorterDiagonal = [](int, size_t, const manifold::vec3& a0, const manifold::vec3& b0,
+                                    const manifold::vec3& a1, const manifold::vec3& b1) {
+        return manifold::la::length(b1 - a0) <= manifold::la::length(a1 - b0);
+    };
+    // The profile's (x, y) become (radius, z): a left-handed frame against
+    // the sweep direction, so the sweep's triangles wind the other way.
+    manifold::Manifold body = sweepProfile(profile, fullTurn ? sections : sections + 1, fullTurn, true, place,
+                                           shorterDiagonal);
+    if (body.IsEmpty()) return {};
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 
@@ -439,8 +453,8 @@ std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& p
 BuiltinWrapParams computeProjectionParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     CSGParams params;
-    // Positional, and only a real bool cuts (ProjectionNode.cc): cut=1 and
-    // cut="yes" do not, projection(true) does.
+    // Positional, and only a real bool cuts: cut=1 and cut="yes" do not,
+    // projection(true) does.
     const Value cutArg = getArg(args, 0, "cut", Value{false});
     params["cut"] = Value{std::holds_alternative<bool>(cutArg) && std::get<bool>(cutArg)};
     return BuiltinWrapParams{std::move(params), std::move(effCtx)};
@@ -479,39 +493,38 @@ std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
 }
 
 // offset(r=)/offset(delta=, chamfer=false) -- mirrors _resolve_offset/
-// _generate_offset. `r` (rounded corners, JoinType::Round) and `delta`
-// (JoinType::Square, or Miter if chamfer=true) are mutually exclusive;
-// neither given passes the first child through unchanged.
+// _generate_offset. `r` (rounded corners, JoinType::Round) wins over
+// `delta` (JoinType::Miter, or Square if chamfer=true); neither given is
+// r=1.
 
 // Split the same way as computeLinearExtrudeParams, above -- see its own
 // doc comment.
 BuiltinWrapParams computeOffsetParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    // Upstream builtin_offset (OffsetNode.cc), rule for rule. A NUMBER r is
-    // a round offset; otherwise a number delta is a sharp (miter) one, or a
-    // square-cut one when chamfer is a real true; otherwise r=1 -- so a bare
-    // offset(), and offset(r="a"), are offset(r=1). The join types used to
-    // be swapped: plain delta came out chamfered and chamfer=true sharp.
-    const Value rArg = getArg(args, 0, "r");
+    // r/delta/chamfer reading: the offset distance and the join ("round",
+    // "miter" or "square").
+    // r rounds; delta keeps corners sharp, or cuts them with chamfer=true;
+    // neither is r=1.
+    const Value r = getArg(args, 0, "r");
     const Value deltaArg = getArg(args, 1, "delta");
-    const Value chamferArg = getArg(args, 2, "chamfer");
     double delta = 1.0;
     std::string join = "round";
-    if (const double* r = std::get_if<double>(&rArg)) {
-        if (std::holds_alternative<double>(deltaArg))
+    if (const double* d = std::get_if<double>(&r)) {
+        delta = *d;
+        if (std::holds_alternative<double>(deltaArg)) {
             ev.warn("Ignoring \"delta\" argument as \"r\" is defined too.", &node.position());
-        delta = *r;
+        }
     } else if (const double* d = std::get_if<double>(&deltaArg)) {
         delta = *d;
-        join = std::holds_alternative<bool>(chamferArg) && std::get<bool>(chamferArg) ? "square" : "miter";
+        const Value chamfer = getArg(args, 2, "chamfer");
+        join = std::holds_alternative<bool>(chamfer) && std::get<bool>(chamfer) ? "square" : "miter";
     }
 
     CSGParams params;
     params["delta"] = Value{delta};
     params["join"] = Value{join};
-    // Silent clamping (upstream builds this node's discretizer without a
-    // location), and segments for |delta|, as GeometryEvaluator asks.
+    // Segments for |delta|; $fa/$fs/$fn clamping is silent here.
     params["segs"] = Value{static_cast<double>(fnSegmentsFromCtx(effCtx, std::fabs(delta)))};
     params["color"] = colorToValue(effCtx.color);
     return BuiltinWrapParams{std::move(params), std::move(effCtx)};
@@ -532,14 +545,15 @@ std::vector<ColoredBody> generateOffset(Evaluator&, const CSGParams& params, con
     if (!cs) return {};
 
     const double delta = std::get<double>(params.at("delta"));
+    // An infinite (or NaN) distance has no shape to give.
+    if (!std::isfinite(delta)) return {};
     const std::string& join = std::get<std::string>(params.at("join"));
     const int segs = static_cast<int>(std::get<double>(params.at("segs")));
     using JT = manifold::CrossSection::JoinType;
     const JT jt = join == "round" ? JT::Round : join == "square" ? JT::Square : JT::Miter;
-    // upstream's miter_limit: "fixed high value to disable chamfers with
-    // jtMiter". Manifold's default of 2 cut a sharp corner off at twice the
-    // offset, so an acute delta offset came out blunted.
-    constexpr double kMiterLimit = 1000000.0;
+    // "miter" joins stay sharp however acute the corner: no realistic
+    // corner reaches this limit.
+    constexpr double kMiterLimit = 1e6;
     ColoredBody result;
     result.section = cs->Offset(delta, jt, kMiterLimit, segs);
     result.color = valueToColor(params.at("color"));
