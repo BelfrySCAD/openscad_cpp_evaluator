@@ -63,7 +63,7 @@ plus gating the silent `is_undef` probe on the call actually resolving to the bu
 CSG-tree shape like union/difference/intersection, role-split via the shared `splitByRole`),
 `linear_extrude()`/`rotate_extrude()`/`projection(cut=)`, and `roof()`; and (Phase 7) `offset()`,
 `surface()` (`.dat` text + PNG/JPEG/BMP/GIF via `stb_image`), hand-rolled DXF (`LWPOLYLINE`/2D
-`POLYLINE`) and SVG (`path`/`polygon`/`polyline`/`rect`/`circle`/`ellipse`, nested
+`POLYLINE`) and SVG (a port of upstream's libsvg: shapes, strokes, `<use>`, layers, nested
 `transform=`, all path commands including elliptical arcs) 2D contour import in both module
 (Region geometry) and expression (Region value) contexts, and the `FontProvider` abstraction
 (`font_provider.hpp`) + built-in FreeType/HarfBuzz backend + `text()`/`textmetrics()`/
@@ -1248,9 +1248,13 @@ grep for `ponytail:`.
   the module *and* expression forms, enclosing transforms still apply to a selected element (it
   has to land where it does in the drawing), and **a filter that matches nothing imports nothing
   and warns** rather than falling back to the whole file — a cut layer that quietly became every
-  layer is the worst answer available. `layer=` stays DXF-only on purpose: upstream reuses the
-  name for SVG but reads only Inkscape's `inkscape:label`, a vendor convention rather than
-  anything SVG defines, so it cannot match a layer from any other tool. `id` had been in
+  layer is the worst answer available. `layer=` (and deprecated `layername=`) also selects in
+  SVG, as upstream does: an Inkscape layer (`inkscape:groupmode="layer"` with an
+  `inkscape:label`). Alone it takes that layer's own group; with `id=`/`class=` it restricts them
+  to elements inside the named layer at any depth. The selection rules were read off the binary:
+  the nearest selected or `display:none` ancestor-or-self decides whether a shape is drawn, so an
+  id selects an element even under a hidden layer, while `layer=` alone does not reach into a
+  hidden sublayer. The miss warning names `id`, `layer`, `class` in that order. `id` had been in
   `registry.cpp`'s declared parameter list since long before anything read it, so a script
   filtering by id was accepted in full and silently handed the whole drawing.
   `resolveFilePath()` (also declared here, defined in import.cpp) — resolves a file argument
@@ -1281,20 +1285,37 @@ grep for `ponytail:`.
   triangle-count parity.
 - `include/openscad_cpp_evaluator/dxf_svg_import.hpp`, `src/import/dxf_import.cpp`,
   `src/import/svg_import.cpp` — hand-rolled, dependency-free 2D-contour loaders (no XML/DXF library
-  pulled in, matching the plan's §9 dependency table). `loadDxfContours()` reads DXF's group-code
-  text format directly (closed `LWPOLYLINE`/2D `POLYLINE` entities only, optional layer filter) --
-  covers the same narrow entity set the reference's own `ezdxf`-based loader does, nothing more.
+  pulled in, matching the plan's §9 dependency table). `loadDxf()` reads DXF's group-code
+  text format directly and matches OpenSCAD 2026.02.01's import, established black-box (its DXF
+  source is GPL; do not read or port it): `LINE`/`CIRCLE`/`ARC`/`ELLIPSE`/`LWPOLYLINE`/`INSERT`
+  become segments (arcs by the circle fragment rules), points snap to a 1/1024 grid, segments chain
+  into paths that are ALL closed (an open chain gets a straight closing edge), filled even-odd;
+  `origin=`/`scale=`/`layer=` and its warnings ("Illegal value", "Not enough input values",
+  "Unsupported DXF Entity") as OpenSCAD has them. The notes atop `dxf_import.cpp` list the rules,
+  the two ellipse bugs deliberately not copied, and the `POLYLINE` extension.
   `loadSvgContours()` pairs a minimal recursive-descent XML tree parser (open/close/self-closing
-  tags, quoted attributes, comments/CDATA/prolog skipping, entity decoding — no namespace URI
-  resolution, a tag's `prefix:` is stripped textually) with a close port of the reference's own
-  path-command tokenizer/flattener (`M`/`L`/`H`/`V`/`C`/`S`/`Q`/`T`/`A`, both absolute and relative,
-  cubic/quadratic Bezier flattening, full elliptical-arc endpoint-to-center parameterization) plus
-  `rect`/`circle`/`ellipse`/`polygon`/`polyline` and nested `transform="matrix()/translate()/
-  scale()/rotate()"` composition (including through `<g>` groups), in SVG user units at the
-  point-transform step, `applyMat()` (named to avoid colliding with `std::apply` in an ADL lookup
-  that broke the build once — see its own comment). **Placement is `pageMap()`, a port of the
-  reference's `import_svg.cc`**: the page's `width`/`height` to mm (a unitless length at `dpi=`,
-  72 by default; `px` at 96), the `viewBox` scaled onto the page under `preserveAspectRatio`
+  tags, quoted attributes, comments/CDATA/prolog skipping, entity and character-reference
+  decoding, attribute whitespace normalisation; a tag keeps its `prefix:`, as libxml2 reports it,
+  so `<svg:rect>` is not a rect -- in OpenSCAD either) with **a port of upstream's MIT-licensed
+  `src/libsvg`** (its copyright notice is in the file): its `d` tokenizer with every quirk (a `-`
+  is a token, `1.5.5` is two numbers, a number with trailing junk is 0), Beziers in `max($fn, 20)`
+  segments, arcs and circles/ellipses through `Discretizer::circular` (circles at least 40),
+  rounded `rect`s rebuilt as path data printed at 6 digits, `transform` with `skewX`/`skewY` and
+  libsvg's argument-count checks, `<use>` of a shape in an earlier `<defs>` only, unknown
+  elements (`<a>`, `<symbol>`, `<switch>`) see-through with their transform ignored, and
+  **strokes**: an open subpath, `<line>` and `<polyline>` become their stroke's outline via
+  Clipper2's `ClipperOffset` at 2^27 per user unit (measured), with `stroke-width` (below 0.01 is
+  1), `stroke-linecap` and `stroke-linejoin` (`bevel` maps to Clipper's Square, as libsvg has it).
+  Each element then fills even-odd on its own and the elements union (`fill()`), which is what
+  the reference does: separate overlapping rects union, one path's overlapping subpaths cancel.
+  Two departures: an arc with a zero radius or coincident endpoints is a line or nothing, as the
+  SVG spec says, where libsvg divides by zero and draws NaN vertices at the origin; and
+  OpenSCAD's 2D pipeline drops vertices within ~1.1e-8 mm of collinear, which ours (any 2D
+  shape, not just SVG) does not -- spec `paths-cubic02` keeps two such vertices at an S-curve's
+  inflection. **Placement is `pageMap()`, matching the reference's `import_svg.cc` by its
+  output**: the page's `width`/`height` to mm (a unitless length at `dpi=`,
+  72 by default; `px` at 96; a `dpi` below 0.001 warns and is 72), the `viewBox` scaled onto the
+  page under `preserveAspectRatio`
   (default `xMidYMid meet`), and Y flipped about the page HEIGHT -- or about the drawing's centre
   with `center=true`. Negating Y alone, as this did before, put a unitless 100-unit drawing in 2.8x
   too large and below the X axis. Bounds match OpenSCAD 2026.02.01 (`SvgPlacement` tests).
@@ -1670,7 +1691,7 @@ the side-quad diagonal choice changes a twisted solid without changing its trian
   default below 3, so these are an extrude warped round Z. The warp inverts the solid for a positive
   angle, hence the mirror-in-Y dance.
 - Kept departure: `$fa`/`$fs` <= 0 fall back to 12/2 rather than upstream's clamp-to-0.01 with a warning.
-- Not ported: `linear_extrude(v=)` (accepted, ignored); DXF/SVG import arcs don't read the discretizer.
+- Not ported: `linear_extrude(v=)` (accepted, ignored); DXF import arcs don't read the discretizer.
 
 ## Cancel and the module recursion limit (#554)
 

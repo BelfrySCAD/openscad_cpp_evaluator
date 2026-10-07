@@ -1529,9 +1529,10 @@ Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::strin
     return Value{}; // unreachable: every BuiltinFnId has a case above
 }
 
-// OpenSCAD's sin_degrees/cos_degrees (exact at multiples of 30 and 45
-// degrees), for the transforms. See builtins.hpp.
+// OpenSCAD's degree trig, for the transforms and SVG import. See builtins.hpp.
 double sinDeg(double x) { return sinDegrees(x); }
 double cosDeg(double x) { return cosDegrees(x); }
+double tanDeg(double x) { return tanDegrees(x); }
+double atan2Deg(double y, double x) { return atan2Degrees(y, x); }
 
 } // namespace oscadeval

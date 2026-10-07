@@ -16,6 +16,7 @@
 #include <array>
 #include <cctype>
 #include <filesystem>
+#include <iterator>
 #include <fstream>
 #include <map>
 
@@ -56,6 +57,31 @@ LoadedMesh loadMeshByExt(const std::string& path, const std::string& ext) {
 bool isMeshExt(const std::string& ext) {
     return ext == ".stl" || ext == ".obj" || ext == ".off" || ext == ".3mf" || ext == ".amf" || ext == ".x3d" ||
            ext == ".wrl";
+}
+
+// layer=, origin= and scale= as OpenSCAD reads them: an empty layer is no
+// filter, a non-string one is matched as its text; an origin that is not two
+// numbers warns and is ignored; a scale that is not a positive number is 1.
+DxfOptions dxfOptions(Evaluator& ev, const CallArgs& args, const Value& layerArg, const oscad::ASTNode& node) {
+    DxfOptions opts;
+    if (const std::string* s = std::get_if<std::string>(&layerArg)) {
+        if (!s->empty()) opts.layer = *s;
+    } else if (!std::holds_alternative<std::monostate>(layerArg)) {
+        opts.layer = fmtValue(layerArg);
+    }
+    const Value originArg = getArg(args, std::nullopt, "origin", Value{});
+    const ListPtr* origin = std::get_if<ListPtr>(&originArg);
+    if (origin && *origin && (*origin)->items.size() == 2 && std::holds_alternative<double>((*origin)->items[0]) &&
+        std::holds_alternative<double>((*origin)->items[1])) {
+        opts.xorigin = std::get<double>((*origin)->items[0]);
+        opts.yorigin = std::get<double>((*origin)->items[1]);
+    } else if (!std::holds_alternative<std::monostate>(originArg)) {
+        ev.warn("Unable to convert import(..., origin=" + fmtValue(originArg) + ") parameter to vec2",
+                &node.position());
+    }
+    const Value scaleArg = getArg(args, std::nullopt, "scale", Value{});
+    if (const double* s = std::get_if<double>(&scaleArg); s && *s > 0) opts.scale = *s;
+    return opts;
 }
 
 
@@ -176,19 +202,70 @@ std::vector<Contour2d> valueToContours(const Value& v) {
     return out;
 }
 
+// The SVG half of import(), shared by the statement and the expression
+// form: the id/class/layer filter, dpi, and OpenSCAD's warnings for a bad
+// dpi and for a filter that matched nothing.
+std::vector<Contour2d> importSvg(Evaluator& ev, const CallArgs& args, const Value& layerArg, const std::string& path,
+                                 bool center, const Discretizer& disc, const oscad::ASTNode& node) {
+    // A number names "5"; undef (or absent) is no filter.
+    const auto filterText = [](const Value& v) -> std::optional<std::string> {
+        if (std::holds_alternative<std::monostate>(v)) return std::nullopt;
+        const std::string* s = std::get_if<std::string>(&v);
+        return s ? *s : fmtValue(v);
+    };
+    SvgFilter filter;
+    filter.id = filterText(getArg(args, std::nullopt, "id", Value{}));
+    filter.cls = filterText(getArg(args, std::nullopt, "class", Value{}));
+    filter.layer = filterText(layerArg);
+    // Any number below 0.001 is refused with a warning; anything that is
+    // not a number is silently the default. (OpenSCAD's own wording reads
+    // "giving, using default of undef dpi" -- its default fails to print.)
+    double dpi = 72.0;
+    const Value dpiArg = getArg(args, std::nullopt, "dpi", Value{});
+    if (const double* d = std::get_if<double>(&dpiArg)) {
+        if (*d >= 0.001) {
+            dpi = *d;
+        } else {
+            ev.warn("Invalid dpi value given, using default of 72 dpi. Value must be positive and >= 0.001",
+                    &node.position());
+        }
+    }
+    bool matched = true;
+    std::vector<Contour2d> contours = loadSvgContours(path, filter, &matched, dpi, center, disc);
+    if (!matched) {
+        // Nothing imported, rather than silently falling back to the whole
+        // drawing -- a cut layer that quietly became every layer is the
+        // worst answer available. OpenSCAD's words, which name no file.
+        std::string what;
+        const auto add = [&](const char* name, const std::optional<std::string>& v) {
+            if (!v) return;
+            if (!what.empty()) what += ", ";
+            what += std::string(name) + " = \"" + *v + "\"";
+        };
+        add("id", filter.id);
+        add("layer", filter.layer);
+        add("class", filter.cls);
+        ev.warn("import() filter " + what + " did not match anything", &node.position());
+    }
+    return contours;
+}
+
 } // namespace
 
 CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    const Value fileArg = getArg(args, 0, "file", Value{});
-    const Value layerArg = getArg(args, std::nullopt, "layer", Value{});
-    // SVG only. `id` matches an element's id; `class` matches one entry of
-    // its space-separated class list. `layer` stays DXF's, where layers are
-    // part of the format -- upstream reuses the name for SVG but reads only
-    // Inkscape's `inkscape:label`, which is a vendor convention rather than
-    // anything SVG defines.
-    const Value idArg = getArg(args, std::nullopt, "id", Value{});
-    const Value classArg = getArg(args, std::nullopt, "class", Value{});
+    Value fileArg = getArg(args, 0, "file", Value{});
+    if (std::holds_alternative<std::monostate>(fileArg)) {
+        fileArg = getArg(args, std::nullopt, "filename", Value{});
+        if (!std::holds_alternative<std::monostate>(fileArg))
+            ev.emitWarning("DEPRECATED: filename= is deprecated. Please use file=");
+    }
+    Value layerArg = getArg(args, std::nullopt, "layer", Value{});
+    if (std::holds_alternative<std::monostate>(layerArg)) {
+        layerArg = getArg(args, std::nullopt, "layername", Value{});
+        if (!std::holds_alternative<std::monostate>(layerArg))
+            ev.emitWarning("DEPRECATED: layername= is deprecated. Please use layer=");
+    }
     // Not an OpenSCAD parameter. A script using it will not run upstream,
     // which is why it has to be asked for rather than being the default.
     const bool repair = truthy(getArg(args, std::nullopt, "repair", Value{false}));
@@ -200,14 +277,32 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     // on its bounding box (optionally_center). Only SVG used to honour it.
     const Value centerArg = getArg(args, std::nullopt, "center", Value{false});
     const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
+    // OpenSCAD checks these for every import, whatever the file type, as the
+    // node is built -- so before the script's later echoes.
+    DxfOptions dxfOpts = dxfOptions(ev, args, layerArg, node);
+    dxfOpts.disc = Discretizer::fromCtx(effCtx, [&](const std::string& m) { ev.warn(m, &node.position()); });
 
     CSGParams params;
     params["color"] = colorToValue(effCtx.color);
-    if (std::holds_alternative<std::monostate>(fileArg)) {
-        ev.error("import: 'file' parameter is required", node);
-    }
+    // An import that fails draws nothing and the render goes on, as in
+    // OpenSCAD; the message is printed at generate, where OpenSCAD prints
+    // it, after the script's echoes. These used to abort the whole render.
+    const auto failed = [&](const std::string& message) {
+        params["kind"] = Value{std::string("failed")};
+        params["message"] = Value{message};
+        return params;
+    };
+    const auto unsupported = [&](const std::string& given) {
+        return failed("Unsupported file format while trying to import file '\"" + given +
+                      "\"', import() at line " + std::to_string(node.position().line));
+    };
+    if (std::holds_alternative<std::monostate>(fileArg)) return unsupported("");
     const std::string path = resolveFilePath(fileArg, node);
     const std::string ext = lowerExt(path);
+    if (ext != ".dxf" && ext != ".svg" && !isMeshExt(ext)) {
+        const std::string* given = std::get_if<std::string>(&fileArg);
+        return unsupported(given ? *given : fmtValue(fileArg));
+    }
 
     if (!std::filesystem::exists(path)) {
         // A missing file warns and imports nothing, as in OpenSCAD; it
@@ -223,39 +318,20 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     // the ordinary "unsupported file type" error below.
     if (ext == ".dxf" || ext == ".svg") {
         std::vector<Contour2d> contours;
-        bool filteredMiss = false;
         try {
             if (ext == ".dxf") {
-                std::optional<std::string> layer;
-                if (const std::string* s = std::get_if<std::string>(&layerArg)) layer = *s;
-                contours = loadDxfContours(path, layer);
+                DxfImport dxf = loadDxf(path, dxfOpts);
+                contours = std::move(dxf.contours);
+                // Printed at generate, after the script's echoes, as OpenSCAD
+                // prints them.
+                std::vector<Value> warnings;
+                for (std::string& w : dxf.warnings) warnings.push_back(Value{std::move(w)});
+                params["dxfWarnings"] = Value{makeList(std::move(warnings))};
             } else {
-                SvgFilter filter;
-                if (const std::string* v = std::get_if<std::string>(&idArg)) filter.id = *v;
-                if (const std::string* v = std::get_if<std::string>(&classArg)) filter.cls = *v;
-                bool matched = true;
-                const Value dpiArg = getArg(args, std::nullopt, "dpi", Value{72.0});
-                contours = loadSvgContours(path, filter, &matched,
-                                           std::holds_alternative<double>(dpiArg) ? std::get<double>(dpiArg) : 72.0,
-                                           std::holds_alternative<bool>(getArg(args, std::nullopt, "center", Value{false})) &&
-                                               std::get<bool>(getArg(args, std::nullopt, "center", Value{false})));
-                if (!matched) {
-                    // Nothing imported, rather than silently falling back to
-                    // the whole drawing -- a cut layer that quietly became
-                    // every layer is the worst answer available.
-                    std::string what;
-                    if (filter.id) what += "id = \"" + *filter.id + "\"";
-                    if (filter.cls) {
-                        if (!what.empty()) what += ", ";
-                        what += "class = \"" + *filter.cls + "\"";
-                    }
-                    // OpenSCAD's words, which name no file.
-                    ev.warn("import() filter " + what + " did not match anything", &node.position());
-                    filteredMiss = true;
-                }
+                contours = importSvg(ev, args, layerArg, path, center, Discretizer::fromCtx(effCtx), node);
             }
         } catch (const std::exception& e) {
-            ev.error(std::string("import: ") + e.what(), node);
+            return failed(std::string(e.what()) + locSuffix(&node.position()));
         }
         if (center && ext == ".dxf" && !contours.empty()) {
             double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
@@ -269,8 +345,14 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
                 for (auto& p : c)
                     for (int k = 0; k < 2; ++k) p[k] -= (lo[k] + hi[k]) / 2;
         }
-        if (contours.empty() && !filteredMiss) {
-            ev.error(ext == ".dxf" ? "import: no closed contours found in DXF file" : "import: no shapes found in SVG file", node);
+        // A drawing with nothing to fill imports nothing, silently, as in
+        // OpenSCAD -- except a file that is not SVG at all, which OpenSCAD
+        // reports as a parse error.
+        if (contours.empty() && ext == ".svg") {
+            std::ifstream in(path, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (text.find("<svg") == std::string::npos)
+                return failed("Error parsing file '" + path + "', import() at line " + std::to_string(node.position().line));
         }
         params["kind"] = Value{std::string("region")};
         params["contours"] = contoursToValue(contours);
@@ -283,7 +365,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         try {
             mesh = loadMeshByExt(path, ext);
         } catch (const std::exception& e) {
-            ev.error(std::string("import: ") + e.what(), node);
+            return failed(std::string(e.what()) + locSuffix(&node.position()));
         }
         for (const std::string& w : mesh.warnings) ev.warn("import: '" + path + "': " + w, &node.position());
         if (center && !mesh.verts.empty()) {
@@ -317,11 +399,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         params["tris"] = Value{makeList(std::move(trisFlat))};
         return params;
     }
-    if (ext == ".json") {
-        ev.error("import: .json returns data, not geometry -- use as an expression", node);
-    }
-    ev.error("import: unsupported file type '" + ext + "'", node);
-    return params;
+    return params;  // unreachable: every supported extension returned above
 }
 
 std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, const std::vector<std::unique_ptr<CSGNode>>&,
@@ -329,6 +407,10 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     const auto kindIt = params.find("kind");
     if (kindIt == params.end()) return {};
     const std::string& kind = std::get<std::string>(kindIt->second);
+    if (kind == "failed") {
+        ev.emitWarning("ERROR: " + std::get<std::string>(params.at("message")));
+        return {};
+    }
     if (kind == "missing") {
         // OpenSCAD's own wording, which names a line rather than a file.
         const std::string& path = std::get<std::string>(params.at("path"));
@@ -340,6 +422,8 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         return {};
     }
     if (kind == "region") {
+        if (const auto it = params.find("dxfWarnings"); it != params.end())
+            for (const Value& w : std::get<ListPtr>(it->second)->items) ev.warn(std::get<std::string>(w), nullptr);
         const std::vector<Contour2d> contours = valueToContours(params.at("contours"));
         manifold::Polygons polys;
         polys.reserve(contours.size());
@@ -351,13 +435,16 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         }
         ColoredBody result;
         result.section = manifold::CrossSection(polys, manifold::CrossSection::FillRule::EvenOdd);
+        // A DXF's outlines come out as OpenSCAD's do: no collinear points,
+        // holes that touch merged into one outline.
+        if (params.count("dxfWarnings")) result.section = result.section->Simplify();
         result.color = valueToColor(params.at("color"));
         return {result};
     }
     if (kind != "mesh") return {};
 
     const auto& tris = std::get<ListPtr>(params.at("tris"))->items;
-    if (tris.empty()) ev.error("import: mesh has no triangles", node);
+    if (tris.empty()) return {};  // nothing to draw, as OpenSCAD draws nothing
 
     // Kept at full precision for the Manifold that CSG will actually use --
     // MeshGL is MeshGLP<float>, and truncating there does not merely lose
@@ -445,16 +532,9 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 
-Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node) {
+Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& node, const EvalContext& ctx) {
     const Value fileArg = getArg(args, 0, "file", Value{});
     const Value layerArg = getArg(args, std::nullopt, "layer", Value{});
-    // SVG only. `id` matches an element's id; `class` matches one entry of
-    // its space-separated class list. `layer` stays DXF's, where layers are
-    // part of the format -- upstream reuses the name for SVG but reads only
-    // Inkscape's `inkscape:label`, which is a vendor convention rather than
-    // anything SVG defines.
-    const Value idArg = getArg(args, std::nullopt, "id", Value{});
-    const Value classArg = getArg(args, std::nullopt, "class", Value{});
     if (std::holds_alternative<std::monostate>(fileArg)) {
         ev.error("import: 'file' parameter is required", node);
     }
@@ -475,31 +555,21 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
         if (ext == ".dxf" || ext == ".svg") {
             std::vector<Contour2d> contours;
             if (ext == ".dxf") {
-                std::optional<std::string> layer;
-                if (const std::string* s = std::get_if<std::string>(&layerArg)) layer = *s;
-                contours = loadDxfContours(path, layer);
+                // ponytail: no context here, so arcs take the default
+                // $fn/$fa/$fs; pass the caller's if anyone needs them.
+                DxfImport dxf = loadDxf(path, dxfOptions(ev, args, layerArg, node));
+                for (const std::string& w : dxf.warnings) ev.warn(w, nullptr);
+                contours = std::move(dxf.contours);
             } else {
-                SvgFilter filter;
-                if (const std::string* v = std::get_if<std::string>(&idArg)) filter.id = *v;
-                if (const std::string* v = std::get_if<std::string>(&classArg)) filter.cls = *v;
-                bool matched = true;
-                const Value dpiArg = getArg(args, std::nullopt, "dpi", Value{72.0});
-                contours = loadSvgContours(path, filter, &matched,
-                                           std::holds_alternative<double>(dpiArg) ? std::get<double>(dpiArg) : 72.0,
-                                           std::holds_alternative<bool>(getArg(args, std::nullopt, "center", Value{false})) &&
-                                               std::get<bool>(getArg(args, std::nullopt, "center", Value{false})));
-                if (!matched) {
-                    // Nothing imported, rather than silently falling back to
-                    // the whole drawing -- a cut layer that quietly became
-                    // every layer is the worst answer available.
-                    std::string what;
-                    if (filter.id) what += "id = \"" + *filter.id + "\"";
-                    if (filter.cls) {
-                        if (!what.empty()) what += ", ";
-                        what += "class = \"" + *filter.cls + "\"";
-                    }
-                    ev.warn("import() filter " + what + " did not match anything", &node.position());
+                // $fn and friends from the call's own arguments, else the scope's.
+                Discretizer disc = Discretizer::fromCtx(ctx);
+                for (auto [name, field] : {std::pair{"$fn", &disc.fn}, {"$fa", &disc.fa}, {"$fs", &disc.fs}, {"$fe", &disc.fe}}) {
+                    if (const Value v = getArg(args, std::nullopt, name, Value{}); std::holds_alternative<double>(v))
+                        *field = std::get<double>(v);
                 }
+                const Value centerArg = getArg(args, std::nullopt, "center", Value{false});
+                contours = importSvg(ev, args, layerArg, path,
+                                     std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg), disc, node);
             }
             return contoursToValue(contours);
         }

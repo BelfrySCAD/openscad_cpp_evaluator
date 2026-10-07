@@ -587,6 +587,11 @@ public:
     // warnCapture first when one is active. Every warning path goes through
     // here, including a ManifoldCache hit replaying a cached line.
     void emitWarning(const std::string& formatted);
+    // "ERROR: {message}{locSuffix(position)}" that does NOT stop the run:
+    // OpenSCAD logs several of its errors this way and carries on.
+    void nonFatalError(const std::string& message, const oscad::Position* position) {
+        emitWarning("ERROR: " + message + locSuffix(position));
+    }
 
     // Applies OpenSCAD's mixed-2D/3D rules to a node's children just
     // before its GenerateFn runs -- see csg_generate.cpp.

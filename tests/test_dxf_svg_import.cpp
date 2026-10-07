@@ -5,6 +5,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <cmath>
 #include <gtest/gtest.h>
 
 using namespace oscadeval;
@@ -98,10 +100,9 @@ TEST(DxfImport, ClosedPolylineVertexEntityProducesExpectedArea) {
     std::filesystem::remove(path);
 }
 
-TEST(DxfImport, OpenPolylineIsIgnored) {
-    // closed=false (group code 70 bit 0 unset, or absent entirely) means
-    // the entity is dropped -- exercises the "!closed" half of the final
-    // guard, distinct from every other DXF fixture here which is closed.
+TEST(DxfImport, TwoPointOpenPolylineDrawsNothing) {
+    // An open path is closed with a straight edge, so two points enclose
+    // nothing -- and that is silent.
     const std::string dxf =
         "0\nSECTION\n2\nENTITIES\n"
         "0\nPOLYLINE\n8\n0\n"
@@ -111,19 +112,16 @@ TEST(DxfImport, OpenPolylineIsIgnored) {
         "0\nENDSEC\n0\nEOF\n";
     const auto path = tempPath("open_polyline.dxf");
     writeFile(path, dxf);
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");", [&](const std::string& m) { log.push_back(m); });
+    EXPECT_TRUE(e.bodies.empty() || e.bodies[0].section->IsEmpty());
+    EXPECT_TRUE(log.empty()) << ::testing::PrintToString(log);
     std::filesystem::remove(path);
 }
 
-TEST(DxfImport, UnrecognizedEntityIsSkipped) {
-    // The trailing "else { ++i; }" branch in loadDxfContours' top-level
-    // loop -- a group-0 entity name that's neither LWPOLYLINE nor
-    // POLYLINE (e.g. LINE) must be skipped without disturbing the real
-    // closed contour that follows it.
+TEST(DxfImport, LoneLineDoesNotDisturbAContour) {
+    // A single LINE joins nothing, so it encloses nothing and leaves the
+    // closed contour beside it alone.
     const std::string dxf =
         "0\nSECTION\n2\nENTITIES\n"
         "0\nLINE\n8\n0\n10\n0.0\n20\n0.0\n11\n1.0\n21\n1.0\n"
@@ -139,16 +137,170 @@ TEST(DxfImport, UnrecognizedEntityIsSkipped) {
     std::filesystem::remove(path);
 }
 
-TEST(DxfImport, NoClosedContoursErrors) {
+// Nothing to fill imports nothing, silently, as in OpenSCAD.
+TEST(DxfImport, NoClosedContoursIsSilent) {
     const std::string dxf = "0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n";
     const auto path = tempPath("empty.dxf");
     writeFile(path, dxf);
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\"); echo(\"after\");",
+                          [&](const std::string& m) { log.push_back(m); });
+    EXPECT_EQ(log, std::vector<std::string>{"ECHO: \"after\""});
     std::filesystem::remove(path);
+}
+
+// The rest of these were checked against OpenSCAD 2026.02.01 running the
+// same files: areas, vertex counts and warning text are its.
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+std::string dxfFile(const std::string& entities, const std::string& blocks = "") {
+    return "0\nSECTION\n2\nBLOCKS\n" + blocks + "0\nENDSEC\n0\nSECTION\n2\nENTITIES\n" + entities +
+           "0\nENDSEC\n0\nEOF\n";
+}
+
+std::string num(double v) {
+    std::ostringstream ss;
+    ss.precision(17);
+    ss << v;
+    return ss.str();
+}
+
+std::string lineEnt(double x1, double y1, double x2, double y2, const std::string& layer = "0") {
+    return "0\nLINE\n8\n" + layer + "\n10\n" + num(x1) + "\n20\n" + num(y1) + "\n11\n" + num(x2) + "\n21\n" + num(y2) +
+           "\n";
+}
+
+// Imports `dxf` with `args` appended to the call; returns the region (empty
+// when nothing was drawn) and every message printed.
+struct DxfRun {
+    manifold::CrossSection section;
+    std::vector<std::string> log;
+};
+
+DxfRun importDxf(const std::string& dxf, const std::string& args = "", const std::string& name = "case.dxf") {
+    const auto path = tempPath(name);
+    writeFile(path, dxf);
+    DxfRun run;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\"" + args + ");",
+                          [&](const std::string& m) { run.log.push_back(m); });
+    if (!e.bodies.empty() && e.bodies[0].section) run.section = *e.bodies[0].section;
+    std::filesystem::remove(path);
+    return run;
+}
+
+} // namespace
+
+TEST(DxfImport, LinesJoinIntoAPolygon) {
+    // Out of order and pointing either way: joined end to end regardless.
+    const DxfRun r = importDxf(dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10, 10, 0, 10) + lineEnt(10, 10, 10, 0) +
+                                       lineEnt(0, 0, 0, 10)));
+    EXPECT_NEAR(r.section.Area(), 100.0, 1e-9);
+    EXPECT_TRUE(r.log.empty()) << ::testing::PrintToString(r.log);
+}
+
+TEST(DxfImport, OpenChainIsClosedWithAStraightEdge) {
+    const DxfRun r = importDxf(dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10, 0, 10, 10)));
+    EXPECT_NEAR(r.section.Area(), 50.0, 1e-9);
+}
+
+TEST(DxfImport, OverlapsAreFilledEvenOdd) {
+    std::string ents;
+    for (double o : {0.0, 5.0})
+        ents += lineEnt(o, o, o + 10, o) + lineEnt(o + 10, o, o + 10, o + 10) + lineEnt(o + 10, o + 10, o, o + 10) +
+                lineEnt(o, o + 10, o, o);
+    EXPECT_NEAR(importDxf(dxfFile(ents)).section.Area(), 150.0, 1e-9);
+}
+
+TEST(DxfImport, PointsSnapToAGridOf1024ths) {
+    // 10.1 lands on 10342/1024, and the gap to 10 stays open.
+    const DxfRun r = importDxf(dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10.1, 0, 10, 10) + lineEnt(10, 10, 0, 0)));
+    EXPECT_NEAR(r.section.Area(), 0.5 * 10 * (10342.0 / 1024), 1e-9);
+    // Endpoints a hair apart (in neighbouring cells) are one point.
+    const DxfRun near = importDxf(
+        dxfFile(lineEnt(0, 0, 10 + 1.49 / 1024, 0) + lineEnt(10 + 2.4 / 1024, 0, 10, 10) + lineEnt(10, 10, 0, 0)));
+    EXPECT_NEAR(near.section.Area(), 0.5 * 10 * (10241.0 / 1024), 1e-9);
+}
+
+TEST(DxfImport, CirclesAndArcsUseTheFragmentRules) {
+    const std::string circle = dxfFile("0\nCIRCLE\n8\n0\n10\n0\n20\n0\n40\n100\n");
+    EXPECT_EQ(importDxf(circle).section.NumVert(), 30u);
+    EXPECT_EQ(importDxf(circle, ", $fn=6").section.NumVert(), 6u);
+    EXPECT_EQ(importDxf(circle, ", $fa=30, $fs=0.1").section.NumVert(), 12u);
+    // scale= is applied first, so a scaled-up small circle gets more.
+    EXPECT_EQ(importDxf(dxfFile("0\nCIRCLE\n8\n0\n10\n0\n20\n0\n40\n1\n"), ", scale=50").section.NumVert(), 30u);
+    // 100 degrees of a 30-fragment circle: ceil(8.33) = 9 segments, plus the
+    // centre the two radii meet at.
+    const double c = 100 * std::cos(100 * kPi / 180), s = 100 * std::sin(100 * kPi / 180);
+    const DxfRun arc = importDxf(dxfFile("0\nARC\n8\n0\n10\n0\n20\n0\n40\n100\n50\n0\n51\n100\n" +
+                                         lineEnt(0, 0, 100, 0) + lineEnt(0, 0, c, s)));
+    EXPECT_EQ(arc.section.NumVert(), 11u);
+}
+
+TEST(DxfImport, EllipseCountsByItsMajorRadius) {
+    // Major radius 5 (16 fragments) though the minor one is 10; an unset
+    // end parameter would make it empty, so it is given.
+    const DxfRun r =
+        importDxf(dxfFile("0\nELLIPSE\n8\n0\n10\n0\n20\n0\n11\n5\n21\n0\n40\n2\n41\n0\n42\n6.283185307179586\n"));
+    EXPECT_EQ(r.section.NumVert(), 16u);
+    const manifold::Rect box = r.section.Bounds();
+    EXPECT_NEAR(box.max.y, 10.0, 1e-3);
+}
+
+TEST(DxfImport, InsertPlacesABlock) {
+    const std::string block = "0\nBLOCK\n8\n0\n2\nb\n70\n0\n10\n5\n20\n5\n" + lineEnt(0, 0, 10, 0) +
+                              lineEnt(10, 0, 10, 10) + lineEnt(10, 10, 0, 0) + "0\nENDBLK\n";
+    // x scaled by 2, then turned 90 degrees, then moved; the block's base
+    // point (5,5) plays no part, as in OpenSCAD.
+    const DxfRun r = importDxf(dxfFile("0\nINSERT\n8\n0\n2\nb\n10\n100\n20\n0\n41\n2\n50\n90\n", block));
+    EXPECT_NEAR(r.section.Area(), 100.0, 1e-9);
+    const manifold::Rect box = r.section.Bounds();
+    EXPECT_NEAR(box.min.x, 90.0, 1e-9);
+    EXPECT_NEAR(box.max.y, 20.0, 1e-9);
+    // A block on its own draws nothing.
+    EXPECT_TRUE(importDxf(dxfFile("", block)).section.IsEmpty());
+}
+
+TEST(DxfImport, LayerFiltersTheInsertNotTheBlock) {
+    const std::string block = "0\nBLOCK\n8\n0\n2\nb\n70\n0\n10\n0\n20\n0\n0\nCIRCLE\n8\ninner\n10\n0\n20\n0\n40\n10\n0\nENDBLK\n";
+    const std::string file = dxfFile("0\nINSERT\n8\nouter\n2\nb\n10\n0\n20\n0\n", block);
+    EXPECT_FALSE(importDxf(file, ", layer=\"outer\"").section.IsEmpty());
+    EXPECT_TRUE(importDxf(file, ", layer=\"inner\"").section.IsEmpty());
+}
+
+TEST(DxfImport, OriginAndScale) {
+    const std::string tri = dxfFile(lineEnt(0, 0, 10, 0) + lineEnt(10, 0, 10, 10) + lineEnt(10, 10, 0, 0));
+    const manifold::Rect box = importDxf(tri, ", origin=[1,2], scale=3").section.Bounds();
+    EXPECT_NEAR(box.min.x, -3.0, 1e-9);
+    EXPECT_NEAR(box.min.y, -6.0, 1e-9);
+    EXPECT_NEAR(box.max.x, 27.0, 1e-9);
+    // A scale that is not a positive number is 1.
+    EXPECT_NEAR(importDxf(tri, ", scale=-2").section.Area(), 50.0, 1e-9);
+    const DxfRun bad = importDxf(tri, ", origin=[1,2,3]");
+    EXPECT_NEAR(bad.section.Area(), 50.0, 1e-9);
+    ASSERT_EQ(bad.log.size(), 1u);
+    EXPECT_NE(bad.log[0].find("WARNING: Unable to convert import(..., origin=[1, 2, 3]) parameter to vec2"),
+              std::string::npos)
+        << bad.log[0];
+}
+
+TEST(DxfImport, DecimalCommasWarnAsOpenSCADDoes) {
+    // A LINE short of a coordinate is not drawn; OpenSCAD names the NEXT
+    // entity's type in the warning, and pours the next entity's values into
+    // the unfinished one.
+    const std::string file = dxfFile("0\nLINE\n8\n0\n10\n0,1\n20\n0\n11\n2\n21\n0\n" + lineEnt(0, 0, 1, 1));
+    const auto path = tempPath("comma.dxf");
+    const DxfRun r = importDxf(file, "", "comma.dxf");
+    const std::string p = path.generic_string();
+    EXPECT_EQ(r.log, (std::vector<std::string>{"WARNING: Illegal value '0,1'in `" + p + "'",
+                                               "WARNING: Not enough input values for LINE. in '" + p + "'"}));
+}
+
+TEST(DxfImport, UnsupportedEntitiesAreCountedAfterTheFile) {
+    const DxfRun r = importDxf(dxfFile("0\nSPLINE\n8\n0\n0\nSPLINE\n8\n0\n0\nDIMENSION\n8\n0\n"), "", "spline.dxf");
+    ASSERT_EQ(r.log.size(), 1u);
+    EXPECT_EQ(r.log[0].rfind("WARNING: Unsupported DXF Entity 'SPLINE' (2) in \"", 0), 0u) << r.log[0];
 }
 
 // -- SVG import -----------------------------------------------------------
@@ -181,11 +333,8 @@ TEST(SvgImport, APdfNamedSvgErrorsInsteadOfHanging) {
     const auto path = tempPath("really_a_pdf.svg");
     writeFile(path, "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
                     "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n%%EOF\n");
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_NE(err.find("ERROR: Error parsing file '"), std::string::npos) << err;
     std::filesystem::remove(path);
 }
 
@@ -194,16 +343,8 @@ TEST(SvgImport, APdfNamedSvgErrorsInsteadOfHanging) {
 TEST(SvgImport, PdfIsAnUnsupportedFileType) {
     const auto path = tempPath("drawing.pdf");
     writeFile(path, "%PDF-1.4\n<< /Type /Catalog >>\n%%EOF\n");
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    try {
-        ev.resolveTree(ast, ctx);
-        ADD_FAILURE() << "expected an error";
-    } catch (const EvalError& e) {
-        EXPECT_NE(std::string(e.what()).find("unsupported file type '.pdf'"), std::string::npos) << e.what();
-    }
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_NE(err.find("Unsupported file format while trying to import file"), std::string::npos) << err;
     std::filesystem::remove(path);
 }
 
@@ -230,7 +371,7 @@ TEST(SvgImport, CircleApproximatesAnalyticArea) {
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><circle cx="0" cy="0" r="5"/></svg>)");
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265 * 25.0, 1.0); // 32-segment approximation
+    EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265 * 25.0, 1.0); // 40-segment approximation
     std::filesystem::remove(path);
 }
 
@@ -244,14 +385,12 @@ TEST(SvgImport, CubicBezierPathIsWatertight) {
     std::filesystem::remove(path);
 }
 
-TEST(SvgImport, NoShapesErrors) {
+TEST(SvgImport, NoShapesIsSilent) {
     const auto path = tempPath("noshapes.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><defs><rect x="0" y="0" width="1" height="1"/></defs></svg>)");
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::vector<std::string> log;
+    evalSrc("import(\"" + path.generic_string() + "\");", [&](const std::string& m) { log.push_back(m); });
+    EXPECT_TRUE(log.empty()) << ::testing::PrintToString(log);
     std::filesystem::remove(path);
 }
 
@@ -384,21 +523,25 @@ TEST(SvgImport, PolygonPointsAttribute) {
     std::filesystem::remove(path);
 }
 
-TEST(SvgImport, PolylinePointsAttribute) {
+// A polyline is a line, never filled: OpenSCAD draws its stroke (width 1
+// by default, butt caps, mitred joins) -- a 4.5 x 4 C shape, area 11.
+TEST(SvgImport, PolylineIsDrawnAsItsStroke) {
     const auto path = tempPath("polyline.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><polyline points="0,0 4,0 4,3 0,3"/></svg>)");
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 11.0, 1e-6);
     std::filesystem::remove(path);
 }
 
-TEST(SvgImport, StrayCharacterInPointsListIsSkipped) {
+// Not skipped, as OpenSCAD reads it: the stray "x" is the number 0, which
+// shifts every pair after it -- (0,0) (0,4) (0,4) (3,0), a triangle of 6.
+TEST(SvgImport, StrayCharacterInPointsListReadsAsZero) {
     const auto path = tempPath("straypoints.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><polygon points="0,0 x 4,0 4,3 0,3"/></svg>)");
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 6.0, 1e-6);
     std::filesystem::remove(path);
 }
 
@@ -626,9 +769,7 @@ TEST(DxfCross, ParallelOrTooFewLinesWarns) {
 // addition (`supported_feature("svg-class")`), because a class is how a
 // drawing marks "every cut line" without naming each one.
 //
-// `layer` deliberately stays DXF's: upstream reuses the name for SVG but
-// reads only Inkscape's `inkscape:label`, a vendor convention rather than
-// anything SVG defines, so it would not match a layer from any other tool.
+// `layer` selects an Inkscape layer, as upstream does; see SvgParity below.
 
 namespace {
 
@@ -698,8 +839,9 @@ TEST(SvgFilter, AnEnclosingTransformStillApplies) {
     ASSERT_EQ(pts.size(), 4u);
     double minx = 1e9;
     for (const auto& p : pts) minx = std::min(minx, std::get<double>(std::get<ListPtr>(p)->items[0]));
-    // x = 10 on a unitless 100-unit page, which OpenSCAD reads at 72 dpi.
-    EXPECT_NEAR(minx, 10.0 * 25.4 / 72.0, 1e-9);
+    // x = 10 on a unitless 100-unit page, which OpenSCAD reads at 72 dpi
+    // (to within the fill's 1e-8 grid).
+    EXPECT_NEAR(minx, 10.0 * 25.4 / 72.0, 1e-7);
     std::filesystem::remove(path);
 }
 
@@ -793,3 +935,124 @@ TEST(SvgPlacement, DpiScalesUnitlessLengths) {
 
 } // namespace
 } // namespace oscadeval
+
+// -- parity with OpenSCAD 2026.02.01 -----------------------------------------
+//
+// Each case is a 100 mm page of 100 user units, imported with `args`; the
+// area, vertex count and bounds are the reference binary's own (its SVG
+// export of the same import). Every one of these was wrong before the
+// libsvg port.
+namespace {
+
+struct SvgParityCase {
+    const char* name;
+    const char* body;
+    const char* args;
+    double area;
+    size_t vertices;
+    double bounds[4];
+};
+
+constexpr const char* kParityHeader =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg" )svg"
+    R"svg(xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" )svg"
+    R"svg(width="100mm" height="100mm" viewBox="0 0 100 100">)svg";
+
+constexpr const char* kLayers =
+    R"svg(<g inkscape:groupmode="layer" inkscape:label="outer"><rect id="a" x="0" y="0" width="10" height="10"/>)svg"
+    R"svg(<g inkscape:groupmode="layer" inkscape:label="inner" style="display:none">)svg"
+    R"svg(<rect id="b" x="20" y="0" width="10" height="5"/></g></g>)svg";
+
+std::string parityImport(const SvgParityCase& c, std::vector<std::string>* log = nullptr) {
+    const auto path = tempPath(std::string("parity_") + c.name + ".svg");
+    writeFile(path, std::string(kParityHeader) + c.body + "</svg>");
+    return "import(\"" + path.generic_string() + "\"" + c.args + ");";
+}
+
+} // namespace
+
+TEST(SvgParity, MatchesTheReference) {
+    const SvgParityCase cases[] = {
+        // Separate elements union; one path's overlapping subpaths cancel.
+        {"union", R"svg(<rect x="10" y="10" width="20" height="20"/><rect x="20" y="20" width="20" height="20"/>)svg", "",
+         700, 8, {10, 60, 40, 90}},
+        {"xor", R"svg(<path d="M10 10 h20 v20 h-20 z M 20 20 h20 v20 h-20 z"/>)svg", "", 600, 12, {10, 60, 40, 90}},
+        // A child's transform applies before its parent's.
+        {"nested",
+         R"svg(<g transform="translate(10,5) scale(2,1)"><g transform="rotate(30, 5, 5)"><rect x="0" y="0" width="10" height="5"/></g></g>)svg",
+         "", 100, 4, {11.3397, 87.5, 33.6603, 96.8301}},
+        {"display",
+         R"svg(<g style="display:none"><rect x="0" y="0" width="10" height="10"/></g><rect display="none" x="40" y="0" width="10" height="10"/>)svg"
+         R"svg(<rect style="display : none" x="60" y="0" width="10" height="10"/><rect x="80" y="0" width="10" height="10"/>)svg",
+         "", 100, 4, {80, 90, 90, 100}},
+        // Only a <defs> shape can be used; x/y apply after its own transform.
+        {"use",
+         R"svg(<defs><g id="gg" transform="translate(5,0)"><rect x="0" y="0" width="10" height="10"/></g></defs>)svg"
+         R"svg(<use xlink:href="#gg" x="50" y="20"/><rect id="r" x="0" y="0" width="5" height="5"/><use xlink:href="#r" x="20" y="20"/>)svg",
+         "", 125, 8, {0, 70, 65, 100}},
+        {"layer", kLayers, R"svg(, layer="outer")svg", 100, 4, {0, 90, 10, 100}},
+        // An id selects even under a hidden layer; the layer restricts it.
+        {"layer_id", kLayers, R"svg(, id="b", layer="outer")svg", 50, 4, {20, 95, 30, 100}},
+        // Lines are strokes: width, caps and joins.
+        {"stroke",
+         R"svg(<line x1="10" y1="10" x2="30" y2="10" style="stroke-width:4;stroke-linecap:square"/>)svg"
+         R"svg(<polyline points="50,10 70,10 70,30" stroke-width="2" stroke-linejoin="round"/>)svg",
+         "", 175.783, 23, {8, 70, 71, 92}},
+        // An open subpath is stroked -- unless the path closed one before it.
+        {"open_path", R"svg(<path d="M10 10 L 30 10 L 30 30"/><path d="M50 10 L 70 10 L 70 30 Z M 80 10 L 90 10"/>)svg", "",
+         240, 9, {10, 70, 70, 90.5}},
+        // Curves split by $fn/$fa/$fs: circles at least 40, beziers 20.
+        {"circle", R"svg(<circle cx="50" cy="50" r="10"/>)svg", "", 312.871, 40, {40, 40, 60, 60}},
+        {"circle_fn", R"svg(<circle cx="50" cy="50" r="10"/>)svg", ", $fn=50", 313.334, 50, {40.0197, 40, 59.9803, 60}},
+        {"cubic", R"svg(<path d="M 10 10 C 20 0 40 0 50 10 Z"/>)svg", "", 209.375, 21, {10, 90, 50, 97.5}},
+        {"cubic_fn", R"svg(<path d="M 10 10 C 20 0 40 0 50 10 Z"/>)svg", ", $fn=50", 209.9, 51, {10, 90, 50, 97.5}},
+        {"arc_fa", R"svg(<path d="M 10 50 A 20 20 0 0 1 50 50 Z"/>)svg", ", $fa=1, $fs=0.1", 628.287, 181, {10, 50, 50, 70}},
+        {"rounded_rect", R"svg(<rect x="10" y="10" width="40" height="20" rx="5"/>)svg", "", 778.141, 40, {10, 70, 50, 90}},
+        // <svg:rect> is not a rect; <symbol> and <a> are see-through, and
+        // <a>'s transform is ignored.
+        {"tags",
+         R"svg(<rect x="0" y="0" width="10" height="10"/><svg:rect x="20" y="0" width="10" height="10"/>)svg"
+         R"svg(<symbol><rect x="40" y="0" width="10" height="10"/></symbol><a transform="translate(50,50)"><rect x="60" y="0" width="10" height="10"/></a>)svg",
+         "", 300, 12, {0, 90, 70, 100}},
+    };
+    for (const SvgParityCase& c : cases) {
+        Evaluated e = evalSrc(parityImport(c));
+        ASSERT_EQ(e.bodies.size(), 1u) << c.name;
+        ASSERT_TRUE(e.bodies[0].section.has_value()) << c.name;
+        const manifold::CrossSection& s = *e.bodies[0].section;
+        EXPECT_NEAR(s.Area(), c.area, 1e-5 * c.area) << c.name;  // the reference printed 6 digits
+        size_t vertices = 0;
+        for (const auto& poly : s.ToPolygons()) vertices += poly.size();
+        EXPECT_EQ(vertices, c.vertices) << c.name;
+        const manifold::Rect b = s.Bounds();
+        EXPECT_NEAR(b.min.x, c.bounds[0], 1e-3) << c.name;
+        EXPECT_NEAR(b.min.y, c.bounds[1], 1e-3) << c.name;
+        EXPECT_NEAR(b.max.x, c.bounds[2], 1e-3) << c.name;
+        EXPECT_NEAR(b.max.y, c.bounds[3], 1e-3) << c.name;
+        std::filesystem::remove(tempPath(std::string("parity_") + c.name + ".svg"));
+    }
+}
+
+TEST(SvgParity, IdOutsideTheLayerIsAMiss) {
+    const SvgParityCase c{"layer_miss", kLayers, R"svg(, id="a", layer="inner")svg", 0, 0, {}};
+    std::vector<std::string> log;
+    Evaluated e = evalSrc(parityImport(c), [&](const std::string& m) { log.push_back(m); });
+    std::filesystem::remove(tempPath("parity_layer_miss.svg"));
+    EXPECT_TRUE(e.bodies.empty() || !e.bodies[0].section || e.bodies[0].section->IsEmpty());
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_NE(log[0].find(R"svg(import() filter id = "a", layer = "inner" did not match anything)svg"), std::string::npos)
+        << log[0];
+}
+
+// Below 0.001 is refused with a warning and read at 72 dpi. (OpenSCAD's own
+// message says "giving" and prints its default as "undef"; ours does not.)
+TEST(SvgParity, TinyDpiWarnsAndUsesTheDefault) {
+    const SvgParityCase c{"dpi", R"svg(<rect x="0" y="0" width="10" height="10"/>)svg", ", dpi=0.0001", 0, 0, {}};
+    std::vector<std::string> log;
+    Evaluated e = evalSrc(parityImport(c), [&](const std::string& m) { log.push_back(m); });
+    std::filesystem::remove(tempPath("parity_dpi.svg"));
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_NE(log[0].find("Invalid dpi value given, using default of 72 dpi"), std::string::npos) << log[0];
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 100, 1e-6);
+}
