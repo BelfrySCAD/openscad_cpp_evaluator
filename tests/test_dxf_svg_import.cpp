@@ -218,7 +218,7 @@ TEST(SvgImport, CircleApproximatesAnalyticArea) {
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><circle cx="0" cy="0" r="5"/></svg>)");
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265 * 25.0, 1.0); // 32-segment approximation
+    EXPECT_NEAR(e.bodies[0].section->Area(), 3.14159265 * 25.0, 1.0); // 40-segment approximation
     std::filesystem::remove(path);
 }
 
@@ -370,21 +370,25 @@ TEST(SvgImport, PolygonPointsAttribute) {
     std::filesystem::remove(path);
 }
 
-TEST(SvgImport, PolylinePointsAttribute) {
+// A polyline is a line, never filled: OpenSCAD draws its stroke (width 1
+// by default, butt caps, mitred joins) -- a 4.5 x 4 C shape, area 11.
+TEST(SvgImport, PolylineIsDrawnAsItsStroke) {
     const auto path = tempPath("polyline.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><polyline points="0,0 4,0 4,3 0,3"/></svg>)");
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 11.0, 1e-6);
     std::filesystem::remove(path);
 }
 
-TEST(SvgImport, StrayCharacterInPointsListIsSkipped) {
+// Not skipped, as OpenSCAD reads it: the stray "x" is the number 0, which
+// shifts every pair after it -- (0,0) (0,4) (0,4) (3,0), a triangle of 6.
+TEST(SvgImport, StrayCharacterInPointsListReadsAsZero) {
     const auto path = tempPath("straypoints.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><polygon points="0,0 x 4,0 4,3 0,3"/></svg>)");
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].section.has_value());
-    EXPECT_NEAR(e.bodies[0].section->Area(), 12.0, 1e-6);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 6.0, 1e-6);
     std::filesystem::remove(path);
 }
 
@@ -612,9 +616,7 @@ TEST(DxfCross, ParallelOrTooFewLinesWarns) {
 // addition (`supported_feature("svg-class")`), because a class is how a
 // drawing marks "every cut line" without naming each one.
 //
-// `layer` deliberately stays DXF's: upstream reuses the name for SVG but
-// reads only Inkscape's `inkscape:label`, a vendor convention rather than
-// anything SVG defines, so it would not match a layer from any other tool.
+// `layer` selects an Inkscape layer, as upstream does; see SvgParity below.
 
 namespace {
 
@@ -684,8 +686,9 @@ TEST(SvgFilter, AnEnclosingTransformStillApplies) {
     ASSERT_EQ(pts.size(), 4u);
     double minx = 1e9;
     for (const auto& p : pts) minx = std::min(minx, std::get<double>(std::get<ListPtr>(p)->items[0]));
-    // x = 10 on a unitless 100-unit page, which OpenSCAD reads at 72 dpi.
-    EXPECT_NEAR(minx, 10.0 * 25.4 / 72.0, 1e-9);
+    // x = 10 on a unitless 100-unit page, which OpenSCAD reads at 72 dpi
+    // (to within the fill's 1e-8 grid).
+    EXPECT_NEAR(minx, 10.0 * 25.4 / 72.0, 1e-7);
     std::filesystem::remove(path);
 }
 
@@ -779,3 +782,124 @@ TEST(SvgPlacement, DpiScalesUnitlessLengths) {
 
 } // namespace
 } // namespace oscadeval
+
+// -- parity with OpenSCAD 2026.02.01 -----------------------------------------
+//
+// Each case is a 100 mm page of 100 user units, imported with `args`; the
+// area, vertex count and bounds are the reference binary's own (its SVG
+// export of the same import). Every one of these was wrong before the
+// libsvg port.
+namespace {
+
+struct SvgParityCase {
+    const char* name;
+    const char* body;
+    const char* args;
+    double area;
+    size_t vertices;
+    double bounds[4];
+};
+
+constexpr const char* kParityHeader =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg" )svg"
+    R"svg(xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" )svg"
+    R"svg(width="100mm" height="100mm" viewBox="0 0 100 100">)svg";
+
+constexpr const char* kLayers =
+    R"svg(<g inkscape:groupmode="layer" inkscape:label="outer"><rect id="a" x="0" y="0" width="10" height="10"/>)svg"
+    R"svg(<g inkscape:groupmode="layer" inkscape:label="inner" style="display:none">)svg"
+    R"svg(<rect id="b" x="20" y="0" width="10" height="5"/></g></g>)svg";
+
+std::string parityImport(const SvgParityCase& c, std::vector<std::string>* log = nullptr) {
+    const auto path = tempPath(std::string("parity_") + c.name + ".svg");
+    writeFile(path, std::string(kParityHeader) + c.body + "</svg>");
+    return "import(\"" + path.generic_string() + "\"" + c.args + ");";
+}
+
+} // namespace
+
+TEST(SvgParity, MatchesTheReference) {
+    const SvgParityCase cases[] = {
+        // Separate elements union; one path's overlapping subpaths cancel.
+        {"union", R"svg(<rect x="10" y="10" width="20" height="20"/><rect x="20" y="20" width="20" height="20"/>)svg", "",
+         700, 8, {10, 60, 40, 90}},
+        {"xor", R"svg(<path d="M10 10 h20 v20 h-20 z M 20 20 h20 v20 h-20 z"/>)svg", "", 600, 12, {10, 60, 40, 90}},
+        // A child's transform applies before its parent's.
+        {"nested",
+         R"svg(<g transform="translate(10,5) scale(2,1)"><g transform="rotate(30, 5, 5)"><rect x="0" y="0" width="10" height="5"/></g></g>)svg",
+         "", 100, 4, {11.3397, 87.5, 33.6603, 96.8301}},
+        {"display",
+         R"svg(<g style="display:none"><rect x="0" y="0" width="10" height="10"/></g><rect display="none" x="40" y="0" width="10" height="10"/>)svg"
+         R"svg(<rect style="display : none" x="60" y="0" width="10" height="10"/><rect x="80" y="0" width="10" height="10"/>)svg",
+         "", 100, 4, {80, 90, 90, 100}},
+        // Only a <defs> shape can be used; x/y apply after its own transform.
+        {"use",
+         R"svg(<defs><g id="gg" transform="translate(5,0)"><rect x="0" y="0" width="10" height="10"/></g></defs>)svg"
+         R"svg(<use xlink:href="#gg" x="50" y="20"/><rect id="r" x="0" y="0" width="5" height="5"/><use xlink:href="#r" x="20" y="20"/>)svg",
+         "", 125, 8, {0, 70, 65, 100}},
+        {"layer", kLayers, R"svg(, layer="outer")svg", 100, 4, {0, 90, 10, 100}},
+        // An id selects even under a hidden layer; the layer restricts it.
+        {"layer_id", kLayers, R"svg(, id="b", layer="outer")svg", 50, 4, {20, 95, 30, 100}},
+        // Lines are strokes: width, caps and joins.
+        {"stroke",
+         R"svg(<line x1="10" y1="10" x2="30" y2="10" style="stroke-width:4;stroke-linecap:square"/>)svg"
+         R"svg(<polyline points="50,10 70,10 70,30" stroke-width="2" stroke-linejoin="round"/>)svg",
+         "", 175.783, 23, {8, 70, 71, 92}},
+        // An open subpath is stroked -- unless the path closed one before it.
+        {"open_path", R"svg(<path d="M10 10 L 30 10 L 30 30"/><path d="M50 10 L 70 10 L 70 30 Z M 80 10 L 90 10"/>)svg", "",
+         240, 9, {10, 70, 70, 90.5}},
+        // Curves split by $fn/$fa/$fs: circles at least 40, beziers 20.
+        {"circle", R"svg(<circle cx="50" cy="50" r="10"/>)svg", "", 312.871, 40, {40, 40, 60, 60}},
+        {"circle_fn", R"svg(<circle cx="50" cy="50" r="10"/>)svg", ", $fn=50", 313.334, 50, {40.0197, 40, 59.9803, 60}},
+        {"cubic", R"svg(<path d="M 10 10 C 20 0 40 0 50 10 Z"/>)svg", "", 209.375, 21, {10, 90, 50, 97.5}},
+        {"cubic_fn", R"svg(<path d="M 10 10 C 20 0 40 0 50 10 Z"/>)svg", ", $fn=50", 209.9, 51, {10, 90, 50, 97.5}},
+        {"arc_fa", R"svg(<path d="M 10 50 A 20 20 0 0 1 50 50 Z"/>)svg", ", $fa=1, $fs=0.1", 628.287, 181, {10, 50, 50, 70}},
+        {"rounded_rect", R"svg(<rect x="10" y="10" width="40" height="20" rx="5"/>)svg", "", 778.141, 40, {10, 70, 50, 90}},
+        // <svg:rect> is not a rect; <symbol> and <a> are see-through, and
+        // <a>'s transform is ignored.
+        {"tags",
+         R"svg(<rect x="0" y="0" width="10" height="10"/><svg:rect x="20" y="0" width="10" height="10"/>)svg"
+         R"svg(<symbol><rect x="40" y="0" width="10" height="10"/></symbol><a transform="translate(50,50)"><rect x="60" y="0" width="10" height="10"/></a>)svg",
+         "", 300, 12, {0, 90, 70, 100}},
+    };
+    for (const SvgParityCase& c : cases) {
+        Evaluated e = evalSrc(parityImport(c));
+        ASSERT_EQ(e.bodies.size(), 1u) << c.name;
+        ASSERT_TRUE(e.bodies[0].section.has_value()) << c.name;
+        const manifold::CrossSection& s = *e.bodies[0].section;
+        EXPECT_NEAR(s.Area(), c.area, 1e-5 * c.area) << c.name;  // the reference printed 6 digits
+        size_t vertices = 0;
+        for (const auto& poly : s.ToPolygons()) vertices += poly.size();
+        EXPECT_EQ(vertices, c.vertices) << c.name;
+        const manifold::Rect b = s.Bounds();
+        EXPECT_NEAR(b.min.x, c.bounds[0], 1e-3) << c.name;
+        EXPECT_NEAR(b.min.y, c.bounds[1], 1e-3) << c.name;
+        EXPECT_NEAR(b.max.x, c.bounds[2], 1e-3) << c.name;
+        EXPECT_NEAR(b.max.y, c.bounds[3], 1e-3) << c.name;
+        std::filesystem::remove(tempPath(std::string("parity_") + c.name + ".svg"));
+    }
+}
+
+TEST(SvgParity, IdOutsideTheLayerIsAMiss) {
+    const SvgParityCase c{"layer_miss", kLayers, R"svg(, id="a", layer="inner")svg", 0, 0, {}};
+    std::vector<std::string> log;
+    Evaluated e = evalSrc(parityImport(c), [&](const std::string& m) { log.push_back(m); });
+    std::filesystem::remove(tempPath("parity_layer_miss.svg"));
+    EXPECT_TRUE(e.bodies.empty() || !e.bodies[0].section || e.bodies[0].section->IsEmpty());
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_NE(log[0].find(R"svg(import() filter id = "a", layer = "inner" did not match anything)svg"), std::string::npos)
+        << log[0];
+}
+
+// Below 0.001 is refused with a warning and read at 72 dpi. (OpenSCAD's own
+// message says "giving" and prints its default as "undef"; ours does not.)
+TEST(SvgParity, TinyDpiWarnsAndUsesTheDefault) {
+    const SvgParityCase c{"dpi", R"svg(<rect x="0" y="0" width="10" height="10"/>)svg", ", dpi=0.0001", 0, 0, {}};
+    std::vector<std::string> log;
+    Evaluated e = evalSrc(parityImport(c), [&](const std::string& m) { log.push_back(m); });
+    std::filesystem::remove(tempPath("parity_dpi.svg"));
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_NE(log[0].find("Invalid dpi value given, using default of 72 dpi"), std::string::npos) << log[0];
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_NEAR(e.bodies[0].section->Area(), 100, 1e-6);
+}

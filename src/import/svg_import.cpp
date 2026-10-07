@@ -1,24 +1,60 @@
 #include "openscad_cpp_evaluator/dxf_svg_import.hpp"
 
+#include "../builtins/builtins.hpp"
+
+#include <clipper2/clipper.h>
+#include <manifold/cross_section.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 
-// Hand-rolled SVG reader -- a close port of _load_svg_contours (path/
-// transform parsing) plus a minimal recursive-descent XML tree parser
-// (Python's version uses stdlib xml.etree.ElementTree for that half; this
-// project has no XML dependency, so this file provides just enough of one:
-// open/close/self-closing tags, quoted attributes, comments, CDATA,
-// prolog/DOCTYPE skipping, and the 5 basic entity references. No namespace
-// URI resolution -- a tag's `prefix:` is stripped textually, matching the
-// common case (default-namespace or single-prefix SVGs) without full XML
-// namespace semantics. Upgrade to pugixml if a real SVG's XML proves too
-// irregular for this.
+// SVG import, as OpenSCAD 2026.02.01 reads it.
+//
+// What becomes geometry -- which elements, how a path's `d` is tokenized
+// (quirks included), how curves are split, how strokes become outlines,
+// which transforms apply, <use>, display:none and Inkscape layers -- is a
+// port of OpenSCAD's src/libsvg, which is MIT licensed:
+//
+//   The MIT License
+//
+//   Copyright (c) 2016-2018, Torsten Paul <torsten.paul@gmx.de>,
+//                            Marius Kintel <marius@kintel.net>
+//
+//   Permission is hereby granted, free of charge, to any person obtaining
+//   a copy of this software and associated documentation files (the
+//   "Software"), to deal in the Software without restriction, including
+//   without limitation the rights to use, copy, modify, merge, publish,
+//   distribute, sublicense, and/or sell copies of the Software, and to
+//   permit persons to whom the Software is furnished to do so, subject to
+//   the following conditions:
+//
+//   The above copyright notice and this permission notice shall be
+//   included in all copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+//   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+//   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+//   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+//   LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+//   OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+//   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// Everything else -- page placement, which elements a filter selects, how
+// shapes are filled and combined -- was worked out from the 2026.02.01
+// binary's output, not its (GPL) source.
+//
+// The XML half is a minimal recursive-descent tree parser: this project has
+// no XML dependency, and libsvg's own (libxml2) is not needed for what SVG
+// files contain. Tag names keep their prefix, as libxml2 reports them, so
+// <svg:rect> is not a rect -- in OpenSCAD either.
 
 namespace oscadeval {
 
@@ -31,53 +67,74 @@ struct XmlNode {
     std::vector<std::pair<std::string, std::string>> attrs;
     std::vector<XmlNode> children;
 
-    std::string getAttr(const std::string& name, const std::string& def = "") const {
+    const std::string* findAttr(const std::string& name) const {
         for (const auto& [k, v] : attrs) {
-            if (k == name) return v;
+            if (k == name) return &v;
         }
-        return def;
+        return nullptr;
+    }
+    std::string getAttr(const std::string& name, const std::string& def = "") const {
+        const std::string* v = findAttr(name);
+        return v ? *v : def;
     }
 };
 
-std::string decodeEntities(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size();) {
-        if (s[i] == '&') {
-            if (s.compare(i, 5, "&amp;") == 0) {
-                out += '&';
-                i += 5;
-                continue;
-            }
-            if (s.compare(i, 4, "&lt;") == 0) {
-                out += '<';
-                i += 4;
-                continue;
-            }
-            if (s.compare(i, 4, "&gt;") == 0) {
-                out += '>';
-                i += 4;
-                continue;
-            }
-            if (s.compare(i, 6, "&quot;") == 0) {
-                out += '"';
-                i += 6;
-                continue;
-            }
-            if (s.compare(i, 6, "&apos;") == 0) {
-                out += '\'';
-                i += 6;
-                continue;
-            }
-        }
-        out += s[i++];
+void appendUtf8(std::string& out, unsigned long cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
     }
-    return out;
 }
 
-std::string stripPrefix(const std::string& tag) {
-    const size_t colon = tag.find(':');
-    return colon == std::string::npos ? tag : tag.substr(colon + 1);
+// An attribute value as an XML parser hands it over: literal tabs and line
+// breaks become spaces (attribute-value normalisation), then entity and
+// character references are decoded -- so `&#10;` survives as a real line
+// break, which matters, since libsvg's number parser rejects one.
+std::string decodeAttrValue(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    static const std::pair<const char*, char> named[] = {
+        {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''}};
+    for (size_t i = 0; i < s.size();) {
+        if (s[i] == '&') {
+            bool done = false;
+            for (const auto& [ent, ch] : named) {
+                if (s.compare(i, std::strlen(ent), ent) == 0) {
+                    out += ch;
+                    i += std::strlen(ent);
+                    done = true;
+                    break;
+                }
+            }
+            if (done) continue;
+            const size_t semi = s.find(';', i);
+            if (s.compare(i, 2, "&#") == 0 && semi != std::string::npos) {
+                const bool hex = i + 2 < s.size() && (s[i + 2] == 'x' || s[i + 2] == 'X');
+                const std::string digits = s.substr(i + (hex ? 3 : 2), semi - i - (hex ? 3 : 2));
+                char* end = nullptr;
+                const unsigned long cp = std::strtoul(digits.c_str(), &end, hex ? 16 : 10);
+                if (!digits.empty() && *end == '\0') {
+                    appendUtf8(out, cp);
+                    i = semi + 1;
+                    continue;
+                }
+            }
+        }
+        const char c = s[i++];
+        out += (c == '\t' || c == '\n' || c == '\r') ? ' ' : c;
+    }
+    return out;
 }
 
 void skipWs(const std::string& s, size_t& i) {
@@ -114,7 +171,7 @@ std::optional<XmlNode> parseElement(const std::string& s, size_t& i) {
     XmlNode node;
     size_t nameStart = i;
     while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])) && s[i] != '>' && s[i] != '/') ++i;
-    node.tag = stripPrefix(s.substr(nameStart, i - nameStart));
+    node.tag = s.substr(nameStart, i - nameStart);
 
     bool selfClosing = false;
     while (i < s.size()) {
@@ -149,7 +206,7 @@ std::optional<XmlNode> parseElement(const std::string& s, size_t& i) {
                 const char quote = s[i++];
                 const size_t valStart = i;
                 while (i < s.size() && s[i] != quote) ++i;
-                attrValue = decodeEntities(s.substr(valStart, i - valStart));
+                attrValue = decodeAttrValue(s.substr(valStart, i - valStart));
                 if (i < s.size()) ++i;
             }
         }
@@ -185,326 +242,610 @@ std::optional<XmlNode> parseXmlRoot(const std::string& text) {
     }
 }
 
+// -- libsvg's number and attribute helpers -----------------------------------
+
+// libsvg's parse_double: the whole string must be one number, else 0 --
+// so "10px", " 5" and "5\n" are all 0.
+double parseDouble(const std::string& s) {
+    if (s.empty() || std::isspace(static_cast<unsigned char>(s[0]))) return 0.0;
+    char* end = nullptr;
+    const double d = std::strtod(s.c_str(), &end);
+    return *end == '\0' ? d : 0.0;
+}
+
+// Splits on any of `drop` (discarded) and `keep` (each kept as a one-char
+// token), dropping empty tokens: boost::char_separator, as libsvg uses it.
+std::vector<std::string> splitTokens(const std::string& s, const char* drop, const char* keep = "") {
+    std::vector<std::string> out;
+    std::string cur;
+    for (const char c : s) {
+        const bool isKeep = std::strchr(keep, c) != nullptr;
+        if (!isKeep && std::strchr(drop, c) == nullptr) {
+            cur += c;
+            continue;
+        }
+        if (!cur.empty()) out.push_back(std::move(cur));
+        cur.clear();
+        if (isKeep) out.emplace_back(1, c);
+    }
+    if (!cur.empty()) out.push_back(std::move(cur));
+    return out;
+}
+
+std::string trim(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+}
+
+// One property of a `style="a: b; c: d"` attribute, or "".
+std::string styleProperty(const XmlNode& el, const std::string& name) {
+    for (const std::string& decl : splitTokens(el.getAttr("style"), ";")) {
+        const std::vector<std::string> kv = splitTokens(decl, ":");
+        if (kv.size() == 2 && trim(kv[0]) == name) return trim(kv[1]);
+    }
+    return "";
+}
+
+// The attribute when present and non-empty, else the style property.
+std::string presentation(const XmlNode& el, const std::string& name) {
+    const std::string attr = el.getAttr(name);
+    return attr.empty() ? styleProperty(el, name) : attr;
+}
+
 // -- 2D affine transform (SVG's own [[a,c,e],[b,d,f],[0,0,1]] convention) --
 
 struct Mat3 {
     double a = 1, b = 0, c = 0, d = 1, e = 0, f = 0;
 };
 
-// this * other (SVG transform composition is left-multiplication of the
-// new transform onto the accumulated one -- matches `m = new @ m`).
-Mat3 compose(const Mat3& m, const Mat3& acc) {
-    return Mat3{
-        m.a * acc.a + m.c * acc.b, m.b * acc.a + m.d * acc.b, m.a * acc.c + m.c * acc.d,
-        m.b * acc.c + m.d * acc.d, m.a * acc.e + m.c * acc.f + m.e, m.b * acc.e + m.d * acc.f + m.f,
-    };
+// p * q: q applies first.
+Mat3 operator*(const Mat3& p, const Mat3& q) {
+    return Mat3{p.a * q.a + p.c * q.b, p.b * q.a + p.d * q.b, p.a * q.c + p.c * q.d,
+                p.b * q.c + p.d * q.d, p.a * q.e + p.c * q.f + p.e, p.b * q.e + p.d * q.f + p.f};
 }
 
-std::array<double, 2> applyMat(const std::array<double, 2>& pt, const Mat3& m) {
-    const double x = m.a * pt[0] + m.c * pt[1] + m.e;
-    const double y = m.b * pt[0] + m.d * pt[1] + m.f;
-    return {x, y}; // SVG user units; pageMap places them on the page
+std::array<double, 2> applyMat(const Mat3& m, const std::array<double, 2>& pt) {
+    return {m.a * pt[0] + m.c * pt[1] + m.e, m.b * pt[0] + m.d * pt[1] + m.f};
 }
 
-std::vector<double> parseNumberList(const std::string& s) {
-    std::vector<double> out;
-    size_t i = 0;
-    while (i < s.size()) {
-        while (i < s.size() && (std::isspace(static_cast<unsigned char>(s[i])) || s[i] == ',')) ++i;
-        const size_t start = i;
-        if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
-        while (i < s.size() && (std::isdigit(static_cast<unsigned char>(s[i])) || s[i] == '.')) ++i;
-        if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
-            ++i;
-            if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
-            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) ++i;
-        }
-        if (i > start) out.push_back(std::stod(s.substr(start, i - start)));
-        else if (i < s.size()) ++i; // stray character, skip
-    }
-    return out;
-}
-
-Mat3 parseTransform(const std::string& tStr) {
+// A `transform` attribute, as libsvg reads it: each operation with the
+// wrong number of arguments is skipped (it printed a complaint to stdout).
+Mat3 parseTransform(const std::string& text) {
     Mat3 acc;
-    size_t i = 0;
-    while (i < tStr.size()) {
-        while (i < tStr.size() && !std::isalpha(static_cast<unsigned char>(tStr[i]))) ++i;
-        const size_t nameStart = i;
-        while (i < tStr.size() && std::isalpha(static_cast<unsigned char>(tStr[i]))) ++i;
-        const std::string cmd = tStr.substr(nameStart, i - nameStart);
-        if (cmd.empty()) break;
-        const size_t parenOpen = tStr.find('(', i);
-        if (parenOpen == std::string::npos) break;
-        const size_t parenClose = tStr.find(')', parenOpen);
-        if (parenClose == std::string::npos) break;
-        const std::vector<double> ns = parseNumberList(tStr.substr(parenOpen + 1, parenClose - parenOpen - 1));
-        i = parenClose + 1;
-
-        if (cmd == "matrix" && ns.size() >= 6) {
-            acc = compose(Mat3{ns[0], ns[1], ns[2], ns[3], ns[4], ns[5]}, acc);
-        } else if (cmd == "translate" && !ns.empty()) {
-            const double tx = ns[0], ty = ns.size() > 1 ? ns[1] : 0.0;
-            acc = compose(Mat3{1, 0, 0, 1, tx, ty}, acc);
-        } else if (cmd == "scale" && !ns.empty()) {
-            const double sx = ns[0], sy = ns.size() > 1 ? ns[1] : ns[0];
-            acc = compose(Mat3{sx, 0, 0, sy, 0, 0}, acc);
-        } else if (cmd == "rotate" && !ns.empty()) {
-            const double ang = ns[0] * M_PI / 180.0;
-            const double cx = ns.size() > 1 ? ns[1] : 0.0, cy = ns.size() > 2 ? ns[2] : 0.0;
-            const double ca = std::cos(ang), sa = std::sin(ang);
-            const Mat3 t1{1, 0, 0, 1, -cx, -cy};
-            const Mat3 r{ca, sa, -sa, ca, 0, 0};
-            const Mat3 t2{1, 0, 0, 1, cx, cy};
-            acc = compose(t2, compose(r, compose(t1, acc)));
+    std::string name;
+    std::vector<double> args;
+    const auto flush = [&]() {
+        const size_t n = args.size();
+        Mat3 m;
+        if (name == "matrix" && n == 6) {
+            m = Mat3{args[0], args[1], args[2], args[3], args[4], args[5]};
+        } else if (name == "translate" && (n == 1 || n == 2)) {
+            m = Mat3{1, 0, 0, 1, args[0], n == 2 ? args[1] : 0.0};
+        } else if (name == "scale" && (n == 1 || n == 2)) {
+            m = Mat3{args[0], 0, 0, n == 2 ? args[1] : args[0], 0, 0};
+        } else if (name == "rotate" && (n == 1 || n == 3)) {
+            const double s = sinDeg(args[0]), c = cosDeg(args[0]);
+            const double cx = n == 3 ? args[1] : 0.0, cy = n == 3 ? args[2] : 0.0;
+            m = Mat3{1, 0, 0, 1, cx, cy} * Mat3{c, s, -s, c, 0, 0} * Mat3{1, 0, 0, 1, -cx, -cy};
+        } else if (name == "skewX" && n == 1) {
+            m = Mat3{1, 0, tanDeg(args[0]), 1, 0, 0};
+        } else if (name == "skewY" && n == 1) {
+            m = Mat3{1, tanDeg(args[0]), 0, 1, 0, 0};
+        }
+        acc = acc * m;
+    };
+    for (const std::string& tok : splitTokens(text, " ,()")) {
+        if (tok == "matrix" || tok == "translate" || tok == "scale" || tok == "rotate" || tok == "skewX" ||
+            tok == "skewY") {
+            if (!name.empty()) flush();
+            name = tok;
+            args.clear();
+        } else if (!name.empty()) {
+            args.push_back(parseDouble(tok));
         }
     }
+    if (!name.empty()) flush();
     return acc;
 }
 
-constexpr int kSegs = 32;
+// -- shapes -> outlines (libsvg's shape/path/rect/... set_attrs) -------------
 
-std::vector<std::array<double, 2>> cubicPts(const std::array<double, 2>& p0, const std::array<double, 2>& p1,
-                                             const std::array<double, 2>& p2, const std::array<double, 2>& p3) {
-    std::vector<std::array<double, 2>> pts;
-    pts.reserve(kSegs);
-    for (int i = 1; i <= kSegs; ++i) {
-        const double t = static_cast<double>(i) / kSegs, mt = 1 - t;
-        const double a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;
-        pts.push_back({a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0], a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1]});
-    }
-    return pts;
+using Path = std::vector<std::array<double, 2>>;
+using PathList = std::vector<Path>;
+
+struct Stroke {
+    double width;
+    Clipper2Lib::JoinType join;
+    Clipper2Lib::EndType cap;
+};
+
+Stroke strokeOf(const XmlNode& el) {
+    const double w = parseDouble(presentation(el, "stroke-width"));
+    const std::string cap = presentation(el, "stroke-linecap");
+    const std::string join = presentation(el, "stroke-linejoin");
+    using Clipper2Lib::EndType;
+    using Clipper2Lib::JoinType;
+    return Stroke{w < 0.01 ? 1.0 : w,
+                  // bevel -> Square is libsvg's choice, kept.
+                  join == "bevel" ? JoinType::Square : join == "round" ? JoinType::Round : JoinType::Miter,
+                  cap == "round" ? EndType::Round : cap == "square" ? EndType::Square : EndType::Butt};
 }
 
-std::vector<std::array<double, 2>> quadPts(const std::array<double, 2>& p0, const std::array<double, 2>& p1,
-                                            const std::array<double, 2>& p2) {
-    std::vector<std::array<double, 2>> pts;
-    pts.reserve(kSegs);
-    for (int i = 1; i <= kSegs; ++i) {
-        const double t = static_cast<double>(i) / kSegs, mt = 1 - t;
-        pts.push_back({mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0], mt * mt * p0[1] + 2 * mt * t * p1[1] + t * t * p2[1]});
+// An open line becomes its stroke's outline. Clipper2 works in integers,
+// at 2^27 per user unit as the reference does (measured: an offset
+// amplified 1e8 times lands on that grid). It is not cosmetic -- it
+// decides which nearly-collinear outline vertices Clipper drops.
+void strokeOutline(PathList& out, const Path& line, const Stroke& stroke) {
+    const double scale = std::ldexp(1.0, 27);
+    Clipper2Lib::Path64 in;
+    for (const auto& p : line) in.emplace_back(p[0] * scale, p[1] * scale);
+    Clipper2Lib::ClipperOffset co;
+    co.AddPath(in, stroke.join, stroke.cap);
+    Clipper2Lib::Paths64 result;
+    co.Execute(stroke.width * scale / 2, result);
+    for (const auto& r : result) {
+        Path p;
+        for (const auto& pt : r) p.push_back({pt.x / scale, pt.y / scale});
+        out.push_back(std::move(p));
     }
-    return pts;
 }
 
-// SVG elliptical arc endpoint-to-center parameterization + sampling.
-std::vector<std::array<double, 2>> arcPts(double x1, double y1, double rx, double ry, double xRotDeg, bool large, bool sweep,
-                                           double x2, double y2) {
-    if (rx == 0 || ry == 0) return {{x2, y2}};
-    const double cosR = std::cos(xRotDeg * M_PI / 180.0), sinR = std::sin(xRotDeg * M_PI / 180.0);
+// SVG arc implementation notes F.6.5, sampled as libsvg does.
+void arcTo(Path& path, double x1, double y1, double rx, double ry, double x2, double y2, double angle, bool large,
+           bool sweep, const Discretizer& disc) {
+    // Out-of-range parameters, as the SVG spec has them. libsvg divides by
+    // zero here and draws NaN vertices (which come out at the origin).
+    if (x1 == x2 && y1 == y2) return;
+    if (rx == 0 || ry == 0) {
+        path.push_back({x2, y2});
+        return;
+    }
+    const double cosR = cosDeg(angle), sinR = sinDeg(angle);
     const double dx = (x1 - x2) / 2, dy = (y1 - y2) / 2;
-    const double x1p = cosR * dx + sinR * dy, y1p = -sinR * dx + cosR * dy;
-    double rxx = rx, ryy = ry;
-    const double lam = (x1p / rxx) * (x1p / rxx) + (y1p / ryy) * (y1p / ryy);
-    if (lam > 1) {
-        rxx *= std::sqrt(lam);
-        ryy *= std::sqrt(lam);
+    const double x1_ = cosR * dx + sinR * dy, y1_ = -sinR * dx + cosR * dy;
+    const double d = (x1_ * x1_) / (rx * rx) + (y1_ * y1_) / (ry * ry);
+    if (d > 1) {
+        rx = std::fabs(std::sqrt(d) * rx);
+        ry = std::fabs(std::sqrt(d) * ry);
     }
-    double sq = std::max(0.0, (rxx * ryy) * (rxx * ryy) - (rxx * y1p) * (rxx * y1p) - (ryy * x1p) * (ryy * x1p));
-    sq = std::sqrt(sq / std::max(1e-12, (rxx * y1p) * (rxx * y1p) + (ryy * x1p) * (ryy * x1p)));
-    if (large == sweep) sq = -sq;
-    const double cxp = sq * rxx * y1p / ryy, cyp = -sq * ryy * x1p / rxx;
-    const double cx = cosR * cxp - sinR * cyp + (x1 + x2) / 2, cy = sinR * cxp + cosR * cyp + (y1 + y2) / 2;
-    const auto angle = [](double ux, double uy, double vx, double vy) { return std::atan2(ux * vy - uy * vx, ux * vx + uy * vy); };
-    const double th1 = angle(1, 0, (x1p - cxp) / rxx, (y1p - cyp) / ryy);
-    double dth = angle((x1p - cxp) / rxx, (y1p - cyp) / ryy, (-x1p - cxp) / rxx, (-y1p - cyp) / ryy);
-    if (!sweep && dth > 0) dth -= 2 * M_PI;
-    if (sweep && dth < 0) dth += 2 * M_PI;
-    const int n = std::max(4, static_cast<int>(std::fabs(dth) / (2 * M_PI) * kSegs * 4));
-    std::vector<std::array<double, 2>> pts;
-    pts.reserve(static_cast<size_t>(n));
-    for (int i = 1; i <= n; ++i) {
-        const double th = th1 + dth * i / n;
-        pts.push_back({cosR * rxx * std::cos(th) - sinR * ryy * std::sin(th) + cx, sinR * rxx * std::cos(th) + cosR * ryy * std::sin(th) + cy});
+    const double t1 = std::max(0.0, rx * rx * ry * ry - rx * rx * y1_ * y1_ - ry * ry * x1_ * x1_);
+    const double t2 = rx * rx * y1_ * y1_ + ry * ry * x1_ * x1_;
+    double t3 = std::sqrt(t1 / t2);
+    if (large == sweep) t3 = -t3;
+    const double cx_ = t3 * rx * y1_ / ry, cy_ = t3 * -ry * x1_ / rx;
+    const double cx = cosR * cx_ - sinR * cy_ + (x1 + x2) / 2.0;
+    const double cy = sinR * cx_ + cosR * cy_ + (y1 + y2) / 2.0;
+    const auto vectorAngle = [](double ux, double uy, double vx, double vy) {
+        const double a = atan2Deg(vy, vx) - atan2Deg(uy, ux);
+        return a < 0 ? a + 360 : a;
+    };
+    const double ux = (x1_ - cx_) / rx, uy = (y1_ - cy_) / ry, vx = (-x1_ - cx_) / rx, vy = (-y1_ - cy_) / ry;
+    const double theta = vectorAngle(1, 0, ux, uy);
+    double delta = vectorAngle(ux, uy, vx, vy);
+    if (!sweep) delta -= 360;
+    const unsigned fn = static_cast<unsigned>(disc.circular(std::max(rx, ry), delta).value_or(3));
+    const unsigned steps = std::max(fn, static_cast<unsigned>(std::fabs(delta) * 10.0 / 180 + 4));
+    for (unsigned a = 0; a <= steps; ++a) {
+        const double phi = theta + delta * a / steps;
+        const double xx = cosR * cosDeg(phi) * rx - sinR * sinDeg(phi) * ry;
+        const double yy = sinR * cosDeg(phi) * rx + cosR * sinDeg(phi) * ry;
+        path.push_back({xx + cx, yy + cy});
     }
-    return pts;
 }
 
-// Tokenizes an SVG path `d` attribute into command letters and numbers (in
-// source order), mirroring the reference's own regex tokenizer.
-std::vector<std::string> tokenizePath(const std::string& d) {
-    std::vector<std::string> toks;
-    size_t i = 0;
-    while (i < d.size()) {
-        const char c = d[i];
-        if (std::isspace(static_cast<unsigned char>(c)) || c == ',') {
-            ++i;
-        } else if (std::strchr("MmZzLlHhVvCcSsQqTtAa", c) != nullptr) {
-            toks.emplace_back(1, c);
-            ++i;
-        } else {
-            const size_t start = i;
-            if (d[i] == '+' || d[i] == '-') ++i;
-            while (i < d.size() && (std::isdigit(static_cast<unsigned char>(d[i])) || d[i] == '.')) ++i;
-            if (i < d.size() && (d[i] == 'e' || d[i] == 'E')) {
-                ++i;
-                if (i < d.size() && (d[i] == '+' || d[i] == '-')) ++i;
-                while (i < d.size() && std::isdigit(static_cast<unsigned char>(d[i]))) ++i;
-            }
-            if (i > start) toks.push_back(d.substr(start, i - start));
-            else ++i; // stray character
+// Beziers take $fn segments, never fewer than 20; $fa/$fs play no part.
+int bezierSegments(const Discretizer& disc) {
+    return std::isfinite(disc.fn) && disc.fn < 1e6 ? std::max(static_cast<int>(disc.fn), 20) : 20;
+}
+
+void quadTo(Path& path, double x, double y, double cx1, double cy1, double x2, double y2, const Discretizer& disc) {
+    const int fn = bezierSegments(disc);
+    for (int idx = 1; idx <= fn; ++idx) {
+        const double a = idx * (1.0 / fn), m = 1.0 - a;
+        path.push_back({x * m * m + cx1 * 2 * m * a + x2 * a * a, y * m * m + cy1 * 2 * m * a + y2 * a * a});
+    }
+}
+
+void cubicTo(Path& path, double x, double y, double cx1, double cy1, double cx2, double cy2, double x2, double y2,
+             const Discretizer& disc) {
+    const int fn = bezierSegments(disc);
+    for (int idx = 1; idx <= fn; ++idx) {
+        const double a = idx * (1.0 / fn), m = 1.0 - a;
+        path.push_back({x * m * m * m + cx1 * 3 * m * m * a + cx2 * 3 * m * a * a + x2 * a * a * a,
+                        y * m * m * m + cy1 * 3 * m * m * a + cy2 * 3 * m * a * a + y2 * a * a * a});
+    }
+}
+
+bool isOpen(const Path& p) {
+    return std::hypot(p.front()[0] - p.back()[0], p.front()[1] - p.back()[1]) > 0.1;
+}
+
+// "1.5.5" is two numbers, 1.5 and .5.
+std::vector<std::string> splitDots(const std::string& str) {
+    if (std::count(str.begin(), str.end(), '.') < 2) return {str};
+    std::vector<std::string> result;
+    std::string text;
+    bool dotSeen = false;
+    for (const std::string& token : splitTokens(str, "", ".")) {
+        text += token;
+        if (token == ".") {
+            dotSeen = true;
+        } else if (dotSeen) {
+            result.push_back(text);
+            text.clear();
         }
     }
-    return toks;
+    return result;
 }
 
-std::vector<Contour2d> parsePathD(const std::string& d, const Mat3& mat) {
-    const std::vector<std::string> toks = tokenizePath(d);
-    std::vector<Contour2d> contours;
-    Contour2d contour;
-    std::array<double, 2> cur{0, 0}, start{0, 0};
-    std::optional<std::array<double, 2>> lastCtrl;
-    char cmd = 'M';
-    size_t ti = 0;
-    const auto nx = [&]() { return std::stod(toks.at(ti++)); };
+// A path's `d`, tokenized and interpreted exactly as libsvg does -- a '-'
+// is its own token negating the next number, "1e" waits for its exponent,
+// and every subpath left open is replaced by its stroke's outline (unless
+// the path closed any subpath and this one is its last).
+PathList parsePathData(const std::string& data, const Stroke& stroke, const Discretizer& disc) {
+    static const char* commands = "-zmlcqahvstZMLCQAHVST";
+    std::vector<std::string> tokens;
+    for (const std::string& tok : splitTokens(data, " ,", commands)) {
+        for (std::string& part : splitDots(tok)) tokens.push_back(std::move(part));
+    }
 
-    while (ti < toks.size()) {
-        const std::string& t = toks[ti];
-        if (t.size() == 1 && std::strchr("MmZzLlHhVvCcSsQqTtAa", t[0]) != nullptr) {
-            cmd = t[0];
-            ++ti;
-            lastCtrl.reset();
-            continue;
+    PathList list(1);
+    double x = 0, y = 0, xx = 0, yy = 0, rx = 0, ry = 0, cx1 = 0, cy1 = 0, cx2 = 0, cy2 = 0, angle = 0;
+    bool large = false, sweep = false, lastCubic = false, lastQuad = false, negate = false, closed = false;
+    char cmd = ' ';
+    int point = 0;
+    std::string preExp;
+    const auto endSegment = [&](bool cubic, bool quad) {
+        point = -1;
+        lastCubic = cubic;
+        lastQuad = quad;
+    };
+    for (const std::string& v : tokens) {
+        double p = 0;
+        if (v.size() == 1 && std::strchr(commands, v[0]) != nullptr) {
+            if (v[0] == '-') {
+                negate = true;
+                continue;
+            }
+            point = -1;
+            cmd = v[0];
+        } else {
+            if (std::tolower(static_cast<unsigned char>(v.back())) == 'e') {
+                preExp = negate ? "-" + v : v;
+                negate = false;
+                continue;
+            }
+            if (preExp.empty()) {
+                p = parseDouble(v);
+                if (negate) p = -p;
+            } else {
+                p = parseDouble(preExp + (negate ? "-" : "") + v);
+                preExp.clear();
+            }
+            negate = false;
         }
         const bool rel = std::islower(static_cast<unsigned char>(cmd));
-        const double ox = rel ? cur[0] : 0.0, oy = rel ? cur[1] : 0.0;
-        const char lc = static_cast<char>(std::toupper(cmd));
-        if (lc == 'M') {
-            if (!contour.empty()) contours.push_back(contour);
-            cur = {nx() + ox, nx() + oy};
-            start = cur;
-            contour = {applyMat(cur, mat)};
-            cmd = rel ? 'l' : 'L';
-        } else if (lc == 'Z') {
-            if (!contour.empty()) contours.push_back(contour);
-            cur = start;
-            contour.clear();
-        } else if (lc == 'L') {
-            cur = {nx() + ox, nx() + oy};
-            contour.push_back(applyMat(cur, mat));
-        } else if (lc == 'H') {
-            cur = {nx() + ox, cur[1]};
-            contour.push_back(applyMat(cur, mat));
-        } else if (lc == 'V') {
-            cur = {cur[0], nx() + oy};
-            contour.push_back(applyMat(cur, mat));
-        } else if (lc == 'C') {
-            const std::array<double, 2> p1{nx() + ox, nx() + oy}, p2{nx() + ox, nx() + oy}, p3{nx() + ox, nx() + oy};
-            lastCtrl = p2;
-            for (const auto& pt : cubicPts(cur, p1, p2, p3)) contour.push_back(applyMat(pt, mat));
-            cur = p3;
-        } else if (lc == 'S') {
-            const std::array<double, 2> refl = lastCtrl ? std::array<double, 2>{2 * cur[0] - (*lastCtrl)[0], 2 * cur[1] - (*lastCtrl)[1]} : cur;
-            const std::array<double, 2> p2{nx() + ox, nx() + oy}, p3{nx() + ox, nx() + oy};
-            lastCtrl = p2;
-            for (const auto& pt : cubicPts(cur, refl, p2, p3)) contour.push_back(applyMat(pt, mat));
-            cur = p3;
-        } else if (lc == 'Q') {
-            const std::array<double, 2> p1{nx() + ox, nx() + oy}, p2{nx() + ox, nx() + oy};
-            lastCtrl = p1;
-            for (const auto& pt : quadPts(cur, p1, p2)) contour.push_back(applyMat(pt, mat));
-            cur = p2;
-        } else if (lc == 'T') {
-            const std::array<double, 2> refl = lastCtrl ? std::array<double, 2>{2 * cur[0] - (*lastCtrl)[0], 2 * cur[1] - (*lastCtrl)[1]} : cur;
-            const std::array<double, 2> p2{nx() + ox, nx() + oy};
-            lastCtrl = refl;
-            for (const auto& pt : quadPts(cur, refl, p2)) contour.push_back(applyMat(pt, mat));
-            cur = p2;
-        } else if (lc == 'A') {
-            const double rx = nx(), ry = nx(), xrot = nx();
-            const bool large = nx() != 0, sweep = nx() != 0;
-            const double ex = nx() + ox, ey = nx() + oy;
-            for (const auto& pt : arcPts(cur[0], cur[1], rx, ry, xrot, large, sweep, ex, ey)) contour.push_back(applyMat(pt, mat));
-            cur = {ex, ey};
+        switch (std::toupper(static_cast<unsigned char>(cmd))) {
+        case 'A':
+            switch (point) {
+            case 0: rx = std::fabs(p); break;
+            case 1: ry = std::fabs(p); break;
+            case 2: angle = p; break;
+            case 3: large = p > 0.5; break;
+            case 4: sweep = p > 0.5; break;
+            case 5: xx = rel ? x + p : p; break;
+            case 6:
+                yy = rel ? y + p : p;
+                arcTo(list.back(), x, y, rx, ry, xx, yy, angle, large, sweep, disc);
+                x = xx;
+                y = yy;
+                endSegment(false, false);
+                break;
+            }
+            break;
+        case 'L':
+            switch (point) {
+            case 0: xx = rel ? x + p : p; break;
+            case 1:
+                yy = rel ? y + p : p;
+                list.back().push_back({xx, yy});
+                x = xx;
+                y = yy;
+                endSegment(false, false);
+                break;
+            }
+            break;
+        case 'C':
+            switch (point) {
+            case 0: cx1 = p; break;
+            case 1: cy1 = p; break;
+            case 2: cx2 = p; break;
+            case 3: cy2 = p; break;
+            case 4: xx = rel ? x + p : p; break;
+            case 5:
+                yy = rel ? y + p : p;
+                if (rel) {
+                    cx1 += x;
+                    cy1 += y;
+                    cx2 += x;
+                    cy2 += y;
+                }
+                cubicTo(list.back(), x, y, cx1, cy1, cx2, cy2, xx, yy, disc);
+                x = xx;
+                y = yy;
+                endSegment(true, false);
+                break;
+            }
+            break;
+        case 'S':
+            switch (point) {
+            case 0:
+                cx1 = lastCubic ? 2 * x - cx2 : x;
+                cy1 = lastCubic ? 2 * y - cy2 : y;
+                cx2 = p;
+                break;
+            case 1: cy2 = p; break;
+            case 2: xx = rel ? x + p : p; break;
+            case 3:
+                yy = rel ? y + p : p;
+                if (rel) {
+                    cx2 += x;
+                    cy2 += y;
+                }
+                cubicTo(list.back(), x, y, cx1, cy1, cx2, cy2, xx, yy, disc);
+                x = xx;
+                y = yy;
+                endSegment(true, false);
+                break;
+            }
+            break;
+        case 'Q':
+            switch (point) {
+            case 0: cx1 = p; break;
+            case 1: cy1 = p; break;
+            case 2: xx = rel ? x + p : p; break;
+            case 3:
+                yy = rel ? y + p : p;
+                if (rel) {
+                    cx1 += x;
+                    cy1 += y;
+                }
+                quadTo(list.back(), x, y, cx1, cy1, xx, yy, disc);
+                x = xx;
+                y = yy;
+                endSegment(false, true);
+                break;
+            }
+            break;
+        case 'T':
+            switch (point) {
+            case 0:
+                cx1 = lastQuad ? 2 * x - cx1 : x;
+                cy1 = lastQuad ? 2 * y - cy1 : y;
+                xx = rel ? x + p : p;
+                break;
+            case 1:
+                yy = rel ? y + p : p;
+                quadTo(list.back(), x, y, cx1, cy1, xx, yy, disc);
+                x = xx;
+                y = yy;
+                endSegment(false, true);
+                break;
+            }
+            break;
+        case 'M':
+            switch (point) {
+            case 0: xx = rel ? x + p : p; break;
+            case 1:
+                yy = rel ? y + p : p;
+                cmd = rel ? 'l' : 'L';
+                if (!list.back().empty()) {
+                    if (isOpen(list.back())) {
+                        const Path open = std::move(list.back());
+                        list.pop_back();
+                        strokeOutline(list, open, stroke);
+                    }
+                    list.emplace_back();
+                }
+                list.back().push_back({xx, yy});
+                x = xx;
+                y = yy;
+                endSegment(false, false);
+                break;
+            }
+            break;
+        case 'V':
+            if (point == 0) {
+                y = rel ? y + p : p;
+                list.back().push_back({x, y});
+                endSegment(false, false);
+            }
+            break;
+        case 'H':
+            if (point == 0) {
+                x = rel ? x + p : p;
+                list.back().push_back({x, y});
+                endSegment(false, false);
+            }
+            break;
+        case 'Z':
+            if (!list.back().empty()) {
+                const auto first = list.back().front();
+                list.back().push_back(first);
+                x = first[0];
+                y = first[1];
+            }
+            list.emplace_back();
+            closed = true;
+            lastCubic = lastQuad = false;
+            break;
         }
+        ++point;
     }
-    if (!contour.empty()) contours.push_back(contour);
-    return contours;
+
+    while (!list.empty() && list.back().empty()) list.pop_back();
+    if (!closed && !list.empty() && isOpen(list.back())) {
+        const Path open = std::move(list.back());
+        list.pop_back();
+        strokeOutline(list, open, stroke);
+    }
+    return list;
 }
 
-std::vector<Contour2d> shapeContours(const XmlNode& el, const Mat3& mat) {
-    if (el.tag == "path") return parsePathD(el.getAttr("d"), mat);
-    if (el.tag == "polygon" || el.tag == "polyline") {
-        const std::vector<double> nums = parseNumberList(el.getAttr("points"));
-        Contour2d pts;
-        for (size_t i = 0; i + 1 < nums.size(); i += 2) pts.push_back(applyMat({nums[i], nums[i + 1]}, mat));
-        return pts.empty() ? std::vector<Contour2d>{} : std::vector<Contour2d>{pts};
-    }
-    if (el.tag == "rect") {
-        const double x = std::stod(el.getAttr("x", "0")), y = std::stod(el.getAttr("y", "0"));
-        const double w = std::stod(el.getAttr("width", "0")), h = std::stod(el.getAttr("height", "0"));
-        Contour2d pts = {applyMat({x, y}, mat), applyMat({x + w, y}, mat), applyMat({x + w, y + h}, mat), applyMat({x, y + h}, mat)};
-        return {pts};
-    }
-    if (el.tag == "circle" || el.tag == "ellipse") {
-        const double cx = std::stod(el.getAttr("cx", "0")), cy = std::stod(el.getAttr("cy", "0"));
-        const double rx = el.tag == "circle" ? std::stod(el.getAttr("r", "0")) : std::stod(el.getAttr("rx", "0"));
-        const double ry = el.tag == "circle" ? rx : std::stod(el.getAttr("ry", "0"));
-        Contour2d pts;
-        pts.reserve(kSegs);
-        for (int i = 0; i < kSegs; ++i) {
-            const double th = 2 * M_PI * i / kSegs;
-            pts.push_back(applyMat({cx + rx * std::cos(th), cy + ry * std::sin(th)}, mat));
-        }
-        return {pts};
-    }
-    return {};
+// "x1,y1 x2,y2 ..." -- an odd number out is dropped.
+Path parsePoints(const std::string& text) {
+    Path path;
+    const std::vector<std::string> toks = splitTokens(text, " ,");
+    for (size_t i = 0; i + 1 < toks.size(); i += 2) path.push_back({parseDouble(toks[i]), parseDouble(toks[i + 1])});
+    return path;
 }
 
-void walk(const XmlNode& el, const Mat3& mat, std::vector<Contour2d>& out) {
-    if (el.tag == "defs" || el.tag == "symbol") return;
-    const Mat3 m = compose(parseTransform(el.getAttr("transform")), mat);
-    const std::vector<Contour2d> shapes = shapeContours(el, m);
-    out.insert(out.end(), shapes.begin(), shapes.end());
-    for (const XmlNode& child : el.children) walk(child, m, out);
+// The outlines one element draws, in its own coordinates.
+PathList elementPaths(const XmlNode& el, const Discretizer& disc) {
+    const auto num = [&](const char* name) { return parseDouble(el.getAttr(name)); };
+    const std::string& tag = el.tag;
+    PathList list;
+    if (tag == "path") return parsePathData(el.getAttr("d"), strokeOf(el), disc);
+    if (tag == "circle" || tag == "ellipse") {
+        const double cx = num("cx"), cy = num("cy");
+        const double rx = tag == "circle" ? num("r") : num("rx"), ry = tag == "circle" ? rx : num("ry");
+        const unsigned long fn = std::max(disc.circular(std::max(rx, ry)).value_or(3), 40);
+        Path p;
+        for (unsigned long i = 1; i <= fn; ++i) {
+            const double a = i * 360.0 / fn;
+            p.push_back({rx * sinDeg(a) + cx, ry * cosDeg(a) + cy});
+        }
+        list.push_back(std::move(p));
+    } else if (tag == "line") {
+        strokeOutline(list, Path{{num("x1"), num("y1")}, {num("x2"), num("y2")}}, strokeOf(el));
+    } else if (tag == "polyline") {
+        strokeOutline(list, parsePoints(el.getAttr("points")), strokeOf(el));
+    } else if (tag == "polygon") {
+        Path p = parsePoints(el.getAttr("points"));
+        if (!p.empty()) p.push_back(p.front());
+        list.push_back(std::move(p));
+    } else if (tag == "rect") {
+        const double x = num("x"), y = num("y"), w = num("width"), h = num("height");
+        double rx = num("rx"), ry = num("ry");
+        const bool hasRx = std::fabs(rx) >= 1e-8, hasRy = std::fabs(ry) >= 1e-8;
+        if (!hasRx && !hasRy) {
+            list.push_back({{x, y}, {x + w, y}, {x + w, y + h}, {x, y + h}, {x, y}});
+            return list;
+        }
+        if (!hasRx) rx = ry;
+        if (!hasRy) ry = rx;
+        rx = std::min(rx, w / 2);
+        ry = std::min(ry, h / 2);
+        // A rounded rect is drawn as path data, its numbers printed at the
+        // stream's default 6 significant digits -- which libsvg does too.
+        std::ostringstream d;
+        d << "M " << x + rx << "," << y << " H " << x + w - rx << " A " << rx << "," << ry << " 0 0,1 " << x + w << ","
+          << y + ry << " V " << y + h - ry << " A " << rx << "," << ry << " 0 0,1 " << x + w - rx << "," << y + h
+          << " H " << x + rx << " A " << rx << "," << ry << " 0 0,1 " << x << "," << y + h - ry << " V " << y + ry
+          << " A " << rx << "," << ry << " 0 0,1 " << x + rx << "," << y << " z";
+        return parsePathData(d.str(), strokeOf(el), disc);
+    }
+    return list;
 }
+
+// -- the document walk ----------------------------------------------------
 
 // `class` is a space-separated LIST, so this is membership rather than
 // equality: class="cut outline" is matched by class="cut".
 bool hasClass(const XmlNode& el, const std::string& want) {
-    const std::string attr = el.getAttr("class");
-    size_t i = 0;
-    while (i < attr.size()) {
-        while (i < attr.size() && std::isspace(static_cast<unsigned char>(attr[i]))) ++i;
-        size_t j = i;
-        while (j < attr.size() && !std::isspace(static_cast<unsigned char>(attr[j]))) ++j;
-        if (j > i && attr.compare(i, j - i, want) == 0) return true;
-        i = j;
+    for (const std::string& c : splitTokens(el.getAttr("class"), " \t\r\n")) {
+        if (c == want) return true;
     }
     return false;
 }
 
-bool matches(const XmlNode& el, const SvgFilter& f) {
-    if (f.id && el.getAttr("id") == *f.id) return true;
-    if (f.cls && hasClass(el, *f.cls)) return true;
-    return false;
+bool isShapeTag(const std::string& tag) {
+    static const char* tags[] = {"svg",     "g",        "path", "rect", "circle", "ellipse",
+                                 "line",    "polyline", "polygon", "use", "text", "tspan"};
+    return std::any_of(std::begin(tags), std::end(tags), [&](const char* t) { return tag == t; });
 }
 
-// Walk looking for matching elements; everything under one is taken whole,
-// which is what makes `id=` on a <g> mean "that group". Transforms above
-// the match still apply -- a selected shape must land where it does in the
-// drawing, not at the origin.
-void walkFiltered(const XmlNode& el, const Mat3& mat, const SvgFilter& f,
-                  std::vector<Contour2d>& out, bool& matched) {
-    if (el.tag == "defs" || el.tag == "symbol") return;
-    const Mat3 m = compose(parseTransform(el.getAttr("transform")), mat);
-    if (matches(el, f)) {
-        matched = true;
-        const std::vector<Contour2d> shapes = shapeContours(el, m);
-        out.insert(out.end(), shapes.begin(), shapes.end());
-        for (const XmlNode& child : el.children) walk(child, m, out);
-        return;     // a match is taken whole; no nested re-matching
+struct Walk {
+    const Discretizer& disc;
+    const SvgFilter& filter;
+    std::map<std::string, const XmlNode*> defs;   // <defs> shapes by id, as seen so far
+    std::vector<PathList> shapes;                 // one entry per drawn element
+    bool matched = false;
+
+    enum class Mode { Normal, Defs, Clone };
+
+    // Which elements a filter selects (read off the reference): with id
+    // (or class), those elements, inside the named layer when one is
+    // given too; with layer alone, just the layer's own group.
+    bool selects(const XmlNode& el, bool isPage, const std::vector<std::string>& layers) const {
+        if (isPage) return false;  // libsvg reads no id or layer for <svg>
+        if (filter.id || filter.cls) {
+            const bool hit = (filter.id && el.getAttr("id") == *filter.id && el.findAttr("id")) ||
+                             (filter.cls && hasClass(el, *filter.cls));
+            return hit && (!filter.layer || std::find(layers.begin(), layers.end(), *filter.layer) != layers.end());
+        }
+        return filter.layer && !layers.empty() && layers.back() == *filter.layer && ownLayer(el);
     }
-    for (const XmlNode& child : el.children) walkFiltered(child, m, f, out, matched);
-}
+
+    static bool ownLayer(const XmlNode& el) {
+        return el.getAttr("inkscape:groupmode") == "layer" && el.findAttr("inkscape:label");
+    }
+
+    // `included` is libsvg's is_excluded() walked downwards: the nearest
+    // selected or display:none ancestor-or-self decides, and with neither,
+    // a filtered import leaves the element out and an unfiltered one keeps it.
+    void walk(const XmlNode& el, const Mat3& mat, bool included, std::vector<std::string> layers, Mode mode) {
+        if (el.tag == "defs") mode = Mode::Defs;
+        if (!isShapeTag(el.tag)) {  // not a shape: transparent, transform and all
+            for (const XmlNode& child : el.children) walk(child, mat, included, layers, mode);
+            return;
+        }
+        const bool isPage = el.tag == "svg";
+        if (!isPage && ownLayer(el)) layers.push_back(el.getAttr("inkscape:label"));
+        const bool selected = selects(el, isPage, layers);
+        matched = matched || selected;
+        std::string display = styleProperty(el, "display");
+        if (display.empty()) display = el.getAttr("display");
+        const bool hidden = !isPage && display == "none";
+        const bool inChain = selected ? true : hidden ? false : included;
+        Mat3 m = isPage ? mat : mat * parseTransform(el.getAttr("transform"));
+
+        if (mode == Mode::Defs) {
+            if (const std::string* id = el.findAttr("id"); id && !isPage) defs.emplace(*id, &el);
+        } else if (inChain) {
+            PathList paths = elementPaths(el, disc);
+            for (Path& p : paths)
+                for (auto& pt : p) pt = applyMat(m, pt);
+            if (!paths.empty()) shapes.push_back(std::move(paths));
+        }
+        if (el.tag == "use" && mode == Mode::Normal) {
+            // Only a shape in a <defs> already read can be used, and its
+            // copy is placed by the <use>'s own transform and then x/y --
+            // which libsvg prints into the transform at 6 digits.
+            std::string href = el.getAttr("href");
+            if (href.empty()) href = el.getAttr("xlink:href");
+            const auto it = href.rfind('#', 0) == 0 ? defs.find(href.substr(1)) : defs.end();
+            if (it != defs.end()) {
+                std::ostringstream t;
+                t << el.getAttr("transform") << " translate(" << parseDouble(el.getAttr("x")) << ","
+                  << parseDouble(el.getAttr("y")) << ")";
+                walk(*it->second, mat * parseTransform(t.str()), inChain, layers, Mode::Clone);
+            }
+        }
+        const bool container = isPage || el.tag == "g" || el.tag == "text" || el.tag == "tspan";
+        for (const XmlNode& child : el.children) {
+            if (container) walk(child, m, inChain, layers, mode);
+            else walk(child, mat, included, layers, mode);
+        }
+    }
+};
 
 // "12", "12.5mm", "3in" -> (number, unit); unit empty when unitless.
 // nullopt for anything else, which OpenSCAD treats as absent.
 std::optional<std::pair<double, std::string>> parseLength(const std::string& text) {
-    const size_t b = text.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return std::nullopt;
-    const size_t e = text.find_last_not_of(" \t\r\n");
-    const std::string t = text.substr(b, e - b + 1);
+    const std::string t = trim(text);
+    if (t.empty()) return std::nullopt;
     size_t used = 0;
     double n = 0.0;
     try {
@@ -521,13 +862,13 @@ std::optional<std::pair<double, std::string>> parseLength(const std::string& tex
     return std::nullopt;
 }
 
-// Place SVG user-unit contours as OpenSCAD's import_svg.cc does: the page's
-// width/height to millimetres (a unitless length at `dpi`, px at 96), the
-// viewBox scaled onto it under preserveAspectRatio (default xMidYMid meet),
-// and Y flipped about the page height -- or, with center, about the
-// drawing's own centre. Without this a unitless 100-unit drawing came in
-// 2.8x too large and below the X axis.
-void pageMap(const XmlNode& root, double dpi, bool center, std::vector<Contour2d>& contours) {
+// Place SVG user-unit contours as OpenSCAD does: the page's width/height
+// to millimetres (a unitless length at `dpi`, px at 96), the viewBox
+// scaled onto it under preserveAspectRatio (default xMidYMid meet), and Y
+// flipped about the page height -- or, with center, about the drawing's
+// own centre. Without this a unitless 100-unit drawing came in 2.8x too
+// large and below the X axis.
+void pageMap(const XmlNode& root, double dpi, bool center, std::vector<PathList>& shapes) {
     std::vector<double> vb;
     {
         std::string v = root.getAttr("viewBox");
@@ -580,26 +921,50 @@ void pageMap(const XmlNode& root, double dpi, bool center, std::vector<Contour2d
     double cx = -ax, cy = heightMm - ay;
     if (center) {
         double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
-        for (const Contour2d& c : contours)
-            for (const auto& p : c) {
-                lo[0] = std::min(lo[0], sx * p[0]);
-                hi[0] = std::max(hi[0], sx * p[0]);
-                lo[1] = std::min(lo[1], sy * p[1]);
-                hi[1] = std::max(hi[1], sy * p[1]);
-            }
+        for (const PathList& s : shapes)
+            for (const Path& c : s)
+                for (const auto& p : c) {
+                    lo[0] = std::min(lo[0], sx * p[0]);
+                    hi[0] = std::max(hi[0], sx * p[0]);
+                    lo[1] = std::min(lo[1], sy * p[1]);
+                    hi[1] = std::max(hi[1], sy * p[1]);
+                }
         cx = std::isfinite(lo[0]) ? (lo[0] + hi[0]) / 2.0 : 0.0;
         cy = std::isfinite(lo[1]) ? (lo[1] + hi[1]) / 2.0 : 0.0;
     }
     // -vby - y, not y - vby: OpenSCAD's own formula, kept for parity.
-    for (Contour2d& c : contours)
-        for (auto& p : c) p = {sx * (p[0] - vbx) - cx, sy * (-vby - p[1]) + cy};
+    for (PathList& s : shapes)
+        for (Path& c : s)
+            for (auto& p : c) p = {sx * (p[0] - vbx) - cx, sy * (-vby - p[1]) + cy};
+}
+
+// Each element fills even-odd on its own -- a path's overlapping subpaths
+// cancel -- and the elements then union, as the reference fills them.
+std::vector<Contour2d> fill(const std::vector<PathList>& shapes) {
+    std::vector<manifold::CrossSection> parts;
+    for (const PathList& s : shapes) {
+        manifold::Polygons polys;
+        for (const Path& c : s) {
+            manifold::SimplePolygon poly;
+            for (const auto& p : c) poly.push_back({p[0], p[1]});
+            polys.push_back(std::move(poly));
+        }
+        parts.emplace_back(polys, manifold::CrossSection::FillRule::EvenOdd);
+    }
+    std::vector<Contour2d> out;
+    for (const manifold::SimplePolygon& poly :
+         manifold::CrossSection::BatchBoolean(parts, manifold::OpType::Add).ToPolygons()) {
+        Contour2d c;
+        for (const auto& p : poly) c.push_back({p.x, p.y});
+        out.push_back(std::move(c));
+    }
+    return out;
 }
 
 } // namespace
 
-std::vector<Contour2d> loadSvgContours(const std::string& path,
-                                      const SvgFilter& filter,
-                                      bool* matched, double dpi, bool center) {
+std::vector<Contour2d> loadSvgContours(const std::string& path, const SvgFilter& filter, bool* matched, double dpi,
+                                       bool center, const Discretizer& disc) {
     if (!(dpi > 0.0)) dpi = 72.0;
     std::ifstream in(path);
     if (!in) throw std::runtime_error("could not open '" + path + "'");
@@ -608,21 +973,14 @@ std::vector<Contour2d> loadSvgContours(const std::string& path,
     std::optional<XmlNode> root = parseXmlRoot(buf.str());
     if (!root) throw std::runtime_error("'" + path + "' is not a well-formed SVG file");
 
-    std::vector<Contour2d> out;
-    if (!filter.id && !filter.cls) {
-        if (matched) *matched = true;   // no filter, nothing to miss
-        walk(*root, Mat3{}, out);
-        pageMap(*root, dpi, center, out);
-        return out;
-    }
-    bool hit = false;
-    walkFiltered(*root, Mat3{}, filter, out, hit);
+    const bool filtered = filter.id || filter.cls || filter.layer;
+    Walk w{disc, filter, {}, {}, false};
+    w.walk(*root, Mat3{}, !filtered, {}, Walk::Mode::Normal);
     // A filter that matched nothing imports nothing -- it does NOT fall
-    // back to the whole drawing, which would be the silent-wrong-geometry
-    // answer. The caller turns this into the warning.
-    if (matched) *matched = hit;
-    pageMap(*root, dpi, center, out);
-    return out;
+    // back to the whole drawing. The caller turns this into the warning.
+    if (matched) *matched = !filtered || w.matched;
+    pageMap(*root, dpi, center, w.shapes);
+    return fill(w.shapes);
 }
 
 } // namespace oscadeval
