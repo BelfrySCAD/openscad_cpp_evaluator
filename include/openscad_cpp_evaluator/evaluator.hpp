@@ -2,6 +2,8 @@
 
 #include "openscad_cpp_evaluator/bound_args.hpp"
 #include "openscad_cpp_evaluator/bytecode.hpp"
+
+#include <unordered_set>
 #include "openscad_cpp_evaluator/bytecode_vm.hpp"
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/csg_node.hpp"
@@ -557,6 +559,30 @@ public:
     // Public: builtins/import.cpp's not-manifold warning is emitted from a
     // free function, same reasoning as tagGenerated()/builtinChildren().
     void warn(const std::string& message, const oscad::Position* position);
+    // OpenSCAD's lexer warns "Undefined escape sequence" once per bad escape
+    // in the source. This warns for a literal the first time it is
+    // evaluated or compiled, and never again for that literal.
+    void warnUndefinedEscapes(const oscad::StringLiteral& lit, int count);
+    // let() keeps the FIRST binding of a repeated name: OpenSCAD evaluates
+    // the later right-hand side, warns with its value, and discards it.
+    // OpenSCAD's Assert::performAssert, given every argument's value in
+    // source order -- it evaluates them all, pass or fail, so a passing
+    // `assert(true, nosuch)` still warns. Warns about unexpected arguments;
+    // throws via error() when the condition is false or missing (`assert()`
+    // fails). The message prints as echo() would print it.
+    void checkAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, const std::vector<Value>& values,
+                     const oscad::ASTNode& node);
+    void warnDuplicateLet(const std::string& name, const Value& v, const oscad::Position* position);
+    template <typename Assignments>
+    static bool repeatsEarlierLetName(const Assignments& assignments, size_t i) {
+        for (size_t j = 0; j < i; ++j)
+            if (assignments[j]->name->name == assignments[i]->name->name) return true;
+        return false;
+    }
+    std::unordered_set<const oscad::StringLiteral*> undefinedEscapesWarned_;
+    void warnUndefinedEscapes(const CompiledChunk& chunk) {
+        for (const auto& [lit, n] : chunk.undefinedEscapeLiterals) warnUndefinedEscapes(*lit, n);
+    }
     // Hands one already-formatted warning line to echoFn_, recording it in
     // warnCapture first when one is active. Every warning path goes through
     // here, including a ManifoldCache hit replaying a cached line.

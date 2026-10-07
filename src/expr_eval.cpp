@@ -108,6 +108,11 @@ void Evaluator::warn(const std::string& message, const oscad::Position* position
     emitWarning(formatWarning(message, position, callStack_));
 }
 
+void Evaluator::warnUndefinedEscapes(const oscad::StringLiteral& lit, int count) {
+    if (!undefinedEscapesWarned_.insert(&lit).second) return;
+    for (int k = 0; k < count; ++k) warn("Undefined escape sequence", &lit.position());
+}
+
 void Evaluator::emitWarning(const std::string& formatted) {
     if (warnCapture != nullptr) warnCapture->push_back(formatted);
     if (echoFn_) echoFn_(formatted);
@@ -316,9 +321,14 @@ void Evaluator::evalListElement(const oscad::ASTNode& elem, EvalContext& ctx, st
             EvalContext letCtx = ctx.letChildCtx();
             // Per-assignment stops only -- no expr-level body marker here,
             // unlike the if/if-else/each clauses (matches the reference).
-            for (const auto& assign : n.assignments) {
+            for (size_t i = 0; i < n.assignments.size(); ++i) {
+                const auto& assign = n.assignments[i];
                 checkDebug(*assign, letCtx);
-                bindLetName(letCtx, assign->name->name, evalExpr(*assign->expr, letCtx));
+                Value v = evalExpr(*assign->expr, letCtx);
+                if (repeatsEarlierLetName(n.assignments, i))
+                    warnDuplicateLet(assign->name->name, v, &n.position());
+                else
+                    bindLetName(letCtx, assign->name->name, v);
             }
             appendAll(out, evalListCompBody(*n.body, letCtx));
             return;
@@ -378,9 +388,25 @@ Value Evaluator::evalRangeLiteral(const oscad::RangeLiteral& node, EvalContext& 
 // Value functions.
 Value Evaluator::applyRange(const Value& startV, const Value& endV, const Value& stepV, bool implicitStep,
                             const oscad::Position* pos) {
-    double start = std::holds_alternative<std::monostate>(startV) ? 0.0 : toDoubleLenient(startV);
-    double end = std::holds_alternative<std::monostate>(endV) ? 0.0 : toDoubleLenient(endV);
-    double step = std::holds_alternative<std::monostate>(stepV) ? 1.0 : toDoubleLenient(stepV);
+    // Bounds and step must be numbers, as upstream's Range::evaluate requires
+    // (its warnings are from 2026-02-17, just after 2026.02.01, which returns
+    // undef silently): [0:"a"] and [undef:1] are undef, so a loop over one
+    // runs zero times. They were coerced -- undef to 0, "a" to 0 -- so
+    // [for (i=[0:"a"]) i] was [0].
+    const double* startD = std::get_if<double>(&startV);
+    const double* endD = std::get_if<double>(&endV);
+    if (!startD || !endD) {
+        warn("Unable to convert [" + fmtValue(startV) + ":...:" + fmtValue(endV) + "] to a range", pos);
+        return Value{};
+    }
+    const double* stepD = std::get_if<double>(&stepV);
+    if (!implicitStep && !stepD) {
+        warn("Unable to convert [...:" + fmtValue(stepV) + ":...] to a step value", pos);
+        return Value{};
+    }
+    double start = *startD;
+    double end = *endD;
+    double step = stepD ? *stepD : 1.0;
     // A range whose begin is already past its end iterates zero times, which
     // is almost always a typo -- [5:0] where [5:-1:0] was meant. Reported
     // here, at construction, because that is where the reference reports it:
@@ -424,7 +450,8 @@ void Evaluator::bindLetName(EvalContext& ctx, const std::string& name, const Val
 
 Value Evaluator::evalLetExpr(const oscad::LetOp& node, EvalContext& ctx) {
     EvalContext childCtx = ctx.letChildCtx();
-    for (const auto& assign : node.assignments) {
+    for (size_t i = 0; i < node.assignments.size(); ++i) {
+        const auto& assign = node.assignments[i];
         // Sequential: each RHS is evaluated against childCtx, so it sees
         // earlier bindings from the same let() -- `let(a=1, b=a+1) b` -> 2.
         // Unlike the *statement* form (evalLetBlock), which does not --
@@ -434,9 +461,16 @@ Value Evaluator::evalLetExpr(const oscad::LetOp& node, EvalContext& ctx) {
         // the mirror image of _eval_let_block's `_check_debug(assign, ctx)`.
         checkDebug(*assign, childCtx);
         Value v = evalExpr(*assign->expr, childCtx);
-        bindLetName(childCtx, assign->name->name, v);
+        if (repeatsEarlierLetName(node.assignments, i))
+            warnDuplicateLet(assign->name->name, v, &node.position());
+        else
+            bindLetName(childCtx, assign->name->name, v);
     }
     return evalExpr(*node.body, childCtx);
+}
+
+void Evaluator::warnDuplicateLet(const std::string& name, const Value& v, const oscad::Position* position) {
+    warn("Ignoring duplicate variable assignment \"" + name + "\" = " + fmtValue(v), position);
 }
 
 Value Evaluator::evalEchoExpr(const oscad::EchoOp& node, EvalContext& ctx) {
@@ -458,23 +492,10 @@ Value Evaluator::evalProfileTimeExpr(const oscad::ProfileTimeOp& node, EvalConte
 }
 
 Value Evaluator::evalAssertExpr(const oscad::AssertOp& node, EvalContext& ctx) {
-    // Unlike the statement form (evalAssertStatement), which supports named
-    // arguments via getArg()/CallArgs, the expression form indexes raw
-    // arguments positionally -- mirrors the reference's _expr_assert
-    // exactly (`raw[0].expr`/`raw[1].expr`, not _get_arg).
     checkDebug(node, ctx); // _expr_assert, before the condition is evaluated
-    const auto& raw = node.arguments;
-    const bool condition = raw.empty() || truthy(evalExpr(*argExpr(*raw[0]), ctx));
-    if (!condition) {
-        std::string condText = raw.empty() ? "false" : argExpr(*raw[0])->toString();
-        std::string err = "Assertion '" + condText + "' failed";
-        if (raw.size() > 1) {
-            Value msg = evalExpr(*argExpr(*raw[1]), ctx);
-            const std::string* s = std::get_if<std::string>(&msg);
-            err += ": \"" + (s ? *s : fmtValue(msg)) + "\"";
-        }
-        error(err, node, "assert");
-    }
+    std::vector<Value> values;
+    for (const auto& arg : node.arguments) values.push_back(evalExpr(*argExpr(*arg), ctx));
+    checkAssert(node.arguments, values, node);
     return evalExpr(*node.body, ctx);
 }
 
@@ -497,8 +518,13 @@ Value Evaluator::evalExpr(const oscad::Expression& node, EvalContext& ctx) {
             return Value{static_cast<const oscad::NumberLiteral&>(node).val};
         case NodeKind::BooleanLiteral:
             return Value{static_cast<const oscad::BooleanLiteral&>(node).val};
-        case NodeKind::StringLiteral:
-            return Value{unescapeStringLiteral(static_cast<const oscad::StringLiteral&>(node).val)};
+        case NodeKind::StringLiteral: {
+            const auto& lit = static_cast<const oscad::StringLiteral&>(node);
+            int undefinedEscapes = 0;
+            Value v{unescapeStringLiteral(lit.val, &undefinedEscapes)};
+            if (undefinedEscapes) warnUndefinedEscapes(lit, undefinedEscapes);
+            return v;
+        }
         case NodeKind::UndefinedLiteral:
             return Value{};
         case NodeKind::CommentedExpr:

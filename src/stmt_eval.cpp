@@ -73,24 +73,41 @@ void Evaluator::doEcho(const std::vector<std::unique_ptr<oscad::Argument>>& argu
     emitEcho(pairs);
 }
 
+void Evaluator::checkAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                            const std::vector<Value>& values, const oscad::ASTNode& node) {
+    static const std::vector<std::string> kParams{"condition", "message"};
+    warnUnexpectedArgs(*this, kParams, arguments);
+    // A named argument wins; positional 0/1 fill whichever is left.
+    std::optional<size_t> cond, msg;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+        if (arguments[i]->kind() != oscad::NodeKind::NamedArgument) continue;
+        const std::string& name = static_cast<const oscad::NamedArgument&>(*arguments[i]).name->name;
+        if (name == "condition" && !cond) cond = i;
+        else if (name == "message" && !msg) msg = i;
+    }
+    size_t positional = 0;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+        if (arguments[i]->kind() == oscad::NodeKind::NamedArgument) continue;
+        if (positional == 0 && !cond) cond = i;
+        else if (positional == 1 && !msg) msg = i;
+        ++positional;
+    }
+    if (cond && truthy(values[*cond])) return;
+    std::string err = "Assertion";
+    if (cond) err += " '" + argExpr(*arguments[*cond])->toString() + "'";
+    err += " failed";
+    if (msg) err += ": " + fmtValue(values[*msg]);
+    error(err, node, "assert");
+}
+
 void Evaluator::evalAssertStatement(const oscad::ModularAssert& node, EvalContext& ctx) {
     // The statement form supports named arguments (assert(condition=...,
     // message=...)), unlike the expression form's raw positional indexing
     // -- see evalAssertExpr. Mirrors _eval_statement_impl's ModularAssert
     // branch exactly.
-    CallArgs args = resolveArgs(*this, node.arguments, ctx);
-    const bool condition = truthy(getArg(args, 0, "condition", Value{true}));
-    if (!condition) {
-        std::string condText = node.arguments.empty() ? "false" : argExpr(*node.arguments[0])->toString();
-        Value msgArg = getArg(args, 1, "message", Value{});
-        std::string err = "Assertion '" + condText + "' failed";
-        if (!std::holds_alternative<std::monostate>(msgArg)) {
-            const std::string* s = std::get_if<std::string>(&msgArg);
-            err += ": \"" + (s ? *s : fmtValue(msgArg)) + "\"";
-        }
-        error(err, node, "assert");
-        return;
-    }
+    std::vector<Value> values;
+    for (const auto& arg : node.arguments) values.push_back(evalExprMaybeCompiled(*argExpr(*arg), ctx));
+    checkAssert(node.arguments, values, node);
     // Assertion passed -- propagate any chained child geometry (e.g.
     // `assert(...) translate(...) children();`).
     if (!node.children.empty()) evalChildren(node.children, ctx);
@@ -125,6 +142,7 @@ void Evaluator::evalFor(const oscad::ModularFor& node, EvalContext& ctx) {
     // case), not just an internal inconsistency.
     std::function<void(size_t, EvalContext&)> recurse = [&](size_t depth, EvalContext& parentCtx) {
         if (depth == node.assignments.size()) {
+            if (depth == 0) return; // for() with no loop variables iterates zero times in OpenSCAD, not once.
             // Per-full-iteration "entering the body" marker, separate from
             // (and before) the body's own per-statement checks in
             // evalChildren -- mirrors _eval_for's
@@ -166,11 +184,14 @@ void Evaluator::evalLetBlock(const oscad::ModularLet& node, EvalContext& ctx) {
     // echoes 2, and BOSL2 depends on it heavily -- isosurface.scad chains
     // five bindings where each uses the previous, and rounding.scad's
     // join_prism examples do the same.
-    for (const auto& assign : node.assignments) {
+    for (size_t i = 0; i < node.assignments.size(); ++i) {
+        const auto& assign = node.assignments[i];
         checkDebug(*assign, childCtx);
         Value v = evalExprMaybeCompiled(*assign->expr, childCtx);
         const std::string& name = assign->name->name;
-        if (!name.empty() && name[0] == '$') {
+        if (repeatsEarlierLetName(node.assignments, i)) {
+            warnDuplicateLet(name, v, &node.position());
+        } else if (!name.empty() && name[0] == '$') {
             childCtx.dyn->set(name, v);
             childCtx.dynExplicit->set(name, true);
         } else {

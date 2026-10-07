@@ -1783,14 +1783,21 @@ TEST(ChildrenIndex, EachBadIndexInAVectorWarnsSeparately) {
 }
 
 TEST(ChildrenIndex, BadParameterTypeWarns) {
-    // Quoted verbatim from the reference, trailing period included.
-    for (const char* src : {"children(\"a\");", "children([\"a\"]);",
-                             "children(true);", "children([true]);"}) {
+    // Quoted verbatim from the reference: a bad element of a vector gets a
+    // trailing full stop and prints unquoted; a bad whole argument does not.
+    for (const char* src : {"children([\"a\"]);", "children([true]);"}) {
         const std::vector<std::string> w = childWarnings(src);
         ASSERT_FALSE(w.empty()) << src;
         EXPECT_NE(w[0].find("for children, only accept: empty, number, vector, range."),
                   std::string::npos) << src << " -> " << w[0];
     }
+    for (const char* src : {"children(\"a\");", "children(true);", "children(undef);"}) {
+        const std::vector<std::string> w = childWarnings(src);
+        ASSERT_FALSE(w.empty()) << src;
+        EXPECT_NE(w[0].find("for children, only accept: empty, number, vector, range in"),
+                  std::string::npos) << src << " -> " << w[0];
+    }
+    EXPECT_NE(childWarnings("children([\"a\"]);")[0].find("type (a)"), std::string::npos);
 }
 
 TEST(ChildrenIndex, GeometryFollowsTheSelection) {

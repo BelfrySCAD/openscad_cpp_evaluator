@@ -31,7 +31,8 @@ EvalContext EvalContext::makeRoot(const oscad::Scope* rootScope, const oscad::Sc
     ctx.dyn->set("$fa", Value{12.0});
     ctx.dyn->set("$fs", Value{2.0});
     ctx.dyn->set("$t", Value{0.0});
-    ctx.dyn->set("$parent_modules", Value{0.0});
+    // No $parent_modules at the top level: OpenSCAD leaves it unset there,
+    // so reading it warns and gives undef, as here.
     // Always false: there is no preview mode here, every render is a full
     // CSG render. The variable still has to EXIST, though -- a script that
     // branches on it (the `$preview ? cheap : real` idiom) would otherwise

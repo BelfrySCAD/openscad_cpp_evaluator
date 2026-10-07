@@ -663,6 +663,12 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     ++f.pc;
                     break;
                 }
+                case Op::WarnDuplicateLet: {
+                    ev.warnDuplicateLet(f.chunk->names[static_cast<size_t>(ins.a)], f.stack.back(), ins.pos);
+                    f.stack.pop_back();
+                    ++f.pc;
+                    break;
+                }
                 case Op::LoadFree:
                     f.stack.push_back(ev.evalIdentifier(f.chunk->names[static_cast<size_t>(ins.a)], ins.pos, ctx, true));
                     ++f.pc;
@@ -1105,18 +1111,6 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         ev.evalChildren(site.node->children, ctx);
                     ++f.pc;
                     break;
-                }
-                case Op::AssertFail: {
-                    const bool hasMessage = ins.a == 1;
-                    std::string err =
-                        "Assertion '" + std::get<std::string>(f.chunk->constants[static_cast<size_t>(ins.b)]) + "' failed";
-                    if (hasMessage) {
-                        Value msg = std::move(f.stack.back());
-                        f.stack.pop_back();
-                        const std::string* s = std::get_if<std::string>(&msg);
-                        err += ": \"" + (s ? *s : fmtValue(msg)) + "\"";
-                    }
-                    ev.error(err, *ins.node, "assert");
                 }
                 case Op::CallModule: {
                     const CompiledChunk::ModuleCallSite& site = f.chunk->moduleCallSites[static_cast<size_t>(ins.a)];
@@ -1596,25 +1590,12 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         args[static_cast<size_t>(i)] = std::move(f.stack.back());
                         f.stack.pop_back();
                     }
-                    const Value condVal = site.conditionArgIndex ? std::move(args[static_cast<size_t>(*site.conditionArgIndex)])
-                                                                   : Value{true};
-                    if (!truthy(condVal)) {
-                        std::string err = "Assertion '" +
-                                           std::get<std::string>(f.chunk->constants[static_cast<size_t>(site.condTextConstIdx)]) +
-                                           "' failed";
-                        if (site.messageArgIndex) {
-                            const Value& msgArg = args[static_cast<size_t>(*site.messageArgIndex)];
-                            if (!std::holds_alternative<std::monostate>(msgArg)) {
-                                const std::string* s = std::get_if<std::string>(&msgArg);
-                                err += ": \"" + (s ? *s : fmtValue(msgArg)) + "\"";
-                            }
-                        }
-                        ev.error(err, *site.node, "assert");
-                    }
+                    ev.checkAssert(*site.arguments, args, *site.node);
                     // Rare (assert(...) translate(...) children();-shaped) --
                     // not worth its own compiled path; evalChildren already
                     // tries ITS OWN compiled fast path internally regardless.
-                    if (!site.node->children.empty()) ev.evalChildren(site.node->children, ctx);
+                    if (site.statement && !site.statement->children.empty())
+                        ev.evalChildren(site.statement->children, ctx);
                     ++f.pc;
                     break;
                 }

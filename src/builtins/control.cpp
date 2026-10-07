@@ -118,6 +118,7 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
     // needs `i` visible in `j`'s own range expression).
     std::function<void(size_t, EvalContext&)> recurse = [&](size_t depth, EvalContext& parentCtx) {
         if (depth == node.assignments.size()) {
+            if (depth == 0) return; // for() with no loop variables iterates zero times in OpenSCAD, not once.
             // One body-entry marker per full cartesian-product iteration
             // and nothing per individual variable binding (unlike
             // evalFor) -- mirrors _resolve_intersection_for's single

@@ -24,7 +24,8 @@ TEST(EvalContextRoot, SeedsDefaultDollarVars) {
     EXPECT_DOUBLE_EQ(std::get<double>(ctx.dyn->at("$fa")), 12.0);
     EXPECT_DOUBLE_EQ(std::get<double>(ctx.dyn->at("$fs")), 2.0);
     EXPECT_DOUBLE_EQ(std::get<double>(ctx.dyn->at("$t")), 0.0);
-    EXPECT_DOUBLE_EQ(std::get<double>(ctx.dyn->at("$parent_modules")), 0.0);
+    // Not seeded: OpenSCAD leaves $parent_modules unset at the top level.
+    EXPECT_EQ(ctx.dyn->find("$parent_modules"), nullptr);
     EXPECT_TRUE(ctx.let_->empty());
 }
 
