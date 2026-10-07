@@ -422,6 +422,43 @@ std::vector<std::array<float, 4>> carryTriColors(const std::vector<std::array<fl
 
 } // namespace
 
+// The dimension a render of these top-level bodies has: that of the first
+// one with any geometry, as OpenSCAD's root union decides it (isValidDim).
+// 0 for nothing at all.
+int topLevelDimension(const std::vector<ColoredBody>& bodies) {
+    for (const ColoredBody& cb : bodies) {
+        if (!isExportable(cb)) continue;
+        if (cb.section && !cb.section->IsEmpty()) return 2;
+        if (cb.flatPreview) continue;  // an extruded empty section
+        if (cb.isDisplayOnly() && !cb.rawMesh->triVerts.empty()) return 3;
+        if (cb.body && !cb.body->IsEmpty()) return 3;
+    }
+    return 0;
+}
+
+// OpenSCAD's render warnings for a top level that mixes 2D and 3D, once for
+// the mix and once per object it drops. The viewport shows both silently
+// (as OpenSCAD's preview does); a file holds only the first object's
+// dimension, and these say so.
+std::vector<std::string> mixedDimensionWarnings(const std::vector<ColoredBody>& bodies) {
+    std::vector<std::string> out;
+    const int dim = topLevelDimension(bodies);
+    if (dim == 0) return out;
+    for (const ColoredBody& cb : bodies) {
+        if (!isExportable(cb)) continue;
+        int d = 0;
+        if (cb.section && !cb.section->IsEmpty()) d = 2;
+        else if (!cb.flatPreview && ((cb.isDisplayOnly() && !cb.rawMesh->triVerts.empty()) ||
+                                     (cb.body && !cb.body->IsEmpty())))
+            d = 3;
+        if (d == 0 || d == dim) continue;
+        if (out.empty()) out.push_back("Mixing 2D and 3D objects is not supported");
+        out.push_back(std::string("Ignoring ") + (d == 3 ? "3D" : "2D") + " child object for " +
+                      (dim == 3 ? "3D" : "2D") + " operation");
+    }
+    return out;
+}
+
 std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies, std::vector<int>* openParts,
                                                 bool splitComponents, bool splitColors) {
     struct Solid {
@@ -435,22 +472,18 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
     std::vector<ExportObject> loose;
 
     // A `flatPreview` body is a top-level 2D shape thin-extruded so it can be
-    // SEEN (toRenderableBodies). The top level keeps 2D and 3D side by side
-    // for exactly that reason -- but a mesh export of a mixed script must
-    // not smuggle a 1-unit-tall slab in beside the real solids, which is what
-    // the reference drops there too. A 2D-ONLY script still exports its
-    // slab, unchanged: that is the only geometry there is, and dropping it
-    // would leave nothing to write.
-    bool hasRealSolid = false;
-    for (const ColoredBody& cb : bodies) {
-        if (!cb.flatPreview && isExportable(cb)) { hasRealSolid = true; break; }
-    }
+    // SEEN (toRenderableBodies). The viewport keeps 2D and 3D side by side,
+    // but a file holds what OpenSCAD's render holds: the FIRST object
+    // decides the dimension, and a model whose first object is 2D -- or a
+    // 2D-only one, which used to be written as a 1-unit slab -- is not a 3D
+    // object at all.
+    if (topLevelDimension(bodies) == 2) throw std::runtime_error("Current top level object is not a 3D object.");
 
     int index = 0;
     for (const ColoredBody& cb : bodies) {
         ++index;
         if (!isExportable(cb)) continue;
-        if (cb.flatPreview && hasRealSolid) continue;
+        if (cb.flatPreview) continue;
         if (cb.isDisplayOnly()) {
             // Manifold rejected this one -- an open shell is not a solid --
             // so it can join no boolean. Its triangles are real geometry the
@@ -947,6 +980,8 @@ std::optional<manifold::MeshGL> mergeBodies(const std::vector<ColoredBody>& bodi
             }
             continue;
         }
+        // A section's display slab is not a solid; see topLevelDimension.
+        if (b.flatPreview || b.section) continue;
         if (b.body && !b.body->IsEmpty()) solids.push_back(*b.body);
     }
     if (solids.empty() && loose.empty()) return std::nullopt;
@@ -1075,6 +1110,8 @@ Flat2d collect2d(const std::vector<ColoredBody>& bodies) {
 
     Flat2d out;
     bool any = false;
+    const int firstDim = topLevelDimension(bodies);
+    if (firstDim == 3) throw std::runtime_error(kNot2d);
     for (const ColoredBody& cb : bodies) {
         if (!isExportable(cb)) continue;
         // The section decides, not the Manifold: a body that has been
@@ -1084,6 +1121,10 @@ Flat2d collect2d(const std::vector<ColoredBody>& bodies) {
         // binding hands export that same converted list, so reading `body`
         // first would make 2D export unreachable for every 2D script.
         if (!cb.section) {
+            // A 3D object after a 2D first one is dropped, as OpenSCAD's
+            // render drops it (with the warnings generation already gave);
+            // a 3D one first makes the whole model 3D.
+            if (firstDim == 2) continue;
             if (cb.isDisplayOnly()) throw std::runtime_error(kNot2d);
             if (cb.body && !cb.body->IsEmpty()) throw std::runtime_error(kNot2d);
             continue;
@@ -1768,7 +1809,7 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
         throw std::runtime_error("Unsupported export format '" + ext + "'");
     }
 
-    std::vector<std::string> warnings;
+    std::vector<std::string> warnings = mixedDimensionWarnings(bodies);
     const auto reportOpen = [&](const std::vector<int>& openParts) {
         for (int n : openParts) {
             warnings.push_back("part " + std::to_string(n) +
@@ -1794,6 +1835,10 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
         writeSvg(path, bodies, opts.svg);
         return warnings;
     }
+
+    // Every mesh format below: a model whose first object is 2D (or that is
+    // 2D only) is not a 3D object, exactly as OpenSCAD says.
+    if (topLevelDimension(bodies) == 2) throw std::runtime_error("Current top level object is not a 3D object.");
 
     if (isMultiObject(ext)) {
         // These keep the parts as separate objects, so each is checked on

@@ -322,24 +322,18 @@ void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int
                 continue;
             }
             const oscad::Position* pos = child->node ? &child->node->position() : nullptr;
-            // Silent when both are kept: the reference says nothing for
-            // `cube(1); square(4);`, `translate(...) { ... }` or `union()
-            // { ... }` -- checked by running it -- and a warning here would
-            // fail any docs example that legitimately draws a 2D annotation
-            // beside a 3D part.
-            if (rule == DimRule::Group && !keepMixed && !warnedMixing) {
-                warn("Mixing 2D and 3D objects is not supported", pos);
-                warnedMixing = true;
-            }
             if (keepMixed) {
-                // Kept, not dropped: at the top level there is no single
-                // result to build, so nothing downstream can be confused by
-                // the other dimension, and the reference's own preview shows
-                // both. The warning above still stands -- an export cannot
-                // represent the mix -- but silently losing the 2D geometry
-                // from the picture is worse than showing it.
+                // Kept, and silently: the viewport shows both, as OpenSCAD's
+                // PREVIEW does (also silent -- checked, 2026.02.01). Its
+                // RENDER drops the other dimension with two warnings, and
+                // that is what export does (topLevelDimension in export.cpp),
+                // warnings included, so a file never holds the mix.
                 kept.push_back(std::move(b));
                 continue;
+            }
+            if (rule == DimRule::Group && !warnedMixing) {
+                warn("Mixing 2D and 3D objects is not supported", pos);
+                warnedMixing = true;
             }
             warn(std::string("Ignoring ") + (dim == 3 ? "3D" : "2D") + " child object for " +
                      (target == 3 ? "3D" : "2D") + " operation",
