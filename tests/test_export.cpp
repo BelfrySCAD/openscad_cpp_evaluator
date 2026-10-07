@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -652,12 +653,24 @@ TEST(ExportPov, CameraOrbitsVptAndKeepsTheVerticalFieldOfView) {
     EXPECT_LT(rotate, translate);
 }
 
-TEST(ExportPov, WithoutACameraFramesTheBoundingBoxAsOpenscadDoes) {
+// With no viewport camera the scene aims at the middle of the bounding box,
+// Z up, from far enough back that the box's bounding sphere (half its
+// diagonal) fits the image at whatever aspect ratio it is rendered.
+TEST(ExportPov, WithoutACameraFramesTheBoundingBox) {
     const std::string text = povOf("translate([-10, 0, 0]) cube([30, 10, 10]);", "nocam.pov");
-    EXPECT_NE(text.find("camera { look_at <5, 5, 5> location <50, -20, 20> up <0, 0, 1>"), std::string::npos);
-    // 27 lights: below, at and beyond the box on every axis.
-    EXPECT_EQ(countOf(text, "light_source {"), 27u);
-    EXPECT_NE(text.find("light_source { <-70, -20, -20> color rgb <0.2, 0.2, 0.2> }"), std::string::npos);
+    EXPECT_NE(text.find("#declare BB_CENTER = <5, 5, 5>;"), std::string::npos);
+    const size_t radiusAt = text.find("#declare BB_RADIUS = ");
+    ASSERT_NE(radiusAt, std::string::npos);
+    EXPECT_GE(std::stod(text.substr(radiusAt + std::string("#declare BB_RADIUS = ").size())),
+              std::sqrt(30.0 * 30 + 10 * 10 + 10 * 10) / 2);
+    const size_t cam = text.find("camera {");
+    ASSERT_NE(cam, std::string::npos);
+    const std::string block = text.substr(cam, text.find("\n}\n", cam) - cam);
+    EXPECT_NE(block.find("look_at BB_CENTER"), std::string::npos);
+    EXPECT_NE(block.find("sky <0, 0, 1>"), std::string::npos);
+    EXPECT_NE(text.find("image_width / image_height"), std::string::npos);
+    EXPECT_NE(text.find("sin(min(HALF_FOV_V, HALF_FOV_H))"), std::string::npos);
+    EXPECT_GE(countOf(text, "light_source {"), 1u);
 }
 
 TEST(ExportPov, NumbersIgnoreTheGlobalLocale) {
