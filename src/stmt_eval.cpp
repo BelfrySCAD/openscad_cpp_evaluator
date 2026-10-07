@@ -1,4 +1,5 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/format_closure.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 
@@ -94,7 +95,7 @@ void Evaluator::checkAssert(const std::vector<std::unique_ptr<oscad::Argument>>&
     }
     if (cond && truthy(values[*cond])) return;
     std::string err = "Assertion";
-    if (cond) err += " '" + argExpr(*arguments[*cond])->toString() + "'";
+    if (cond) err += " '" + formatExpression(*argExpr(*arguments[*cond])) + "'";
     err += " failed";
     if (msg) err += ": " + fmtValue(values[*msg]);
     error(err, node, "assert");

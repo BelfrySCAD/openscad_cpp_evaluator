@@ -160,7 +160,7 @@ Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* 
         // assignment, function body, module body, comparison. Real BOSL2
         // (gears, threading, rounded_prism, diff/attach, path_sweep) emits
         // none of these, because it guards its own $-reads.
-        if (warnIfUndef) warn("Ignoring unknown variable '" + name + "'", position);
+        if (warnIfUndef) warn("Ignoring unknown variable \"" + name + "\"", position);
         return Value{};
     }
 
@@ -168,7 +168,7 @@ Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* 
 
     const oscad::ASTNode* decl = ctx.scope->lookupVariable(name);
     if (decl == nullptr) {
-        if (warnIfUndef) warn("Ignoring unknown variable '" + name + "'", position);
+        if (warnIfUndef) warn("Ignoring unknown variable \"" + name + "\"", position);
         return Value{};
     }
     if (decl->kind() == oscad::NodeKind::ParameterDeclaration) return Value{};
@@ -180,7 +180,7 @@ Value Evaluator::evalIdentifier(const std::string& name, const oscad::Position* 
     if (declScope && declScope->parent() == nullptr && rootCtx_) {
         if (std::optional<const Value*> v = fileGlobal(*declScope, name)) {
             if (*v) return **v;
-            if (warnIfUndef) warn("Ignoring unknown variable '" + name + "'", position);
+            if (warnIfUndef) warn("Ignoring unknown variable \"" + name + "\"", position);
             return Value{};
         }
     }

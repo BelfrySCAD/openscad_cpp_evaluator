@@ -1305,3 +1305,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_export_of_an_empty_model_uses_openscads_words(tmp_path):
+    import pytest
+    from openscad_cpp_evaluator import Evaluator, EvalError, export_model
+
+    src = tmp_path / "empty.scad"
+    src.write_text("x = 1;")
+    ev = Evaluator()
+    ev.evaluate(str(src), {})
+    with pytest.raises(EvalError, match=r"Current top level object is empty\."):
+        export_model(str(tmp_path / "empty.stl"), ev.geometry)
+    with pytest.raises(EvalError, match=r"Current top level object is not a 2D object\."):
+        export_model(str(tmp_path / "empty.svg"), ev.geometry)

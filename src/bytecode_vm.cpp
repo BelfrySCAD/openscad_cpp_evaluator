@@ -648,7 +648,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         f.stack.push_back(*v);
                     } else {
                         // ins.b = warn flag; see compileIdentifierLoad.
-                        if (ins.b) ev.warn("Ignoring unknown variable '" + name + "'", ins.pos);
+                        if (ins.b) ev.warn("Ignoring unknown variable \"" + name + "\"", ins.pos);
                         f.stack.push_back(Value{});
                     }
                     ++f.pc;

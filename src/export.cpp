@@ -1106,7 +1106,7 @@ Flat2d collect2d(const std::vector<ColoredBody>& bodies) {
     // level. There is no sane projection to fall back on -- a silhouette
     // would be a different model from the one the script describes -- so
     // refusing is the honest answer.
-    const char* kNot2d = "Current top level object is not a 2D object";
+    const char* kNot2d = "Current top level object is not a 2D object.";
 
     Flat2d out;
     bool any = false;
@@ -1853,6 +1853,14 @@ std::vector<std::string> exportModel(const std::string& path, const std::vector<
     const std::vector<std::string>& known = exportExtensions();
     if (std::find(known.begin(), known.end(), ext) == known.end()) {
         throw std::runtime_error("Unsupported export format '" + ext + "'");
+    }
+
+    // Nothing to write, in OpenSCAD's words: a 2D format calls an empty
+    // model "not a 2D object", every other format calls it empty.
+    if (topLevelDimension(bodies) == 0) {
+        const bool twoD = ext == ".svg" || ext == ".pdf" || ext == ".dxf";
+        throw std::runtime_error(twoD ? "Current top level object is not a 2D object."
+                                      : "Current top level object is empty.");
     }
 
     std::vector<std::string> warnings = mixedDimensionWarnings(bodies);

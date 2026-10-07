@@ -441,13 +441,12 @@ TEST(ExpandIterable, NegativeStepRangeTooManyElementsIsRejectedToo) {
     EXPECT_EQ(items.size(), 0u);
 }
 
-TEST(ExpandIterable, ZeroStepRangeIsNaturallyEmptyNotTooMany) {
-    // A zero step never terminates by walking, but must not be
-    // misclassified as "too many" either -- it's naturally empty (0
-    // elements), no warning.
-    bool warned = false;
-    auto items = expandIterable(Value{OscRange{0, 0, 10}}, [&](size_t) { warned = true; });
-    EXPECT_FALSE(warned);
+TEST(ExpandIterable, ZeroStepRangeIsTooManyAsInOpenSCAD) {
+    // A zero step never reaches its end: the reference counts it as its
+    // uint32 ceiling and warns "too many elements (4294967295)".
+    size_t warned = 0;
+    auto items = expandIterable(Value{OscRange{0, 0, 10}}, [&](size_t n) { warned = n; });
+    EXPECT_EQ(warned, 4294967295u);
     EXPECT_EQ(items.size(), 0u);
 }
 

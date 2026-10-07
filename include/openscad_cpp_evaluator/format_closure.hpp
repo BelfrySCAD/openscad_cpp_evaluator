@@ -3,6 +3,7 @@
 #include <string>
 
 namespace oscad {
+class ASTNode;
 class FunctionLiteral;
 }
 
@@ -16,5 +17,8 @@ namespace oscadeval {
 // precedence-minimal and which 94 places inside the parser depend on. See
 // format_closure.cpp for where each rule came from.
 std::string formatFunctionLiteral(const oscad::FunctionLiteral& fn);
+// Any expression, spelled the same way: what assert() quotes as its
+// condition ("Assertion '(a > 1)' failed").
+std::string formatExpression(const oscad::ASTNode& expr);
 
 } // namespace oscadeval

@@ -481,3 +481,34 @@ TEST(Parity, TextMetricsBoxIsGridFitted) {
     EXPECT_TRUE(logged(run("echo(textmetrics(\"Hello\"));"),
                        "position = [1.1392, -0.1408]; size = [29.929, 10.208]; ascent = 10.0672; descent = -0.1408;"));
 }
+
+// -- messages (tier 5) -------------------------------------------------------------
+
+// The condition was quoted as written; the reference parenthesises every
+// binary operator and ternary.
+TEST(Parity, AssertQuotesItsConditionAsTheReferenceSpellsIt) {
+    EXPECT_NE(assertError("a = 1; assert(a + 1 * 2 > 3);").find("Assertion '((a + (1 * 2)) > 3)' failed"),
+              std::string::npos);
+    EXPECT_NE(assertError("assert(1 > 2 ? false : true == false);").find("Assertion '((1 > 2) ? false : (true == false))' failed"),
+              std::string::npos);
+}
+
+TEST(Parity, UnknownVariableIsDoubleQuoted) {
+    EXPECT_TRUE(logged(run("echo(nosuch);"), "Ignoring unknown variable \"nosuch\""));
+}
+
+TEST(Parity, TextWarnsAboutANonStringText) {
+    EXPECT_TRUE(logged(run("text(42);"), "text(..., text=42) Invalid type: expected string, found number"));
+    EXPECT_FALSE(logged(run("text(undef);"), "Invalid type"));
+}
+
+// A zero step was a silently empty range; the reference counts it as its
+// uint32 ceiling and warns wherever it is iterated.
+TEST(Parity, ZeroStepRangeIsTooMany) {
+    const char* kFor = "Bad range parameter in for statement: too many elements (4294967295)";
+    EXPECT_TRUE(logged(run("for (i = [0:0:5]) echo(i);"), kFor));
+    EXPECT_TRUE(logged(run("echo([for (i = [0:0:5]) i]);"), kFor));
+    EXPECT_TRUE(logged(run("module m() children([0:0:1]); m() cube(1);"),
+                       "Bad range parameter for children: too many elements (4294967295)"));
+    EXPECT_FALSE(logged(run("echo([for (i = [0:0/0:5]) i]);"), "too many"));  // NaN stays silent
+}
