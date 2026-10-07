@@ -731,8 +731,17 @@ def test_export_model_writes_dxf_that_imports_back_unchanged(tmp_path):
     coords = [lines[i + 1] for i, code in enumerate(lines[:-1]) if code in (" 10", " 20")]
     assert max(len(c.lstrip("-").replace(".", "").lstrip("0")) for c in coords) > 6
 
+    # Importing it back gives the same outlines. Not byte-identical: DXF
+    # import snaps every point to a 1/1024 grid, as OpenSCAD's does.
     second = export(f'import("{first.as_posix()}");', "second")
-    assert second.read_text() == text
+    lines2 = second.read_text().split("\n")
+    coords2 = [lines2[i + 1] for i, code in enumerate(lines2[:-1]) if code in (" 10", " 20")]
+    assert second.read_text().count("LWPOLYLINE") == 2 and len(coords2) == len(coords)
+    # ...and an outline may start at a different corner, so compare the points.
+    def points(cs):
+        return sorted(zip(map(float, cs[0::2]), map(float, cs[1::2])))
+    assert all(abs(p[0] - q[0]) <= 1 / 1024 and abs(p[1] - q[1]) <= 1 / 1024
+               for p, q in zip(points(coords), points(coords2)))
 
 
 def test_export_model_dxf_refuses_a_3d_model(tmp_path):
@@ -765,9 +774,12 @@ def test_export_model_writes_pov_mesh2_with_the_viewport_camera(tmp_path):
     assert "rotate <55, 0 + clock * 3, 25 + clock>\ntranslate <1, 2, 3>" in text
     assert "location <0, 0, 140>" in text
 
+    # Without a camera the scene frames the models' bounding box: 0..30 x 0..10 x 0..10.
     bare = tmp_path / "bare.pov"
     export_model(str(bare), ev.geometry)
-    assert "rotate <-55, clock * 3, clock + 25>" in bare.read_text()   # the bounding-box camera
+    text = bare.read_text()
+    assert "#declare BB_CENTER = <15, 5, 5>;" in text
+    assert "look_at BB_CENTER" in text and "sky <0, 0, 1>" in text
 
 
 def test_export_model_pov_camera_needs_eight_numbers(tmp_path):
