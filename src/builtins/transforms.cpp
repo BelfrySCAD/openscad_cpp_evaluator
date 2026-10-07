@@ -103,15 +103,23 @@ Mat4 scaleMatrix(Evaluator& ev, const CallArgs& args, const oscad::Position* whe
     double k[3] = {1, 1, 1};
     if (!readVec3(v, k, 1.0)) {
         if (isNumber(v)) {
-            k[0] = k[1] = k[2] = std::get<double>(v);
+            const double s = std::get<double>(v);
+            k[0] = s;
+            k[1] = s;
+            k[2] = s;
         } else {
             ev.warn("Unable to convert scale(" + fmtValue(v) +
                         ") parameter to a number, a vec3 or vec2 of numbers or a number",
                     where);
         }
     }
+    // Written out rather than looped: MSVC's optimizer (windows-latest CI,
+    // 2026-10) turned the chained assignment above plus a diagonal loop into
+    // a stray write of the scale into m[2][3], so scale(2) also moved z by 2.
     Mat4 m = identity4();
-    for (int i = 0; i < 3; ++i) m[i][i] = k[i];
+    m[0][0] = k[0];
+    m[1][1] = k[1];
+    m[2][2] = k[2];
     return m;
 }
 

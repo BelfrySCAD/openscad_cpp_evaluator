@@ -63,6 +63,7 @@ TEST(Scale, ScalarBroadcastsToAllAxes) {
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
     EXPECT_NEAR(bbox.max.x, 2.0, 1e-9);
     EXPECT_NEAR(bbox.max.z, 2.0, 1e-9);
+    EXPECT_NEAR(bbox.min.z, 0.0, 1e-9);  // a scale must not translate (MSVC once made it)
 }
 
 TEST(Mirror, PreservesVolumeAndFlipsPosition) {
