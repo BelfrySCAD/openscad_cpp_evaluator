@@ -275,10 +275,20 @@ bool emptyStatementIsAnOperand(const oscad::ASTNode& stmt);
 double sinDeg(double x);
 double cosDeg(double x);
 
-// OpenSCAD's lookup_radius() (primitives_2d.cpp): `d` beats `r`, numbers only.
+// A radius/diameter argument pair: a numeric `d` beats `r`, numbers only.
 std::optional<double> lookupRadius(Evaluator& ev, const CallArgs& args, std::optional<int> rPos,
                                    std::optional<int> dPos, const std::string& rName, const std::string& dName,
                                    const oscad::Position* where);
+
+// "ERROR: <text>" at `where`, for input a primitive repairs and carries on with.
+void emitInputError(Evaluator& ev, const std::string& text, const oscad::Position* where);
+
+// Reads polygon() paths or polyhedron() faces (`listName`): each entry a
+// list of point indices. Entries that are not lists and indices that are not
+// numbers are reported as ERRORs and skipped; out-of-range indices are
+// WARNINGs and skipped. Every surviving entry is returned, however short.
+std::vector<std::vector<size_t>> readIndexLists(Evaluator& ev, const ValueList& lists, const std::string& listName,
+                                                size_t pointCount, const oscad::Position* where);
 
 CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 
