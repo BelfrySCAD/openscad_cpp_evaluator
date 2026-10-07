@@ -40,9 +40,10 @@ std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodi
                 // slab finds the node that built the shape (see
                 // ColoredBody::sectionId). Manifold keeps a MeshGL's
                 // runOriginalID when it is given one.
-                manifold::MeshGL mesh = flat.body->GetMeshGL();
+                // MeshGL64: rebuilt below, and float32 would move every vertex.
+                manifold::MeshGL64 mesh = flat.body->GetMeshGL64();
                 mesh.runOriginalID = {*cb.sectionId};
-                mesh.runIndex = {0, static_cast<uint32_t>(mesh.triVerts.size())};
+                mesh.runIndex = {0, mesh.triVerts.size()};
                 mesh.runTransform.clear();
                 mesh.faceID.clear();
                 flat.body = manifold::Manifold(mesh);
