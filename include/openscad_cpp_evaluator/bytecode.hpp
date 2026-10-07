@@ -287,14 +287,13 @@ enum class Op {
     // this AFTER would silently drop uncacheable/ManifoldCache taint
     // tracking for a rands() call embedded in the wrapper's own
     // arguments), computes this site's own params for every kind except
-    // Modifier (empty, no ctx push) and Roof (deferred to Pop -- see
-    // BuiltinWrapSite's own doc comment) via that kind's own native
+    // Modifier (empty, no ctx push) via that kind's own native
     // compute function (computeTransformParams/computeColorParams/etc.,
     // builtins.hpp) -- always a possibly-$-scoped child EvalContext,
     // pushed onto f.ctxChain unconditionally for every non-Modifier kind
-    // (Roof pushes it too, params or not) -- pushes a fresh ev.treeStack_
-    // frame, and stashes {params, randsBefore, siteIdx, (Roof only)
-    // deferredArgs} onto VmFrame::builtinWrapStack (a real per-frame LIFO
+    // -- pushes a fresh ev.treeStack_
+    // frame, and stashes {params, randsBefore, siteIdx} onto
+    // VmFrame::builtinWrapStack (a real per-frame LIFO
     // stack, not a single slot: Push/PopBuiltinWrap pairs can nest or
     // sequence within one frame's own instruction stream, e.g.
     // `translate(a) translate(b) recur();`). The compiler always emits a
@@ -311,12 +310,7 @@ enum class Op {
     // VmFrame::builtinWrapStack's own top entry FIRST (before anything
     // that can itself throw, e.g. Evaluator::setTreeDepthOrThrow below --
     // so the exception-teardown path's own pending count is already
-    // correct if THIS throws); for Roof only, computes `pending.params`
-    // HERE via computeRoofParams(ev, pending.deferredArgs, ctx) -- the one
-    // kind whose params computation has an observable side effect
-    // (ev.warn()) that must stay ordered AFTER children, unlike every
-    // other kind's params (computed at Push, before children, since
-    // nothing else in this group has an order-sensitive side effect); pops
+    // correct if THIS throws); pops
     // the ctx Push made (every kind except Modifier); pops ev.treeStack_
     // to retrieve the children this bracket's own body produced, and
     // builds the tagged CSGNode exactly like Evaluator::buildTreeNode's
@@ -956,10 +950,9 @@ struct CompiledChunk {
     // rotate_extrude()/projection()/offset()/roof()) share Transform/
     // Color's exact push-time-computed-params shape, just via a different
     // native compute function each (Op::PushBuiltinWrap's own runtime
-    // handler switches on `kind` to pick it) -- see that op's own doc
-    // comment for the one exception (Roof, whose params computation has
-    // to run at POP time instead, after children, to preserve an
-    // observable warn() ordering).
+    // handler switches on `kind` to pick it). Roof's warnings ($fs/$fa
+    // clamping, unknown method) therefore come before its children's
+    // output, as in OpenSCAD 2026.02.01.
     struct BuiltinWrapSite {
         enum class Kind {
             Transform,
@@ -977,7 +970,7 @@ struct CompiledChunk {
             RotateExtrude,
             Projection,
             Offset,
-            Roof,          // computed at POP time, not PUSH -- see this struct's own doc comment
+            Roof,
         };
         Kind kind;
         std::string tagName; // "translate"/"rotate"/.../"color"/"highlight"/"background"/"show_only"/"hull"/...

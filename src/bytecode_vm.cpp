@@ -1215,7 +1215,6 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     const std::uint64_t randsBefore = ev.randsCallCount();
                     warnUnexpectedBuiltinArgs(ev, *site.node);
                     CSGParams params;
-                    CallArgs deferredArgs; // Roof only -- see PendingBuiltinWrap's own doc comment
                     switch (site.kind) {
                         case CompiledChunk::BuiltinWrapSite::Kind::Transform: {
                             BuiltinWrapParams result =
@@ -1305,22 +1304,15 @@ Value driveVm(Evaluator& ev, size_t floor) {
                             break;
                         }
                         case CompiledChunk::BuiltinWrapSite::Kind::Roof: {
-                            // params stays empty here -- computed at Pop
-                            // instead (computeRoofParams calls ev.warn(),
-                            // which must stay ordered AFTER children; see
-                            // this Kind's own doc comment, bytecode.hpp).
-                            // `args` must be retained, not re-resolved at
-                            // Pop, or its argument expressions would run
-                            // twice.
                             auto [args, effCtx] =
                                 resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node).arguments, ctx);
-                            deferredArgs = std::move(args);
+                            params = computeRoofParams(ev, args, effCtx, &site.node->position());
                             f.ctxChain.push_back(std::move(effCtx));
                             break;
                         }
                     }
                     ev.treeStack_.emplace_back();
-                    f.builtinWrapStack.push_back({std::move(params), randsBefore, ins.a, std::move(deferredArgs),
+                    f.builtinWrapStack.push_back({std::move(params), randsBefore, ins.a,
                                                    ev.measuring_, f.stack.size(), ev.treeStack_.size() - 1});
                     // AFTER the push, so a throw from the push itself leaves
                     // the flag untouched rather than stuck on.
@@ -1373,14 +1365,6 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         f.stack.push_back(ev.measureCsgSubtree(std::move(sub), *site.node));
                         ++f.pc;
                         break;
-                    }
-                    // Roof's params computation is deferred to here (see
-                    // this Kind's own doc comment, bytecode.hpp) -- ctx is
-                    // still on top of f.ctxChain, not yet popped below, so
-                    // computeRoofParams sees the exact same effCtx the
-                    // children just ran against.
-                    if (site.kind == CompiledChunk::BuiltinWrapSite::Kind::Roof) {
-                        pending.params = computeRoofParams(ev, pending.deferredArgs, f.ctxChain.back());
                     }
                     if (site.kind != CompiledChunk::BuiltinWrapSite::Kind::Modifier) f.ctxChain.pop_back();
                     std::vector<std::unique_ptr<CSGNode>> children = std::move(ev.treeStack_.back());
