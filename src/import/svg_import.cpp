@@ -841,16 +841,132 @@ struct Walk {
     }
 };
 
-// CLEAN-ROOM: page lengths (width/height with units) are part of spec section G1.
+// -- page placement -----------------------------------------------------------
 
-// CLEAN-ROOM: reimplement from spec section G1.
+// A page length (the root's width or height): a number with an optional
+// unit, whitespace allowed around either. Anything else is no length.
+struct PageLength {
+    double n;
+    std::string unit;  // "", "px", "pt", "pc", "in", "cm", "mm", "%", "em" or "ex"
+};
+
+std::optional<PageLength> parsePageLength(const std::string& text) {
+    const std::string s = trim(text);
+    if (s.empty()) return std::nullopt;
+    char* end = nullptr;
+    const double n = std::strtod(s.c_str(), &end);
+    if (end == s.c_str()) return std::nullopt;
+    const std::string unit = trim(end);
+    static const char* units[] = {"", "px", "pt", "pc", "in", "cm", "mm", "%", "em", "ex"};
+    if (std::none_of(std::begin(units), std::end(units), [&](const char* u) { return unit == u; }))
+        return std::nullopt;
+    return PageLength{n, unit};
+}
+
+// A page length in millimetres. `vbSize` is the viewBox's size along the
+// same axis, when there is a viewBox.
+double pageLengthMm(const std::optional<PageLength>& len, std::optional<double> vbSize, double dpi) {
+    if (!len) return vbSize ? 25.4 * *vbSize / dpi : 0.0;
+    const double n = len->n;
+    const std::string& u = len->unit;
+    if (u.empty()) return 25.4 * n / dpi;
+    if (u == "px") return 25.4 * n / 96.0;
+    if (u == "pt") return 25.4 * n / 72.0;
+    if (u == "pc") return 25.4 * n / 6.0;
+    if (u == "in") return 25.4 * n;
+    if (u == "cm") return 10.0 * n;
+    if (u == "mm") return n;
+    if (u == "%") return vbSize ? 25.4 * (n / 100.0) * *vbSize / dpi : 0.0;
+    return vbSize ? *vbSize : 0.0;  // em, ex: the viewBox size, whatever the number
+}
+
+// viewBox="x y w h", separated by spaces and/or commas; a negative size or
+// anything but four numbers is no viewBox.
+std::optional<std::array<double, 4>> parseViewBox(const std::string& text) {
+    const std::vector<std::string> tok = splitTokens(text, " ,");
+    if (tok.size() != 4) return std::nullopt;
+    std::array<double, 4> vb{};
+    for (int i = 0; i < 4; ++i) {
+        char* end = nullptr;
+        vb[i] = std::strtod(tok[i].c_str(), &end);
+        if (end == tok[i].c_str() || *end != '\0') return std::nullopt;
+    }
+    if (vb[2] < 0 || vb[3] < 0) return std::nullopt;
+    return vb;
+}
+
 // Maps the parsed shapes from SVG user units to millimetres, Y up, placing
 // them on the page the root <svg> element describes.
 void pageMap(const XmlNode& root, double dpi, bool center, std::vector<PathList>& shapes) {
-    (void)root;
-    (void)dpi;
-    (void)center;
-    (void)shapes;
+    const auto vb = parseViewBox(root.getAttr("viewBox"));
+    const auto width = parsePageLength(root.getAttr("width"));
+    const auto height = parsePageLength(root.getAttr("height"));
+    const double pageW = pageLengthMm(width, vb ? std::optional<double>((*vb)[2]) : std::nullopt, dpi);
+    const double pageH = pageLengthMm(height, vb ? std::optional<double>((*vb)[3]) : std::nullopt, dpi);
+
+    // Without a viewBox one user unit is one millimetre.
+    double sx = 1, sy = 1, x0 = 0, y0 = 0, ax = 0, ay = 0;
+    if (vb) {
+        const auto [vx, vy, vw, vh] = *vb;
+        // A percentage page length scales that axis's viewBox origin too.
+        x0 = width && width->unit == "%" ? vx * width->n / 100.0 : vx;
+        y0 = height && height->unit == "%" ? vy * height->n / 100.0 : vy;
+        sx = pageW / vw;  // a zero size gives +inf, which min() below discards
+        sy = pageH / vh;
+
+        // preserveAspectRatio="[defer] <align> [meet|slice]", where <align> is
+        // none or x<Min|Mid|Max>Y<Min|Mid|Max>. Anything else, in any part,
+        // is the default xMidYMid meet.
+        auto fraction = [](const std::string& f) {
+            return f == "Min" ? 0.0 : f == "Mid" ? 0.5 : f == "Max" ? 1.0 : -1.0;
+        };
+        std::vector<std::string> par = splitTokens(root.getAttr("preserveAspectRatio"), " ");
+        if (!par.empty() && par[0] == "defer") par.erase(par.begin());
+        std::string align = par.empty() ? "xMidYMid" : par[0];
+        bool slice = par.size() == 2 && par[1] == "slice";
+        const bool wellFormed =
+            par.size() <= 2 && (par.size() < 2 || par[1] == "meet" || slice) &&
+            (align == "none" || (align.size() == 8 && align[0] == 'x' && align[4] == 'Y' &&
+                                 fraction(align.substr(1, 3)) >= 0 && fraction(align.substr(5, 3)) >= 0));
+        if (!wellFormed) {
+            align = "xMidYMid";
+            slice = false;
+        }
+        if (align != "none") {
+            const double s = slice ? std::max(sx, sy) : std::min(sx, sy);
+            sx = sy = s;
+            const double fx = fraction(align.substr(1, 3));
+            const double fy = fraction(align.substr(5, 3));
+            ax = fx * (pageW - s * vw);
+            ay = fy * (pageH - s * vh);
+        }
+    }
+
+    if (!center) {
+        // Y flips about the page. The viewBox's Y origin is added, not
+        // subtracted, as the reference places it.
+        for (PathList& s : shapes)
+            for (Path& p : s)
+                for (auto& pt : p) pt = {sx * (pt[0] - x0) + ax, pageH - ay - sy * (pt[1] + y0)};
+        return;
+    }
+    // Centred: the centre of the scaled drawing's bounding box (origin
+    // offset not included) goes to the origin; page height and alignment
+    // play no part.
+    double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
+    for (const PathList& s : shapes)
+        for (const Path& p : s)
+            for (const auto& pt : p) {
+                const double q[2] = {sx * pt[0], sy * pt[1]};
+                for (int a = 0; a < 2; ++a) {
+                    lo[a] = std::min(lo[a], q[a]);
+                    hi[a] = std::max(hi[a], q[a]);
+                }
+            }
+    const double cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2;
+    for (PathList& s : shapes)
+        for (Path& p : s)
+            for (auto& pt : p) pt = {sx * (pt[0] - x0) - cx, cy - sy * (pt[1] + y0)};
 }
 
 // Each element fills even-odd on its own -- a path's overlapping subpaths
