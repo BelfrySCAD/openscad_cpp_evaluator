@@ -5,7 +5,9 @@
 
 #include <manifold/common.h>
 
+#include <functional>
 #include <optional>
+#include <string>
 
 namespace oscadeval {
 
@@ -27,7 +29,8 @@ struct Discretizer {
     double fa = 12.0;
     double fs = 2.0;
 
-    static Discretizer fromCtx(const EvalContext& ctx);
+    // `warn`, when given, receives upstream's clamping warnings.
+    static Discretizer fromCtx(const EvalContext& ctx, const std::function<void(const std::string&)>& warn = {});
     // Stored in, and read back from, a node's params -- they are part of its
     // cache key, and generate has only the params to go on.
     static Discretizer fromParams(const CSGParams& params);
@@ -53,6 +56,7 @@ struct Discretizer {
 
 // Full-circle segment count from ctx's $fn/$fe/$fa/$fs at radius r;
 // upstream's primitives fall back to 3.
-int fnSegmentsFromCtx(const EvalContext& ctx, double r = 0.0);
+int fnSegmentsFromCtx(const EvalContext& ctx, double r = 0.0,
+                      const std::function<void(const std::string&)>& warn = {});
 
 } // namespace oscadeval

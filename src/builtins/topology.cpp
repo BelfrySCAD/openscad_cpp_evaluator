@@ -46,6 +46,15 @@ static void appendVertices(const manifold::MeshGL& mesh, std::vector<manifold::v
                        mesh.vertProperties[i + 2]});
 }
 
+namespace {
+// A 3D hull with no volume -- of a single flat face, coplanar points, a
+// zero-thickness slab -- is nothing in OpenSCAD (checked, 2026.02.01), not a
+// zero-volume sheet to export.
+manifold::Manifold flatHullIsNothing(manifold::Manifold hull) {
+    return hull.Volume() > 0 ? hull : manifold::Manifold();
+}
+} // namespace
+
 std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::vector<std::unique_ptr<CSGNode>>& children,
                                        const oscad::ASTNode&) {
     const std::vector<ColoredBody> bodies = flattenCsgTree(children);
@@ -76,13 +85,13 @@ std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::v
             for (const manifold::Manifold& m : bodies3d)
                 appendVertices(m.GetMeshGL(), loosePoints);
             ColoredBody cb;
-            cb.body = manifold::Manifold::Hull(loosePoints);
+            cb.body = flatHullIsNothing(manifold::Manifold::Hull(loosePoints));
             cb.color = split.foreground.empty() ? split.displayOnly.front().color
                                                 : split.foreground.front().color;
             hullResult = std::move(cb);
         } else if (!bodies3d.empty()) {
             ColoredBody cb;
-            cb.body = manifold::Manifold::Hull(bodies3d);
+            cb.body = flatHullIsNothing(manifold::Manifold::Hull(bodies3d));
             cb.color = split.foreground.front().color;
             hullResult = std::move(cb);
         } else {

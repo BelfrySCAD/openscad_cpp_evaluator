@@ -63,7 +63,8 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
         // reads them, so circle(3, 5) is d=5.
         const double r = lookupRadius(ev, args, 0, 1, "r", "d", &node.position()).value_or(1.0);
         params["r"] = Value{r};
-        params["segs"] = Value{static_cast<double>(fnSegmentsFromCtx(effCtx, r))};
+        params["segs"] = Value{static_cast<double>(
+            fnSegmentsFromCtx(effCtx, r, [&](const std::string& m) { ev.warn(m, &node.position()); }))};
         return params;
     }
 

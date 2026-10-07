@@ -202,7 +202,7 @@ BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::Modular
     params["twist"] = Value{twist};
     params["slices"] = slices ? Value{*slices} : Value{};
     params["segments"] = segments ? Value{*segments} : Value{};
-    Discretizer::fromCtx(effCtx).store(params);
+    Discretizer::fromCtx(effCtx, [&](const std::string& m) { ev.warn(m, &node.position()); }).store(params);
     params["scale_x"] = Value{scaleX};
     params["scale_y"] = Value{scaleY};
     params["color"] = colorToValue(effCtx.color);
@@ -321,7 +321,7 @@ BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::Modular
         if (angle <= -360.0 || angle > 360.0) angle = 360.0;
     }
     if (hasStart) start = toDoubleLenient(startArg);
-    const Discretizer disc = Discretizer::fromCtx(effCtx);
+    const Discretizer disc = Discretizer::fromCtx(effCtx, [&](const std::string& m) { ev.warn(m, &node.position()); });
     if (!hasAngle && !hasStart && (static_cast<int>(disc.fn) & 1)) {
         ev.emitWarning("DEPRECATED: In future releases, rotational extrusion without \"angle\" will start at zero, "
                        "the +X axis.  Set start=180 to explicitly start on the -X axis.");
