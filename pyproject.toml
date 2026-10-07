@@ -9,7 +9,7 @@ description = "C++ OpenSCAD evaluator with Python bindings"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "resources/fonts/LICENSE"]
 authors = [{ name = "NeuSCAD Contributors" }]
 classifiers = [
     "Development Status :: 3 - Alpha",
