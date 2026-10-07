@@ -880,7 +880,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     if (site.isImport) {
                         CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
                         f.stack.resize(argBase);
-                        f.stack.push_back(importAsValue(ev, callArgs, *site.callNode));
+                        f.stack.push_back(importAsValue(ev, callArgs, *site.callNode, f.ctxChain.back()));
                         ++f.pc;
                     } else if (site.isObjectBuiltin) {
                         std::vector<std::pair<std::optional<std::string>, Value>> pairs;

@@ -896,7 +896,7 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
     if (leftId) {
         if (leftId->name == "import") {
             CallArgs args = resolveArgs(*this, node.arguments, ctx);
-            return importAsValue(*this, args, node);
+            return importAsValue(*this, args, node, ctx);
         }
         // A user-defined function SHADOWS a same-named builtin, so the
         // user lookup runs FIRST. Verified against OpenSCAD 2026.02.01:
