@@ -113,14 +113,11 @@ Mat4 scaleMatrix(Evaluator& ev, const CallArgs& args, const oscad::Position* whe
                     where);
         }
     }
-    // Written out rather than looped: MSVC's optimizer (windows-latest CI,
-    // 2026-10) turned the chained assignment above plus a diagonal loop into
-    // a stray write of the scale into m[2][3], so scale(2) also moved z by 2.
-    Mat4 m = identity4();
-    m[0][0] = k[0];
-    m[1][1] = k[1];
-    m[2][2] = k[2];
-    return m;
+    // Built in one initializer: on windows-latest CI (MSVC, 2026-10) the
+    // scalar form came out with the scale also in m[2][3] -- scale(2) moved
+    // z by 2 -- when the matrix was built as an identity and then
+    // overwritten, with or without a loop.
+    return Mat4{{{k[0], 0, 0, 0}, {0, k[1], 0, 0}, {0, 0, k[2], 0}, {0, 0, 0, 1}}};
 }
 
 Mat4 mirrorMatrix(Evaluator& ev, const CallArgs& args, const oscad::Position* where) {
