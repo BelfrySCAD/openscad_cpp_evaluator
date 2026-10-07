@@ -1434,7 +1434,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     // ITERATION child ctxs are pushed separately, by the
                     // compiled loop's own Op::ForIterNext.
                     ev.treeStack_.emplace_back();
-                    f.csgWrapStack.push_back({site.op, randsBefore, ins.a, {}, {}, 0});
+                    f.csgWrapStack.push_back({site.op, randsBefore, ins.a, {}, {}, {}, 0});
                     ++f.pc;
                     break;
                 }
@@ -1461,6 +1461,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                             Value{static_cast<double>(ev.treeStack_.back().size() - before)});
                         // A spliced child is a plain statement, never a loop.
                         pending.emptyIsAGroup.push_back(Value{false});
+                        pending.backgroundStmt.push_back(Value{false});
                     }
                     ++f.pc;
                     break;
@@ -1469,7 +1470,8 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     PendingCsgWrap& pending = f.csgWrapStack.back();
                     const size_t after = ev.treeStack_.back().size();
                     pending.groupSizes.push_back(Value{static_cast<double>(after - pending.groupStartSize)});
-                    pending.emptyIsAGroup.push_back(Value{ins.a != 0});
+                    pending.emptyIsAGroup.push_back(Value{(ins.a & 1) != 0});
+                    pending.backgroundStmt.push_back(Value{(ins.a & 2) != 0});
                     ++f.pc;
                     break;
                 }
@@ -1494,6 +1496,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     params["group_sizes"] =
                         Value{makeList(std::move(pending.groupSizes))};
                     params["empty_is_a_group"] = Value{makeList(std::move(pending.emptyIsAGroup))};
+                    params["background_stmt"] = Value{makeList(std::move(pending.backgroundStmt))};
                     // Mirrors Evaluator::buildTreeNode's own post-
                     // resolveBody() half exactly (csg_resolve.cpp).
                     const bool uncacheable =

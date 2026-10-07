@@ -334,7 +334,8 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     if (anyShowOnly) {
         std::vector<ColoredBody> filtered;
         for (ColoredBody& b : result) {
-            if (b.role == BodyRole::ShowOnly || b.role == BodyRole::Highlight) filtered.push_back(std::move(b));
+            if (b.role == BodyRole::ShowOnly || b.role == BodyRole::Highlight || b.role == BodyRole::HighlightGhost)
+                filtered.push_back(std::move(b));
         }
         return filtered;
     }

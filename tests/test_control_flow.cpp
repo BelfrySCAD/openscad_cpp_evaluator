@@ -1483,15 +1483,20 @@ TEST(IntersectionFor, TwoDeeChildrenExerciseSectionPath) {
     EXPECT_NEAR(bounds.max.x, 3.0, 1e-6);
 }
 
-TEST(IntersectionFor, MultipleStatementsPerIterationAreUnionedFirst) {
-    // combineBodies' multi-body-per-iteration union branch: each iteration
-    // here contributes TWO sibling cube() statements (not one), which must
-    // be unioned together before intersecting across iterations.
+TEST(IntersectionFor, EveryStatementOfEveryIterationIsAnOperand) {
+    // Upstream instantiates the children straight into the intersection
+    // node, so every child statement of every iteration is intersected --
+    // they are NOT unioned per iteration first, as this used to do.
+    // Checked against OpenSCAD 2026.02.01: two disjoint statements per
+    // iteration intersect to nothing.
     Evaluated e = evalSrc("intersection_for (i = [0,1]) { translate([i,0,0]) cube(3); translate([i,0,0]) cube(3); }");
     ASSERT_EQ(e.bodies.size(), 1u);
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
     EXPECT_NEAR(bbox.min.x, 1.0, 1e-6);
     EXPECT_NEAR(bbox.max.x, 3.0, 1e-6);
+    Evaluated disjoint = evalSrc(
+        "intersection_for (i = [0:1]) { translate([i*0.5,0,0]) cube(1); translate([3,0,0]) cube(1); }");
+    for (const ColoredBody& b : disjoint.bodies) EXPECT_TRUE(!b.body || b.body->IsEmpty());
 }
 
 // -- render() ---------------------------------------------------------------

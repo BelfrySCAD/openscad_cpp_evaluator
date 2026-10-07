@@ -70,4 +70,29 @@ std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodi
     return out;
 }
 
+manifold::mat2x3 projectTo2d(const manifold::mat3x4& m) {
+    return manifold::mat2x3(manifold::vec2(m[0].x, m[0].y), manifold::vec2(m[1].x, m[1].y),
+                            manifold::vec2(m[3].x, m[3].y));
+}
+
+bool transformSection(manifold::CrossSection& cs, const manifold::mat3x4& m) {
+    const manifold::mat2x3 p = projectTo2d(m);
+    // Polygon2d::transform: a singular 2D matrix removes the shape.
+    if (p[0].x * p[1].y - p[1].x * p[0].y == 0.0) {
+        cs = manifold::CrossSection();
+        return false;
+    }
+    cs = cs.Transform(p);
+    return true;
+}
+
+bool projectSectionXform(ColoredBody& b) {
+    const manifold::mat3x4 ident(manifold::vec3(1, 0, 0), manifold::vec3(0, 1, 0), manifold::vec3(0, 0, 1),
+                                 manifold::vec3(0, 0, 0));
+    if (!b.section || b.sectionXform == ident) return true;
+    const bool kept = transformSection(*b.section, b.sectionXform);
+    b.sectionXform = ident;
+    return kept;
+}
+
 } // namespace oscadeval

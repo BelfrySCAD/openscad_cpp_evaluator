@@ -249,7 +249,8 @@ def _summarize_param(value, max_items: int = 6, max_len: int = 40) -> str:
 # of kind -- pure internal bookkeeping or already represented structurally
 # elsewhere in the tree. Mirrors the reference's _DUMP_HIDDEN_PARAM_KEYS.
 _DUMP_HIDDEN_PARAM_KEYS = frozenset(
-    {"color", "op", "name", "group_sizes", "empty_is_a_group"})
+    {"color", "op", "name", "group_sizes", "empty_is_a_group", "background_stmt",
+     "m", "remove"})
 
 # Auto-generated tessellation data (not user-authored) for every kind except
 # polyhedron, where the equivalent data *is* the user's own points/faces.
@@ -520,7 +521,7 @@ class ColoredBody:
     section: object = None             # kept for API parity (always None here)
     flat_preview: bool = False
     tri_colors: Optional[object] = None  # (numTri, 4) float32 ndarray, real multi-color CSG merges only
-    role: str = "normal"               # "normal" | "highlight" | "background" | "show_only"
+    role: str = "normal"               # "normal" | "highlight" | "highlight_ghost" | "background" | "show_only"
 
 
 def bodies_from_dicts(body_dicts) -> list:

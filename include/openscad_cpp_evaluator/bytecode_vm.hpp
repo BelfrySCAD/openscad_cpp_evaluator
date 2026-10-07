@@ -71,6 +71,9 @@ struct PendingCsgWrap {
     // Parallel to groupSizes: whether a group that came out EMPTY is still
     // an operand. See Op::CsgGroupEnd's `a`.
     std::vector<Value> emptyIsAGroup;
+    // Parallel too: whether the statement was a `%` one, which is never an
+    // operand. See Op::CsgGroupEnd's `a` (bit 2).
+    std::vector<Value> backgroundStmt;
     size_t groupStartSize = 0;
 };
 

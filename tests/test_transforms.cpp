@@ -4,6 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <vector>
+
 using namespace oscadeval;
 using namespace oscadeval::test;
 
@@ -114,12 +117,16 @@ TEST(Transform3d, TranslateWithNoArgumentDefaultsToOrigin) {
     EXPECT_NEAR(bbox.max.x, 1.0, 1e-9);
 }
 
-TEST(Transform3d, ScalarTranslateBecomesXOnlyVector) {
-    // toVec3's own scalar (bare double) branch -- translate(5) is
-    // equivalent to translate([5,0,0]), not an error or a uniform offset.
-    Evaluated e = evalSrc("translate(5) cube(1);");
+TEST(Transform3d, ScalarTranslateIsIgnoredWithAWarning) {
+    // OpenSCAD (2026.02.01, upstream builtin_translate) accepts only a
+    // vec2 or vec3: translate(5) warns and leaves the object where it is.
+    // This test once asserted [5,0,0] -- a guess the reference disproves.
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("translate(5) cube(1);", [&](const std::string& m) { log.push_back(m); });
+    ASSERT_FALSE(log.empty());
+    EXPECT_NE(log[0].find("Unable to convert translate(5) parameter to a vec3 or vec2 of numbers"), std::string::npos);
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
-    EXPECT_NEAR(bbox.min.x, 5.0, 1e-9);
+    EXPECT_NEAR(bbox.min.x, 0.0, 1e-9);
     EXPECT_NEAR(bbox.min.y, 0.0, 1e-9);
     EXPECT_NEAR(bbox.min.z, 0.0, 1e-9);
 }

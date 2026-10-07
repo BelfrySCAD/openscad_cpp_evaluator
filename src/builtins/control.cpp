@@ -106,6 +106,8 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
     const std::vector<const oscad::ASTNode*> bodyNodes = ev.expandChildStatements(node.body, ctx);
 
     std::vector<Value> groupSizes;
+    std::vector<Value> emptyIsAGroup;
+    std::vector<Value> backgroundStmt;
 
     // Each dimension's own RHS is evaluated against `parentCtx` (not
     // upfront against the original `ctx`), re-evaluated on every entry
@@ -121,9 +123,25 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
             // evalFor) -- mirrors _resolve_intersection_for's single
             // `_check_debug(body_node[0], loop_ctx, expr_level=True)`.
             if (!bodyNodes.empty()) ev.checkDebug(*bodyNodes.front(), parentCtx, /*forced=*/false, /*exprLevel=*/true);
-            const size_t before = ev.currentTreeFrameSize();
-            ev.evalChildren(bodyNodes, parentCtx);
-            groupSizes.push_back(Value{static_cast<double>(ev.currentTreeFrameSize() - before)});
+            // One operand per child STATEMENT of every iteration: upstream
+            // instantiates the children straight into the intersection
+            // node (control.cc), so they are intersected flat, not
+            // unioned per iteration first.
+            std::vector<const oscad::ASTNode*> assigns, stmts;
+            for (const oscad::ASTNode* stmt : bodyNodes) {
+                if (stmt->kind() == oscad::NodeKind::Assignment) assigns.push_back(stmt);
+                else if (stmt->kind() != oscad::NodeKind::ModuleDeclaration &&
+                         stmt->kind() != oscad::NodeKind::FunctionDeclaration)
+                    stmts.push_back(stmt);
+            }
+            if (!assigns.empty()) ev.evalChildren(assigns, parentCtx);
+            for (const oscad::ASTNode* stmt : stmts) {
+                const size_t before = ev.currentTreeFrameSize();
+                ev.evalChildren(std::vector<const oscad::ASTNode*>{stmt}, parentCtx);
+                groupSizes.push_back(Value{static_cast<double>(ev.currentTreeFrameSize() - before)});
+                emptyIsAGroup.push_back(Value{emptyStatementIsAnOperand(*stmt)});
+                backgroundStmt.push_back(Value{stmt->kind() == oscad::NodeKind::ModularModifierBackground});
+            }
             return;
         }
         const auto& assign = node.assignments[depth];
@@ -142,49 +160,19 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
 
     CSGParams params;
     params["group_sizes"] = Value{makeList(std::move(groupSizes))};
+    params["empty_is_a_group"] = Value{makeList(std::move(emptyIsAGroup))};
+    params["background_stmt"] = Value{makeList(std::move(backgroundStmt))};
     return params;
 }
 
-std::vector<ColoredBody> generateIntersectionFor(Evaluator&, const CSGParams& params,
+std::vector<ColoredBody> generateIntersectionFor(Evaluator& ev, const CSGParams& params,
                                                   const std::vector<std::unique_ptr<CSGNode>>& children,
-                                                  const oscad::ASTNode&) {
-    const auto& groupSizes = std::get<ListPtr>(params.at("group_sizes"))->items;
-    std::vector<ColoredBody> iterations;
-    size_t idx = 0;
-    for (const Value& sv : groupSizes) {
-        const size_t size = static_cast<size_t>(std::get<double>(sv));
-        std::vector<ColoredBody> stmtBodies = flattenCsgTree(children, idx, size);
-        idx += size;
-        if (!stmtBodies.empty()) iterations.push_back(combineBodies(stmtBodies));
-    }
-    if (iterations.empty()) return {};
-
-    std::vector<ColoredBody> bodies3d;
-    for (const ColoredBody& c : iterations) {
-        if (c.body) bodies3d.push_back(c);
-    }
-    if (!bodies3d.empty()) {
-        manifold::Manifold result = *bodies3d.front().body;
-        for (size_t i = 1; i < bodies3d.size(); ++i) result = result ^ *bodies3d[i].body;
-        ColoredBody cb;
-        cb.body = std::move(result);
-        cb.color = bodies3d.front().color;
-        return {cb};
-    }
-
-    std::vector<ColoredBody> sections;
-    for (const ColoredBody& c : iterations) {
-        if (c.section) sections.push_back(c);
-    }
-    if (!sections.empty()) {
-        manifold::CrossSection result = *sections.front().section;
-        for (size_t i = 1; i < sections.size(); ++i) result = result ^ *sections[i].section;
-        ColoredBody cb;
-        cb.section = std::move(result);
-        cb.color = iterations.front().color;
-        return {cb};
-    }
-    return {};
+                                                  const oscad::ASTNode& node) {
+    // The same operand rules as intersection() itself -- empty statements,
+    // `%` scenery, `#` ghosts, 2D vs 3D -- over the flat statement list.
+    CSGParams p = params;
+    p["op"] = Value{std::string("intersection")};
+    return generateCsg(ev, p, children, node);
 }
 
 } // namespace oscadeval

@@ -134,6 +134,7 @@ const char* roleToString(oscadeval::BodyRole role) {
         case oscadeval::BodyRole::Highlight:  return "highlight";
         case oscadeval::BodyRole::Background: return "background";
         case oscadeval::BodyRole::ShowOnly:   return "show_only";
+        case oscadeval::BodyRole::HighlightGhost: return "highlight_ghost";
         case oscadeval::BodyRole::Normal:
         default:                              return "normal";
     }
