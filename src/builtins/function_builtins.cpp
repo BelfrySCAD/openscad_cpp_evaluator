@@ -246,23 +246,6 @@ Value builtinPow(double a, double b) {
 
 // -- cross/rands/search/lookup --------------------------------------------
 
-Value builtinCross(const Value& aArg, const Value& bArg) {
-    const auto a = allNumericList(aArg);
-    const auto b = allNumericList(bArg);
-    if (!a || !b) return Value{};
-    for (double x : *a) {
-        if (!std::isfinite(x)) return Value{};
-    }
-    for (double x : *b) {
-        if (!std::isfinite(x)) return Value{};
-    }
-    if (a->size() == 2 && b->size() == 2) return Value{(*a)[0] * (*b)[1] - (*a)[1] * (*b)[0]};
-    if (a->size() == 3 && b->size() == 3) {
-        return numList({(*a)[1] * (*b)[2] - (*a)[2] * (*b)[1], (*a)[2] * (*b)[0] - (*a)[0] * (*b)[2],
-                         (*a)[0] * (*b)[1] - (*a)[1] * (*b)[0]});
-    }
-    return Value{};
-}
 
 // -- linear_solve(A, b) --------------------------------------------------
 //
@@ -784,36 +767,49 @@ Value builtinSearch(const CallArgs& args, Evaluator& ev, const oscad::Position* 
     return Value{};
 }
 
-Value builtinLookup(const CallArgs& args) {
-    // Guarded here rather than via scalarNumericArity() -- the second
-    // argument is a table, so the all-arguments-are-numbers rule can't
-    // apply. Without this, toDoubleLenient() turns a non-numeric key into
-    // 0.0 and the lookup silently returns the table's first value.
+// upstream builtin_lookup, line for line: a non-finite key warns; the
+// first row must be exactly two numbers or the answer is undef; later rows
+// that aren't are skipped; the low/high candidates are picked in table
+// order (the first of equal keys wins), then interpolated. This used to
+// sort the table, coerce malformed rows, and accept inf/nan keys silently.
+Value builtinLookup(Evaluator& ev, const CallArgs& args, const oscad::Position* pos) {
     const Value keyArg = getArg(args, 0, "key", Value{});
-    if (!std::holds_alternative<double>(keyArg)) return Value{};
-    const double key = std::get<double>(keyArg);
-    const Value tableArg = getArg(args, 1, "table", Value{});
-    const ListPtr* tablePtr = std::get_if<ListPtr>(&tableArg);
-    if (!tablePtr || !*tablePtr) return Value{};
-
-    std::vector<std::pair<double, double>> pairs;
-    for (const Value& row : (*tablePtr)->items) {
-        const ListPtr* rowPtr = std::get_if<ListPtr>(&row);
-        if (!rowPtr || !*rowPtr || (*rowPtr)->items.size() < 2) continue;
-        pairs.emplace_back(toDoubleLenient((*rowPtr)->items[0]), toDoubleLenient((*rowPtr)->items[1]));
+    const double p = std::get<double>(keyArg);  // checkBuiltinArgs: a number
+    if (!std::isfinite(p)) {
+        ev.warn("lookup(" + fmtValue(keyArg) + ", ...) first argument is not a number", pos);
+        return Value{};
     }
-    if (pairs.empty()) return Value{};
-    std::stable_sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-    if (key <= pairs.front().first) return Value{pairs.front().second};
-    if (key >= pairs.back().first) return Value{pairs.back().second};
-    for (size_t i = 0; i + 1 < pairs.size(); ++i) {
-        const double k0 = pairs[i].first, k1 = pairs[i + 1].first;
-        if (k0 <= key && key <= k1) {
-            const double t = (k1 == k0) ? 0.0 : (key - k0) / (k1 - k0);
-            return Value{pairs[i].second + t * (pairs[i + 1].second - pairs[i].second)};
+    const auto& vec = std::get<ListPtr>(getArg(args, 1, "table", Value{}))->items;  // checkBuiltinArgs: a vector
+    const auto vec2 = [](const Value& v, double& a, double& b) {
+        const ListPtr* l = std::get_if<ListPtr>(&v);
+        if (!l || !*l || (*l)->items.size() != 2) return false;
+        const double* x = std::get_if<double>(&(*l)->items[0]);
+        const double* y = std::get_if<double>(&(*l)->items[1]);
+        if (!x || !y) return false;
+        a = *x;
+        b = *y;
+        return true;
+    };
+    double lowP, lowV, highP, highV;
+    if (vec.empty() || !vec2(vec[0], lowP, lowV)) return Value{};
+    highP = lowP;
+    highV = lowV;
+    for (size_t k = 1; k < vec.size(); ++k) {
+        double thisP, thisV;
+        if (!vec2(vec[k], thisP, thisV)) continue;
+        if (thisP <= p && (thisP > lowP || lowP > p)) {
+            lowP = thisP;
+            lowV = thisV;
+        }
+        if (thisP >= p && (thisP < highP || highP < p)) {
+            highP = thisP;
+            highV = thisV;
         }
     }
-    return Value{0.0};
+    if (p <= lowP) return Value{highV};
+    if (p >= highP) return Value{lowV};
+    const double f = (p - lowP) / (highP - lowP);
+    return Value{highV * f + lowV * (1 - f)};
 }
 
 std::string asStringOr(const Value& v, const std::string& fallback) {
@@ -1155,12 +1151,14 @@ const std::unordered_map<int, BuiltinCheck>& builtinChecks() {
         std::unordered_map<int, BuiltinCheck> m;
         const auto add = [&m](BuiltinFnId id, BuiltinCheck c) { m.emplace(static_cast<int>(id), std::move(c)); };
         for (BuiltinFnId id : {BuiltinFnId::Abs, BuiltinFnId::Sign, BuiltinFnId::Ceil, BuiltinFnId::Floor,
-                                BuiltinFnId::Round, BuiltinFnId::Sqrt, BuiltinFnId::Ln, BuiltinFnId::Log,
+                                BuiltinFnId::Round, BuiltinFnId::Sqrt, BuiltinFnId::Ln,
                                 BuiltinFnId::Exp, BuiltinFnId::Sin, BuiltinFnId::Cos, BuiltinFnId::Tan,
                                 BuiltinFnId::Asin, BuiltinFnId::Acos, BuiltinFnId::Atan}) {
             add(id, {1, 1, "1", {kNum}});
         }
         add(BuiltinFnId::Atan2, {2, 2, "2", {kNum, kNum}});
+        // log(x) or log(base, x); upstream's count warning names 2.
+        add(BuiltinFnId::Log, {1, 2, "2", {kNum, kNum}});
         add(BuiltinFnId::Pow, {2, 2, "2", {kNum, kNum}});
         add(BuiltinFnId::Cross, {2, 2, "2", {kVec, kVec}});
         add(BuiltinFnId::Lookup, {2, 2, "2", {kNum, kVec}});
@@ -1275,6 +1273,9 @@ BuiltinFnId builtinFnIdFor(const std::string& name) {
     return it == ids.end() ? BuiltinFnId::None : it->second;
 }
 
+Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::string& name, const CallArgs& args,
+                                 const oscad::ASTNode& node);
+
 Value evalBuiltinFunction(Evaluator& ev, const std::string& name, const CallArgs& args, const oscad::ASTNode& node) {
     return evalBuiltinFunctionResolved(ev, builtinFnIdFor(name), builtinParamNames(name), name, args, node);
 }
@@ -1297,6 +1298,36 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
         }
     }
 
+    // Every other builtin function reads its arguments IN ORDER and ignores
+    // their names, exactly as upstream's builtin_* functions index
+    // `arguments[i]`: sin(a=90) is sin(90), pow(y=3, x=2) is 3^2, and
+    // rands(0, 1, 2, seed_value=5) is seeded. Names used to bind by this
+    // port's own spelling and drop the rest silently -- sin(a=90) was 0,
+    // concat(a=[1], b=[2]) was [], rands(seed_value=) went unseeded.
+    // (textmetrics/fontmetrics -- with declaredParams -- and dxf_dim/
+    // dxf_cross parse names upstream, through Parameters::parse.)
+    const bool byName = declaredParams || id == BuiltinFnId::DxfDim || id == BuiltinFnId::DxfCross;
+    CallArgs ordered;
+    if (!byName && node.kind() == oscad::NodeKind::PrimaryCall && !args.named.empty()) {
+        int k = 0, out = 0;
+        for (const auto& a : static_cast<const oscad::PrimaryCall&>(node).arguments) {
+            const Value* v = nullptr;
+            if (a->kind() == oscad::NodeKind::PositionalArgument) {
+                v = args.findPositional(k++);
+            } else {
+                const std::string& n = static_cast<const oscad::NamedArgument&>(*a).name->name;
+                if (isConfigVariable(n)) continue;  // a $-override, not an argument
+                v = args.findNamed(n);
+            }
+            ordered.setPositional(out++, v ? *v : Value{});
+        }
+    }
+    const CallArgs& argsInOrder = (!byName && !args.named.empty()) ? ordered : args;
+    return evalBuiltinFunctionInOrder(ev, id, name, argsInOrder, node);
+}
+
+Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::string& name, const CallArgs& args,
+                                 const oscad::ASTNode& node) {
     // Arity and argument types, with the reference's own two diagnostics.
     // This replaced a silent version of the same gate (scalarNumericArity /
     // numericOnlyNames), which returned undef without ever saying why.
@@ -1321,8 +1352,10 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
         }
         case BuiltinFnId::Round: {
             const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-            if (std::isnan(x) || std::isinf(x)) return Value{x};
-            return Value{x >= 0 ? std::floor(x + 0.5) : std::ceil(x - 0.5)};
+            // std::round, as upstream: halves away from zero, exactly. The
+            // floor(x + 0.5) this was rounded 0.49999999999999994 up to 1
+            // (the sum rounds to 1.0) and broke integers above 2^52.
+            return Value{std::round(x)};
         }
         case BuiltinFnId::Sqrt: {
             const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
@@ -1334,9 +1367,13 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
             return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log(x)};
         }
         case BuiltinFnId::Log: {
-            const double x = toDoubleLenient(getArg(args, 0, "x", Value{}));
-            if (x == 0) return Value{-std::numeric_limits<double>::infinity()};
-            return Value{x < 0 ? std::numeric_limits<double>::quiet_NaN() : std::log10(x)};
+            // upstream builtin_log: log(y) / log(base), base 10 by default --
+            // that formula, not log10(), so results agree to the last bit.
+            // The two-argument form was missing (log(2, 8) was undef).
+            const bool twoArgs = positionalCount(args) == 2;
+            const double base = twoArgs ? toDoubleLenient(getArg(args, 0, "base", Value{})) : 10.0;
+            const double y = toDoubleLenient(getArg(args, twoArgs ? 1 : 0, "x", Value{}));
+            return Value{std::log(y) / std::log(base)};
         }
         case BuiltinFnId::Exp: return Value{std::exp(toDoubleLenient(getArg(args, 0, "x", Value{})))};
         case BuiltinFnId::Sin: return Value{sinDegrees(toDoubleLenient(getArg(args, 0, "x", Value{})))};
@@ -1371,25 +1408,42 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
             return Value{std::sqrt(sum)};
         }
         case BuiltinFnId::Cross: {
+            // upstream builtin_cross, check for check: two 2-vectors are
+            // multiplied as they are (a non-number counts as 0, inf and nan
+            // propagate -- no checks at all); otherwise both must be
+            // 3-vectors, and each element pair is checked in order for a
+            // non-number, then NaN, then infinity, each with its own warning.
             const Value a = getArg(args, 0, "a", Value{});
             const Value b = getArg(args, 1, "b", Value{});
-            // Two distinct messages, and the size check runs first: a
-            // 4-element operand is a size complaint even when it also holds
-            // a string.
-            const auto sizeOf = [](const Value& v) {
-                const ListPtr* l = std::get_if<ListPtr>(&v);
-                return (l && *l) ? (*l)->items.size() : size_t{0};
+            const auto& va = std::get<ListPtr>(a)->items;
+            const auto& vb = std::get<ListPtr>(b)->items;
+            const auto num = [](const Value& v) {
+                const double* d = std::get_if<double>(&v);
+                return d ? *d : 0.0;
             };
-            const size_t na = sizeOf(a), nb = sizeOf(b);
-            if (na != nb || (na != 2 && na != 3)) {
+            if (va.size() == 2 && vb.size() == 2) return Value{num(va[0]) * num(vb[1]) - num(va[1]) * num(vb[0])};
+            if (va.size() != 3 || vb.size() != 3) {
                 ev.warn("Invalid vector size of parameter for cross()", &node.position());
                 return Value{};
             }
-            if (!allNumericList(a) || !allNumericList(b)) {
-                ev.warn("Invalid value in parameter vector for cross()", &node.position());
-                return Value{};
+            for (size_t k = 0; k < 3; ++k) {
+                if (!std::holds_alternative<double>(va[k]) || !std::holds_alternative<double>(vb[k])) {
+                    ev.warn("Invalid value in parameter vector for cross()", &node.position());
+                    return Value{};
+                }
+                const double d0 = std::get<double>(va[k]), d1 = std::get<double>(vb[k]);
+                if (std::isnan(d0) || std::isnan(d1)) {
+                    ev.warn("Invalid value (NaN) in parameter vector for cross()", &node.position());
+                    return Value{};
+                }
+                if (std::isinf(d0) || std::isinf(d1)) {
+                    ev.warn("Invalid value (INF) in parameter vector for cross()", &node.position());
+                    return Value{};
+                }
             }
-            return builtinCross(a, b);
+            return numList({num(va[1]) * num(vb[2]) - num(va[2]) * num(vb[1]),
+                            num(va[2]) * num(vb[0]) - num(va[0]) * num(vb[2]),
+                            num(va[0]) * num(vb[1]) - num(va[1]) * num(vb[0])});
         }
         case BuiltinFnId::Rands: {
             ev.noteRandsCall();
@@ -1493,7 +1547,7 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
             return Value{std::holds_alternative<ObjectPtr>(x) && std::get<ObjectPtr>(x) != nullptr};
         }
         case BuiltinFnId::Search: return builtinSearch(args, ev, &node.position());
-        case BuiltinFnId::Lookup: return builtinLookup(args);
+        case BuiltinFnId::Lookup: return builtinLookup(ev, args, &node.position());
         case BuiltinFnId::HasKey: {
             const Value objArg = getArg(args, 0, "object", Value{});
             const ObjectPtr* obj = std::get_if<ObjectPtr>(&objArg);

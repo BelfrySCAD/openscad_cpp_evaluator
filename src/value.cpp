@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -378,7 +381,7 @@ std::string encodeEscapedCodePoint(std::uint32_t cp) {
 
 } // namespace
 
-std::string unescapeStringLiteral(const std::string& raw) {
+std::string unescapeStringLiteral(const std::string& raw, int* undefinedEscapes) {
     // Most strings need no work at all, and this runs on every evaluation
     // of a literal on the tree-walking path -- so don't build a second copy
     // unless there is something to change. A bare line ending counts as
@@ -425,19 +428,25 @@ std::string unescapeStringLiteral(const std::string& raw) {
                     i += 3;
                     break;
                 }
+                if (undefinedEscapes) ++*undefinedEscapes;
                 out.push_back(next);
                 ++i;
                 break;
             }
-            case 'u': {
-                // \uXXXX, exactly four hex digits. No \u{...} form: the
-                // reference calls that an undefined escape.
+            case 'u':
+            case 'U': {
+                // \uXXXX, exactly four hex digits, or \UXXXXXX, exactly six
+                // (lexer.l). No \u{...} form: the reference calls that an
+                // undefined escape. \U was missing -- "\U01F600" was seven
+                // characters, not one.
+                const size_t n = next == 'u' ? 4 : 6;
                 std::uint32_t cp = 0;
-                if (i + 5 < raw.size() && hexDigits(raw, i + 2, 4, cp)) {
+                if (i + 1 + n < raw.size() && hexDigits(raw, i + 2, n, cp)) {
                     out += encodeEscapedCodePoint(cp);
-                    i += 5;
+                    i += 1 + n;
                     break;
                 }
+                if (undefinedEscapes) ++*undefinedEscapes;
                 out.push_back(next);
                 ++i;
                 break;
@@ -446,51 +455,97 @@ std::string unescapeStringLiteral(const std::string& raw) {
             // LF after a CR is dropped by the loop itself.
             case '\n':
             case '\r': ++i; break;
-            default: out.push_back(next); ++i; break;  // \\ and \" land here too
+            case '\\':
+            case '"': out.push_back(next); ++i; break;
+            // Anything else is OpenSCAD's "Undefined escape sequence": the
+            // backslash goes, the character stays, and the caller warns.
+            default:
+                if (undefinedEscapes) ++*undefinedEscapes;
+                out.push_back(next);
+                ++i;
+                break;
         }
     }
     return out;
 }
 
+namespace {
+// The first 6 significant digits of |v|, correctly rounded with exact ties
+// rounding UP (double-conversion's ToPrecision, which OpenSCAD prints
+// with), and the power of ten of the first one. A 17-digit rendering
+// decides every case but one: when it reads exactly ...5000000000 past the
+// sixth digit, the true value may sit just either side of the tie, so the
+// exact expansion settles it.
+void sixDigits(double av, char digits[6], int& exp10) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.16e", av);  // d.dddddddddddddddde[+-]x
+    exp10 = std::atoi(std::strchr(buf, 'e') + 1);
+    char all[17];
+    all[0] = buf[0];
+    std::memcpy(all + 1, buf + 2, 16);
+    bool up;
+    if (all[6] == '5' && std::memcmp(all + 7, "0000000000", 10) == 0) {
+        static thread_local char exact[1100];
+        std::snprintf(exact, sizeof exact, "%.1000e", av);  // the exact expansion
+        // exact[7] is the 7th significant digit ("d.dddddd..."); 5 or more
+        // rounds up, an exact tie included.
+        up = exact[7] >= '5';
+    } else {
+        up = all[6] >= '5';
+    }
+    std::memcpy(digits, all, 6);
+    if (up) {
+        int k = 5;
+        while (k >= 0 && digits[k] == '9') digits[k--] = '0';
+        if (k >= 0) {
+            ++digits[k];
+        } else {  // 999999.5 -> 1000000
+            digits[0] = '1';
+            ++exp10;
+        }
+    }
+}
+} // namespace
+
+// OpenSCAD's number formatting (Value.cc DoubleConvert): double-conversion
+// ToPrecision(v, 6) with up to 5 leading zeros and no trailing padding, so
+// exponent form below 1e-5 and from 1e6 up; trailing zeros trimmed; -0 is
+// 0. This used to round ties to even (123456.5 printed as 123456, not
+// 123457), round twice, and print the smallest subnormals as "infe-323".
 std::string formatNumber(double v) {
     if (std::isnan(v)) return "nan";
     if (std::isinf(v)) return v > 0 ? "inf" : "-inf";
     if (v == 0.0) return "0"; // also covers -0.0 (-0.0 == 0.0 is true)
 
-    const bool neg = v < 0;
-    const double av = std::abs(v);
-    int exp = static_cast<int>(std::floor(std::log10(av)));
-    double mantissa = std::round(av / std::pow(10.0, exp) * 1e5) / 1e5;
-    if (mantissa >= 10.0) {
-        mantissa /= 10.0;
-        ++exp;
-    }
-
-    auto trimTrailing = [](std::string s) {
-        if (s.find('.') == std::string::npos) return s;
-        size_t last = s.find_last_not_of('0');
-        s.erase(last + 1);
-        if (!s.empty() && s.back() == '.') s.pop_back();
-        return s;
-    };
-
-    std::string s;
-    if (exp >= -5 && exp <= 5) {
-        const int decimals = std::max(0, 5 - exp);
-        std::ostringstream oss;
-        oss.setf(std::ios::fixed);
-        oss.precision(decimals);
-        oss << av;
-        s = trimTrailing(oss.str());
+    char d[6];
+    int e = 0;
+    sixDigits(std::fabs(v), d, e);
+    int len = 6;
+    while (len > 1 && d[len - 1] == '0') --len;  // significant digits that matter
+    const int point = e + 1;                    // digits before the decimal point
+    std::string s = v < 0 ? "-" : "";
+    if (point < -4 || point > 6) {
+        s += d[0];
+        if (len > 1) {
+            s += '.';
+            s.append(d + 1, d + len);
+        }
+        s += 'e';
+        s += e < 0 ? '-' : '+';
+        s += std::to_string(std::abs(e));
+    } else if (point <= 0) {
+        s += "0.";
+        s.append(static_cast<size_t>(-point), '0');
+        s.append(d, d + len);
     } else {
-        std::ostringstream oss;
-        oss.setf(std::ios::fixed);
-        oss.precision(5);
-        oss << mantissa;
-        const std::string m = trimTrailing(oss.str());
-        s = m + "e" + (exp >= 0 ? "+" : "-") + std::to_string(std::abs(exp));
+        s.append(d, d + std::min(point, len));
+        if (point > len) s.append(static_cast<size_t>(point - len), '0');
+        if (len > point) {
+            s += '.';
+            s.append(d + point, d + len);
+        }
     }
-    return neg ? "-" + s : s;
+    return s;
 }
 
 std::string fmtValue(const Value& v) {

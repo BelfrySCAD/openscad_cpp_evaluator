@@ -404,13 +404,14 @@ public:
             case NodeKind::BooleanLiteral:
                 out.push_back({Op::PushBool, static_cast<const oscad::BooleanLiteral&>(node).val ? 1 : 0, 0, nullptr});
                 return;
-            case NodeKind::StringLiteral:
-                out.push_back({Op::PushConst,
-                                internConst(Value{unescapeStringLiteral(
-                                    static_cast<const oscad::StringLiteral&>(node).val)}),
-                                0,
-                                nullptr});
+            case NodeKind::StringLiteral: {
+                const auto& lit = static_cast<const oscad::StringLiteral&>(node);
+                int undefinedEscapes = 0;
+                Value v{unescapeStringLiteral(lit.val, &undefinedEscapes)};
+                if (undefinedEscapes) chunk_.undefinedEscapeLiterals.emplace_back(&lit, undefinedEscapes);
+                out.push_back({Op::PushConst, internConst(std::move(v)), 0, nullptr});
                 return;
+            }
             case NodeKind::UndefinedLiteral:
                 out.push_back({Op::PushConst, internConst(Value{}), 0, nullptr});
                 return;
@@ -797,7 +798,7 @@ public:
                 for (size_t i = 0; i < n.assignments.size(); ++i) {
                     const auto& assign = n.assignments[i];
                     const std::string& name = assign->name->name;
-                    if (name.empty() || name[0] == '$') continue;
+                    if (name.empty() || name[0] == '$' || Evaluator::repeatsEarlierLetName(n.assignments, i)) continue;
                     if (auto candidates = collectLetrecCandidateLiterals(*assign->expr)) {
                         letrecSlot[i] = declareLocal(scope, name);
                         letrecCandidates[i] = std::move(*candidates);
@@ -860,7 +861,9 @@ public:
                             }
                         }
                     }
-                    if (!name.empty() && name[0] == '$') {
+                    if (Evaluator::repeatsEarlierLetName(n.assignments, i)) {
+                        out.push_back({Op::WarnDuplicateLet, internName(name), 0, &n.position()});
+                    } else if (!name.empty() && name[0] == '$') {
                         out.push_back({Op::StoreDyn, internName(name), 0, &assign->position()});
                     } else {
                         int slot = selfBinding ? preDeclaredSlot : declareLocal(scope, name);
@@ -910,37 +913,17 @@ public:
             }
 
             case NodeKind::AssertOp: {
+                // Every argument is evaluated, pass or fail, as OpenSCAD
+                // does -- see Evaluator::checkAssert.
                 auto& n = static_cast<const oscad::AssertOp&>(node);
-                if (n.arguments.empty()) {
-                    // Mirrors evalAssertExpr's own `raw.empty() || ...`
-                    // short-circuit exactly: a zero-argument assert() is
-                    // unconditionally true, so the check can never fail --
-                    // skip it entirely rather than compiling a check that
-                    // can never trigger.
-                    compileExpr(*n.body, out, scope, tail);
-                    return;
-                }
-                compileExpr(*argExpr(*n.arguments[0]), out, scope); // condition, never tail
-                size_t jumpPassed = out.size();
-                out.push_back({Op::JumpIfTrue, 0, 0, nullptr});
-                const bool hasMessage = n.arguments.size() > 1;
-                // Lazily compiled: only reachable on the condition-false
-                // path (guarded by the JumpIfTrue above) -- mirrors
-                // evalAssertExpr's own lazy evaluation of the message
-                // argument exactly (only evaluated when the assertion
-                // actually fails). Slot resolution is unaffected by which
-                // runtime path reaches this code -- CompileScope is purely
-                // a compile-time name/index table, same as every other
-                // conditionally-executed branch this compiler already
-                // handles (Ternary, LogicalAnd/Or, ListCompIf).
-                if (hasMessage) compileExpr(*argExpr(*n.arguments[1]), out, scope); // message, never tail
-                // Precomputed ONCE at compile time (cheaper than the
-                // interpreter, which recomputes this on every failing
-                // call) -- toString() is a pure, ctx-free AST-to-text
-                // operation.
-                int condTextIdx = internConst(Value{argExpr(*n.arguments[0])->toString()});
-                out.push_back({Op::AssertFail, hasMessage ? 1 : 0, condTextIdx, &n.position(), &n});
-                out[jumpPassed].a = static_cast<int>(out.size());
+                CompiledChunk::AssertSite site;
+                site.node = &n;
+                site.arguments = &n.arguments;
+                site.argCount = static_cast<int>(n.arguments.size());
+                for (const auto& arg : n.arguments) compileExpr(*argExpr(*arg), out, scope); // never tail
+                int siteIdx = static_cast<int>(chunk_.assertSites.size());
+                chunk_.assertSites.push_back(std::move(site));
+                out.push_back({Op::AssertStatement, siteIdx, 0, &n.position()});
                 compileExpr(*n.body, out, scope, tail);
                 return;
             }
@@ -1202,10 +1185,13 @@ public:
                 size_t placeholderIdx = out.size();
                 out.push_back({Op::OpenLocalScope, 0, 0, nullptr});
                 int slotStart = nextSlot_;
-                for (const auto& assign : n.assignments) {
+                for (size_t i = 0; i < n.assignments.size(); ++i) {
+                    const auto& assign = n.assignments[i];
                     compileExpr(*assign->expr, out, scope);
                     const std::string& name = assign->name->name;
-                    if (!name.empty() && name[0] == '$') {
+                    if (Evaluator::repeatsEarlierLetName(n.assignments, i)) {
+                        out.push_back({Op::WarnDuplicateLet, internName(name), 0, &n.position()});
+                    } else if (!name.empty() && name[0] == '$') {
                         out.push_back({Op::StoreDyn, internName(name), 0, &assign->position()});
                     } else {
                         int slot = declareLocal(scope, name);
@@ -1488,6 +1474,7 @@ public:
         const size_t numDims = n.assignments.size();
         std::function<void(size_t)> emitDim = [&](size_t d) {
             if (d == numDims) {
+                if (d == 0) return; // for() with no loop variables iterates zero times in OpenSCAD, not once.
                 if (!n.body.empty()) {
                     out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(n.body.front().get()), 0, nullptr});
                 }
@@ -1612,50 +1599,16 @@ public:
                 return;
             }
             case NodeKind::ModularAssert: {
-                // Genuinely different contract from AssertOp's own compiled
-                // form (Op::AssertFail): the statement form supports named
-                // arguments AND evaluates every argument EAGERLY (mirrors
-                // Evaluator::evalAssertStatement's own resolveArgs() call
-                // exactly -- unlike AssertOp's lazily-compiled message,
-                // guarded by a runtime JumpIfTrue), so every argument is
-                // compiled+pushed here unconditionally, in source order.
+                // Like AssertOp's compiled form, plus chained children.
                 auto& n = static_cast<const oscad::ModularAssert&>(stmt);
                 out.push_back({Op::CheckDebugStatement, internNativeStatement(&stmt), 0, nullptr});
                 CompiledChunk::AssertSite site;
                 site.node = &n;
+                site.statement = &n;
+                site.arguments = &n.arguments;
                 site.argCount = static_cast<int>(n.arguments.size());
                 CompileScope exprScope;
-                for (size_t i = 0; i < n.arguments.size(); ++i) {
-                    compileIsolatedExpr(*argExpr(*n.arguments[i]), out, exprScope);
-                    if (n.arguments[i]->kind() == NodeKind::NamedArgument) {
-                        auto& na = static_cast<const oscad::NamedArgument&>(*n.arguments[i]);
-                        if (na.name->name == "condition") site.conditionArgIndex = static_cast<int>(i);
-                        else if (na.name->name == "message") site.messageArgIndex = static_cast<int>(i);
-                    }
-                }
-                // Second pass: positional 0/1 fill whichever logical
-                // parameter a named arg didn't already claim -- run AFTER
-                // the named pass above (not interleaved) so a named arg
-                // wins regardless of its position relative to its
-                // positional counterpart in source, matching
-                // Evaluator::getArg's own "named first" priority exactly.
-                int posCounter = 0;
-                for (size_t i = 0; i < n.arguments.size(); ++i) {
-                    if (n.arguments[i]->kind() == NodeKind::NamedArgument) continue;
-                    if (posCounter == 0 && !site.conditionArgIndex) site.conditionArgIndex = static_cast<int>(i);
-                    else if (posCounter == 1 && !site.messageArgIndex) site.messageArgIndex = static_cast<int>(i);
-                    ++posCounter;
-                }
-                // Precomputed once, like AssertFail's own condText --
-                // mirrors evalAssertStatement's `node.arguments.empty() ?
-                // "false" : argExpr(*node.arguments[0])->toString()`
-                // exactly (a MISSING condition arg -- e.g. a bare
-                // `assert(message="x");` -- reads the same as an EMPTY
-                // arg list here: no arg supplies "condition" either way).
-                site.condTextConstIdx = internConst(Value{
-                    site.conditionArgIndex
-                        ? argExpr(*n.arguments[static_cast<size_t>(*site.conditionArgIndex)])->toString()
-                        : std::string("false")});
+                for (const auto& arg : n.arguments) compileIsolatedExpr(*argExpr(*arg), out, exprScope);
                 int siteIdx = static_cast<int>(chunk_.assertSites.size());
                 chunk_.assertSites.push_back(std::move(site));
                 out.push_back({Op::AssertStatement, siteIdx, 0, &n.position()});
@@ -1683,10 +1636,14 @@ public:
                 auto& n = static_cast<const oscad::ModularLet&>(stmt);
                 CompileScope exprScope;
                 out.push_back({Op::OpenLetScope, 0, 0, nullptr});
-                for (const auto& assign : n.assignments) {
+                for (size_t i = 0; i < n.assignments.size(); ++i) {
+                    const auto& assign = n.assignments[i];
                     out.push_back({Op::CheckDebugStatement, internNativeStatement(assign.get()), 0, nullptr});
                     compileIsolatedExpr(*assign->expr, out, exprScope);
-                    out.push_back({Op::StoreLetVar, internName(assign->name->name), 0, &assign->position()});
+                    if (Evaluator::repeatsEarlierLetName(n.assignments, i))
+                        out.push_back({Op::WarnDuplicateLet, internName(assign->name->name), 0, &n.position()});
+                    else
+                        out.push_back({Op::StoreLetVar, internName(assign->name->name), 0, &assign->position()});
                 }
                 compileStatementList(n.children, out);
                 out.push_back({Op::CloseExprScope, 0, 0, nullptr});
@@ -1897,6 +1854,7 @@ public:
         const size_t numDims = n.assignments.size();
         std::function<void(size_t)> emitDim = [&](size_t d) {
             if (d == numDims) {
+                if (d == 0) return; // for() with no loop variables iterates zero times in OpenSCAD, not once.
                 const oscad::ASTNode* marker = n.body.empty() ? static_cast<const oscad::ASTNode*>(&n) : n.body.front().get();
                 out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(marker), 0, nullptr});
                 compileStatementList(n.body, out);

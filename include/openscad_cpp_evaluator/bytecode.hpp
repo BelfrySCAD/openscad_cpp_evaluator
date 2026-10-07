@@ -43,6 +43,7 @@ enum class Op {
     StoreLocal,     // a = slot index (pops)
     LoadDyn,        // a = name pool index ($-prefixed)
     StoreDyn,       // a = name pool index (pops; also marks dynExplicit)
+    WarnDuplicateLet, // a = name pool index (pops; warns, binds nothing -- see Evaluator::warnDuplicateLet)
     LoadFree,       // a = name pool index -- Evaluator::evalIdentifier fallback (warnIfUndef=true)
     // Same as LoadFree, but Evaluator::evalIdentifier's warnIfUndef=false --
     // only ever emitted for a PrimaryCall's own callee probe (bytecode_
@@ -239,20 +240,6 @@ enum class Op {
     // shape; echo() always evaluates every argument unconditionally, so
     // there's no branch to emit here).
     Echo,
-
-    // Only ever emitted for a non-empty-argument AssertOp (see
-    // bytecode_compiler.cpp's own AssertOp case -- a zero-argument
-    // assert() is unconditionally true and compiles straight through with
-    // no check at all). Reached only on the condition-false path (guarded
-    // by a JumpIfTrue the compiler emits around it, mirroring LogicalOrOp's
-    // own jump-then-patch shape) -- always throws via Evaluator::error(),
-    // i.e. [[noreturn]] at runtime. a = 1 if a message Value was compiled
-    // and pushed (pop it), else 0. b = constant-pool index of condText
-    // (the condition expression's own source text, interned ONCE at
-    // compile time via its toString() -- cheaper than the interpreter,
-    // which recomputes this on every failing call). pos/node: same
-    // Evaluator::error() TRACE-walk need CheckIterLimit already has.
-    AssertFail,
 
     // -- Module-body compilation (Stage 2) --------------------------------
     // A call to a user module resolved to a specific ModuleDeclaration AT
@@ -717,16 +704,10 @@ enum class Op {
     StoreLetVar,
 
     // a = index into CompiledChunk::assertSites. Pops site.argCount values
-    // (all of this statement's own arguments, already compiled+pushed in
-    // source order via compileExpr -- EVERY one, not just condition/
-    // message, mirrors evalAssertStatement's own eager resolveArgs() over
-    // AssertOp's lazy-message contract) and replicates
-    // Evaluator::evalAssertStatement exactly: named "condition"/"message"
-    // win over positional 0/1 (resolved at COMPILE time into
-    // AssertSite::conditionArgIndex/messageArgIndex -- the argument SHAPE
-    // is static, only values vary per call), throws via Evaluator::error()
-    // on failure, otherwise runs any chained node.children natively (rare;
-    // not worth its own compiled path -- see AssertSite's own doc comment).
+    // (every argument of an assert() statement or expression, pushed in
+    // source order) and hands them to Evaluator::checkAssert; a statement
+    // then runs any chained children natively (rare; not worth its own
+    // compiled path).
     AssertStatement,
     // a = nativeStatements index of the AST node whose arm this is. Emitted
     // only when the Evaluator was built with coverage on (compile-time
@@ -763,6 +744,10 @@ struct Instruction {
 // applyDefaults()'s existing sibling-isolated defaultCtx; empty if that
 // parameter has no default. `bodyCode` is the function's own expression body.
 struct CompiledChunk {
+    // String literals whose text holds an escape OpenSCAD calls undefined,
+    // with how many: the Evaluator warns for them once, when the chunk is
+    // compiled (it has the warning channel; the compiler does not).
+    std::vector<std::pair<const oscad::StringLiteral*, int>> undefinedEscapeLiterals;
     struct Param {
         std::string name;
         int slot = 0; // unused when isDyn is true -- $-params are never slot-addressed
@@ -1036,30 +1021,13 @@ struct CompiledChunk {
         const oscad::ASTNode* node = nullptr;
     };
 
-    // One Op::AssertStatement site -- see that op's own doc comment for
-    // the full contract. `conditionArgIndex`/`messageArgIndex` are indices
-    // into the site's own argCount-sized popped-argument array (source
-    // order), resolved at COMPILE time via the same "named wins over
-    // positional 0/1" priority Evaluator::getArg applies at runtime --
-    // nullopt means "no argument supplies this logical parameter" (mirrors
-    // getArg's own defaultValue fallback: absent condition reads as
-    // `Value{true}`, absent message means no ": ..." suffix).
-    // `condTextConstIdx`: constants[] index of the condition argument's own
-    // source text (or "false" when no condition argument exists, matching
-    // evalAssertStatement's `node.arguments.empty() ? "false" : ...`),
-    // interned once at compile time. `node`: for both Evaluator::error()'s
-    // TRACE walk and the (rare) chained-children fallback below.
-    //
-    // ponytail: a script with TWO named args of the SAME name (e.g.
-    // `assert(condition=true, condition=false)`) would resolve to the
-    // LAST one here, not getArg's own first-match; not worth the extra
-    // bookkeeping to fix for input that's already nonsensical.
+    // One Op::AssertStatement site. `statement` is null for the expression
+    // form, which has no children.
     struct AssertSite {
         int argCount = 0;
-        std::optional<int> conditionArgIndex;
-        std::optional<int> messageArgIndex;
-        int condTextConstIdx = -1;
-        const oscad::ModularAssert* node = nullptr;
+        const std::vector<std::unique_ptr<oscad::Argument>>* arguments = nullptr;
+        const oscad::ASTNode* node = nullptr;
+        const oscad::ModularAssert* statement = nullptr;
     };
 
     // Every distinct chunk this SPECIFIC CompiledChunk owns is either a

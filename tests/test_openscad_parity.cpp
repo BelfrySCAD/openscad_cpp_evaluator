@@ -368,3 +368,116 @@ TEST(Parity, SurfaceDatOrientationAndBase) {
     EXPECT_GT(r.volume, 0.0);
     std::filesystem::remove(path);
 }
+
+// -- values ----------------------------------------------------------------------
+
+// Builtin functions read their arguments in order, names ignored; the names
+// were dropped instead, so sin(a=90) was sin(undef).
+TEST(Parity, BuiltinFunctionsTakeNamedArgumentsInOrder) {
+    EXPECT_TRUE(logged(run("echo(sin(a=90), pow(y=3,x=2), concat(a=[1],b=[2]), len(v=[1,2]), str(a=1,b=2), max(a=1,b=5));"),
+                       "ECHO: 1, 9, [1, 2], 2, \"12\", 5"));
+    EXPECT_TRUE(logged(run("echo(rands(0,10,2,seed_value=5) == rands(0,10,2,seed_value=5));"), "ECHO: true"));
+}
+
+TEST(Parity, LogTakesABase) {
+    EXPECT_TRUE(logged(run("echo(log(2,8), log(0.5,4), log(100));"), "ECHO: 3, -2, 2"));
+}
+
+// Printed through double rounding: 123456.5 printed 123456, and a subnormal
+// printed "infe-323".
+TEST(Parity, NumbersPrintToSixSignificantDigits) {
+    EXPECT_TRUE(logged(run("echo(123456.5, 99.99995, 1e-300/1e23, 1234567, 0.0001, 0.00001);"),
+                       "ECHO: 123457, 99.9999, 9.88131e-324, 1.23457e+6, 0.0001, 0.00001"));
+}
+
+TEST(Parity, RoundIsExactNotFloorOfXPlusHalf) {
+    EXPECT_TRUE(logged(run("echo(round(0.49999999999999994), round(2.5), round(-2.5));"), "ECHO: 0, 3, -3"));
+}
+
+TEST(Parity, CrossWarnsAboutBadElements) {
+    const Outcome r = run("echo(cross([1,0,1/0],[0,1,0]));");
+    EXPECT_TRUE(logged(r, "Invalid value (INF) in parameter vector for cross()"));
+    EXPECT_TRUE(logged(r, "ECHO: undef"));
+    EXPECT_TRUE(logged(run("echo(cross([1,2],[3,4]));"), "ECHO: -2"));
+}
+
+TEST(Parity, LookupRejectsANonFiniteKey) {
+    const Outcome r = run("echo(lookup(1/0,[[0,0],[1,10]]));");
+    EXPECT_TRUE(logged(r, "lookup(inf, ...) first argument is not a number"));
+    EXPECT_TRUE(logged(r, "ECHO: undef"));
+}
+
+// \U was not an escape at all, and a bad escape passed silently.
+TEST(Parity, StringEscapes) {
+    EXPECT_TRUE(logged(run("echo(len(\"\\U01F600\"), ord(\"\\U01F600\"));"), "ECHO: 1, 128512"));
+    EXPECT_TRUE(logged(run("echo(\"\\q\");"), "Undefined escape sequence"));
+}
+
+TEST(Parity, ParentModulesCountsTheModuleItself) {
+    EXPECT_TRUE(logged(run("module m() echo($parent_modules); m();"), "ECHO: 1"));
+}
+
+// [0:"a"] was [0:0]; OpenSCAD 2026.02 makes it undef, and master warns.
+TEST(Parity, RangeBoundsMustBeNumbers) {
+    const Outcome r = run("echo([0:\"a\"], [undef:1], [0:\"x\":3], [for (i=[0:\"a\"]) i]);");
+    EXPECT_TRUE(logged(r, "ECHO: undef, undef, undef, []"));
+    EXPECT_TRUE(logged(r, "Unable to convert [0:...:\"a\"] to a range"));
+    EXPECT_TRUE(logged(r, "Unable to convert [...:\"x\":...] to a step value"));
+}
+
+// The later binding won; OpenSCAD keeps the first and warns with the value.
+TEST(Parity, LetKeepsTheFirstOfARepeatedName) {
+    for (const char* src : {"echo(let(a=1, a=a+3) a);", "let(a=1, a=a+3) echo(a);", "echo([let(a=1, a=a+3) a][0]);",
+                            "function f(a) = let(a=1, a=a+3) a; echo(f(0));"}) {
+        const Outcome r = run(src);
+        EXPECT_TRUE(logged(r, "Ignoring duplicate variable assignment \"a\" = 4")) << src;
+        EXPECT_TRUE(logged(r, "ECHO: 1")) << src;
+    }
+}
+
+namespace {
+std::string assertError(const std::string& src) {
+    try {
+        run(src);
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return "";
+}
+}  // namespace
+
+// assert() passed; a message was always quoted; an undef message vanished;
+// the message was only evaluated on failure.
+TEST(Parity, AssertFollowsUpstream) {
+    EXPECT_NE(assertError("assert();").find("Assertion failed"), std::string::npos);
+    EXPECT_NE(assertError("function f() = assert() 1; x = f();").find("Assertion failed"), std::string::npos);
+    EXPECT_NE(assertError("assert(false, 42);").find("Assertion 'false' failed: 42"), std::string::npos);
+    EXPECT_NE(assertError("x = assert(false, \"m\") 1;").find("Assertion 'false' failed: \"m\""), std::string::npos);
+    EXPECT_NE(assertError("assert(undef, undef);").find("failed: undef"), std::string::npos);
+    EXPECT_NE(assertError("assert(message=\"m\");").find("Assertion failed: \"m\""), std::string::npos);
+    EXPECT_TRUE(logged(run("x = assert(true, echo(\"eager\") 1) 2;"), "ECHO: \"eager\""));
+    EXPECT_TRUE(logged(run("assert(1, 2, 3);"), "Too many unnamed arguments supplied"));
+}
+
+TEST(Parity, ForWithNoVariablesRunsZeroTimes) {
+    EXPECT_FALSE(logged(run("for() echo(\"in\");"), "ECHO"));
+    EXPECT_FALSE(logged(run("module q() for() echo(\"in\"); q();"), "ECHO"));
+    EXPECT_FALSE(logged(run("intersection_for() echo(\"in\");"), "ECHO"));
+}
+
+// children(undef) drew every child; a bad vector element aborted the rest.
+TEST(Parity, ChildrenIndexMustBeGiven) {
+    const Outcome r = run("module m() children(undef); m() { echo(\"a\"); }");
+    EXPECT_TRUE(logged(r, "Bad parameter type (undef) for children"));
+    EXPECT_FALSE(logged(r, "ECHO"));
+    const Outcome v = run("module m() children([\"x\", 0]); m() { echo(\"a\"); }");
+    EXPECT_TRUE(logged(v, "Bad parameter type (x) for children"));
+    EXPECT_TRUE(logged(v, "ECHO: \"a\""));
+    EXPECT_TRUE(logged(run("module m() children(0); m();"), "Children index (0) out of bounds (0 children)"));
+}
+
+// The box was the exact outline; OpenSCAD's is hinted and grid-fitted.
+TEST(Parity, TextMetricsBoxIsGridFitted) {
+    EXPECT_TRUE(logged(run("echo(textmetrics(\"Hello\"));"),
+                       "position = [1.1392, -0.1408]; size = [29.929, 10.208]; ascent = 10.0672; descent = -0.1408;"));
+}

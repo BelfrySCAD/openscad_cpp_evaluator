@@ -686,17 +686,14 @@ TEST(ExprEvalAssertExpression, StringMessageIsQuoted) {
 }
 
 TEST(ExprEvalAssertExpression, NonStringMessageUsesFmtValue) {
-    // Note: the surrounding `": \"" + ... + "\""` wrapping is unconditional
-    // (not just for actual strings), so a non-string message's fmtValue()
-    // rendering still ends up inside literal quotes in the final message --
-    // this is a pre-existing quirk of evalAssertExpr, not something this
-    // test is asserting is "correct," just documenting the real output.
+    // The message prints as echo() prints it: a number unquoted, as
+    // OpenSCAD's "Assertion 'false' failed: 42".
     Evaluator ev;
     try {
         evalSrc("assert(false, 42) 1", ev);
         FAIL() << "expected EvalError";
     } catch (const EvalError& e) {
-        EXPECT_NE(std::string(e.what()).find("failed: \"42\""), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("failed: 42"), std::string::npos) << e.what();
     }
 }
 

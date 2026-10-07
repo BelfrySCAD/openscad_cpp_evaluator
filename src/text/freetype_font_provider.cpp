@@ -358,17 +358,32 @@ std::vector<ShapedGlyph> FreetypeFontProvider::shapeText(FontHandle handle, cons
 std::optional<std::array<double, 4>> FreetypeFontProvider::glyphInkBounds(FontHandle handle, GlyphId glyph) {
     if (handle >= impl_->faces.size()) handle = 0;
     FT_Face ft = impl_->faces[handle].ft;
-    if (FT_Load_Glyph(ft, glyph, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING) != 0) return std::nullopt;
+    // Measured exactly as OpenSCAD measures it: the glyph loaded hinted
+    // (FT_LOAD_DEFAULT) at FT_Set_Char_Size(1e5, 100 dpi), and its box
+    // grid-fitted -- grown outward to whole 64ths, as FT_Glyph_Get_CBox's
+    // FT_GLYPH_BBOX_GRIDFIT does. Every textmetrics() box value, and so
+    // halign/valign, lands on that grid (size * 0.00064). Every other load
+    // here is FT_LOAD_NO_SCALE, which ignores the char size, so setting it
+    // once on the shared face disturbs nothing.
+    constexpr FT_F26Dot6 kCharSize = 100000;
+    if (ft->size->metrics.y_ppem == 0 && FT_Set_Char_Size(ft, 0, kCharSize, 100, 100) != 0) return std::nullopt;
+    if (FT_Load_Glyph(ft, glyph, FT_LOAD_DEFAULT) != 0) return std::nullopt;
     if (ft->glyph->outline.n_contours == 0) return std::nullopt;
 
     FT_BBox box;
     FT_Outline_Get_CBox(&ft->glyph->outline, &box);
+    box.xMin &= ~63;
+    box.yMin &= ~63;
+    box.xMax = (box.xMax + 63) & ~63;
+    box.yMax = (box.yMax + 63) & ~63;
     // A contour that encloses nothing draws nothing; real OpenSCAD applies
     // the same xMax>xMin && yMax>yMin test before letting a glyph
     // contribute to the text bounding box.
     if (box.xMax <= box.xMin || box.yMax <= box.yMin) return std::nullopt;
-    return std::array<double, 4>{static_cast<double>(box.xMin), static_cast<double>(box.yMin),
-                                 static_cast<double>(box.xMax), static_cast<double>(box.yMax)};
+    // Back to font units, which measureText scales by size*(100/72)/em.
+    const double toFontUnits = (ft->units_per_EM ? ft->units_per_EM : 1000) * 0.72 / kCharSize;
+    return std::array<double, 4>{box.xMin * toFontUnits, box.yMin * toFontUnits, box.xMax * toFontUnits,
+                                 box.yMax * toFontUnits};
 }
 
 GlyphContours FreetypeFontProvider::glyphOutline(FontHandle handle, GlyphId glyph, int segsPerCurve) {

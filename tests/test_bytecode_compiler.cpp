@@ -187,8 +187,11 @@ TEST(BytecodeCompiler, SiblingParameterDefaultCannotSeeOtherParametersRealValue)
 TEST(BytecodeCompiler, SequentialLetReassignmentSeesPriorValue) {
     ScopedVm vm(true);
     EXPECT_EQ(runCapturingEcho("function bar(h) = let(h = h * 2) h;\necho(bar(3));"), "ECHO: 6");
-    // BOSL2-style plain-variable-name reassignment via nested let().
-    EXPECT_EQ(runCapturingEcho("function baz(x) = let(x = x + 1, x = x + 1) x;\necho(baz(1));"), "ECHO: 3");
+    // A name repeated within ONE let() keeps its first binding: OpenSCAD
+    // warns "Ignoring duplicate variable assignment" and echoes 2, not 3.
+    std::string out = runCapturingEcho("function baz(x) = let(x = x + 1, x = x + 1) x;\necho(baz(1));");
+    EXPECT_NE(out.find("WARNING: Ignoring duplicate variable assignment \"x\" = 3"), std::string::npos) << out;
+    EXPECT_EQ(out.substr(out.rfind('\n') + 1), "ECHO: 2") << out;
 }
 
 TEST(BytecodeCompiler, LetCanOverrideDollarVar) {
@@ -1001,9 +1004,9 @@ TEST(BytecodeCompiler, AssertExpressionCompiles) {
     ScopedVm vm(true);
     // Passing condition: falls through to body untouched.
     EXPECT_EQ(runCapturingEcho("function f(x) = assert(x > 0) x;\necho(f(5));"), "ECHO: 5");
-    // Zero-argument assert() is unconditionally true (compiled with no
-    // check at all -- see the compiler's own AssertOp case).
-    EXPECT_EQ(runCapturingEcho("function h() = assert() 42;\necho(h());"), "ECHO: 42");
+    // Zero-argument assert() FAILS: OpenSCAD reads the missing condition
+    // as undef and says "Assertion failed".
+    EXPECT_THROW(runCapturingEcho("function h() = assert() 42;\necho(h());"), EvalError);
 }
 
 TEST(BytecodeCompiler, AssertExpressionFailureThrowsWithCorrectMessage) {
@@ -1997,7 +2000,7 @@ TEST(ModuleBodyCompiles, ParentModulesCountIsAccurateAtEachNestingLevelCompiled)
                                 "module mid() { inner(); }\n"
                                 "module outer() { mid(); }\n"
                                 "outer();"),
-              "ECHO: 2");
+              "ECHO: 3");  // OpenSCAD counts the module itself (checked, 2026.02.01)
 }
 
 TEST(ModuleBodyCompiles, ParentModulesCountRecoversCorrectlyAfterACaughtExceptionCompiled) {
@@ -2025,7 +2028,7 @@ TEST(ModuleBodyCompiles, ParentModulesCountRecoversCorrectlyAfterACaughtExceptio
     auto scope2 = oscad::buildScopes(ast2);
     EvalContext ctx2 = EvalContext::makeRoot(scope2.get());
     ev.resolveTree(ast2, ctx2);
-    EXPECT_EQ(captured, "ECHO: 1");
+    EXPECT_EQ(captured, "ECHO: 2");  // inner and outer, as OpenSCAD counts
 }
 
 TEST(ModuleBodyCompiles, NestedModuleClosureStillWorksAfterADeepUnrelatedRecursiveDetour) {

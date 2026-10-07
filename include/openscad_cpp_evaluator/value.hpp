@@ -306,7 +306,9 @@ std::string formatNumber(double v);
 //
 // A trailing lone backslash is kept as itself. It can only occur in an
 // unterminated literal, which is a parse error long before this runs.
-std::string unescapeStringLiteral(const std::string& raw);
+// `undefinedEscapes`, when given, counts the escapes OpenSCAD's lexer calls
+// undefined (it warns once for each).
+std::string unescapeStringLiteral(const std::string& raw, int* undefinedEscapes = nullptr);
 
 // echo()/str()/assert-message display format: "undef" | "true"/"false" |
 // "[start : step : end]" (range) | formatNumber() (number) | "[e1, e2, ...]"
