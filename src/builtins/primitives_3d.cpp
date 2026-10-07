@@ -119,10 +119,30 @@ std::string describeEdge(const M& mesh, std::pair<uint32_t, uint32_t> edge) {
 
 CSGParams resolveCube(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    // size/center reading.
-    // CLEAN-ROOM: reimplement from spec section B4.
+    // A number is a cube. A list of exactly three is read axis by axis up
+    // to its first non-number, which (with the axes after it) stays at 1;
+    // that, and any other kind of size, warns. undef is a unit cube.
     std::vector<Value> sizeVec(3, Value{1.0});
-    const bool center = false;
+    const Value size = getArg(args, 0, "size");
+    if (std::holds_alternative<double>(size)) {
+        sizeVec.assign(3, size);
+    } else if (!std::holds_alternative<std::monostate>(size)) {
+        bool ok = false;
+        if (const ListPtr* list = std::get_if<ListPtr>(&size); list && (*list)->items.size() == 3) {
+            size_t axis = 0;
+            while (axis < 3 && std::holds_alternative<double>((*list)->items[axis])) {
+                sizeVec[axis] = (*list)->items[axis];
+                ++axis;
+            }
+            ok = axis == 3;
+        }
+        if (!ok) {
+            ev.warn("Unable to convert cube(size=" + fmtValue(size) + ", ...) parameter to a number or a vec3 of numbers",
+                    &node.position());
+        }
+    }
+    const Value centerArg = getArg(args, 1, "center");
+    const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
 
     CSGParams params;
     params["size"] = Value{makeList(std::move(sizeVec))};
@@ -305,10 +325,35 @@ V3 octaCanonical(int a, int b, int c, int n) {
         const std::array<double, 2> e = quarterArc(b, n);
         return {e[0], e[1], 0.0};
     }
-    // An interior vertex (all three weights non-zero).
-    // CLEAN-ROOM: reimplement from spec section B8.
-    (void)a;
-    return {1.0, 0.0, 0.0};
+    // An interior vertex (all three weights non-zero): each weight picks a
+    // great circle crossing the octant at that weight's level, and the
+    // vertex is where the three meet -- the normalised mean of their
+    // pairwise crossings, as three great circles do not quite share a point.
+    const auto cross = [](const V3& u, const V3& v) -> V3 {
+        return {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+    };
+    const auto normalised = [](V3 v) {
+        const double len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        return V3{v[0] / len, v[1] / len, v[2] / len};
+    };
+    const auto xy = [&](int m) { const auto e = quarterArc(m, n); return V3{e[0], e[1], 0.0}; };
+    const auto xz = [&](int m) { const auto e = quarterArc(m, n); return V3{e[0], 0.0, e[1]}; };
+    const auto yz = [&](int m) { const auto e = quarterArc(m, n); return V3{0.0, e[0], e[1]}; };
+
+    // Each great circle as its plane's normal.
+    const V3 cLevel = cross(xz(c), yz(c));
+    const V3 bLevel = cross(xy(b), yz(n - b));
+    const V3 aLevel = cross(xy(n - a), xz(n - a));
+    const auto meet = [&](const V3& u, const V3& v) {
+        V3 p = normalised(cross(u, v));
+        if (p[0] + p[1] + p[2] < 0) p = {-p[0], -p[1], -p[2]};
+        return p;
+    };
+    const V3 p = meet(cLevel, bLevel), q = meet(bLevel, aLevel), s = meet(aLevel, cLevel);
+    V3 v = normalised({p[0] + q[0] + s[0], p[1] + q[1] + s[1], p[2] + q[2] + s[2]});
+    if (a == b) v[1] = v[0];
+    if (b == c) v[2] = v[1];
+    return v;
 }
 } // namespace
 
@@ -510,12 +555,21 @@ std::vector<ColoredBody> generateSphere(Evaluator& ev, const CSGParams& params, 
 
 CSGParams resolveCylinder(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    // h, center and the three radius/diameter pairs.
-    // CLEAN-ROOM: reimplement from spec section B5 (the pairs through
-    // lookupRadius, spec section B1).
-    const double h = 1.0;
-    const bool center = false;
-    const double r1 = 1.0, r2 = 1.0;
+    // cylinder(h, r1, r2, center, r, d, d1, d2). r (or d) sets both ends,
+    // then r1/d1 and r2/d2 override their own end; mixing r with either is
+    // ambiguous and warned about.
+    const Value hArg = getArg(args, 0, "h");
+    const double h = std::holds_alternative<double>(hArg) ? std::get<double>(hArg) : 1.0;
+    const Value centerArg = getArg(args, 3, "center");
+    const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
+
+    const oscad::Position* where = &node.position();
+    const std::optional<double> r = lookupRadius(ev, args, 4, 5, "r", "d", where);
+    const std::optional<double> bottom = lookupRadius(ev, args, 1, 6, "r1", "d1", where);
+    const std::optional<double> top = lookupRadius(ev, args, 2, 7, "r2", "d2", where);
+    if (r && (bottom || top)) ev.warn("Cylinder parameters ambiguous", where);
+    const double r1 = bottom.value_or(r.value_or(1.0));
+    const double r2 = top.value_or(r.value_or(1.0));
 
     const int segs =
         fnSegmentsFromCtx(effCtx, std::max(r1, r2), [&](const std::string& m) { ev.warn(m, &node.position()); });
@@ -715,10 +769,48 @@ namespace {
 // have been unpacked): `points` gets one [x, y, z] per input point, `faces`
 // the faces to draw, each a list of indices in range for `points`. False
 // when nothing at all can be drawn.
-// CLEAN-ROOM: reimplement from spec section B6.
-bool readPolyhedronInput(Evaluator&, const Value&, const Value&, const oscad::Position*,
-                         std::vector<std::array<double, 3>>&, std::vector<std::vector<size_t>>&) {
-    return false;
+bool readPolyhedronInput(Evaluator& ev, const Value& points, const Value& faces, const oscad::Position* where,
+                         std::vector<std::array<double, 3>>& outPoints, std::vector<std::vector<size_t>>& outFaces) {
+    const ListPtr* pointList = std::get_if<ListPtr>(&points);
+    if (!pointList) {
+        emitInputError(ev, "Unable to convert points = " + fmtValue(points) + " to a vector of coordinates", where);
+        return false;
+    }
+    // A point is two or three finite numbers (z defaults to 0). A bad one
+    // becomes the origin rather than being dropped, so later indices hold.
+    const auto& items = (*pointList)->items;
+    outPoints.clear();
+    for (size_t i = 0; i < items.size(); ++i) {
+        std::array<double, 3> xyz{0.0, 0.0, 0.0};
+        const ListPtr* coords = std::get_if<ListPtr>(&items[i]);
+        const size_t dims = coords ? (*coords)->items.size() : 0;
+        bool ok = dims == 2 || dims == 3;
+        for (size_t c = 0; ok && c < dims; ++c) {
+            const double* n = std::get_if<double>(&(*coords)->items[c]);
+            ok = n && std::isfinite(*n);
+            if (ok) xyz[c] = *n;
+        }
+        if (!ok) {
+            emitInputError(ev,
+                           "Unable to convert points[" + std::to_string(i) + "] = " + fmtValue(items[i]) +
+                               " to a vec3 of numbers",
+                           where);
+            xyz = {0.0, 0.0, 0.0};
+        }
+        outPoints.push_back(xyz);
+    }
+
+    const ListPtr* faceList = std::get_if<ListPtr>(&faces);
+    if (!faceList) {
+        emitInputError(ev, "Unable to convert faces = " + fmtValue(faces) + " to a vector of vector of point indices",
+                       where);
+        return false;
+    }
+    outFaces.clear();
+    for (auto& face : readIndexLists(ev, **faceList, "faces", outPoints.size(), where)) {
+        if (face.size() >= 3) outFaces.push_back(std::move(face));
+    }
+    return true;
 }
 } // namespace
 
