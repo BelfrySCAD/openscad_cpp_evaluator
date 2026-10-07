@@ -707,32 +707,36 @@ TEST(MixedDimensions, TopLevelKeepsBothDimensionsSilently) {
     EXPECT_TRUE(e.bodies[1].body.has_value()) << "and so did the 3D one";
 }
 
-TEST(MixedDimensions, ExportDropsTheFlatSlabWhenRealSolidsArePresent) {
-    // The top level keeps a 2D shape so it can be SEEN, thin-extruded by
-    // toRenderableBodies. A mesh export must not smuggle that 1-unit-tall slab
-    // in beside the real solids -- the reference drops it there too.
-    Evaluated e = evalSrc("square(4); cube(1);");
+TEST(MixedDimensions, ExportWritesWhatOpenSCADsRenderKeeps) {
+    // The viewport keeps a top-level 2D shape beside the 3D ones (as
+    // OpenSCAD's preview does, silently). A file holds what OpenSCAD's
+    // RENDER holds: the first object decides the dimension, the others are
+    // dropped with its two warnings. Checked against 2026.02.01.
+    Evaluated e = evalSrc("cube(1); square(4);");
     const std::vector<ColoredBody> renderable = toRenderableBodies(e.bodies);
     ASSERT_EQ(renderable.size(), 2u) << "both are still drawn";
-
     const std::vector<ExportObject> objects = splitBodiesForExport(renderable, nullptr);
     ASSERT_EQ(objects.size(), 1u) << "but only the cube is exported";
-    // Only the cube survives, so the height is the cube's own.
     float zmin = 1e9f, zmax = -1e9f;
     for (size_t i = 2; i < objects[0].verts.size(); i += 3) {
         zmin = std::min(zmin, objects[0].verts[i]);
         zmax = std::max(zmax, objects[0].verts[i]);
     }
     EXPECT_NEAR(zmax - zmin, 1.0f, 1e-5f);
+    const std::vector<std::string> w = mixedDimensionWarnings(renderable);
+    ASSERT_EQ(w.size(), 2u);
+    EXPECT_EQ(w[0], "Mixing 2D and 3D objects is not supported");
+    EXPECT_EQ(w[1], "Ignoring 2D child object for 3D operation");
 }
 
-TEST(MixedDimensions, ExportKeepsTheFlatSlabWhenItIsTheOnlyGeometry) {
-    // A 2D-only script has nothing else to write, so its slab still exports
-    // -- unchanged behaviour, and the only reason the filter is conditional.
-    Evaluated e = evalSrc("square(4);");
-    const std::vector<ExportObject> objects =
-        splitBodiesForExport(toRenderableBodies(e.bodies), nullptr);
-    EXPECT_EQ(objects.size(), 1u);
+TEST(MixedDimensions, A2DFirstOr2DOnlyModelIsNotA3DObject) {
+    // OpenSCAD refuses a mesh export when the first top-level object is
+    // 2D -- including a 2D-only model, which used to be written as a
+    // 1-unit slab.
+    for (const char* src : {"square(4);", "square(4); cube(1);"}) {
+        Evaluated e = evalSrc(src);
+        EXPECT_THROW(splitBodiesForExport(toRenderableBodies(e.bodies), nullptr), std::runtime_error) << src;
+    }
 }
 
 TEST(MixedDimensions, ATranslatedTwoDeeShapeKeepsItsZ) {

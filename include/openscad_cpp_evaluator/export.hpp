@@ -52,6 +52,14 @@ struct ExportObject {
 // A body Manifold rejected (an open shell is not a solid) can take part in
 // none of that: it keeps its own triangles and its own object, and its
 // 1-based index is appended to `openParts` for the caller to warn about.
+// The dimension OpenSCAD's render gives these top-level bodies: that of the
+// first one with geometry (2 or 3), or 0 for none.
+int topLevelDimension(const std::vector<ColoredBody>& bodies);
+
+// OpenSCAD's render warnings for a top level that mixes 2D and 3D; export
+// writes only the first object's dimension.
+std::vector<std::string> mixedDimensionWarnings(const std::vector<ColoredBody>& bodies);
+
 std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies,
                                                 std::vector<int>* openParts = nullptr,
                                                 bool splitComponents = false,
