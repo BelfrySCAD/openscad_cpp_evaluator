@@ -1576,4 +1576,9 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
     return Value{}; // unreachable: every BuiltinFnId has a case above
 }
 
+// OpenSCAD's sin_degrees/cos_degrees (exact at multiples of 30 and 45
+// degrees), for the transforms. See builtins.hpp.
+double sinDeg(double x) { return sinDegrees(x); }
+double cosDeg(double x) { return cosDegrees(x); }
+
 } // namespace oscadeval

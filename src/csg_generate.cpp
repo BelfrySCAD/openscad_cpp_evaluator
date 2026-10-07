@@ -2,6 +2,7 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 #include <cstring>
 #include <exception>
 
@@ -132,6 +133,20 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 const uint32_t savedCallChain = generateCallChain;
                 generateWarnEntry = node.warnEntry;
                 generateCallChain = node.callChain;
+                // An operation (union, offset, hull, linear_extrude, ...)
+                // sees its 2D children where OpenSCAD's F6 would: with any
+                // transform they carry projected onto the plane. Only the
+                // transforms, color() and the modifier wrappers pass the
+                // carried transform on untouched, so a lifted or tilted 2D
+                // shape still displays in place. See projectSectionXform.
+                static const std::unordered_set<std::string> kCarriesSectionXform = {
+                    "translate", "rotate", "scale", "mirror", "multmatrix", "resize",
+                    "color", "highlight", "background", "show_only", "children"};
+                if (!kCarriesSectionXform.count(node.kind)) {
+                    for (const std::unique_ptr<CSGNode>& c : node.children)
+                        for (ColoredBody& b : c->bodies)
+                            if (!projectSectionXform(b)) warn(kZeroScale2dWarning, nullptr);
+                }
                 try {
                     node.bodies = it->second(*this, node.params, node.children, *node.node);
                 } catch (const std::exception& e) {
@@ -293,7 +308,7 @@ void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int
         kept.reserve(child->bodies.size());
         for (ColoredBody& b : child->bodies) {
             const int dim = dimensionOf(b);
-            if (b.role == BodyRole::Background || dim == 0 || isEmptyBody(b)) {
+            if (b.role == BodyRole::Background || b.role == BodyRole::HighlightGhost || dim == 0 || isEmptyBody(b)) {
                 kept.push_back(std::move(b));
                 continue;
             }

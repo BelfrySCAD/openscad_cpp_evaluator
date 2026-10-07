@@ -304,6 +304,28 @@ manifold::CrossSection minkowski2d(const manifold::CrossSection& a, const manifo
 // was given. 2D used to be dropped on the floor -- silently, so
 // `linear_extrude() minkowski() { square(); circle(); }` produced nothing
 // at all where the reference produces the rounded square you asked for.
+namespace {
+// Any vertex of a non-empty solid; the origin for an empty one.
+manifold::vec3 someVertex(const manifold::Manifold& m) {
+    const manifold::MeshGL64 mesh = m.GetMeshGL64();
+    if (mesh.vertProperties.size() < 3) return manifold::vec3(0, 0, 0);
+    return manifold::vec3(mesh.vertProperties[0], mesh.vertProperties[1], mesh.vertProperties[2]);
+}
+} // namespace
+
+// A (+) B, exactly. Manifold::MinkowskiSum unions its first operand into
+// the result (minkowski.cpp seeds composedHulls with it), which is the
+// Minkowski sum only when the other operand contains the origin: a cube
+// summed with a cube at x=5 came out with the original cube still attached
+// (volume 9, not 8). Moving each operand so one of its own vertices is at
+// the origin puts both inside the sum, where the extra union adds nothing;
+// the result moves back by the same amount, since
+// (A - u) (+) (B - v) = A (+) B - (u + v).
+manifold::Manifold minkowskiSum3d(const manifold::Manifold& a, const manifold::Manifold& b) {
+    const manifold::vec3 u = someVertex(a), v = someVertex(b);
+    return a.Translate(-u).MinkowskiSum(b.Translate(-v)).Translate(u + v);
+}
+
 std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams&, const std::vector<std::unique_ptr<CSGNode>>& children,
                                             const oscad::ASTNode& node) {
     const std::vector<ColoredBody> bodies = flattenCsgTree(children);
@@ -348,7 +370,7 @@ std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams&, cons
     }
 
     manifold::Manifold result = *bodies3d.front()->body;
-    for (size_t i = 1; i < bodies3d.size(); ++i) result = result.MinkowskiSum(*bodies3d[i]->body);
+    for (size_t i = 1; i < bodies3d.size(); ++i) result = minkowskiSum3d(result, *bodies3d[i]->body);
     if (result.Status() != manifold::Manifold::Error::NoError) {
         ev.warn("minkowski: result is not manifold", &node.position());
     }

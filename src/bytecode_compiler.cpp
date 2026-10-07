@@ -1404,42 +1404,7 @@ public:
         // geometry pass then reads from, so it cannot be bracketed per-pass.
         out.push_back({Op::OpenLetScope, 0, 0, nullptr});
 
-        std::vector<const oscad::ASTNode*> assignNodes;
-        std::vector<const oscad::ASTNode*> geoNodes;
-        for (const auto& c : call.children) {
-            if (c->kind() == oscad::NodeKind::Assignment) {
-                assignNodes.push_back(c.get());
-            } else if (c->kind() != oscad::NodeKind::ModuleDeclaration &&
-                       c->kind() != oscad::NodeKind::FunctionDeclaration) {
-                geoNodes.push_back(c.get());
-            }
-        }
-        compileStatementList(assignNodes, out);
-        for (const oscad::ASTNode* geoNode : geoNodes) {
-            // A separating children() forward contributes a runtime-decided
-            // NUMBER of groups, so it cannot be bracketed at compile time.
-            if (Evaluator::isSeparatingChildrenCall(*geoNode)) {
-                out.push_back({Op::CsgGroupChildren, internNativeStatement(geoNode), 0, &geoNode->position()});
-                continue;
-            }
-            out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
-            compileStatementList(std::vector<const oscad::ASTNode*>{geoNode}, out);
-            // `a` = whether a group that turns out EMPTY is still an
-            // operand: a module instantiation or a loop builds a node
-            // whatever it contains, an `if`/block/`*` does not. Mirrors
-            // resolveCsg's own "empty_is_a_group" (booleans.cpp), where the
-            // full reasoning and the OpenSCAD checks live.
-            const oscad::NodeKind k = geoNode->kind();
-            const int emptyIsAGroup = (
-                                       k == oscad::NodeKind::ModularCall ||
-                                       k == oscad::NodeKind::ModularFor ||
-                                       k == oscad::NodeKind::ModularIntersectionFor ||
-                                       k == oscad::NodeKind::ModularLet ||
-                                       k == oscad::NodeKind::ModularModifierShowOnly ||
-                                       k == oscad::NodeKind::ModularModifierHighlight ||
-                                       k == oscad::NodeKind::ModularModifierBackground) ? 1 : 0;
-            out.push_back({Op::CsgGroupEnd, emptyIsAGroup, 0, nullptr});
-        }
+        emitOperandGroups(call.children, out);
         out.push_back({Op::CloseExprScope, 0, 0, nullptr});
         out.push_back({Op::PopCsgWrap, idx, 0, &call.position()});
     }
@@ -1474,6 +1439,41 @@ public:
     // fallback, so neither does this) -- but CsgGroupStart/CsgGroupEnd
     // themselves are UNCONDITIONAL, since native measures a (possibly
     // zero-size) group regardless of body emptiness.
+    // One CsgGroupStart/End bracket per child statement -- one boolean
+    // operand each -- after the block's assignments. Shared by the boolean
+    // modules and intersection_for, mirroring resolveCsg/
+    // resolveIntersectionFor.
+    template <typename Stmts>
+    void emitOperandGroups(const Stmts& stmts, std::vector<Instruction>& out) {
+        std::vector<const oscad::ASTNode*> assignNodes;
+        std::vector<const oscad::ASTNode*> geoNodes;
+        for (const auto& c : stmts) {
+            if (c->kind() == oscad::NodeKind::Assignment) {
+                assignNodes.push_back(c.get());
+            } else if (c->kind() != oscad::NodeKind::ModuleDeclaration &&
+                       c->kind() != oscad::NodeKind::FunctionDeclaration) {
+                geoNodes.push_back(c.get());
+            }
+        }
+        compileStatementList(assignNodes, out);
+        for (const oscad::ASTNode* geoNode : geoNodes) {
+            // A separating children() forward contributes a runtime-decided
+            // NUMBER of groups, so it cannot be bracketed at compile time.
+            if (Evaluator::isSeparatingChildrenCall(*geoNode)) {
+                out.push_back({Op::CsgGroupChildren, internNativeStatement(geoNode), 0, &geoNode->position()});
+                continue;
+            }
+            out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
+            compileStatementList(std::vector<const oscad::ASTNode*>{geoNode}, out);
+            // `a` = whether a group that turns out EMPTY is still an
+            // operand. See emptyStatementIsAnOperand (booleans.cpp).
+            // and bit 2 = it is a `%` statement, never an operand at all.
+            const int flags = (emptyStatementIsAnOperand(*geoNode) ? 1 : 0) |
+                              (geoNode->kind() == oscad::NodeKind::ModularModifierBackground ? 2 : 0);
+            out.push_back({Op::CsgGroupEnd, flags, 0, nullptr});
+        }
+    }
+
     void compileIntersectionForLoop(const oscad::ModularIntersectionFor& n, std::vector<Instruction>& out) {
         out.push_back({Op::CheckDebugStatement, internNativeStatement(&n), 0, nullptr});
         CompiledChunk::CsgWrapSite site;
@@ -1491,9 +1491,9 @@ public:
                 if (!n.body.empty()) {
                     out.push_back({Op::NativeCheckDebugExprLevel, internNativeStatement(n.body.front().get()), 0, nullptr});
                 }
-                out.push_back({Op::CsgGroupStart, 0, 0, nullptr});
-                compileStatementList(n.body, out);
-                out.push_back({Op::CsgGroupEnd, 0, 0, nullptr});
+                // One operand per child statement, as upstream intersects
+                // them flat -- see resolveIntersectionFor.
+                emitOperandGroups(n.body, out);
                 return;
             }
             const int iterListId = nextIterList_++;

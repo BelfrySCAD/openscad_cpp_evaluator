@@ -28,6 +28,8 @@ Outcome run(const std::string& src) {
     Outcome r;
     Evaluated e = evaluateSrc(src, [&](const std::string& m) { r.log.push_back(m); });
     for (const ColoredBody& b : e.bodies) {
+        // Only what an export would write: not `%` scenery, not `#` ghosts.
+        if (b.role == BodyRole::Background || b.role == BodyRole::HighlightGhost) continue;
         if (b.section) r.area += b.section->Area();
         else if (b.body && !b.body->IsEmpty()) r.volume += b.body->Volume();
         if ((b.section && !b.section->IsEmpty()) || (b.body && !b.body->IsEmpty())) ++r.bodies;
@@ -139,4 +141,108 @@ TEST(Parity, RandsMatchesUpstreamForOddArguments) {
     const Outcome r = run("echo(rands(0,1/0,1,1));");
     EXPECT_TRUE(logged(r, "rands() range max cannot be infinite"));
     EXPECT_TRUE(logged(r, "resetting to 89884656743115785407263711865852178399035283762922498299458738401578630390014"));
+}
+
+// -- transforms ----------------------------------------------------------------
+
+namespace {
+manifold::Rect sectionBounds(const std::string& src) {
+    Evaluated e = evaluateSrc(src);
+    manifold::Rect r;
+    for (const ColoredBody& b : e.bodies)
+        if (b.section) r = r.Union(b.section->Bounds());
+    return r;
+}
+manifold::Box solidBounds(const std::string& src) {
+    Evaluated e = evaluateSrc(src);
+    manifold::Box r;
+    for (const ColoredBody& b : e.bodies)
+        if (b.body && !b.body->IsEmpty()) r = r.Union(b.body->BoundingBox());
+    return r;
+}
+}  // namespace
+
+// A transform out of the XY plane rides on a 2D shape for display, but every
+// 2D operation sees it projected, as OpenSCAD's F6 does. union, offset, hull
+// and linear_extrude used the shape as if the transform had not happened.
+TEST(Parity, OperationsSeeA2DShapesOutOfPlaneTransformProjected) {
+    EXPECT_NEAR(sectionBounds("union(){ multmatrix([[1,0,0,1],[0,1,0,0],[0,0,1,3]]) square(1); "
+                              "translate([5,0]) square(1); }").min.x,
+                1.0, 1e-9);
+    const manifold::Box b =
+        solidBounds("linear_extrude(1) multmatrix([[1,0.5,0,1],[0,1,0,2],[0,0,1,3]]) square([1,2]);");
+    EXPECT_NEAR(b.min.x, 1.0, 1e-9);
+    EXPECT_NEAR(b.max.x, 3.0, 1e-9);
+    EXPECT_NEAR(b.max.y, 4.0, 1e-9);
+    // A quarter turn out of the plane is singular: the shape is removed.
+    const Outcome r = run("linear_extrude(1) rotate([90,0,0]) square(1); cube(0.5);");
+    EXPECT_TRUE(logged(r, "Scaling a 2D object with 0 - removing object"));
+    EXPECT_NEAR(r.volume, 0.125, 1e-9);
+}
+
+TEST(Parity, TwoDRotateHonoursTheAxisAndResizeWorks) {
+    // v=[0,0,-1] turns the other way (it used to be ignored for 2D).
+    EXPECT_NEAR(sectionBounds("rotate(a=30, v=[0,0,-1]) square([1,2]);").min.y, -0.5, 1e-9);
+    const manifold::Rect r = sectionBounds("resize([10,20]) square([1,2]);");
+    EXPECT_NEAR(r.max.x, 10.0, 1e-9);
+    EXPECT_NEAR(r.max.y, 20.0, 1e-9);
+    // A negative newsize leaves its axis alone.
+    EXPECT_NEAR(solidBounds("resize([-10,20,30]) cube([1,2,3]);").max.x, 1.0, 1e-9);
+}
+
+TEST(Parity, TransformArgumentsFollowUpstream) {
+    // mirror with a zero normal is the identity, not a deletion.
+    EXPECT_NEAR(run("mirror([0,0,0]) cube([1,2,3]);").volume, 6.0, 1e-9);
+    // multmatrix fills from the identity and divides by [3][3].
+    EXPECT_NEAR(run("multmatrix([[2,0],[0,3]]) cube([1,2,3]);").volume, 36.0, 1e-9);
+    EXPECT_NEAR(run("multmatrix([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,2]]) cube([1,2,3]);").volume, 0.75, 1e-9);
+    // Arguments a transform cannot use are ignored with upstream's warning.
+    Outcome r = run("scale([2]) cube(1);");
+    EXPECT_TRUE(logged(r, "Unable to convert scale([2]) parameter to a number, a vec3 or vec2 of numbers or a number"));
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    r = run("rotate(a=[10,20,30], v=[1,0,0]) cube(1);");
+    EXPECT_TRUE(logged(r, "When parameter a is supplied as vector, v is ignored"));
+    // A NaN in the final matrix removes the object, with upstream's warning.
+    r = run("scale(0/0) cube(1); translate([3,0,0]) cube(1);");
+    EXPECT_TRUE(logged(r, "Transformation matrix contains Not-a-Number and/or Infinity - removing object."));
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+}
+
+// -- modifiers and operands ------------------------------------------------------
+
+TEST(Parity, BackgroundStatementIsNotAnOperand) {
+    EXPECT_NEAR(run("difference(){ %cube(2); translate([1,1,1]) cube(2); }").volume, 8.0, 1e-9);
+    EXPECT_NEAR(run("intersection(){ cube(2); %translate([5,0,0]) cube(1); }").volume, 8.0, 1e-9);
+    // ...but a module or union() holding only `%` is an empty operand.
+    EXPECT_NEAR(run("module m(){ %cube(3); } intersection(){ cube(2); m(); }").volume, 0.0, 1e-9);
+}
+
+// A `#` operand is merged AND drawn as a ghost; the ghost used to be
+// exported (and re-used by an outer boolean) as real geometry.
+TEST(Parity, HighlightedOperandIsNotExportedTwice) {
+    Evaluated e = evaluateSrc("difference(){ cube(2); #translate([1,1,1]) cube(2); }");
+    double exported = 0;
+    bool ghost = false;
+    for (const ColoredBody& b : e.bodies) {
+        if (b.role == BodyRole::HighlightGhost) ghost = true;
+        else if (b.body) exported += b.body->Volume();
+    }
+    EXPECT_TRUE(ghost);
+    EXPECT_NEAR(exported, 7.0, 1e-9);
+    // A `#` with nothing merging it is ordinary, exported geometry.
+    Evaluated top = evaluateSrc("#cube(2);");
+    ASSERT_EQ(top.bodies.size(), 1u);
+    EXPECT_EQ(top.bodies[0].role, BodyRole::Highlight);
+}
+
+// Manifold::MinkowskiSum unions its first operand into the result.
+TEST(Parity, MinkowskiIsExactForOperandsAwayFromTheOrigin) {
+    const Outcome r = run("minkowski(){ cube(1); translate([5,0,0]) cube(1); }");
+    EXPECT_NEAR(r.volume, 8.0, 1e-9);
+    EXPECT_NEAR(solidBounds("minkowski(){ cube(1); translate([5,0,0]) cube(1); }").min.x, 5.0, 1e-9);
+}
+
+TEST(Parity, IntersectionForIntersectsEveryStatementFlat) {
+    EXPECT_NEAR(run("intersection_for(i=[0:1]){ translate([i*0.5,0,0]) cube(1); translate([3,0,0]) cube(1); }").volume,
+                0.0, 1e-9);
 }

@@ -12,7 +12,16 @@
 
 namespace oscadeval {
 
-enum class BodyRole { Normal, Highlight, Background, ShowOnly };
+// HighlightGhost is the see-through copy of a `#` operand that an operation
+// (difference, intersection, hull, ...) emits beside its result so the
+// viewport can still show the operand. The operand itself was merged into
+// the result; the ghost is drawing only. It is never an operand again and
+// never exported -- it used to be a plain Highlight body, so an outer
+// boolean used it twice and export wrote it as real geometry:
+// difference(){ cube(2); #translate([1,1,1]) cube(2); } exported volume 15
+// where OpenSCAD writes 7. A `#` with nothing merging it stays Highlight,
+// and exports like any other geometry, as it does upstream.
+enum class BodyRole { Normal, Highlight, Background, ShowOnly, HighlightGhost };
 
 // A single piece of evaluated geometry: exactly one of `body` (3D) or
 // `section` (2D) is set, never both -- mirrors the Python reference's
@@ -177,5 +186,27 @@ inline constexpr double kTopLevel2dHeight = 1.0;
 
 std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodies,
                                             double flatHeight = kTopLevel2dHeight);
+
+// A 3D affine transform as it acts on the XY plane: rows x and y, columns
+// x, y and translation -- what OpenSCAD's GeometryEvaluator applies to 2D
+// geometry (z, and everything out of the plane, simply drops away).
+manifold::mat2x3 projectTo2d(const manifold::mat3x4& m);
+
+// Moves a section's carried transform (ColoredBody::sectionXform) into the
+// CrossSection itself, projected onto the plane, and resets it. Every 2D
+// operation does this to its children before it reads them: OpenSCAD's F6
+// has already projected each transform by then, and an operation that
+// ignored the carried one -- union, offset, hull, linear_extrude -- used the
+// shape as if the transform had never happened. False if the projection
+// was singular and the shape was removed (the caller warns).
+bool projectSectionXform(ColoredBody& b);
+
+// Applies `m`, projected onto the plane, to a CrossSection. A singular
+// projection -- scale([0,1]), a quarter turn about X -- empties it, as
+// upstream's Polygon2d::transform does, and returns false.
+bool transformSection(manifold::CrossSection& cs, const manifold::mat3x4& m);
+
+// Upstream's warning for that case, word for word.
+inline constexpr const char* kZeroScale2dWarning = "Scaling a 2D object with 0 - removing object";
 
 } // namespace oscadeval

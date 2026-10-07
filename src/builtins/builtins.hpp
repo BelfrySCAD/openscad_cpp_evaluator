@@ -267,6 +267,14 @@ std::vector<ColoredBody> generateSurface(Evaluator& ev, const CSGParams& params,
                                           const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
 
 // text() -- text.cpp.
+// Whether a statement that produced no geometry still counts as a boolean
+// operand (and so empties an intersection) -- see resolveCsg.
+bool emptyStatementIsAnOperand(const oscad::ASTNode& stmt);
+
+// OpenSCAD's sin_degrees/cos_degrees: exact at multiples of 30 and 45 degrees.
+double sinDeg(double x);
+double cosDeg(double x);
+
 // OpenSCAD's lookup_radius() (primitives_2d.cpp): `d` beats `r`, numbers only.
 std::optional<double> lookupRadius(Evaluator& ev, const CallArgs& args, std::optional<int> rPos,
                                    std::optional<int> dPos, const std::string& rName, const std::string& dName,

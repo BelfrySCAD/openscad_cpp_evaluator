@@ -33,17 +33,28 @@ RoleSplit splitByRole(const std::vector<ColoredBody>& bodies) {
     // boolean would silently zero the whole operation (the same failure
     // mode invalid operands caused before they were filtered out).
     for (const ColoredBody& c : bodies) {
-        if (c.isDisplayOnly() && c.role != BodyRole::Background && c.role != BodyRole::ShowOnly) {
+        if (c.isDisplayOnly() && c.role != BodyRole::Background && c.role != BodyRole::ShowOnly &&
+            c.role != BodyRole::HighlightGhost) {
             r.displayOnly.push_back(c);
         }
     }
     for (const ColoredBody& c : bodies) {
-        if (c.role != BodyRole::Background && c.role != BodyRole::ShowOnly && !c.isDisplayOnly()) {
+        if (c.role != BodyRole::Background && c.role != BodyRole::ShowOnly && c.role != BodyRole::HighlightGhost &&
+            !c.isDisplayOnly()) {
             r.foreground.push_back(c);
         }
     }
+    // A `#` operand is merged like any other (it is in `foreground` above)
+    // AND drawn again as a ghost; a ghost from deeper down just rides along.
     for (const ColoredBody& c : r.foreground) {
-        if (c.role == BodyRole::Highlight) r.highlight.push_back(c);
+        if (c.role == BodyRole::Highlight) {
+            ColoredBody ghost = c;
+            ghost.role = BodyRole::HighlightGhost;
+            r.highlight.push_back(std::move(ghost));
+        }
+    }
+    for (const ColoredBody& c : bodies) {
+        if (c.role == BodyRole::HighlightGhost) r.highlight.push_back(c);
     }
     for (const ColoredBody& c : bodies) {
         if (c.role == BodyRole::ShowOnly) r.showOnly.push_back(c);
@@ -82,6 +93,13 @@ std::optional<manifold::CrossSection> toCrossSection(const std::vector<ColoredBo
 // alongside real ManifoldCache/provenance work if per-triangle color
 // through a merge is needed).
 
+bool emptyStatementIsAnOperand(const oscad::ASTNode& stmt) {
+    const oscad::NodeKind k = stmt.kind();
+    return k == oscad::NodeKind::ModularCall || k == oscad::NodeKind::ModularFor ||
+           k == oscad::NodeKind::ModularIntersectionFor || k == oscad::NodeKind::ModularLet ||
+           k == oscad::NodeKind::ModularModifierShowOnly || k == oscad::NodeKind::ModularModifierHighlight;
+}
+
 CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     const std::string& op = node.name->name;
     // union/difference/intersection take no positional arguments in real
@@ -110,6 +128,7 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
 
     std::vector<Value> groupSizes;
     std::vector<Value> emptyIsAGroup;
+    std::vector<Value> backgroundStmt;
     groupSizes.reserve(geoNodes.size());
     emptyIsAGroup.reserve(geoNodes.size());
     for (const oscad::ASTNode* geoNode : geoNodes) {
@@ -130,15 +149,8 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
         // for `if(false) sphere(6)`, `{ }` and `*cube(1)`, and comes out
         // empty for `for(i=[1:0]) sphere(6)`, `union(){}`, `group(){}` and
         // a call to an empty user module.
-        const oscad::NodeKind k = geoNode->kind();
-        emptyIsAGroup.push_back(Value{
-                                       k == oscad::NodeKind::ModularCall ||
-                                       k == oscad::NodeKind::ModularFor ||
-                                       k == oscad::NodeKind::ModularIntersectionFor ||
-                                       k == oscad::NodeKind::ModularLet ||
-                                       k == oscad::NodeKind::ModularModifierShowOnly ||
-                                       k == oscad::NodeKind::ModularModifierHighlight ||
-                                       k == oscad::NodeKind::ModularModifierBackground});
+        emptyIsAGroup.push_back(Value{emptyStatementIsAnOperand(*geoNode)});
+        backgroundStmt.push_back(Value{geoNode->kind() == oscad::NodeKind::ModularModifierBackground});
     }
 
     CSGParams params;
@@ -146,6 +158,7 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
     params["group_sizes"] = Value{makeList(std::move(groupSizes))};
     params["empty_is_a_group"] =
         Value{makeList(std::move(emptyIsAGroup))};
+    params["background_stmt"] = Value{makeList(std::move(backgroundStmt))};
     return params;
 }
 
@@ -314,6 +327,11 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
     const std::string& op = std::get<std::string>(params.at("op"));
     const auto& groupSizes = std::get<ListPtr>(params.at("group_sizes"))->items;
     const auto emptyIsAGroupIt = params.find("empty_is_a_group");
+    const auto backgroundStmtIt = params.find("background_stmt");
+    const auto* backgroundStmt =
+        backgroundStmtIt != params.end() && std::holds_alternative<ListPtr>(backgroundStmtIt->second)
+            ? &std::get<ListPtr>(backgroundStmtIt->second)->items
+            : nullptr;
     const ListItems* emptyIsAGroup =
         emptyIsAGroupIt == params.end()
             ? nullptr
@@ -374,6 +392,20 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         }
 
         RoleSplit split = splitByRole(stmtBodies);
+        // A `%` statement is scenery, not an operand: upstream leaves it out
+        // of the CSG entirely (collectChildren skips isBackground()), so the
+        // NEXT statement is the minuend of a difference(), and an
+        // intersection() is not cancelled by it. It was taken as an empty
+        // operand, which emptied both. Only the `%` statement itself: a
+        // module or union() holding nothing but `%` is still an (empty)
+        // operand there.
+        const bool isBackgroundStmt = backgroundStmt && thisStmt < backgroundStmt->size() &&
+                                      std::holds_alternative<bool>((*backgroundStmt)[thisStmt]) &&
+                                      std::get<bool>((*backgroundStmt)[thisStmt]);
+        if (isBackgroundStmt) {
+            allBg.insert(allBg.end(), split.background.begin(), split.background.end());
+            continue;
+        }
         allBg.insert(allBg.end(), split.background.begin(), split.background.end());
         allHi.insert(allHi.end(), split.highlight.begin(), split.highlight.end());
         allSo.insert(allSo.end(), split.showOnly.begin(), split.showOnly.end());

@@ -347,7 +347,9 @@ bool isExportable(const ColoredBody& b) {
     // `%` is scenery: drawn so other things can be lined up against it, and
     // excluded from booleans upstream, so letting it reach a file would put
     // geometry there that no boolean ever accounted for.
-    return b.role != BodyRole::Background;
+    // A HighlightGhost is the drawing-only copy of a `#` operand that an
+    // operation already merged; exporting it would add the operand twice.
+    return b.role != BodyRole::Background && b.role != BodyRole::HighlightGhost;
 }
 
 void meshToArrays(const manifold::MeshGL& mesh, std::vector<float>& verts, std::vector<uint32_t>& tris) {
@@ -937,7 +939,7 @@ std::optional<manifold::MeshGL> mergeBodies(const std::vector<ColoredBody>& bodi
     int index = 0;
     for (const ColoredBody& b : bodies) {
         ++index;
-        if (b.role == BodyRole::Background) continue;
+        if (b.role == BodyRole::Background || b.role == BodyRole::HighlightGhost) continue;
         if (b.isDisplayOnly()) {
             if (!b.rawMesh->triVerts.empty()) {
                 loose.push_back(&*b.rawMesh);
