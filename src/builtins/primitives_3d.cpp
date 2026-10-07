@@ -265,10 +265,9 @@ SphereMesh buildAligned(double r, int hsides, int vsides, bool stagger) {
 
 // "octa": an octahedron with each face cut into an n x n triangular grid,
 // n = ceil(segments / 4), pushed out to the sphere -- 4n^2 + 2 vertices,
-// one on each pole of all three axes. Vertex placement is upstream
-// OpenSCAD's (primitives.cc, SphereNode::createGeometryOcta): an interior
-// vertex is where the great-circle arcs through equally spaced edge points
-// meet, the three pairwise intersections averaged.
+// one on each pole of all three axes. Edge vertices are equally spaced on
+// the octahedron's great circles; interior vertex placement is spec section
+// B8.
 //
 // The mesh is EXACTLY symmetric under all 48 symmetries of the octahedron,
 // not merely to rounding: every vertex is computed once, for its
@@ -297,13 +296,6 @@ std::array<double, 2> quarterArc(int m, int n) {
 }
 
 using V3 = std::array<double, 3>;
-V3 cross(const V3& a, const V3& b) {
-    return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
-}
-V3 normalized(const V3& v) {
-    const double l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    return {v[0] / l, v[1] / l, v[2] / l};
-}
 
 // The unit-sphere point with barycentric weights a >= b >= c (a + b + c = n)
 // toward three orthogonal axes, as coordinates along those axes.
@@ -313,27 +305,10 @@ V3 octaCanonical(int a, int b, int c, int n) {
         const std::array<double, 2> e = quarterArc(b, n);
         return {e[0], e[1], 0.0};
     }
-    // Upstream's construction, with its i, j, k = a, b, c.
-    const auto ac = [&](int m) { const auto e = quarterArc(m, n); return V3{e[0], 0.0, e[1]}; };
-    const auto bc = [&](int m) { const auto e = quarterArc(m, n); return V3{0.0, e[0], e[1]}; };
-    const auto ab = [&](int m) { const auto e = quarterArc(m, n); return V3{e[0], e[1], 0.0}; };
-    const auto meet = [](const V3& p, const V3& q, const V3& r, const V3& s) {
-        V3 x = normalized(cross(cross(p, q), cross(r, s)));
-        if (x[0] + x[1] + x[2] < 0) x = {-x[0], -x[1], -x[2]};  // the octant's side
-        return x;
-    };
-    const V3 xz_k = ac(c), yz_k = bc(c);
-    const V3 xy_j = ab(b), yz_j = bc(n - b);
-    const V3 xy_i = ab(n - a), xz_i = ac(n - a);
-    const V3 p1 = meet(xz_k, yz_k, xy_j, yz_j);
-    const V3 p2 = meet(xz_k, yz_k, xy_i, xz_i);
-    const V3 p3 = meet(xy_j, yz_j, xy_i, xz_i);
-    V3 p = normalized({p1[0] + p2[0] + p3[0], p1[1] + p2[1] + p3[1], p1[2] + p2[2] + p3[2]});
-    // Equal weights must give equal coordinates exactly, or the two
-    // permutations that swap them would disagree about this one vertex.
-    if (a == b) p[1] = p[0];
-    if (b == c) p[2] = p[1];
-    return p;
+    // An interior vertex (all three weights non-zero).
+    // CLEAN-ROOM: reimplement from spec section B8.
+    (void)a;
+    return {1.0, 0.0, 0.0};
 }
 } // namespace
 

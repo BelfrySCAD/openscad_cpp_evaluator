@@ -44,82 +44,17 @@ manifold::Manifold extrudeTwisted(const manifold::Polygons&, double, int, double
 BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    // Positional order is upstream's: height, v, scale, center, twist,
-    // slices, segments. Only height used to be read positionally.
-    //
-    // Upstream's LinearExtrudeNode: the extrusion runs along a vector, (0,0,1)
-    // unless `v` gives one. Its length is `height` (`h` its alias, BOSL2's
-    // override forwards it) when given -- `v` then only sets the direction --
-    // else |v| when `v` is given, else 100. A vector pointing down (z <= 0)
-    // extrudes nothing. Bad values warn and fall back as upstream's do.
-    // `v` was ignored here, so an oblique extrusion came out straight.
-    double hv[3] = {0.0, 0.0, 1.0};
-    double length = 100.0;
-    const Value vArg = getArg(args, 1, "v", Value{});
-    if (!std::holds_alternative<std::monostate>(vArg)) {
-        const ListPtr* l = std::get_if<ListPtr>(&vArg);
-        bool ok = l && *l && (*l)->items.size() == 3;
-        double t[3] = {0, 0, 0};
-        for (int i = 0; ok && i < 3; ++i) {
-            const double* d = std::get_if<double>(&(*l)->items[i]);
-            ok = d && std::isfinite(*d);
-            if (ok) t[i] = *d;
-        }
-        if (ok) std::copy(t, t + 3, hv);
-        else ev.warn("v when specified should be a 3d vector", &node.position());
-        length = 1.0;
-    }
-    const Value heightArg = getArgOrAlias(ev, &node.position(), args, 0, "height", "h", Value{});
-    if (!std::holds_alternative<std::monostate>(heightArg)) {
-        const double* d = std::get_if<double>(&heightArg);
-        if (d && std::isfinite(*d)) {
-            length = *d;
-        } else {
-            ev.warn("height when specified should be a number", &node.position());
-            length = 100.0;
-        }
-        const double norm = std::sqrt(hv[0] * hv[0] + hv[1] * hv[1] + hv[2] * hv[2]);
-        for (double& c : hv) c /= norm;
-    }
-    for (double& c : hv) c *= length;
-    if (hv[2] <= 0) hv[2] = 0;
+    // Argument reading (positional: height, v, scale, center, twist, slices,
+    // segments): the extrusion vector, center, twist, slices, segments and
+    // scale, with their warnings.
+    // CLEAN-ROOM: reimplement from spec section C5.
+    const double hv[3] = {0.0, 0.0, 1.0};
     const double height = hv[2];
-    // Only a real boolean counts, as upstream: center="yes" is not true.
-    const Value centerArg = getArg(args, 3, "center", Value{false});
-    const bool* centerBool = std::get_if<bool>(&centerArg);
-    const bool center = centerBool && *centerBool;
-    const double twist = toDoubleLenient(getArg(args, 4, "twist", Value{0.0}));
-    // Upstream's validate_integral: any finite number counts as given, and is
-    // truncated and clamped (slices >= 1, segments >= 0). Not given, the
-    // discretizer decides.
-    const auto integral = [&](int pos, const char* name, double lo) -> std::optional<double> {
-        const Value v = getArg(args, pos, name, Value{});
-        const double* d = std::get_if<double>(&v);
-        if (!d || !std::isfinite(*d)) return std::nullopt;
-        return *d < lo ? lo : std::trunc(*d);
-    };
-    const std::optional<double> slices = integral(5, "slices", 1.0);
-    const std::optional<double> segments = integral(6, "segments", 0.0);
-    const Value scaleArg = getArg(args, 2, "scale", Value{});
-
-    double scaleX = 1.0, scaleY = 1.0;
-    bool scaleOk = true;
-    if (const double* s = std::get_if<double>(&scaleArg)) {
-        scaleX = scaleY = *s;
-        scaleOk = std::isfinite(*s);
-    } else if (const ListPtr* l = std::get_if<ListPtr>(&scaleArg); l && *l && (*l)->items.size() == 2) {
-        // Exactly two: a 3-vector is the "could not be converted" case
-        // below, not its first two.
-        scaleX = toDoubleLenient((*l)->items[0]);
-        scaleY = toDoubleLenient((*l)->items[1]);
-        scaleOk = std::isfinite(scaleX) && std::isfinite(scaleY);
-    } else if (!std::holds_alternative<std::monostate>(scaleArg)) {
-        scaleOk = false;
-    }
-    if (!scaleOk) {
-        ev.warn("linear_extrude(..., scale=" + fmtValue(scaleArg) + ") could not be converted", &node.position());
-        scaleX = scaleY = 1.0;
-    }
+    const bool center = false;
+    const double twist = 0.0;
+    const std::optional<double> slices;
+    const std::optional<double> segments;
+    const double scaleX = 1.0, scaleY = 1.0;
 
     CSGParams params;
     params["height"] = Value{height};
@@ -160,42 +95,13 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
     const Discretizer disc = Discretizer::fromParams(params);
     manifold::Polygons polys = cs->ToPolygons();
 
-    // Upstream's calc_num_slices (linear_extrude.cc).
-    const auto maxDeltaSqr = [&] {
-        double m = 0;
-        for (const manifold::SimplePolygon& o : polys)
-            for (const manifold::vec2& v : o) m = std::max(m, manifold::la::length2(v - manifold::vec2(v.x * scaleX, v.y * scaleY)));
-        return m;
-    };
-    const int twistFallback = std::max(static_cast<int>(std::ceil(twist / 120.0)), 1);
-    int slices = 1;
-    if (givenSlices) {
-        slices = static_cast<int>(*givenSlices);
-    } else if (twist != 0.0) {
-        double maxR1Sqr = 0;
-        for (const manifold::SimplePolygon& o : polys)
-            for (const manifold::vec2& v : o) maxR1Sqr = std::max(maxR1Sqr, manifold::la::length2(v));
-        if (scaleX == 1.0 && scaleY == 1.0) {
-            slices = disc.helixSlices(maxR1Sqr, height, twist).value_or(twistFallback);
-        } else if (scaleX != scaleY) {
-            slices = std::max(disc.diagonalSlices(maxDeltaSqr(), height).value_or(1),
-                              disc.helixSlices(maxR1Sqr, height, twist).value_or(twistFallback));
-        } else {
-            slices = disc.conicalHelixSlices(maxR1Sqr, height, twist, scaleX).value_or(twistFallback);
-        }
-    } else if (scaleX != scaleY) {
-        slices = disc.diagonalSlices(maxDeltaSqr(), height).value_or(1);
-    }
-
-    // Split outline edges where a straight one would lose the shape between
-    // slices: twist or non-uniform scale, or `segments` asked for. segments=0
-    // turns it off.
-    const unsigned segments = givenSegments ? static_cast<unsigned>(*givenSegments) : 0;
+    // The slice count, and the subdivision of outline edges (through
+    // disc.splitOutline) that a twisted or scaled extrusion needs.
+    // CLEAN-ROOM: reimplement from spec section C6.
+    const int slices = givenSlices ? static_cast<int>(*givenSlices) : 1;
+    (void)givenSegments;
+    (void)disc;
     const bool nonLinear = twist != 0.0 || scaleX != scaleY;
-    if (!(givenSegments && segments == 0) && (segments > 0 || nonLinear)) {
-        for (manifold::SimplePolygon& o : polys)
-            o = disc.splitOutline(o, twist, scaleX, scaleY, static_cast<unsigned>(slices), segments);
-    }
 
     // Planar side quads (no twist, uniform scale) come out the same however
     // they are split, so Manifold's own Extrude does them.
@@ -205,9 +111,8 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
             ? extrudeTwisted(polys, height, slices, twist, scaleX, scaleY)
             : manifold::Manifold::Extrude(polys, height, slices - 1, -twist, manifold::vec2(scaleX, scaleY));
     if (std::get<bool>(params.at("center"))) body = body.Translate(manifold::vec3(0, 0, -height / 2));
-    // `v`: slide each point sideways in proportion to its height -- upstream
-    // places slice k at bottom + v*k/n, and centring subtracts v/2, so the
-    // same shear is right either way.
+    // `v`: slide each point sideways in proportion to its height; centring
+    // subtracts v/2, so the same shear is right either way.
     const double shearX = std::get<double>(params.at("shear_x"));
     const double shearY = std::get<double>(params.at("shear_y"));
     if (shearX != 0.0 || shearY != 0.0) {

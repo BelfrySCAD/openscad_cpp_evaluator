@@ -167,7 +167,7 @@ struct ExportSvgOptions {
 void writeSvg(const std::string& path, const std::vector<ColoredBody>& bodies,
               const ExportSvgOptions& opts = {});
 
-// DXF, the third 2D writer: OpenSCAD's own export_dxf.cc layout (an AC1006
+// DXF, the third 2D writer: byte-compatible with OpenSCAD's layout (an AC1006
 // header with the model's extents, one CONTINUOUS linetype, layer 0) and
 // every contour of every body a closed LWPOLYLINE on layer 0 -- holes are
 // contours like any other, as in OpenSCAD. A 1-vertex contour is a POINT
@@ -259,13 +259,10 @@ struct ExportPovOptions {
 // POV-Ray scene description. Every object splitBodiesForExport produces is
 // one mesh2 -- a welded vertex list, a texture per colour, and a texture
 // index per triangle, so per-triangle colour needs no unwelding -- with
-// inside_vector, which makes it a SOLID to POV-Ray (refraction, CSG). That
-// is the difference from OpenSCAD's export_pov.cc, which writes every face
-// as its own flat polygon object. The rest of the scene is OpenSCAD's: its
-// header, MATERIAL finish and ior 1.32 interior, 27 lights around the
-// bounding box, its camera, and radiosity from rad_def.inc. Colour is rgbf
-// with filter = 1 - alpha, as OpenSCAD writes it. Numbers are the shortest
-// text that round-trips, in the classic locale.
+// inside_vector, which makes it a SOLID to POV-Ray (refraction, CSG). The
+// rest of the scene (material, lights, default camera) is spec section F2.
+// Colour is rgbf with filter = 1 - alpha. Numbers are the shortest text that
+// round-trips, in the classic locale.
 void writePov(const std::string& path, const std::vector<ExportObject>& objects,
               const ExportPovOptions& opts = {});
 

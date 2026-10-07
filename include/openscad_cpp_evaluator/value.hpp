@@ -268,12 +268,9 @@ Value vecSub(const Value& a, const Value& b);
 // behavior in the reference implementation -- revisit only if a real
 // script's `*` on a bool-containing vector is shown to need it.
 //
-// `error`, when non-null, receives the reference's own diagnostic text for
-// whichever undefined case was hit (multiply_visitor / multvecvec /
-// multmatvec / multvecmat in the reference's Value.cc) -- "vector*vector
-// requires matching lengths (2 != 3)", "Matrix must be rectangular. Problem
-// at row 1", and so on. applyBinaryOp warns with it; a caller that only
-// wants the value can leave it null. It is only written on an undef result.
+// `error`, when non-null, receives the diagnostic for whichever undefined
+// case was hit (spec section A6); applyBinaryOp warns with it. It is only
+// written on an undef result.
 Value matmul(const Value& a, const Value& b, std::string* error = nullptr);
 
 // OpenSCAD's echo()/str() number formatting: at most 6 significant digits,
