@@ -603,21 +603,12 @@ std::string_view elementText(std::string_view s, std::string_view tag, size_t fr
     return s.substr(b + open.size(), e - b - open.size());
 }
 
+// OpenSCAD reads an AMF's numbers as millimetres whatever its `unit`
+// attribute says (checked, 2026.02.01: a unit="inch" sphere of radius 4.25
+// imports at 4.25). Applying the unit made this 25.4 times larger.
 double amfUnitScale(std::string_view xml) {
-    const size_t amf = xml.find("<amf");
-    if (amf == std::string_view::npos) throw std::runtime_error("AMF: no <amf> element");
-    const std::string_view tag = xml.substr(amf, xml.find('>', amf) - amf);
-    const size_t u = tag.find("unit=");
-    if (u == std::string_view::npos) return 1.0;  // the spec's default is millimetre
-    const char q = tag[u + 5];
-    const size_t e = tag.find(q, u + 6);
-    const std::string unit(tag.substr(u + 6, e - u - 6));
-    if (unit == "millimeter" || unit == "millimetre") return 1.0;
-    if (unit == "inch") return 25.4;
-    if (unit == "feet") return 304.8;
-    if (unit == "meter" || unit == "metre") return 1000.0;
-    if (unit == "micron" || unit == "micrometer") return 0.001;
-    throw std::runtime_error("AMF: unknown unit '" + unit + "'");
+    if (xml.find("<amf") == std::string_view::npos) throw std::runtime_error("AMF: no <amf> element");
+    return 1.0;
 }
 
 // Each <tag>...</tag> segment inside `s`, in order.

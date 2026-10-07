@@ -41,9 +41,9 @@ void writeGrayscalePng(const std::filesystem::path& path, int w, int h, const st
 // -- .dat loading -----------------------------------------------------------
 
 TEST(Surface, DatFileHeightsMatchExactVertexPositions) {
-    // File's first line = highest Y (OpenSCAD convention) -- verified via
-    // export.py cross-check in the session, exact match with the Python
-    // reference on this shape (12 triangles, bbox [0,0,0]-[2,2,5]).
+    // The base sits at min(1, lowest height) - 1, as upstream's read_dat +
+    // createGeometry place it: -1 here, since the data reaches 0. Checked
+    // against OpenSCAD 2026.02.01.
     const auto path = tempPath("terrain.dat");
     writeDat(path, {{0, 0, 0}, {0, 5, 0}, {0, 0, 0}});
     Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\", center=false);");
@@ -52,8 +52,28 @@ TEST(Surface, DatFileHeightsMatchExactVertexPositions) {
     manifold::Box bbox = e.bodies[0].body->BoundingBox();
     EXPECT_NEAR(bbox.min.x, 0.0, 1e-9);
     EXPECT_NEAR(bbox.max.x, 2.0, 1e-9);
-    EXPECT_NEAR(bbox.min.z, 0.0, 1e-9);
+    EXPECT_NEAR(bbox.min.z, -1.0, 1e-9);
     EXPECT_NEAR(bbox.max.z, 5.0, 1e-9);
+    std::filesystem::remove(path);
+}
+
+TEST(Surface, DatFirstLineIsYZero) {
+    // OpenSCAD puts the FIRST line of the file at y = 0 (checked, 2026.02.01).
+    // This used to reverse the rows -- calling it "OpenSCAD's convention",
+    // on the strength of a cross-check against the old Python port rather
+    // than OpenSCAD -- which mirrored every surface in Y.
+    const auto path = tempPath("rows.dat");
+    writeDat(path, {{0, 0, 0}, {9, 9, 9}});
+    Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\");");
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    const auto edgeTop = [&](double y0) {
+        return (*e.bodies[0].body ^
+                manifold::Manifold::Cube(manifold::vec3(4, 0.2, 40)).Translate(manifold::vec3(-1, y0, -20)))
+            .BoundingBox()
+            .max.z;
+    };
+    EXPECT_LT(edgeTop(-0.1), 3.0);         // y = 0 holds the first line's 0s
+    EXPECT_NEAR(edgeTop(0.9), 9.0, 1e-9);  // y = 1 holds the 9s
     std::filesystem::remove(path);
 }
 
@@ -76,14 +96,20 @@ TEST(Surface, FlatGridVolumeMatchesFootprintTimesHeight) {
     std::filesystem::remove(path);
 }
 
-TEST(Surface, EmptyFileErrors) {
+TEST(Surface, EmptyOrMissingFileDrawsNothingAndTheScriptCarriesOn) {
+    // Upstream draws nothing -- an empty .dat silently, a missing file with
+    // its warning -- and the rest of the model renders. Both used to stop it.
     const auto path = tempPath("empty.dat");
     writeDat(path, {});
-    Evaluator ev;
-    auto ast = parseSrc("surface(file=\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\"); surface(\"/nonexistent/nope.dat\"); cube(1);",
+                          [&](const std::string& m) { log.push_back(m); });
+    double volume = 0;
+    for (const ColoredBody& b : e.bodies)
+        if (b.body) volume += b.body->Volume();
+    EXPECT_NEAR(volume, 1.0, 1e-9);
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_EQ(log[0], "WARNING: The file '/nonexistent/nope.dat' couldn't be opened.");
     std::filesystem::remove(path);
 }
 
@@ -94,10 +120,12 @@ TEST(Surface, UniformGrayImageVolumeMatchesLuminanceFormula) {
     writeGrayscalePng(path, 3, 3, std::vector<unsigned char>(9, 128));
     Evaluated e = evalSrc("surface(file=\"" + path.generic_string() + "\");");
     ASSERT_TRUE(e.bodies[0].body.has_value());
-    // gray=128 (r=g=b, so the weighted luminance formula reduces to the
-    // input value exactly) -> height = 128/255*100.
-    const double height = 128.0 / 255.0 * 100.0;
-    EXPECT_NEAR(e.bodies[0].body->Volume(), 2.0 * 2.0 * height, height * 2e-3);
+    // gray=128 widens to 128*257 of 65535 -> height 50.196; the base sits 1
+    // below the lowest height, so a flat image is a 1-unit slab. Checked
+    // against OpenSCAD 2026.02.01: volume 4, z 49.196..50.196.
+    const double height = 128.0 * 257.0 / 65535.0 * 100.0;
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 2.0 * 2.0 * 1.0, 1e-9);
+    EXPECT_NEAR(e.bodies[0].body->BoundingBox().max.z, height, 1e-9);
     std::filesystem::remove(path);
 }
 
@@ -106,10 +134,13 @@ TEST(Surface, InvertFlipsTheHeightMapping) {
     writeGrayscalePng(path, 3, 3, std::vector<unsigned char>(9, 200));
     Evaluated normal = evalSrc("surface(file=\"" + path.generic_string() + "\", invert=false);");
     Evaluated inverted = evalSrc("surface(file=\"" + path.generic_string() + "\", invert=true);");
-    const double heightNormal = 200.0 / 255.0 * 100.0;
-    const double heightInverted = (255.0 - 200.0) / 255.0 * 100.0;
-    EXPECT_NEAR(normal.bodies[0].body->Volume(), 2.0 * 2.0 * heightNormal, heightNormal * 2e-3);
-    EXPECT_NEAR(inverted.bodies[0].body->Volume(), 2.0 * 2.0 * heightInverted, std::max(1e-6, heightInverted * 2e-3));
+    // invert NEGATES the height (upstream #6949, 2026-08; the 2026.02.01
+    // binary still offsets it by 100). Either way a flat image is a 1-unit
+    // slab below its surface.
+    const double height = 200.0 * 257.0 / 65535.0 * 100.0;
+    EXPECT_NEAR(normal.bodies[0].body->BoundingBox().max.z, height, 1e-9);
+    EXPECT_NEAR(inverted.bodies[0].body->BoundingBox().max.z, -height, 1e-9);
+    EXPECT_NEAR(inverted.bodies[0].body->Volume(), 4.0, 1e-9);
     std::filesystem::remove(path);
 }
 

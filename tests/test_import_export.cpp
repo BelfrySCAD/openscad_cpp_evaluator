@@ -255,11 +255,15 @@ std::string inchCubeAmf() {
 
 // unit="inch" scales to millimetres; a constellation is not applied, and
 // says so.
-TEST(ImportModuleContext, AmfUnitScalesToMillimetres) {
+TEST(ImportModuleContext, AmfUnitIsIgnoredAsInOpenSCAD) {
+    // OpenSCAD reads an AMF's numbers as millimetres whatever its unit says
+    // (checked, 2026.02.01: a unit="inch" unit cube imports as a unit cube),
+    // and says AMF import is deprecated.
     const Imported r = importText("inch.amf", inchCubeAmf());
-    EXPECT_NEAR(r.volume, 25.4 * 25.4 * 25.4, 1e-6);
-    EXPECT_NEAR(r.box.max.x, 25.4, 1e-9);
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    EXPECT_NEAR(r.box.max.x, 1.0, 1e-9);
     EXPECT_TRUE(anyContains(r.messages, "AMF constellations are not applied"));
+    EXPECT_TRUE(anyContains(r.messages, "DEPRECATED: AMF import is deprecated. Please use 3MF instead."));
 }
 
 // Compressed AMF: a zip holding one .amf, deflated.
@@ -270,7 +274,7 @@ TEST(ImportModuleContext, ZippedAmfImports) {
     Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");", [](const std::string&) {});
     std::filesystem::remove(path);
     ASSERT_EQ(e.bodies.size(), 1u);
-    EXPECT_NEAR(e.bodies[0].body->Volume(), 25.4 * 25.4 * 25.4, 1e-6);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-9);
 }
 
 TEST(ImportModuleContext, UnsupportedExtensionErrors) {
