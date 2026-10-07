@@ -1195,12 +1195,15 @@ def test_a_viewer_can_ask_for_a_thin_2d_slab_and_export_keeps_1(tmp_path):
     bodies, id_to_node = thin.evaluate(str(script), {})
     assert abs(z_extent(bodies) - 0.01) < 1e-9
     assert id_to_node, "still pickable"
-    out = tmp_path / "flat.off"            # ASCII: header, counts, vertices
-    E.export_model(str(out), thin.geometry)
-    lines = [l for l in out.read_text().splitlines() if l.strip() and not l.startswith("#")]
-    nverts = int(lines[1].split()[0])
-    zs = [float(l.split()[2]) for l in lines[2:2 + nverts]]
-    assert abs(max(zs) - min(zs) - 1.0) < 1e-6, "export is the 1-unit slab"
+    # The slab is for display only. A 2D-only model is not a 3D object to a
+    # mesh export -- OpenSCAD refuses it, and so does this -- while a 2D
+    # format writes its real contours.
+    import pytest
+    with pytest.raises(Exception, match="not a 3D object"):
+        E.export_model(str(tmp_path / "flat.off"), thin.geometry)
+    svg = tmp_path / "flat.svg"
+    E.export_model(str(svg), thin.geometry)
+    assert "<path" in svg.read_text()
 
 
 def test_parsing_from_two_threads_at_once_is_safe(tmp_path):
