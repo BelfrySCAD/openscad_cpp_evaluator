@@ -139,12 +139,12 @@ TEST(LinearExtrude, BadArgumentsWarnAndFallBack) {
     const Extruded h = linearExtrude("height=\"a\"");
     EXPECT_NEAR(h.box.max.z, 100.0, 1e-6);
     ASSERT_EQ(h.msgs.size(), 1u);
-    EXPECT_EQ(h.msgs[0].rfind("WARNING: height when specified should be a number", 0), 0u) << h.msgs[0];
+    EXPECT_EQ(h.msgs[0].rfind("ERROR: height when specified should be a number", 0), 0u) << h.msgs[0];
 
     const Extruded v = linearExtrude("v=[1,2]");
     EXPECT_NEAR(v.box.max.z, 1.0, 1e-6);
     ASSERT_EQ(v.msgs.size(), 1u);
-    EXPECT_EQ(v.msgs[0].rfind("WARNING: v when specified should be a 3d vector", 0), 0u) << v.msgs[0];
+    EXPECT_EQ(v.msgs[0].rfind("ERROR: v when specified should be a 3d vector", 0), 0u) << v.msgs[0];
 
     const Extruded s = linearExtrude("height=10, scale=\"x\"");
     EXPECT_NEAR(s.volume, 80.0, 1e-6);
