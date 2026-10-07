@@ -1646,27 +1646,25 @@ TEST(ModuleBodyCompiles, DollarArgPropagatesIntoCompiledHullWrapChildren) {
               "ECHO: 9");
 }
 
-// The ONE behavioral subtlety Op::PushBuiltinWrap's Roof kind introduces:
-// computeRoofParams's own "Unknown roof method" warning is computed at POP
-// time (after children), deliberately, so it stays ordered AFTER any
-// echo()/warn() a child produces -- exactly matching native resolveRoof's
-// own evalChildren-then-compute-params order. Pins that ordering under the
-// compiled path specifically (every other kind in this group computes its
-// params at PUSH time instead, since none of them has an order-sensitive
-// side effect to preserve).
-TEST(ModuleBodyCompiles, CompiledRoofUnknownMethodWarningStaysOrderedAfterChildrensOwnEcho) {
+// roof()'s warnings come before its children's output, under the compiled
+// path as under the native one -- as in OpenSCAD 2026.02.01, which prints
+// "$fa too small", then "Unknown roof method", then the child's echo.
+TEST(ModuleBodyCompiles, CompiledRoofWarningsComeBeforeChildrensOwnEcho) {
     ScopedVm vm(true);
     const std::string out = runCapturingEcho(
-        "module m() { roof(method=\"bogus\") { echo(\"child\"); square(4, center=true); } }\n"
+        "module m() { roof(method=\"bogus\", $fa=0) { echo(\"child\"); square(4, center=true); } }\n"
         "m();");
     // Asserted as an ordering rather than one exact string: the warning also
     // carries call-site attribution (", from ... line N" plus TRACE lines,
     // see formatWarning), which is orthogonal to what this test pins.
-    const size_t echoAt = out.find("ECHO: \"child\"");
+    const size_t clampAt = out.find("WARNING: $fa too small - clamping to 0.010000");
     const size_t warnAt = out.find("WARNING: Unknown roof method 'bogus'. Using 'voronoi'.");
-    ASSERT_NE(echoAt, std::string::npos) << out;
+    const size_t echoAt = out.find("ECHO: \"child\"");
+    ASSERT_NE(clampAt, std::string::npos) << out;
     ASSERT_NE(warnAt, std::string::npos) << out;
-    EXPECT_LT(echoAt, warnAt) << out;
+    ASSERT_NE(echoAt, std::string::npos) << out;
+    EXPECT_LT(clampAt, warnAt) << out;
+    EXPECT_LT(warnAt, echoAt) << out;
 }
 
 // -- intersection_for -- the TRUE last native-reentry gap, closed by -------

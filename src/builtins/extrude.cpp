@@ -27,9 +27,7 @@ namespace oscadeval {
 // side effect of its own (no warn()/echo()/rands() call), so moving it
 // before evalChildren (unlike this function's own former single-body
 // shape, which computed params AFTER children like every other builtin
-// still not covered by PushBuiltinWrap) is behaviorally unobservable --
-// see computeRoofParams's own doc comment (roof.cpp) for the one builtin
-// in this group where that ISN'T true and a different split was needed.
+// still not covered by PushBuiltinWrap) is behaviorally unobservable.
 namespace {
 
 // Picks the diagonal that splits one side quad: true for A0-B1, false for

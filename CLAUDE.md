@@ -211,8 +211,23 @@ Challenges and Experiences"), `roof.cpp` was rewritten from scratch as a close p
 `roof_vd.cc`'s `voronoi_diagram_roof`/`vd_inner_faces`/`discretize_arc` (CGAL/Eigen/Clipper2Lib
 swapped for `manifold::vec2` arithmetic and `manifold::Triangulate`), on top of Boost.Polygon's
 Voronoi builder (fetched as just `boostorg/polygon` + `boostorg/config`, confirmed to need nothing
-else from Boost). Both `method` values dispatch to this same construction (no CGAL-based `"straight"`
-path exists in this port). **Verified independently**, not just "it compiles": a brute-force
+else from Boost). **`method="straight"` is its own construction** (`StraightSkeletonRoof` in
+`roof.cpp`), a true straight-skeleton roof written from the literature (Aichholzer et al. 1995;
+Felkel & Obdržálek 1998's event-driven wavefront) and the reference binary's black-box output --
+no CGAL, and no OpenSCAD roof source read. It simulates the shrinking wavefront event by event
+(edge, split and vertex events; a vertex event reconnects every wavefront edge at the meeting point
+by angle), O(n^2 log n): 5000 vertices in ~0.5 s. Its input is welded first (`weldContours`: corners
+within 2^-19 of the extent snapped together or onto edges, then a Clipper2 union), because a 2D
+union often hands back pieces sharing an edge as separate outlines a hairline apart, and spikes
+are cut away (`dropSpikes`). It matches OpenSCAD 2026.02.01 (`--enable=roof`) in volume, height and
+vertex set on every shape compared that the reference does not crash on -- the reference segfaults
+on many unions of rectangles/triangles that touch along edges, so those were checked only for being
+valid 45-degree roofs (roof area = floor area x sqrt 2). Until this landed both methods built the
+Voronoi roof, wrong for any concave outline. **Warnings**: `$fs`/`$fa` clamping (via the shared
+`Discretizer::fromCtx`) and `Unknown roof method '...'` (a non-string shown as str() shows it) are
+printed BEFORE the children run, as the reference does -- `computeRoofParams` therefore runs at
+`Op::PushBuiltinWrap` time like every other wrap kind (it used to be deferred to Pop on the belief
+that the warning followed the children). **Verified independently**, not just "it compiles": a brute-force
 distance-transform grid search over a square-frame-with-a-hole test case found the same ridge height
 (≈1.756) this implementation produces — the Python reference's own SDF fallback gets this case
 measurably wrong (≈1.5, ~15% low) since it was never more than a documented approximation for
@@ -1115,9 +1130,10 @@ grep for `ponytail:`.
   `toCrossSection`; no children/generate-time-bounds dependency, so its resolve/generate split is
   the simple kind (segment count for `r=` IS resolvable early here, unlike `rotate_extrude`'s,
   since `offset`'s own radius argument is already known at resolve time).
-- `src/builtins/roof.cpp` — `roof()`, built on Boost.Polygon's segment Voronoi diagram (see the
-  `roof()` note above for the full story of why this replaced an earlier straight-skeleton
-  approximation mid-Phase-6). `voronoiRoof` scales the merged cross-section's polygons into signed
+- `src/builtins/roof.cpp` — `roof()`: the default `method="voronoi"` built on Boost.Polygon's
+  segment Voronoi diagram (see the `roof()` note above for the full story of why this replaced an
+  earlier straight-skeleton approximation mid-Phase-6), and `method="straight"`'s straight-skeleton
+  wavefront simulation (`StraightSkeletonRoof`, same note). `voronoiRoof` scales the merged cross-section's polygons into signed
   32-bit integer coordinates (`chooseScale`, headroom below 2^31 for Boost.Polygon's own internal
   robustness margin), constructs the Voronoi diagram over the resulting segments, walks it
   (`vdInnerFaces`, discretizing parabolic point-vs-segment bisector edges via `discretizeArc`) to get

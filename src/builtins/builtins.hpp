@@ -246,17 +246,11 @@ CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalConte
 std::vector<ColoredBody> generateOffset(Evaluator& ev, const CSGParams& params,
                                          const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
 
-// roof() -- roof.cpp. Tier 1 (exact straight skeleton, stable single-
-// contour polygons) + Tier 3 (SDF/level-set fallback) only, per the plan --
-// Tier 2 (general multi-contour/hole straight skeleton) is a named,
-// documented follow-up, not silently dropped (see CLAUDE.md).
-// computeRoofParams: UNLIKE computeLinearExtrudeParams and friends above,
-// this is the params-computation half taken from AFTER evalChildren (it
-// calls ev.warn(), an observable side effect that must stay ordered after
-// any child's own echo/warn output) -- takes already-resolved CallArgs,
-// not a raw node+ctx, since Op::PushBuiltinWrap's own runtime handler
-// calls this at POP time. See its own doc comment (roof.cpp).
-CSGParams computeRoofParams(Evaluator& ev, const CallArgs& args, EvalContext& effCtx);
+// roof() -- roof.cpp. method="voronoi" (the default) is the Voronoi-diagram
+// roof, method="straight" the straight-skeleton one.
+// computeRoofParams: the params half, from already-resolved arguments;
+// it warns ($fs/$fa clamping, unknown method), before the children run.
+CSGParams computeRoofParams(Evaluator& ev, const CallArgs& args, EvalContext& effCtx, const oscad::Position* where);
 CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateRoof(Evaluator& ev, const CSGParams& params,
                                        const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
