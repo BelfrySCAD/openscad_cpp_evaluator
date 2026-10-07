@@ -78,7 +78,7 @@ TEST(ForLoop, MultipleVariablesProduceCartesianProduct) {
 // dimension's current binding (a standard triangular-loop idiom) --
 // verified directly against real OpenSCAD.app: `for (i=[0:2], j=[0:i])`
 // produces (0,0)(1,0)(1,1)(2,0)(2,1)(2,2), NOT a flat 3x3 product and NOT
-// an "unknown variable 'i'" warning. Regression test for a real bug: this
+// an "unknown variable \"i\"" warning. Regression test for a real bug: this
 // used to evaluate every dimension's own range expression exactly once,
 // upfront, against the ORIGINAL (pre-loop) ctx, so `j`'s own `[0:i]` never
 // saw `i` at all. Pinned under both VM states explicitly (compileForLoop
@@ -560,7 +560,7 @@ TEST(AssertStatement, FailingAssertionThrowsWithExactMessageFormat) {
         runScript("assert(1 == 2, \"nope\");");
         FAIL() << "expected EvalError";
     } catch (const EvalError& e) {
-        EXPECT_NE(std::string(e.what()).find("Assertion '1 == 2' failed: \"nope\""), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("Assertion '(1 == 2)' failed: \"nope\""), std::string::npos);
     }
 }
 
@@ -1440,7 +1440,7 @@ TEST(FunctionBuiltins, ParentModuleAtTopLevelIsUndef) {
 // compileIntersectionForLoop). Verified against real OpenSCAD.app:
 // `intersection_for(i=[0:1], j=[0:i]) { echo(i,j); cube(1); }` fires the
 // body (and its echo) exactly 3 times, for (0,0),(1,0),(1,1) -- a flat
-// 2x2 product (4 firings) or an "unknown variable 'i'" warning would both
+// 2x2 product (4 firings) or an "unknown variable \"i\"" warning would both
 // be wrong.
 TEST(IntersectionFor, LaterDimensionRangeCanDependOnEarlierBindingCompiled) {
     ScopedVm vm(true);

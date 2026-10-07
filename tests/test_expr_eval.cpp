@@ -49,7 +49,7 @@ TEST(ExprEvalIdentifiers, UnknownVariableWarnsAndIsUndef) {
     Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
     Value v = evalSrc("nope", ev);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(v));
-    EXPECT_NE(lastWarning.find("Ignoring unknown variable 'nope'"), std::string::npos);
+    EXPECT_NE(lastWarning.find("Ignoring unknown variable \"nope\""), std::string::npos);
 }
 
 TEST(ExprEvalIdentifiers, UndefinedDollarVariableIsUndefAndWarns) {
@@ -69,7 +69,7 @@ TEST(ExprEvalIdentifiers, UndefinedDollarVariableIsUndefAndWarns) {
     Evaluator ev([&](const std::string& msg) { lastWarning = msg; });
     Value v = evalSrc("$slop", ev);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(v));
-    EXPECT_NE(lastWarning.find("Ignoring unknown variable '$slop'"), std::string::npos) << lastWarning;
+    EXPECT_NE(lastWarning.find("Ignoring unknown variable \"$slop\""), std::string::npos) << lastWarning;
 }
 
 TEST(ExprEvalIdentifiers, TheBoslGetSlopIdiomStaysSilent) {

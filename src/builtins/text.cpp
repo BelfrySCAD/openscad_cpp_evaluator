@@ -45,7 +45,13 @@ double textSizeArg(Evaluator& ev, const CallArgs& args, std::optional<int> sizeP
 
 CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    const std::string text = asStringOr(getArg(args, 0, "text", Value{std::string("")}), "");
+    const Value textArg = getArg(args, 0, "text", Value{std::string("")});
+    // A non-string draws nothing, with the reference's warning; undef is
+    // silent.
+    if (!std::holds_alternative<std::string>(textArg) && !std::holds_alternative<std::monostate>(textArg))
+        ev.warn("text(..., text=" + fmtValue(textArg) + ") Invalid type: expected string, found " + oscTypeName(textArg),
+                &node.position());
+    const std::string text = asStringOr(textArg, "");
     // em is name-only, like everything after font here.
     const double size = textSizeArg(ev, args, 1, std::nullopt, "text", &node.position());
     // font is POSITIONAL, at index 2: `text("Hi", 10, "Liberation Sans")`

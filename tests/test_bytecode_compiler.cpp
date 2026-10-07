@@ -180,7 +180,7 @@ TEST(BytecodeCompiler, SiblingParameterDefaultCannotSeeOtherParametersRealValue)
     // isolation this is undef, not whatever `a` was actually bound to
     // (`undef + 1` -> undef, matching AdditionOp's non-numeric fallback).
     EXPECT_EQ(runCapturingEcho("function foo(a, b = a + 1) = b;\necho(foo(41));"),
-              "WARNING: Ignoring unknown variable 'a' in file <string>, line 1\n"
+              "WARNING: Ignoring unknown variable \"a\" in file <string>, line 1\n"
               "WARNING: undefined operation (undefined + number) in file <string>, line 1\nECHO: undef");
 }
 
@@ -394,7 +394,9 @@ TEST(BytecodeCompiler, ForOverUndefBodyKeepsUndefAsAnElement) {
 
 TEST(BytecodeCompiler, ZeroStepRangeIterationYieldsNothing) {
     ScopedVm vm(true);
-    EXPECT_EQ(runCapturingEcho("function f() = [for (i = [1:0:5]) i];\necho(f());"), "ECHO: []");
+    const std::string out = runCapturingEcho("function f() = [for (i = [1:0:5]) i];\necho(f());");
+    EXPECT_NE(out.find("too many elements (4294967295)"), std::string::npos) << out;
+    EXPECT_EQ(out.substr(out.rfind('\n') + 1), "ECHO: []") << out;
 }
 
 TEST(BytecodeCompiler, MultiAssignmentForClauseIteratesCartesianProduct) {
@@ -1019,9 +1021,9 @@ TEST(BytecodeCompiler, AssertExpressionFailureThrowsWithCorrectMessage) {
         ev.resolveTree(ast, ctx);
         FAIL() << "expected EvalError";
     } catch (const EvalError& e) {
-        // condText baked in at compile time via the condition's own
-        // toString() -- must match the source text exactly.
-        EXPECT_NE(std::string(e.what()).find("Assertion 'x > 0' failed"), std::string::npos);
+        // The condition is quoted as the reference spells it, every binary
+        // operator in parentheses (formatExpression).
+        EXPECT_NE(std::string(e.what()).find("Assertion '(x > 0)' failed"), std::string::npos);
     }
 }
 
@@ -1036,7 +1038,7 @@ TEST(BytecodeCompiler, AssertExpressionFailureWithMessageThrowsWithMessage) {
         FAIL() << "expected EvalError";
     } catch (const EvalError& e) {
         const std::string msg = e.what();
-        EXPECT_NE(msg.find("Assertion 'x > 0' failed"), std::string::npos);
+        EXPECT_NE(msg.find("Assertion '(x > 0)' failed"), std::string::npos);
         EXPECT_NE(msg.find("must be positive"), std::string::npos);
     }
 }

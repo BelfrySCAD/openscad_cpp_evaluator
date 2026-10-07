@@ -1066,7 +1066,13 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     if (std::holds_alternative<double>(idxArg)) {
         indexValues.push_back(idxArg);
     } else if (std::holds_alternative<ListPtr>(idxArg) || std::holds_alternative<OscRange>(idxArg)) {
-        const IterableValues iter = expandIterable(idxArg);
+        bool tooMany = false;
+        const IterableValues iter = expandIterable(idxArg, [&](size_t count) {
+            warn("Bad range parameter for children: too many elements (" + std::to_string(count) + ")",
+                 currentWarnEntry());
+            tooMany = true;
+        });
+        if (tooMany) return std::nullopt;
         for (const Value& v : iter) indexValues.push_back(v);
     } else {
         // No full stop here, unlike the per-element message below: both

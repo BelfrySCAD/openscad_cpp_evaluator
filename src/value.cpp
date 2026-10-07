@@ -612,6 +612,11 @@ std::optional<size_t> rangeElementCount(const OscRange& r) {
     // the reference says nothing about it -- `[for (i = [nan:1:-1]) i]` is
     // [] with no warning there. BOSL2 reaches exactly that through
     // list_rotate() on an empty list, where ((n % 0) + 0) % 0 is NaN.
+    constexpr double kCap = 4294967295.0;
+    // A zero step between finite bounds never reaches its end: the
+    // reference counts it as its uint32 ceiling, so iterating one warns
+    // "too many elements (4294967295)" rather than yielding [] silently.
+    if (r.step == 0.0 && std::isfinite(r.start) && std::isfinite(r.end)) return static_cast<size_t>(kCap);
     if (r.isEmpty()) return std::nullopt;
 
     const double count = std::floor((r.end - r.start) / r.step + 1e-10) + 1.0;
@@ -626,7 +631,6 @@ std::optional<size_t> rangeElementCount(const OscRange& r) {
     // Clamp to what the reference reports for such a range, its own uint32
     // ceiling: `[0:1:1/0]` warns "too many elements (4294967295)" there and
     // yields [].
-    constexpr double kCap = 4294967295.0;
     if (!(count < kCap)) return static_cast<size_t>(kCap);
     return static_cast<size_t>(count);
 }

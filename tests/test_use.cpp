@@ -168,7 +168,7 @@ TEST(UseStatement, MainFileGlobalReadFromFunctionIsStable) {
     std::vector<std::string> echoed;
     evalFile(main, [&](const std::string& m) { echoed.push_back(m); });
     ASSERT_EQ(echoed.size(), 3u);
-    EXPECT_NE(echoed[0].find("Ignoring unknown variable 'y'"), std::string::npos); // forward read: undef, as in OpenSCAD
+    EXPECT_NE(echoed[0].find("Ignoring unknown variable \"y\""), std::string::npos); // forward read: undef, as in OpenSCAD
     EXPECT_EQ(echoed[1], "ECHO: true, true");
     EXPECT_EQ(echoed[2], "ECHO: undef");
     std::filesystem::remove(main);

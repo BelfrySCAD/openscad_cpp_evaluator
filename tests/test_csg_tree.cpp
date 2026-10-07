@@ -263,7 +263,7 @@ TEST(WarningTrace, EvalTimeWarningNamesTheTopLevelCallSite) {
             "outer(2);\n",                           // line 4: the user's own line
             [&](const std::string& m) { if (warning.empty()) warning = m; });
 
-    EXPECT_NE(warning.find("Ignoring unknown variable 'nope'"), std::string::npos) << warning;
+    EXPECT_NE(warning.find("Ignoring unknown variable \"nope\""), std::string::npos) << warning;
     EXPECT_NE(warning.find("line 1"), std::string::npos) << warning;      // where it happened
     EXPECT_NE(warning.find("from <string>, line 4"), std::string::npos) << warning; // who caused it
     // Full chain follows, same shape as an error's trace.
@@ -296,7 +296,7 @@ TEST(WarningTrace, TopLevelWarningStaysASingleLineWithNoTrace) {
     std::string warning;
     evalSrc("x = nope;\n", [&](const std::string& m) { if (warning.empty()) warning = m; });
 
-    EXPECT_NE(warning.find("Ignoring unknown variable 'nope'"), std::string::npos) << warning;
+    EXPECT_NE(warning.find("Ignoring unknown variable \"nope\""), std::string::npos) << warning;
     EXPECT_EQ(warning.find("TRACE:"), std::string::npos) << warning;
     EXPECT_EQ(warning.find(", from "), std::string::npos) << warning;
     EXPECT_EQ(warning.find('\n'), std::string::npos) << warning;

@@ -218,4 +218,6 @@ std::string fmt(const ASTNode& n) {
 
 std::string formatFunctionLiteral(const oscad::FunctionLiteral& fn) { return fmt(fn); }
 
+std::string formatExpression(const oscad::ASTNode& expr) { return fmt(expr); }
+
 } // namespace oscadeval
