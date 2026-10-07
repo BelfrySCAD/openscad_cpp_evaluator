@@ -267,6 +267,11 @@ std::vector<ColoredBody> generateSurface(Evaluator& ev, const CSGParams& params,
                                           const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode& node);
 
 // text() -- text.cpp.
+// OpenSCAD's lookup_radius() (primitives_2d.cpp): `d` beats `r`, numbers only.
+std::optional<double> lookupRadius(Evaluator& ev, const CallArgs& args, std::optional<int> rPos,
+                                   std::optional<int> dPos, const std::string& rName, const std::string& dName,
+                                   const oscad::Position* where);
+
 CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 
 // The font size text()/textmetrics()/fontmetrics() draw at: `size`
