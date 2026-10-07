@@ -364,7 +364,7 @@ std::shared_ptr<const std::vector<ColoredBody>> remapParts(const std::vector<Col
     for (ColoredBody part : parts) {
         if (part.mergedFrom) part.mergedFrom = remapParts(*part.mergedFrom, remap);
         if (part.body && !part.body->IsEmpty()) {
-            manifold::MeshGL mesh = part.body->GetMeshGL();
+            manifold::MeshGL64 mesh = part.body->GetMeshGL64();
             for (uint32_t& id : mesh.runOriginalID) {
                 auto found = remap.find(id);
                 if (found != remap.end()) id = found->second;
@@ -417,7 +417,14 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
             cb.sectionId = fresh;
         }
         if (!cb.body || cb.body->IsEmpty()) continue;
-        manifold::MeshGL mesh = cb.body->GetMeshGL();
+        // MeshGL64, not MeshGL: the body is rebuilt from this mesh below,
+        // and MeshGL is float32. Rounding every vertex made a cache hit a
+        // slightly different solid from the same shape built fresh, so
+        // difference() { sphere(50); sphere(50); } left a shell of slivers
+        // wherever one operand came from the cache -- only in the GUI,
+        // which has a cache, never in the CLI. A cube survived because its
+        // coordinates are exact in float32.
+        manifold::MeshGL64 mesh = cb.body->GetMeshGL64();
         if (mesh.runOriginalID.empty()) continue;
         std::unordered_map<uint32_t, uint32_t> remap;
         // fresh ID -> the colour its triangles carried, multi-colour

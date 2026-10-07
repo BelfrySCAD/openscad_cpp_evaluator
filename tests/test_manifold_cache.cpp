@@ -496,3 +496,26 @@ TEST(ManifoldCache, AHitOnAQuietSubtreeStaysQuiet) {
     EXPECT_EQ(countLines(), 0);
     EXPECT_EQ(countLines(), 0);
 }
+
+// A cache hit used to come back rebuilt through float32 (MeshGL), so the
+// second of two identical spheres was a slightly different solid from the
+// first and difference() left a shell of slivers -- in the GUI only, since
+// the CLI has no cache. A cube hid it: its coordinates are exact in float.
+// Covers the hit within one render, across renders, and the keep-minuend
+// path, which rebuilt its parts the same way.
+TEST(ManifoldCache, AHitIsTheSameSolidNotAFloatRoundedCopy) {
+    const std::string srcs[] = {
+        "difference() { sphere(d=100, $fn=16); sphere(d=100, $fn=16); }",
+        "difference() { sphere(d=100, style=\"octa\", $fn=16); sphere(d=100, style=\"octa\", $fn=16); }",
+        "difference() { rotate([10, 20, 30]) cylinder(h=7.3, r=3.1); rotate([10, 20, 30]) cylinder(h=7.3, r=3.1); }",
+    };
+    for (const std::string& src : srcs) {
+        auto cache = std::make_shared<ManifoldCache>();
+        for (int render = 0; render < 2; ++render) {
+            Evaluated e = evalSrcWithCache(src, cache);
+            for (const ColoredBody& b : e.bodies) {
+                EXPECT_TRUE(!b.body || b.body->IsEmpty()) << src << " render " << render;
+            }
+        }
+    }
+}

@@ -231,7 +231,8 @@ manifold::Manifold finishKeepMinuend(Evaluator& ev, std::vector<KeepPart>& parts
     std::optional<manifold::Manifold> out;
     for (KeepPart& part : parts) {
         if (!part.body.body) continue;
-        manifold::MeshGL mesh = part.body.body->GetMeshGL();
+        // MeshGL64: rebuilt below, and float32 would move every vertex.
+        manifold::MeshGL64 mesh = part.body.body->GetMeshGL64();
         if (mesh.triVerts.empty()) continue;
         std::unordered_map<uint32_t, uint32_t> remap;
         for (uint32_t& id : mesh.runOriginalID) {
