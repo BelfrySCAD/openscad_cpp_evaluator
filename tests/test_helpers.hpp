@@ -64,4 +64,28 @@ inline Evaluated evalSrcWithCache(const std::string& code, std::shared_ptr<Manif
     return e;
 }
 
+inline bool anyContains(const std::vector<std::string>& messages, const std::string& needle) {
+    for (const std::string& m : messages) {
+        if (m.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// An import() that fails prints OpenSCAD's non-fatal ERROR line, draws
+// nothing and lets the rest of the script run. Returns that ERROR line, or
+// a description of what went wrong instead.
+inline std::string importFailure(const std::string& importCall) {
+    std::vector<std::string> log;
+    Evaluated e = evalSrc(importCall + " echo(\"after\");", [&](const std::string& m) { log.push_back(m); });
+    if (!e.bodies.empty()) return "<drew something>";
+    std::string error;
+    bool after = false;
+    for (const std::string& m : log) {
+        if (m.rfind("ERROR: ", 0) == 0) error = m;
+        if (m == "ECHO: \"after\"") after = true;
+    }
+    if (!after) return "<script did not run on>";
+    return error.empty() ? "<no ERROR line>" : error;
+}
+
 } // namespace oscadeval::test

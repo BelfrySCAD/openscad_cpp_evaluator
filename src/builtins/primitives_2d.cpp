@@ -119,7 +119,7 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
     std::vector<Value> pts;
     const ListPtr* pointsList = std::get_if<ListPtr>(&pointsArg);
     if (!pointsList || !*pointsList) {
-        ev.warn("Unable to convert points = " + fmtValue(pointsArg) + " to a vector of coordinates", where);
+        ev.nonFatalError("Unable to convert points = " + fmtValue(pointsArg) + " to a vector of coordinates", where);
         params["pts"] = Value{makeList({})};
         params["paths"] = Value{};
         return params;
@@ -127,7 +127,7 @@ CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& 
     for (const Value& p : (*pointsList)->items) {
         double x = 0.0, y = 0.0;
         if (!asVec2(p, x, y) || !std::isfinite(x) || !std::isfinite(y)) {
-            ev.warn("Unable to convert points[" + std::to_string(pts.size()) + "] = " + fmtValue(p) +
+            ev.nonFatalError("Unable to convert points[" + std::to_string(pts.size()) + "] = " + fmtValue(p) +
                         " to a vec2 of numbers",
                     where);
             x = y = 0.0;

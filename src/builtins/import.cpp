@@ -16,6 +16,7 @@
 #include <array>
 #include <cctype>
 #include <filesystem>
+#include <iterator>
 #include <fstream>
 #include <map>
 
@@ -180,8 +181,18 @@ std::vector<Contour2d> valueToContours(const Value& v) {
 
 CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
-    const Value fileArg = getArg(args, 0, "file", Value{});
-    const Value layerArg = getArg(args, std::nullopt, "layer", Value{});
+    Value fileArg = getArg(args, 0, "file", Value{});
+    if (std::holds_alternative<std::monostate>(fileArg)) {
+        fileArg = getArg(args, std::nullopt, "filename", Value{});
+        if (!std::holds_alternative<std::monostate>(fileArg))
+            ev.emitWarning("DEPRECATED: filename= is deprecated. Please use file=");
+    }
+    Value layerArg = getArg(args, std::nullopt, "layer", Value{});
+    if (std::holds_alternative<std::monostate>(layerArg)) {
+        layerArg = getArg(args, std::nullopt, "layername", Value{});
+        if (!std::holds_alternative<std::monostate>(layerArg))
+            ev.emitWarning("DEPRECATED: layername= is deprecated. Please use layer=");
+    }
     // SVG only. `id` matches an element's id; `class` matches one entry of
     // its space-separated class list. `layer` stays DXF's, where layers are
     // part of the format -- upstream reuses the name for SVG but reads only
@@ -203,11 +214,25 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
 
     CSGParams params;
     params["color"] = colorToValue(effCtx.color);
-    if (std::holds_alternative<std::monostate>(fileArg)) {
-        ev.error("import: 'file' parameter is required", node);
-    }
+    // An import that fails draws nothing and the render goes on, as in
+    // OpenSCAD; the message is printed at generate, where OpenSCAD prints
+    // it, after the script's echoes. These used to abort the whole render.
+    const auto failed = [&](const std::string& message) {
+        params["kind"] = Value{std::string("failed")};
+        params["message"] = Value{message};
+        return params;
+    };
+    const auto unsupported = [&](const std::string& given) {
+        return failed("Unsupported file format while trying to import file '\"" + given +
+                      "\"', import() at line " + std::to_string(node.position().line));
+    };
+    if (std::holds_alternative<std::monostate>(fileArg)) return unsupported("");
     const std::string path = resolveFilePath(fileArg, node);
     const std::string ext = lowerExt(path);
+    if (ext != ".dxf" && ext != ".svg" && !isMeshExt(ext)) {
+        const std::string* given = std::get_if<std::string>(&fileArg);
+        return unsupported(given ? *given : fmtValue(fileArg));
+    }
 
     if (!std::filesystem::exists(path)) {
         // A missing file warns and imports nothing, as in OpenSCAD; it
@@ -255,7 +280,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
                 }
             }
         } catch (const std::exception& e) {
-            ev.error(std::string("import: ") + e.what(), node);
+            return failed(std::string(e.what()) + locSuffix(&node.position()));
         }
         if (center && ext == ".dxf" && !contours.empty()) {
             double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
@@ -269,8 +294,14 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
                 for (auto& p : c)
                     for (int k = 0; k < 2; ++k) p[k] -= (lo[k] + hi[k]) / 2;
         }
-        if (contours.empty() && !filteredMiss) {
-            ev.error(ext == ".dxf" ? "import: no closed contours found in DXF file" : "import: no shapes found in SVG file", node);
+        // A drawing with nothing to fill imports nothing, silently, as in
+        // OpenSCAD -- except a file that is not SVG at all, which OpenSCAD
+        // reports as a parse error.
+        if (contours.empty() && ext == ".svg") {
+            std::ifstream in(path, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (text.find("<svg") == std::string::npos)
+                return failed("Error parsing file '" + path + "', import() at line " + std::to_string(node.position().line));
         }
         params["kind"] = Value{std::string("region")};
         params["contours"] = contoursToValue(contours);
@@ -283,7 +314,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         try {
             mesh = loadMeshByExt(path, ext);
         } catch (const std::exception& e) {
-            ev.error(std::string("import: ") + e.what(), node);
+            return failed(std::string(e.what()) + locSuffix(&node.position()));
         }
         for (const std::string& w : mesh.warnings) ev.warn("import: '" + path + "': " + w, &node.position());
         if (center && !mesh.verts.empty()) {
@@ -317,11 +348,7 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         params["tris"] = Value{makeList(std::move(trisFlat))};
         return params;
     }
-    if (ext == ".json") {
-        ev.error("import: .json returns data, not geometry -- use as an expression", node);
-    }
-    ev.error("import: unsupported file type '" + ext + "'", node);
-    return params;
+    return params;  // unreachable: every supported extension returned above
 }
 
 std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, const std::vector<std::unique_ptr<CSGNode>>&,
@@ -329,6 +356,10 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     const auto kindIt = params.find("kind");
     if (kindIt == params.end()) return {};
     const std::string& kind = std::get<std::string>(kindIt->second);
+    if (kind == "failed") {
+        ev.emitWarning("ERROR: " + std::get<std::string>(params.at("message")));
+        return {};
+    }
     if (kind == "missing") {
         // OpenSCAD's own wording, which names a line rather than a file.
         const std::string& path = std::get<std::string>(params.at("path"));
@@ -357,7 +388,7 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
     if (kind != "mesh") return {};
 
     const auto& tris = std::get<ListPtr>(params.at("tris"))->items;
-    if (tris.empty()) ev.error("import: mesh has no triangles", node);
+    if (tris.empty()) return {};  // nothing to draw, as OpenSCAD draws nothing
 
     // Kept at full precision for the Manifold that CSG will actually use --
     // MeshGL is MeshGLP<float>, and truncating there does not merely lose

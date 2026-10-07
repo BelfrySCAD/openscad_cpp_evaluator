@@ -111,11 +111,10 @@ TEST(DxfImport, OpenPolylineIsIgnored) {
         "0\nENDSEC\n0\nEOF\n";
     const auto path = tempPath("open_polyline.dxf");
     writeFile(path, dxf);
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");", [&](const std::string& m) { log.push_back(m); });
+    EXPECT_TRUE(e.bodies.empty() || e.bodies[0].section->IsEmpty());
+    EXPECT_TRUE(log.empty()) << ::testing::PrintToString(log);
     std::filesystem::remove(path);
 }
 
@@ -139,15 +138,15 @@ TEST(DxfImport, UnrecognizedEntityIsSkipped) {
     std::filesystem::remove(path);
 }
 
-TEST(DxfImport, NoClosedContoursErrors) {
+// Nothing to fill imports nothing, silently, as in OpenSCAD.
+TEST(DxfImport, NoClosedContoursIsSilent) {
     const std::string dxf = "0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n";
     const auto path = tempPath("empty.dxf");
     writeFile(path, dxf);
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\"); echo(\"after\");",
+                          [&](const std::string& m) { log.push_back(m); });
+    EXPECT_EQ(log, std::vector<std::string>{"ECHO: \"after\""});
     std::filesystem::remove(path);
 }
 
@@ -181,11 +180,8 @@ TEST(SvgImport, APdfNamedSvgErrorsInsteadOfHanging) {
     const auto path = tempPath("really_a_pdf.svg");
     writeFile(path, "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
                     "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n%%EOF\n");
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_NE(err.find("ERROR: Error parsing file '"), std::string::npos) << err;
     std::filesystem::remove(path);
 }
 
@@ -194,16 +190,8 @@ TEST(SvgImport, APdfNamedSvgErrorsInsteadOfHanging) {
 TEST(SvgImport, PdfIsAnUnsupportedFileType) {
     const auto path = tempPath("drawing.pdf");
     writeFile(path, "%PDF-1.4\n<< /Type /Catalog >>\n%%EOF\n");
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    try {
-        ev.resolveTree(ast, ctx);
-        ADD_FAILURE() << "expected an error";
-    } catch (const EvalError& e) {
-        EXPECT_NE(std::string(e.what()).find("unsupported file type '.pdf'"), std::string::npos) << e.what();
-    }
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_NE(err.find("Unsupported file format while trying to import file"), std::string::npos) << err;
     std::filesystem::remove(path);
 }
 
@@ -244,14 +232,12 @@ TEST(SvgImport, CubicBezierPathIsWatertight) {
     std::filesystem::remove(path);
 }
 
-TEST(SvgImport, NoShapesErrors) {
+TEST(SvgImport, NoShapesIsSilent) {
     const auto path = tempPath("noshapes.svg");
     writeFile(path, R"(<svg xmlns="http://www.w3.org/2000/svg"><defs><rect x="0" y="0" width="1" height="1"/></defs></svg>)");
-    Evaluator ev;
-    auto ast = parseSrc("import(\"" + path.generic_string() + "\");");
-    auto scope = oscad::buildScopes(ast);
-    EvalContext ctx = EvalContext::makeRoot(scope.get());
-    EXPECT_THROW(ev.resolveTree(ast, ctx), EvalError);
+    std::vector<std::string> log;
+    evalSrc("import(\"" + path.generic_string() + "\");", [&](const std::string& m) { log.push_back(m); });
+    EXPECT_TRUE(log.empty()) << ::testing::PrintToString(log);
     std::filesystem::remove(path);
 }
 

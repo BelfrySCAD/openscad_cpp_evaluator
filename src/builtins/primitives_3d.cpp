@@ -872,7 +872,7 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
         return params;
     };
     if (!pointsList || !*pointsList) {
-        ev.warn("Unable to convert points = " + fmtValue(pointsArg) + " to a vector of coordinates", where);
+        ev.nonFatalError("Unable to convert points = " + fmtValue(pointsArg) + " to a vector of coordinates", where);
         return emptyResult();
     }
 
@@ -893,7 +893,7 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
             }
         }
         if (!ok || !std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])) {
-            ev.warn("Unable to convert points[" + std::to_string(rawVerts.size()) + "] = " + fmtValue(p) +
+            ev.nonFatalError("Unable to convert points[" + std::to_string(rawVerts.size()) + "] = " + fmtValue(p) +
                         " to a vec3 of numbers",
                     where);
             v = {0, 0, 0};
