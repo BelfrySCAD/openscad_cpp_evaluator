@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cctype>
 #include <filesystem>
@@ -195,6 +196,10 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     // Named rather than hidden so import() and mesh_repair() answer the
     // same question the same way (issue #190); undef keeps the default.
     const Value toleranceArg = getArg(args, std::nullopt, "tolerance", Value{});
+    // ImportNode: center counts only as a real bool, and centres every type
+    // on its bounding box (optionally_center). Only SVG used to honour it.
+    const Value centerArg = getArg(args, std::nullopt, "center", Value{false});
+    const bool center = std::holds_alternative<bool>(centerArg) && std::get<bool>(centerArg);
 
     CSGParams params;
     params["color"] = colorToValue(effCtx.color);
@@ -232,7 +237,8 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
                 const Value dpiArg = getArg(args, std::nullopt, "dpi", Value{72.0});
                 contours = loadSvgContours(path, filter, &matched,
                                            std::holds_alternative<double>(dpiArg) ? std::get<double>(dpiArg) : 72.0,
-                                           truthy(getArg(args, std::nullopt, "center", Value{false})));
+                                           std::holds_alternative<bool>(getArg(args, std::nullopt, "center", Value{false})) &&
+                                               std::get<bool>(getArg(args, std::nullopt, "center", Value{false})));
                 if (!matched) {
                     // Nothing imported, rather than silently falling back to
                     // the whole drawing -- a cut layer that quietly became
@@ -251,6 +257,18 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         } catch (const std::exception& e) {
             ev.error(std::string("import: ") + e.what(), node);
         }
+        if (center && ext == ".dxf" && !contours.empty()) {
+            double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
+            for (const auto& c : contours)
+                for (const auto& p : c)
+                    for (int k = 0; k < 2; ++k) {
+                        lo[k] = std::min(lo[k], p[k]);
+                        hi[k] = std::max(hi[k], p[k]);
+                    }
+            for (auto& c : contours)
+                for (auto& p : c)
+                    for (int k = 0; k < 2; ++k) p[k] -= (lo[k] + hi[k]) / 2;
+        }
         if (contours.empty() && !filteredMiss) {
             ev.error(ext == ".dxf" ? "import: no closed contours found in DXF file" : "import: no shapes found in SVG file", node);
         }
@@ -259,6 +277,8 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
         return params;
     }
     if (isMeshExt(ext)) {
+        // OpenSCAD 2026.02.01's notice, without a location, as it prints it.
+        if (ext == ".amf") ev.emitWarning("DEPRECATED: AMF import is deprecated. Please use 3MF instead.");
         LoadedMesh mesh;
         try {
             mesh = loadMeshByExt(path, ext);
@@ -266,6 +286,16 @@ CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalConte
             ev.error(std::string("import: ") + e.what(), node);
         }
         for (const std::string& w : mesh.warnings) ev.warn("import: '" + path + "': " + w, &node.position());
+        if (center && !mesh.verts.empty()) {
+            double lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+            for (const auto& v : mesh.verts)
+                for (int k = 0; k < 3; ++k) {
+                    lo[k] = std::min(lo[k], v[k]);
+                    hi[k] = std::max(hi[k], v[k]);
+                }
+            for (auto& v : mesh.verts)
+                for (int k = 0; k < 3; ++k) v[k] -= (lo[k] + hi[k]) / 2;
+        }
         std::vector<Value> vertsFlat;
         vertsFlat.reserve(mesh.verts.size() * 3);
         for (const auto& v : mesh.verts) {
@@ -456,7 +486,8 @@ Value importAsValue(Evaluator& ev, const CallArgs& args, const oscad::ASTNode& n
                 const Value dpiArg = getArg(args, std::nullopt, "dpi", Value{72.0});
                 contours = loadSvgContours(path, filter, &matched,
                                            std::holds_alternative<double>(dpiArg) ? std::get<double>(dpiArg) : 72.0,
-                                           truthy(getArg(args, std::nullopt, "center", Value{false})));
+                                           std::holds_alternative<bool>(getArg(args, std::nullopt, "center", Value{false})) &&
+                                               std::get<bool>(getArg(args, std::nullopt, "center", Value{false})));
                 if (!matched) {
                     // Nothing imported, rather than silently falling back to
                     // the whole drawing -- a cut layer that quietly became

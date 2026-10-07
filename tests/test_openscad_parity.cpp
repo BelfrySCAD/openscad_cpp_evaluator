@@ -9,6 +9,9 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+
 #include <string>
 #include <vector>
 
@@ -299,4 +302,69 @@ TEST(Parity, PolyhedronBadInputIsReportedAndDroppedNotGuessed) {
     r = run("polyhedron(points=[[0,0,0],[10,0,0],[0,10,0],[0,0,10]], triangles=[[0,1,2],[0,3,1],[0,2,3],[1,3,2]]);");
     EXPECT_TRUE(logged(r, "DEPRECATED: polyhedron(triangles=[]) will be removed in future releases."));
     EXPECT_GT(r.volume, 100.0);
+}
+
+// -- offset, extrusions, import, surface ------------------------------------------
+
+// delta= is a sharp (miter) offset and chamfer=true a cut corner; the two
+// were swapped. The miter limit is upstream's 1e6, not Manifold's 2.
+TEST(Parity, OffsetDeltaIsSharpAndChamferCuts) {
+    EXPECT_NEAR(run("offset(delta=2) square(10);").area, 196.0, 1e-9);
+    // OpenSCAD's square join cuts each corner: 193.2548 (checked, 2026.02.01).
+    EXPECT_NEAR(run("offset(delta=2, chamfer=true) square(10);").area, 193.2548, 1e-3);
+    EXPECT_NEAR(sectionBounds("offset(delta=1) polygon([[0,0],[10,0],[0,1]]);").max.x, 30.05, 0.01);
+    const Outcome both = run("offset(r=1, delta=3, $fn=8) square(4);");
+    EXPECT_TRUE(logged(both, "Ignoring \"delta\" argument as \"r\" is defined too."));
+}
+
+TEST(Parity, RotateExtrudeSignsAndSides) {
+    // A negative angle is a sweep the other way, not an inside-out solid.
+    EXPECT_NEAR(run("rotate_extrude(angle=-90) translate([3,0]) square([1,2]);").volume, 10.7151, 1e-3);
+    EXPECT_NEAR(run("difference(){ cube([10,10,1], center=true); "
+                    "rotate_extrude(angle=-90) translate([3,0]) square([1,2]); }").volume,
+                97.3215, 1e-3);
+    // A profile left of the axis is swept where it lies.
+    EXPECT_NEAR(run("rotate_extrude($fn=16) translate([-4,0]) square([1,2]);").volume, 42.8604, 1e-3);
+    // Across the axis: upstream's error, nothing drawn, the script carries on.
+    const Outcome r = run("rotate_extrude() translate([-1,0]) square([3,2]); cube(1);");
+    EXPECT_TRUE(logged(r, "ERROR: Children of rotate_extrude() may not lie across the Y axis (Range of X coords for "
+                          "all children [-1.00 : 2.00])"));
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+}
+
+// Zero scale with twist or a non-uniform scale: upstream's diagonal choice
+// (reversed on the collapsed top slice), not Manifold::Extrude's.
+TEST(Parity, LinearExtrudeToZeroScaleMatchesUpstream) {
+    EXPECT_NEAR(run("linear_extrude(10, scale=0, twist=180) square(4, center=true);").volume, 55.3393, 1e-3);
+    EXPECT_NEAR(run("linear_extrude(10, scale=[0,1], twist=60) square(4, center=true);").volume, 81.7820, 1e-3);
+    EXPECT_NEAR(run("linear_extrude(10, scale=[2,0], slices=4) square(4, center=true);").volume, 106.6667, 1e-3);
+}
+
+TEST(Parity, ImportCenterAppliesToEveryFormat) {
+    const auto path = std::filesystem::temp_directory_path() / "parity_center.off";
+    {
+        std::ofstream f(path);
+        f << "OFF\n4 4 0\n1 1 1\n4 1 1\n1 5 1\n1 1 7\n3 0 2 1\n3 0 1 3\n3 0 3 2\n3 1 2 3\n";
+    }
+    const manifold::Box b = solidBounds("import(\"" + path.generic_string() + "\", center=true);");
+    EXPECT_NEAR(b.min.x, -1.5, 1e-9);
+    EXPECT_NEAR(b.max.z, 3.0, 1e-9);
+    // Only a real bool centres.
+    EXPECT_NEAR(solidBounds("import(\"" + path.generic_string() + "\", center=1);").min.x, 1.0, 1e-9);
+    std::filesystem::remove(path);
+}
+
+// The first line of a .dat is y = 0 (it was mirrored), and the base sits
+// below the lowest height (it was at z = 0, so negative heights inverted).
+TEST(Parity, SurfaceDatOrientationAndBase) {
+    const auto path = std::filesystem::temp_directory_path() / "parity_surface.dat";
+    {
+        std::ofstream f(path);
+        f << "-5 -5 -5\n9 9 9\n";
+    }
+    const Outcome r = run("surface(\"" + path.generic_string() + "\");");
+    const manifold::Box b = solidBounds("surface(\"" + path.generic_string() + "\");");
+    EXPECT_NEAR(b.min.z, -6.0, 1e-9);
+    EXPECT_GT(r.volume, 0.0);
+    std::filesystem::remove(path);
 }

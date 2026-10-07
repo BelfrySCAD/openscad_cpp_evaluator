@@ -69,8 +69,14 @@ manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height
     const auto tri = [&](size_t a, size_t b, size_t c) { mesh.triVerts.insert(mesh.triVerts.end(), {a, b, c}); };
 
     const bool backTwist = twist <= 0; // rotation_slice_top <= rotation_slice_bottom, every slice
+    // A top scaled to zero in either axis collapses the last ring to a line
+    // or a point. Upstream reverses its shorter-diagonal choice on that last
+    // slice (splitfirst xor any_zero), to avoid zero-thickness "ears", and
+    // has no top cap to add.
+    const bool anyZero = scaleX == 0.0 || scaleY == 0.0;
     for (int j = 1; j <= slices; ++j) {
         const size_t bot = (j - 1) * stride, top = j * stride;
+        const bool flipForZero = anyZero && j == slices;
         size_t cur = 0;
         for (const manifold::SimplePolygon& o : polys) {
             const size_t n = o.size();
@@ -82,7 +88,7 @@ manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height
                 const manifold::vec2 vBot = ringPoint(o[i % n], j - 1), vTop = ringPoint(o[i % n], j);
                 const size_t idx = cur + i % n, prev = cur + i - 1;
                 const int diff = sgnVdiff(prevBot - vTop, vBot - prevTop);
-                if (diff == -1 || (diff == 0 && !flip)) {
+                if ((diff == -1 || (diff == 0 && !flip)) != flipForZero) {
                     tri(bot + idx, top + idx, bot + prev);
                     tri(top + prev, bot + prev, top + idx);
                 } else {
@@ -106,6 +112,9 @@ manifold::Manifold extrudeTwisted(const manifold::Polygons& polys, double height
         cur += o.size();
     }
     const size_t topBase = static_cast<size_t>(slices) * stride;
+    // A collapsed top keeps its cap: zero-area triangles, but they close the
+    // mesh topologically, and Manifold collapses degenerate triangles itself.
+    // (Upstream simply skips the cap; its PolySet need not be manifold.)
     for (const manifold::ivec3& t : manifold::TriangulateIdx(indexed)) {
         tri(t.x, t.z, t.y);                                    // bottom faces down
         tri(topBase + t.x, topBase + t.y, topBase + t.z);      // top faces up
@@ -181,7 +190,9 @@ BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::Modular
     if (const double* s = std::get_if<double>(&scaleArg)) {
         scaleX = scaleY = *s;
         scaleOk = std::isfinite(*s);
-    } else if (const ListPtr* l = std::get_if<ListPtr>(&scaleArg); l && *l && (*l)->items.size() >= 2) {
+    } else if (const ListPtr* l = std::get_if<ListPtr>(&scaleArg); l && *l && (*l)->items.size() == 2) {
+        // Exactly two, as Value::getVec2 takes them: a 3-vector is the
+        // "could not be converted" case below, not its first two.
         scaleX = toDoubleLenient((*l)->items[0]);
         scaleY = toDoubleLenient((*l)->items[1]);
         scaleOk = std::isfinite(scaleX) && std::isfinite(scaleY);
@@ -275,7 +286,7 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
     // reversed to avoid zero-thickness ears; a cone tip is Extrude's to make.
     // Manifold's nDivisions is the copies BETWEEN the ends: slices - 1.
     manifold::Manifold body =
-        nonLinear && scaleX > 0 && scaleY > 0 && height > 0
+        nonLinear && scaleX >= 0 && scaleY >= 0 && height > 0
             ? extrudeTwisted(polys, height, slices, twist, scaleX, scaleY)
             : manifold::Manifold::Extrude(polys, height, slices - 1, -twist, manifold::vec2(scaleX, scaleY));
     if (std::get<bool>(params.at("center"))) body = body.Translate(manifold::vec3(0, 0, -height / 2));
@@ -311,7 +322,9 @@ BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::Modular
     // always wins. It was ignored here: a quarter turn from 90 drew 0..90.
     const Value angleArg = getArgOrAlias(ev, &node.position(), args, 0, "angle", "a", Value{});
     const Value startArg = getArg(args, 1, "start", Value{});
-    const bool hasAngle = !std::holds_alternative<std::monostate>(angleArg) && std::isfinite(toDoubleLenient(angleArg));
+    // Only a number is an angle (rotate_extrude(angle="x") is a full turn,
+    // as upstream reads it; it came out as 0, a flat sheet).
+    const bool hasAngle = std::holds_alternative<double>(angleArg) && std::isfinite(std::get<double>(angleArg));
     const bool hasStart = !std::holds_alternative<std::monostate>(startArg) && std::isfinite(toDoubleLenient(startArg));
     double angle = 360.0;
     double start = 180.0;
@@ -346,23 +359,45 @@ CSGParams resolveRotateExtrude(Evaluator& ev, const oscad::ModularCall& node, Ev
 std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& params,
                                                 const std::vector<std::unique_ptr<CSGNode>>& children,
                                                 const oscad::ASTNode& node) {
-    const std::optional<manifold::CrossSection> cs = toCrossSection(flattenCsgTree(children));
+    std::optional<manifold::CrossSection> cs = toCrossSection(flattenCsgTree(children));
     if (!cs || cs->IsEmpty()) return {};
 
-    // Upstream (rotate_extrude.cc) sizes the arc by the profile's extent in X,
-    // measured from the axis: both ends start at 0.
+    // Upstream rotatePolygon (rotate_extrude.cc): no sweep at all draws
+    // nothing; a profile on both sides of the axis is an error (logged, not
+    // fatal) and draws nothing; one entirely left of it is swept as it lies.
+    // Manifold::Revolve only handles x >= 0, so a left-hand profile is
+    // mirrored in and the result turned half a revolution back: (-r, z) at
+    // angle a is (r, z) at a + 180. It used to draw nothing, or silently
+    // only the right-hand part of a profile across the axis.
+    const double rawAngle = std::get<double>(params.at("angle"));
+    if (rawAngle == 0.0) return {};
     const manifold::Rect bounds = cs->Bounds();
-    const double width = std::max(bounds.max.x, 0.0) - std::min(bounds.min.x, 0.0);
-    const double angle = std::get<double>(params.at("angle"));
+    if (bounds.min.x < 0 && bounds.max.x > 0) {
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "[%.2f : %.2f]", bounds.min.x, bounds.max.x);
+        ev.emitWarning(std::string("ERROR: Children of rotate_extrude() may not lie across the Y axis (Range of X "
+                                   "coords for all children ") +
+                       buf + ")");
+        return {};
+    }
+    const bool leftOfAxis = bounds.max.x <= 0;
+    if (leftOfAxis) cs = cs->Mirror(manifold::vec2(1.0, 0.0));
+    // A negative angle is the same sweep run the other way: |angle| from
+    // start + angle. Handing Revolve the negative angle built the solid
+    // inside out, so subtracting it ADDED material.
+    const double angle = std::fabs(rawAngle);
+
+    // Upstream sizes the arc by the profile's extent in X, measured from the
+    // axis: both ends start at 0.
+    const manifold::Rect profileBounds = cs->Bounds();
+    const double width = std::max(profileBounds.max.x, 0.0) - std::min(profileBounds.min.x, 0.0);
     const int sections = Discretizer::fromParams(params).circular(width, angle).value_or(
         std::max(1, static_cast<int>(std::fabs(angle) / 360 * 3)));
     // Revolve takes this as the section count for the arc it is given -- not
     // per full circle, which is what it used to be handed, packing a whole
     // circle's worth into a partial one.
     manifold::Manifold body;
-    if (sections >= 3 || bounds.min.x < 0) {
-        // (A profile left of the axis keeps Revolve's handling; a 1-2 section
-        // arc of one is the only case still drawn with 3.)
+    if (sections >= 3) {
         body = manifold::Manifold::Revolve(cs->ToPolygons(), std::max(sections, 3), angle);
     } else {
         // Revolve substitutes its own default below 3 sections, but a short
@@ -384,8 +419,11 @@ std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& p
             v = manifold::vec3(v.x * std::cos(a), v.x * std::sin(a), sign * v.y);
         });
     }
-    // The arc above runs from +X; turn it to begin at `start`.
-    const double start = std::get<double>(params.at("start"));
+    // The arc above runs from +X; turn it to begin at `start` (or at
+    // start + angle, for a negative sweep), and back round for a left-hand
+    // profile.
+    const double start = std::get<double>(params.at("start")) + (rawAngle < 0 ? rawAngle : 0.0) +
+                         (leftOfAxis ? 180.0 : 0.0);
     if (start != 0.0) body = body.Rotate(0.0, 0.0, start);
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
@@ -401,7 +439,10 @@ std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& p
 BuiltinWrapParams computeProjectionParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
     CSGParams params;
-    params["cut"] = Value{truthy(getArg(args, std::nullopt, "cut", Value{false}))};
+    // Positional, and only a real bool cuts (ProjectionNode.cc): cut=1 and
+    // cut="yes" do not, projection(true) does.
+    const Value cutArg = getArg(args, 0, "cut", Value{false});
+    params["cut"] = Value{std::holds_alternative<bool>(cutArg) && std::get<bool>(cutArg)};
     return BuiltinWrapParams{std::move(params), std::move(effCtx)};
 }
 
@@ -447,28 +488,31 @@ std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
 BuiltinWrapParams computeOffsetParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
 
-    // `r` owns position 0 (offset(2) == offset(r=2)); delta/chamfer are
-    // named-only, matching the reference. `r` also wins outright when both
-    // are given -- the reference never even looks at delta in that case.
-    Value rArg = getArg(args, 0, "r", Value{});
-    const Value deltaArg = getArg(args, std::nullopt, "delta", Value{});
-    // A bare offset() is offset(r=1), not a pass-through: the reference
-    // initialises delta to 1 with a round join and only ever overwrites it
-    // from an argument, so "neither given" lands on the same state "r=1"
-    // does. Verified against OpenSCAD 2022.08.22 -- offset() and offset(r=1)
-    // produce a byte-identical mesh for the same input.
-    if (std::holds_alternative<std::monostate>(rArg) && std::holds_alternative<std::monostate>(deltaArg)) {
-        rArg = Value{1.0};
+    // Upstream builtin_offset (OffsetNode.cc), rule for rule. A NUMBER r is
+    // a round offset; otherwise a number delta is a sharp (miter) one, or a
+    // square-cut one when chamfer is a real true; otherwise r=1 -- so a bare
+    // offset(), and offset(r="a"), are offset(r=1). The join types used to
+    // be swapped: plain delta came out chamfered and chamfer=true sharp.
+    const Value rArg = getArg(args, 0, "r");
+    const Value deltaArg = getArg(args, 1, "delta");
+    const Value chamferArg = getArg(args, 2, "chamfer");
+    double delta = 1.0;
+    std::string join = "round";
+    if (const double* r = std::get_if<double>(&rArg)) {
+        if (std::holds_alternative<double>(deltaArg))
+            ev.warn("Ignoring \"delta\" argument as \"r\" is defined too.", &node.position());
+        delta = *r;
+    } else if (const double* d = std::get_if<double>(&deltaArg)) {
+        delta = *d;
+        join = std::holds_alternative<bool>(chamferArg) && std::get<bool>(chamferArg) ? "square" : "miter";
     }
-    const bool chamfer = truthy(getArg(args, std::nullopt, "chamfer", Value{false}));
 
     CSGParams params;
-    params["r"] = rArg;
-    params["delta"] = deltaArg;
-    params["chamfer"] = Value{chamfer};
-    if (!std::holds_alternative<std::monostate>(rArg)) {
-        params["segs"] = Value{static_cast<double>(fnSegmentsFromCtx(effCtx, std::fabs(toDoubleLenient(rArg))))};
-    }
+    params["delta"] = Value{delta};
+    params["join"] = Value{join};
+    // Silent clamping (upstream builds this node's discretizer without a
+    // location), and segments for |delta|, as GeometryEvaluator asks.
+    params["segs"] = Value{static_cast<double>(fnSegmentsFromCtx(effCtx, std::fabs(delta)))};
     params["color"] = colorToValue(effCtx.color);
     return BuiltinWrapParams{std::move(params), std::move(effCtx)};
 }
@@ -487,25 +531,19 @@ std::vector<ColoredBody> generateOffset(Evaluator&, const CSGParams& params, con
     const std::optional<manifold::CrossSection> cs = toCrossSection(bodies);
     if (!cs) return {};
 
-    const Value rArg = params.at("r");
-    const Value deltaArg = params.at("delta");
-
-    if (!std::holds_alternative<std::monostate>(rArg)) {
-        const int segs = static_cast<int>(std::get<double>(params.at("segs")));
-        ColoredBody result;
-        result.section = cs->Offset(toDoubleLenient(rArg), manifold::CrossSection::JoinType::Round, 2.0, segs);
-        result.color = valueToColor(params.at("color"));
-        return {result};
-    }
-    if (!std::holds_alternative<std::monostate>(deltaArg)) {
-        const manifold::CrossSection::JoinType jt =
-            std::get<bool>(params.at("chamfer")) ? manifold::CrossSection::JoinType::Miter : manifold::CrossSection::JoinType::Square;
-        ColoredBody result;
-        result.section = cs->Offset(toDoubleLenient(deltaArg), jt);
-        result.color = valueToColor(params.at("color"));
-        return {result};
-    }
-    return bodies.empty() ? std::vector<ColoredBody>{} : std::vector<ColoredBody>{bodies.front()};
+    const double delta = std::get<double>(params.at("delta"));
+    const std::string& join = std::get<std::string>(params.at("join"));
+    const int segs = static_cast<int>(std::get<double>(params.at("segs")));
+    using JT = manifold::CrossSection::JoinType;
+    const JT jt = join == "round" ? JT::Round : join == "square" ? JT::Square : JT::Miter;
+    // upstream's miter_limit: "fixed high value to disable chamfers with
+    // jtMiter". Manifold's default of 2 cut a sharp corner off at twice the
+    // offset, so an acute delta offset came out blunted.
+    constexpr double kMiterLimit = 1000000.0;
+    ColoredBody result;
+    result.section = cs->Offset(delta, jt, kMiterLimit, segs);
+    result.color = valueToColor(params.at("color"));
+    return {result};
 }
 
 } // namespace oscadeval

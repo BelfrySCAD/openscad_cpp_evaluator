@@ -5,12 +5,19 @@
 
 namespace oscadeval {
 
-// Loads height data for surface(): a `.dat` text file (whitespace-separated
-// numbers per line, `#`-prefixed lines skipped, file order reversed so the
-// first line represents the highest Y row -- OpenSCAD's own convention) or
-// an image (PNG/JPEG/BMP/GIF via stb_image, grayscale luminance mapped to
-// 0-100, optionally inverted). Throws std::runtime_error on failure.
-// Mirrors _surface_load/_surface_load_dat/_surface_load_image.
-std::vector<std::vector<double>> loadSurfaceHeights(const std::string& path, bool invert);
+// Height data for surface(), read as upstream's SurfaceNode reads it: a
+// PNG (by its signature) as 16-bit luminance scaled to 0-100, negated by
+// `invert`, bottom image row at y = 0; anything else as a .dat grid, first
+// line at y = 0, short rows padded with 0. Never throws: a file that cannot
+// be read gives no heights and upstream's warning, and the script carries
+// on. `heights[row * cols + col]`; `minVal` is what the base sits 1 below.
+struct SurfaceData {
+    std::vector<double> heights;
+    int rows = 0;
+    int cols = 0;
+    double minVal = 0;
+    std::vector<std::string> warnings;
+};
+SurfaceData loadSurface(const std::string& path, bool invert);
 
 } // namespace oscadeval
