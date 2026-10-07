@@ -11,12 +11,25 @@ namespace oscadeval {
 
 using Contour2d = std::vector<std::array<double, 2>>;
 
-// Hand-rolled, dependency-free DXF reader covering only what real
-// OpenSCAD's own dxf import (and this port's Python reference, via ezdxf)
-// exposes: closed LWPOLYLINE and 2D POLYLINE entities, optionally filtered
-// to one layer. Any other entity type is ignored. Throws
-// std::runtime_error on I/O failure. Mirrors _load_dxf_contours.
-std::vector<Contour2d> loadDxfContours(const std::string& path, const std::optional<std::string>& layer);
+// import()'s DXF arguments. `disc` carries $fn/$fa/$fs/$fe for arcs.
+struct DxfOptions {
+    std::optional<std::string> layer;
+    double xorigin = 0.0, yorigin = 0.0, scale = 1.0;
+    Discretizer disc;
+};
+
+// The outlines, to be filled even-odd, and OpenSCAD's warnings about the
+// file, in the order it prints them.
+struct DxfImport {
+    std::vector<Contour2d> contours;
+    std::vector<std::string> warnings;
+};
+
+// Hand-rolled DXF reader matching OpenSCAD 2026.02.01's import (see the
+// notes atop dxf_import.cpp): LINE, CIRCLE, ARC, ELLIPSE, LWPOLYLINE,
+// POLYLINE and INSERT, chained into closed outlines. Throws
+// std::runtime_error on I/O failure.
+DxfImport loadDxf(const std::string& path, const DxfOptions& opts = {});
 
 // SVG reader, as OpenSCAD 2026.02.01 reads it (a port of its MIT-licensed
 // libsvg): <path>, <rect>, <circle>, <ellipse>, <line>, <polygon>,

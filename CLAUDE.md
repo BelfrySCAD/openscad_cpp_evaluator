@@ -1285,9 +1285,14 @@ grep for `ponytail:`.
   triangle-count parity.
 - `include/openscad_cpp_evaluator/dxf_svg_import.hpp`, `src/import/dxf_import.cpp`,
   `src/import/svg_import.cpp` — hand-rolled, dependency-free 2D-contour loaders (no XML/DXF library
-  pulled in, matching the plan's §9 dependency table). `loadDxfContours()` reads DXF's group-code
-  text format directly (closed `LWPOLYLINE`/2D `POLYLINE` entities only, optional layer filter) --
-  covers the same narrow entity set the reference's own `ezdxf`-based loader does, nothing more.
+  pulled in, matching the plan's §9 dependency table). `loadDxf()` reads DXF's group-code
+  text format directly and matches OpenSCAD 2026.02.01's import, established black-box (its DXF
+  source is GPL; do not read or port it): `LINE`/`CIRCLE`/`ARC`/`ELLIPSE`/`LWPOLYLINE`/`INSERT`
+  become segments (arcs by the circle fragment rules), points snap to a 1/1024 grid, segments chain
+  into paths that are ALL closed (an open chain gets a straight closing edge), filled even-odd;
+  `origin=`/`scale=`/`layer=` and its warnings ("Illegal value", "Not enough input values",
+  "Unsupported DXF Entity") as OpenSCAD has them. The notes atop `dxf_import.cpp` list the rules,
+  the two ellipse bugs deliberately not copied, and the `POLYLINE` extension.
   `loadSvgContours()` pairs a minimal recursive-descent XML tree parser (open/close/self-closing
   tags, quoted attributes, comments/CDATA/prolog skipping, entity and character-reference
   decoding, attribute whitespace normalisation; a tag keeps its `prefix:`, as libxml2 reports it,
