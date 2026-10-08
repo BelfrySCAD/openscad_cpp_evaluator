@@ -114,10 +114,35 @@ class RoofMesh {
         }
     }
 
+    // A vertex no triangle uses -- the far end of an unbounded Voronoi edge
+    // outside the outline can lie 10^12 away -- would stretch the bounding
+    // box Manifold sizes its tolerance by, and its cleanup would then
+    // collapse the whole roof; such vertices are left out. (Only when one
+    // lies well beyond the rest: renumbering reorders the output, and one
+    // nearer changes the tolerance by no more than a few times.)
     manifold::Manifold build() {
         mesh_.numProp = 3;
+        const size_t n = mesh_.vertProperties.size() / 3;
+        std::vector<bool> used(n, false);
         for (const auto& t : triangles_) {
-            for (int i : t) mesh_.triVerts.push_back(static_cast<uint64_t>(i));
+            for (int i : t) used[i] = true;
+        }
+        manifold::Box box;
+        for (size_t i = 0; i < n; ++i) {
+            if (used[i]) box.Union(manifold::vec3(mesh_.vertProperties[3 * i], mesh_.vertProperties[3 * i + 1], mesh_.vertProperties[3 * i + 2]));
+        }
+        std::vector<uint64_t> to(n);
+        std::vector<double> kept;
+        bool stray = false;
+        for (size_t i = 0; i < n; ++i) {
+            const manifold::vec3 p(mesh_.vertProperties[3 * i], mesh_.vertProperties[3 * i + 1], mesh_.vertProperties[3 * i + 2]);
+            stray = stray || (!used[i] && la::maxelem(la::abs(p)) > 16 * box.Scale());
+            to[i] = kept.size() / 3;
+            if (used[i]) kept.insert(kept.end(), {p.x, p.y, p.z});
+        }
+        if (stray) mesh_.vertProperties = std::move(kept);
+        for (const auto& t : triangles_) {
+            for (int i : t) mesh_.triVerts.push_back(stray ? to[i] : static_cast<uint64_t>(i));
         }
         manifold::Manifold body(mesh_);
         if (body.Status() == manifold::Manifold::Error::NoError) return body;
@@ -991,16 +1016,17 @@ void dropSpikes(std::vector<Vec2>& c) {
     }
 }
 
-// The outline of `cs` snapped to a grid of 2^30 steps across its largest
-// coordinate, with repeated and straight corners dropped. Sets `toGrid`.
-std::vector<std::vector<Vec2>> gridContours(const manifold::CrossSection& cs, double& toGrid) {
+// The outline of `cs` snapped to a grid of 2^(bits+1) steps across its
+// largest coordinate, with repeated and straight corners dropped. Sets
+// `toGrid`.
+std::vector<std::vector<Vec2>> gridContours(const manifold::CrossSection& cs, double& toGrid, int bits = 29) {
     const manifold::Polygons polys = cs.ToPolygons();
     double extent = 0;
     for (const auto& poly : polys) {
         for (Vec2 p : poly) extent = std::max({extent, std::abs(p.x), std::abs(p.y)});
     }
     if (!(extent > 0) || !std::isfinite(extent)) return {};
-    toGrid = std::ldexp(1.0, 29 - std::ilogb(extent));
+    toGrid = std::ldexp(1.0, bits - std::ilogb(extent));
 
     std::vector<std::vector<Vec2>> contours;
     for (const auto& poly : polys) {
@@ -1014,17 +1040,6 @@ std::vector<std::vector<Vec2>> gridContours(const manifold::CrossSection& cs, do
         if (c.size() >= 3) contours.push_back(std::move(c));
     }
     return contours;
-}
-
-// The roof solid over `cs` (its floor at z = 0), discretizing curved parts
-// by `fa`/`fs`.
-manifold::Manifold voronoiRoof(const manifold::CrossSection& cs, double fa, double fs) {
-    double toGrid = 1;
-    std::vector<std::vector<Vec2>> contours = gridContours(cs, toGrid);
-    if (contours.empty()) return manifold::Manifold();
-    // $fa/$fs below 0.01 would ask for unbounded detail (computeRoofParams
-    // has already clamped them, warning).
-    return RoofBuilder(std::move(contours), 1 / toGrid, std::max(fa, 0.01), std::max(fs, 0.01)).build();
 }
 
 // The outline welded where it touches itself: a union can leave pieces
@@ -1062,8 +1077,11 @@ std::vector<std::vector<Vec2>> weldContours(std::vector<std::vector<Vec2>> conto
             }
         }
     }
-    // ponytail: every corner against every edge, O(n^2); a grid of edges
-    // when outlines of tens of thousands of corners matter.
+    // Each edge looks only at the corners in its x range.
+    // ponytail: still O(n^2) for an outline of long edges all spanning one
+    // x range; a grid of edges if that ever matters.
+    const auto byX = [](Vec2 p, Vec2 q) { return p.x != q.x ? p.x < q.x : p.y < q.y; };
+    std::sort(corners.begin(), corners.end(), byX);
     Clipper2Lib::Paths64 paths;
     for (const auto& c : contours) {
         Clipper2Lib::Path64 path;
@@ -1074,8 +1092,10 @@ std::vector<std::vector<Vec2>> weldContours(std::vector<std::vector<Vec2>> conto
             if (len == 0) continue;
             const Vec2 lo = la::min(a, b) - kWeld, hi = la::max(a, b) + kWeld;
             std::vector<std::pair<double, Vec2>> on;
-            for (Vec2 q : corners) {
-                if (q.x < lo.x || q.y < lo.y || q.x > hi.x || q.y > hi.y || q == a || q == b) continue;
+            for (auto it = std::lower_bound(corners.begin(), corners.end(), Vec2{lo.x, -std::numeric_limits<double>::infinity()}, byX);
+                 it != corners.end() && it->x <= hi.x; ++it) {
+                const Vec2 q = *it;
+                if (q.y < lo.y || q.y > hi.y || q == a || q == b) continue;
                 const double t = la::dot(q - a, d) / len;
                 if (t > 0 && t < len && std::abs(cross2(d, q - a)) / len <= kWeld) on.push_back({t, q});
             }
@@ -1093,6 +1113,47 @@ std::vector<std::vector<Vec2>> weldContours(std::vector<std::vector<Vec2>> conto
         if (c.size() >= 3) welded.push_back(std::move(c));
     }
     return welded;
+}
+
+// Each contour rotated to start at its least corner, and the contours sorted:
+// equal for two outlines that differ only in where Clipper starts them.
+std::vector<std::vector<Vec2>> canonical(std::vector<std::vector<Vec2>> contours) {
+    const auto less = [](Vec2 a, Vec2 b) { return a.x != b.x ? a.x < b.x : a.y < b.y; };
+    for (auto& c : contours) std::rotate(c.begin(), std::min_element(c.begin(), c.end(), less), c.end());
+    std::sort(contours.begin(), contours.end(), [&](const auto& a, const auto& b) { return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), less); });
+    return contours;
+}
+
+// The roof solid over `cs` (its floor at z = 0), discretizing curved parts
+// by `fa`/`fs`.
+//
+// Boost's Voronoi builder needs segments that meet only at their ends. A
+// union's pieces sharing an edge come back as outlines a hairline apart,
+// which on the grid overlap or cross: the diagram comes out wrong, or the
+// builder never finishes, allocating without bound. So the outline is
+// welded first, as for the straight skeleton.
+//
+// Even on valid input the builder occasionally gets a near-degenerate
+// configuration wrong -- a cell left with no finite edges, where four sites
+// are all but equidistant once the outline is rounded to the grid -- and the
+// facets built from it do not close. Rounding to a coarser grid perturbs
+// the outline differently, so the roof is retried there.
+manifold::Manifold voronoiRoof(const manifold::CrossSection& cs, double fa, double fs) {
+    manifold::Manifold body;
+    for (int bits = 29; bits >= 25; --bits) {
+        double toGrid = 1;
+        std::vector<std::vector<Vec2>> contours = gridContours(cs, toGrid, bits);
+        std::vector<std::vector<Vec2>> welded = weldContours(contours);
+        // An outline welding leaves as it was keeps its own order, so its
+        // roof is the same, vertex for vertex, as without welding.
+        if (canonical(welded) != canonical(contours)) contours = std::move(welded);
+        if (contours.empty()) return manifold::Manifold();
+        // $fa/$fs below 0.01 would ask for unbounded detail
+        // (computeRoofParams has already clamped them, warning).
+        body = RoofBuilder(std::move(contours), 1 / toGrid, std::max(fa, 0.01), std::max(fs, 0.01)).build();
+        if (body.Status() == manifold::Manifold::Error::NoError && !body.IsEmpty()) break;
+    }
+    return body;
 }
 
 manifold::Manifold straightRoof(const manifold::CrossSection& cs) {
