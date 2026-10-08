@@ -4,6 +4,7 @@
 #include "openscad_cpp_evaluator/utf8.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -486,29 +487,59 @@ std::string unescapeStringLiteral(const std::string& raw, int* undefinedEscapes)
 }
 
 namespace {
-// The first 6 significant digits of |v|, correctly rounded with exact ties
-// rounding UP (double-conversion's ToPrecision, which OpenSCAD prints
-// with), and the power of ten of the first one. A 17-digit rendering
-// decides every case but one: when it reads exactly ...5000000000 past the
-// sixth digit, the true value may sit just either side of the tie, so the
-// exact expansion settles it.
-void sixDigits(double av, char digits[6], int& exp10) {
+// The first 7 significant digits of |v| (all[0..6]) and the power of ten of
+// the first one, plus whether the first 6 round UP: correctly rounded with
+// exact ties rounding up (double-conversion's ToPrecision, which OpenSCAD
+// prints with). A 17-digit rendering decides every case but one: when it
+// reads exactly ...5000000000 past the sixth digit, the true value may sit
+// just either side of the tie, so the exact expansion settles it.
+bool exactSevenDigits(double av, char all[17], int& exp10) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "%.16e", av);  // d.dddddddddddddddde[+-]x
     exp10 = std::atoi(std::strchr(buf, 'e') + 1);
-    char all[17];
     all[0] = buf[0];
     std::memcpy(all + 1, buf + 2, 16);
-    bool up;
     if (all[6] == '5' && std::memcmp(all + 7, "0000000000", 10) == 0) {
         static thread_local char exact[1100];
         std::snprintf(exact, sizeof exact, "%.1000e", av);  // the exact expansion
         // exact[7] is the 7th significant digit ("d.dddddd..."); 5 or more
         // rounds up, an exact tie included.
-        up = exact[7] >= '5';
-    } else {
-        up = all[6] >= '5';
+        return exact[7] >= '5';
     }
+    return all[6] >= '5';
+}
+
+// The same answer from the SHORTEST round-trip rendering D (std::to_chars,
+// several times cheaper than printf), which is safe for a normal double:
+// its rounding interval is ~1e-16 relative, far narrower than the 1e-6
+// spacing of 7-digit decimals, so at most one 7-digit decimal lies in it.
+// If the rounding boundary B (a 7-digit ...5) is in the interval, D is B
+// itself; otherwise D and |v| lie on the same side of B and round alike.
+// So D decides every case except D == B exactly, where |v| may be just
+// either side of the tie -- returns false then, for exactSevenDigits. A
+// subnormal's interval is far wider (5e-324 renders shortest as "5e-324"
+// but prints as 4.94066e-324), so subnormals never come here.
+bool shortestSevenDigits(double av, char all[17], int& exp10, bool& up) {
+    char buf[32];
+    const std::to_chars_result res = std::to_chars(buf, buf + sizeof buf, av, std::chars_format::scientific);
+    int n = 0;
+    const char* p = buf;
+    for (; *p != 'e'; ++p)
+        if (*p != '.') all[n++] = *p;
+    if (n == 7 && all[6] == '5') return false;
+    for (; n < 7; ++n) all[n] = '0';
+    std::from_chars(p + (p[1] == '+' ? 2 : 1), res.ptr, exp10);
+    up = all[6] >= '5';
+    return true;
+}
+
+// The first 6 significant digits of |v|, rounded as above, and the power
+// of ten of the first one.
+void sixDigits(double av, char digits[6], int& exp10) {
+    char all[17];
+    bool up;
+    if (av < std::numeric_limits<double>::min() || !shortestSevenDigits(av, all, exp10, up))
+        up = exactSevenDigits(av, all, exp10);
     std::memcpy(digits, all, 6);
     if (up) {
         int k = 5;
