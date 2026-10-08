@@ -1247,7 +1247,10 @@ grep for `ponytail:`.
   without `-1` counts), and X3D's `IndexedTriangleSet`/`TriangleSet` are read. X3D goes through a
   small real XML parser (comments, CDATA, DOCTYPE, entities); VRML through a tokenizer + generic
   node parser that steps over `PROTO`/`EXTERNPROTO`/`ROUTE` (VRML 1.0 is refused by name). AMF's
-  `unit` scales to mm, and a zipped AMF (`PK` header) is read through `readStoredZipEntryBySuffix`.
+  `unit` is ignored (OpenSCAD reads millimetres whatever it says), a zipped AMF (`PK` header) is read
+  through `readStoredZipEntryBySuffix`, and each AMF object's vertices are welded by exact position
+  (`weldVertices`, STL's), so a closed object written as a triangle soup imports closed, as in
+  OpenSCAD -- per object, never across objects, and never near-coincident vertices.
   What is not a mesh — primitives (Box, Sphere, ...), `Inline`, AMF constellations — lands in
   `LoadedMesh::warnings`, which both `import()` faces emit as `import: '<file>': ...`.
 - `include/openscad_cpp_evaluator/import_builtin.hpp`, `include/openscad_cpp_evaluator/

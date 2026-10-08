@@ -22,6 +22,9 @@ struct LoadedMesh {
 // "import: {what}" on parse/IO failure. Mirrors _load_stl/_load_obj/
 // _load_off/_load_3mf exactly (including STL's exact-match vertex welding
 // and OBJ/OFF's fan triangulation of >3-gon faces).
+// Merges vertices at exactly equal positions (STL's corners, an AMF
+// object's duplicated vertices); every position keeps its first index.
+LoadedMesh weldVertices(const std::vector<std::array<double, 3>>& verts, const std::vector<std::array<int, 3>>& tris);
 LoadedMesh loadStl(const std::string& path);
 LoadedMesh loadObj(const std::string& path);
 LoadedMesh loadOff(const std::string& path);

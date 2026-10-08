@@ -4,7 +4,9 @@
 
 #include "test_helpers.hpp"
 
+#include <algorithm>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <manifold/manifold.h>
@@ -265,6 +267,97 @@ TEST(ImportModuleContext, ZippedAmfImports) {
     std::filesystem::remove(path);
     ASSERT_EQ(e.bodies.size(), 1u);
     EXPECT_NEAR(e.bodies[0].body->Volume(), 1.0, 1e-9);
+}
+
+namespace {
+
+using Tri = std::array<std::array<double, 3>, 3>;
+
+// The unit cube at (x, y, z) as 12 outward triangles, two per face, the
+// faces in -z, +z, -y, +x, +y, -x order.
+std::vector<Tri> cubeTris(double x, double y, double z) {
+    const int idx[12][3] = {{0, 3, 2}, {0, 2, 1}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                            {1, 2, 6}, {1, 6, 5}, {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}};
+    const double c[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+    std::vector<Tri> out;
+    for (const auto& t : idx) {
+        Tri tri;
+        for (int k = 0; k < 3; ++k) tri[k] = {c[t[k]][0] + x, c[t[k]][1] + y, c[t[k]][2] + z};
+        out.push_back(tri);
+    }
+    return out;
+}
+
+// One <object> per entry, every triangle carrying its own three vertex
+// copies: a triangle soup, as an exporter that never shares vertices writes.
+std::string soupAmf(const std::vector<std::vector<Tri>>& objects) {
+    std::string amf = "<?xml version=\"1.0\"?>\n<amf unit=\"millimeter\">";
+    for (const auto& tris : objects) {
+        amf += "<object id=\"1\"><mesh><vertices>";
+        for (const Tri& t : tris)
+            for (const auto& p : t)
+                amf += "<vertex><coordinates><x>" + std::to_string(p[0]) + "</x><y>" + std::to_string(p[1]) +
+                       "</y><z>" + std::to_string(p[2]) + "</z></coordinates></vertex>";
+        amf += "</vertices><volume>";
+        for (size_t i = 0; i < tris.size(); ++i)
+            amf += "<triangle><v1>" + std::to_string(3 * i) + "</v1><v2>" + std::to_string(3 * i + 1) + "</v2><v3>" +
+                   std::to_string(3 * i + 2) + "</v3></triangle>";
+        amf += "</volume></mesh></object>";
+    }
+    return amf + "</amf>";
+}
+
+} // namespace
+
+// OpenSCAD treats an AMF object's vertices at exactly the same position as
+// one vertex (checked, 2026.02.01), so a closed object written as a soup
+// imports as a closed solid. Without the weld it was an open surface with
+// 36 boundary edges, drawn but unable to take part in CSG.
+TEST(ImportModuleContext, AmfTriangleSoupWeldsIntoAClosedSolid) {
+    const Imported r = importText("soup.amf", soupAmf({cubeTris(0, 0, 0)}));
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    EXPECT_FALSE(anyContains(r.messages, "not a closed solid")) << ::testing::PrintToString(r.messages);
+}
+
+// A 3x3x1 slab with a 1x1 hole through it (eight unit cubes around the
+// middle, the faces between neighbours left out), as a soup: closed, genus 1.
+TEST(ImportModuleContext, AmfSoupWithAThroughHoleWeldsClosed) {
+    std::map<std::vector<std::array<double, 3>>, std::vector<Tri>> faces;
+    std::map<std::vector<std::array<double, 3>>, int> uses;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            if (i == 1 && j == 1) continue;
+            const std::vector<Tri> c = cubeTris(i, j, 0);
+            for (size_t f = 0; f < c.size(); f += 2) {
+                std::vector<std::array<double, 3>> key{c[f][0], c[f][1], c[f][2], c[f + 1][0], c[f + 1][1], c[f + 1][2]};
+                std::sort(key.begin(), key.end());
+                key.erase(std::unique(key.begin(), key.end()), key.end());
+                faces[key] = {c[f], c[f + 1]};
+                ++uses[key];
+            }
+        }
+    std::vector<Tri> ring;
+    for (const auto& [key, tris] : faces)
+        if (uses[key] == 1) ring.insert(ring.end(), tris.begin(), tris.end());
+    const auto path = tempPath("ring.amf");
+    std::ofstream(path, std::ios::binary) << soupAmf({ring});
+    std::vector<std::string> messages;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");",
+                          [&](const std::string& m) { messages.push_back(m); });
+    std::filesystem::remove(path);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].body);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-9);
+    EXPECT_EQ(e.bodies[0].body->Genus(), 1);
+    EXPECT_FALSE(anyContains(messages, "not a closed solid")) << ::testing::PrintToString(messages);
+}
+
+// The weld is per object, as in OpenSCAD: a cube split into two objects,
+// each half its triangles, is two open surfaces, not one closed cube.
+TEST(ImportModuleContext, AmfWeldsWithinAnObjectOnly) {
+    const std::vector<Tri> c = cubeTris(0, 0, 0);
+    const Imported r = importText("halves.amf", soupAmf({{c.begin(), c.begin() + 6}, {c.begin() + 6, c.end()}}));
+    EXPECT_TRUE(anyContains(r.messages, "not a closed solid")) << ::testing::PrintToString(r.messages);
 }
 
 TEST(ImportModuleContext, UnsupportedExtensionErrors) {

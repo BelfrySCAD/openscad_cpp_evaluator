@@ -57,6 +57,18 @@ std::vector<std::string> splitWs(const std::string& s) {
     return out;
 }
 
+std::string attrValue(std::string_view tag, std::string_view attrName) {
+    const std::string needle = std::string(attrName) + "=\"";
+    const size_t pos = tag.find(needle);
+    if (pos == std::string_view::npos) return "0";
+    const size_t start = pos + needle.size();
+    const size_t end = tag.find('"', start);
+    if (end == std::string_view::npos) return "0";
+    return std::string(tag.substr(start, end - start));
+}
+
+} // namespace
+
 // Exact-match vertex welding (STL has no shared-index concept; each
 // triangle carries its own private corner copies) -- matches
 // _weld_stl_vertices's np.unique(axis=0) exact-equality behavior.
@@ -79,18 +91,6 @@ LoadedMesh weldVertices(const std::vector<std::array<double, 3>>& verts, const s
     for (const auto& t : tris) out.tris.push_back({remap[t[0]], remap[t[1]], remap[t[2]]});
     return out;
 }
-
-std::string attrValue(std::string_view tag, std::string_view attrName) {
-    const std::string needle = std::string(attrName) + "=\"";
-    const size_t pos = tag.find(needle);
-    if (pos == std::string_view::npos) return "0";
-    const size_t start = pos + needle.size();
-    const size_t end = tag.find('"', start);
-    if (end == std::string_view::npos) return "0";
-    return std::string(tag.substr(start, end - start));
-}
-
-} // namespace
 
 LoadedMesh loadStl(const std::string& path) {
     const std::vector<uint8_t> bytes = readWholeFile(path);
