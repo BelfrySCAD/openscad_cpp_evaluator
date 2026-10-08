@@ -565,13 +565,20 @@ public:
     void warnUndefinedEscapes(const oscad::StringLiteral& lit, int count);
     // let() keeps the FIRST binding of a repeated name: OpenSCAD evaluates
     // the later right-hand side, warns with its value, and discards it.
-    // OpenSCAD's Assert::performAssert, given every argument's value in
-    // source order -- it evaluates them all, pass or fail, so a passing
-    // `assert(true, nosuch)` still warns. Warns about unexpected arguments;
-    // throws via error() when the condition is false or missing (`assert()`
-    // fails). The message prints as echo() would print it.
-    void checkAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, const std::vector<Value>& values,
-                     const oscad::ASTNode& node);
+    // assert(), interpreted: the condition first, and only on failure the
+    // message and any other argument -- see the definition (stmt_eval.cpp)
+    // for why this deliberately diverges from OpenSCAD. `maybeCompiled`
+    // picks evalExprMaybeCompiled (statement form) over evalExpr.
+    void evalAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, const oscad::ASTNode& node,
+                    EvalContext& ctx, bool maybeCompiled);
+    // The unexpected-argument warnings, which a passing assert still prints.
+    void warnAssertArgs(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, const AssertLayout& layout);
+    // A failed (or condition-less) assert, once every non-condition argument
+    // has been evaluated: warns about unexpected arguments, then throws via
+    // error(). `message` is null when none was given; it prints as echo()
+    // would print it.
+    [[noreturn]] void failAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                                 const AssertLayout& layout, const Value* message, const oscad::ASTNode& node);
     void warnDuplicateLet(const std::string& name, const Value& v, const oscad::Position* position);
     template <typename Assignments>
     static bool repeatsEarlierLetName(const Assignments& assignments, size_t i) {

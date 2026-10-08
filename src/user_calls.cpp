@@ -532,9 +532,7 @@ std::variant<Value, Evaluator::TailStep, Evaluator::NotTailStep> Evaluator::simp
             // Mirrors evalAssertExpr.
             auto& n = static_cast<const oscad::AssertOp&>(node);
             checkDebug(n, ctx);
-            std::vector<Value> values;
-            for (const auto& arg : n.arguments) values.push_back(evalExpr(*argExpr(*arg), ctx));
-            checkAssert(n.arguments, values, n);
+            evalAssert(n.arguments, n, ctx, /*maybeCompiled=*/false);
             TailStep step;
             step.nextExpr = n.body.get();
             step.ctx = ctx;

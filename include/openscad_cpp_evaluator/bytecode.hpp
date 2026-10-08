@@ -505,7 +505,7 @@ enum class Op {
     // anything compileStatementList doesn't give its own real bytecode.
     // (Assignment/ModularEcho/ModularAssert/ModularLet used to fall here
     // too; they now have their own real bytecode -- Op::StoreModuleVar/
-    // Op::Echo/Op::AssertStatement/Op::OpenLetScope+StoreLetVar -- purely
+    // Op::Echo/Op::AssertPass+AssertFail/Op::OpenLetScope+StoreLetVar -- purely
     // a throughput change, since none of these were ever the recursion-
     // depth risk this compiler targets. `#`/`%`/`!` modifiers and
     // translate/rotate/scale/mirror/multmatrix/resize/color used to fall
@@ -634,14 +634,9 @@ enum class Op {
     // the position recorded into dynPositions).
     StoreModuleVar,
 
-    // ModularEcho/ModularAssert's own statement form share Op::Echo/a
-    // dedicated AssertStatement op (below) for the "pop N already-compiled
-    // argument values" mechanics -- see those ops' own doc comments
-    // (Op::Echo, above; Op::AssertStatement, below) for why the
-    // EXPRESSION-form opcodes are directly reusable (statement-shaped
-    // already: no value pushed, straight fall-through) while assert's
-    // needs its own op (named-argument support + eager-not-lazy message
-    // evaluation, both genuinely different from AssertOp's own contract).
+    // ModularEcho/ModularAssert's own statement form share Op::Echo and
+    // Op::AssertPass/AssertFail (below) with the expression forms: both are
+    // statement-shaped already (no value pushed, straight fall-through).
 
     // Isolates ONE inline-compiled sub-expression's own `$`-writes from the
     // rest of this chunk's shared, long-lived ctx -- pushes ctx.
@@ -697,12 +692,15 @@ enum class Op {
     // the handler itself, kept for consistency/future debugging only).
     StoreLetVar,
 
-    // a = index into CompiledChunk::assertSites. Pops site.argCount values
-    // (every argument of an assert() statement or expression, pushed in
-    // source order) and hands them to Evaluator::checkAssert; a statement
-    // then runs any chained children natively (rare; not worth its own
-    // compiled path).
-    AssertStatement,
+    // assert(): the condition is compiled first, then JumpIfFalse to the
+    // failure path; the passing path never evaluates any other argument
+    // (see Evaluator::evalAssert). a = index into CompiledChunk::assertSites.
+    // AssertPass prints the site's unexpected-argument warnings and runs a
+    // statement's chained children; it is emitted only when the site has
+    // either. AssertFail pops every non-condition argument (source order)
+    // and throws via Evaluator::failAssert.
+    AssertPass,
+    AssertFail,
     // a = nativeStatements index of the AST node whose arm this is. Emitted
     // only when the Evaluator was built with coverage on (compile-time
     // flag, and chunks are per-Evaluator): Evaluator::coverHit(node), nothing
@@ -710,6 +708,17 @@ enum class Op {
     // -- ternary arms, comprehension if/else arms, `&&`/`||` right operands.
     Cover,
 };
+
+// Which of an assert() call's arguments are its condition and message, and
+// whether the call has any unexpected argument to warn about -- all fixed by
+// the call's shape, so worked out once per call site (assertLayout,
+// stmt_eval.cpp). -1 = not given.
+struct AssertLayout {
+    int cond = -1;
+    int msg = -1;
+    bool warns = false;
+};
+AssertLayout assertLayout(const std::vector<std::unique_ptr<oscad::Argument>>& arguments);
 
 struct Instruction {
     Op op;
@@ -1014,10 +1023,10 @@ struct CompiledChunk {
         const oscad::ASTNode* node = nullptr;
     };
 
-    // One Op::AssertStatement site. `statement` is null for the expression
-    // form, which has no children.
+    // One Op::AssertPass/AssertFail site. `statement` is null for the
+    // expression form, which has no children.
     struct AssertSite {
-        int argCount = 0;
+        AssertLayout layout;
         const std::vector<std::unique_ptr<oscad::Argument>>* arguments = nullptr;
         const oscad::ASTNode* node = nullptr;
         const oscad::ModularAssert* statement = nullptr;

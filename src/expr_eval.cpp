@@ -492,9 +492,7 @@ Value Evaluator::evalProfileTimeExpr(const oscad::ProfileTimeOp& node, EvalConte
 
 Value Evaluator::evalAssertExpr(const oscad::AssertOp& node, EvalContext& ctx) {
     checkDebug(node, ctx); // _expr_assert, before the condition is evaluated
-    std::vector<Value> values;
-    for (const auto& arg : node.arguments) values.push_back(evalExpr(*argExpr(*arg), ctx));
-    checkAssert(node.arguments, values, node);
+    evalAssert(node.arguments, node, ctx, /*maybeCompiled=*/false);
     return evalExpr(*node.body, ctx);
 }
 

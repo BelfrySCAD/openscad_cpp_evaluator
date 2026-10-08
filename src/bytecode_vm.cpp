@@ -1105,7 +1105,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     ev.emitEcho(pairs);
                     // The STATEMENT form can carry children and the
                     // reference renders them; same tail as
-                    // Op::AssertStatement below. Null node = the expression
+                    // Op::AssertPass below. Null node = the expression
                     // form (`echo(...) 1+1`), which has none.
                     if (site.node && !site.node->children.empty())
                         ev.evalChildren(site.node->children, ctx);
@@ -1567,14 +1567,9 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     ++f.pc;
                     break;
                 }
-                case Op::AssertStatement: {
+                case Op::AssertPass: {
                     const CompiledChunk::AssertSite& site = f.chunk->assertSites[static_cast<size_t>(ins.a)];
-                    std::vector<Value> args(static_cast<size_t>(site.argCount));
-                    for (int i = site.argCount - 1; i >= 0; --i) {
-                        args[static_cast<size_t>(i)] = std::move(f.stack.back());
-                        f.stack.pop_back();
-                    }
-                    ev.checkAssert(*site.arguments, args, *site.node);
+                    ev.warnAssertArgs(*site.arguments, site.layout);
                     // Rare (assert(...) translate(...) children();-shaped) --
                     // not worth its own compiled path; evalChildren already
                     // tries ITS OWN compiled fast path internally regardless.
@@ -1582,6 +1577,19 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         ev.evalChildren(site.statement->children, ctx);
                     ++f.pc;
                     break;
+                }
+                case Op::AssertFail: {
+                    // Every argument but the condition is on the stack, in
+                    // source order; only the message's value is wanted.
+                    const CompiledChunk::AssertSite& site = f.chunk->assertSites[static_cast<size_t>(ins.a)];
+                    const AssertLayout& layout = site.layout;
+                    Value message;
+                    for (int i = static_cast<int>(site.arguments->size()) - 1; i >= 0; --i) {
+                        if (i == layout.cond) continue;
+                        if (i == layout.msg) message = std::move(f.stack.back());
+                        f.stack.pop_back();
+                    }
+                    ev.failAssert(*site.arguments, layout, layout.msg >= 0 ? &message : nullptr, *site.node);
                 }
                 case Op::NativeCondJumpIfFalse: {
                     const oscad::Expression* cond = f.chunk->nativeExprs[static_cast<size_t>(ins.a)];

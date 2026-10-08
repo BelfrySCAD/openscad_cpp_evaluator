@@ -446,8 +446,10 @@ std::string assertError(const std::string& src) {
 }
 }  // namespace
 
-// assert() passed; a message was always quoted; an undef message vanished;
-// the message was only evaluated on failure.
+// assert() passed; a message was always quoted; an undef message vanished.
+// The message is only evaluated on failure -- which OpenSCAD does NOT do: it
+// evaluates every argument, pass or fail. That divergence is deliberate (see
+// Evaluator::evalAssert).
 TEST(Parity, AssertFollowsUpstream) {
     EXPECT_NE(assertError("assert();").find("Assertion failed"), std::string::npos);
     EXPECT_NE(assertError("function f() = assert() 1; x = f();").find("Assertion failed"), std::string::npos);
@@ -455,7 +457,7 @@ TEST(Parity, AssertFollowsUpstream) {
     EXPECT_NE(assertError("x = assert(false, \"m\") 1;").find("Assertion 'false' failed: \"m\""), std::string::npos);
     EXPECT_NE(assertError("assert(undef, undef);").find("failed: undef"), std::string::npos);
     EXPECT_NE(assertError("assert(message=\"m\");").find("Assertion failed: \"m\""), std::string::npos);
-    EXPECT_TRUE(logged(run("x = assert(true, echo(\"eager\") 1) 2;"), "ECHO: \"eager\""));
+    EXPECT_FALSE(logged(run("x = assert(true, echo(\"lazy\") 1) 2;"), "ECHO: \"lazy\""));
     EXPECT_TRUE(logged(run("assert(1, 2, 3);"), "Too many unnamed arguments supplied"));
 }
 
