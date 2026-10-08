@@ -227,6 +227,72 @@ TEST(ImportModuleContext, VrmlIndexPastItsPointsErrors) {
 
 namespace {
 
+// The unit cube translated by `x` as one X3D / VRML node.
+std::string x3dCubeAt(int x) {
+    return "<Transform translation=\"" + std::to_string(x) + " 0 0\"><Shape><IndexedFaceSet coordIndex=\"" +
+           kCubeQuads + "\"><Coordinate point=\"" + kCubePoints + "\"/></IndexedFaceSet></Shape></Transform>";
+}
+std::string wrlCubeAt(int x) {
+    return "Transform { translation " + std::to_string(x) +
+           " 0 0 children [ Shape { geometry IndexedFaceSet { coord Coordinate { point [ " + kCubePoints +
+           " ] } coordIndex [ " + kCubeQuads + " ] } } ] }\n";
+}
+
+} // namespace
+
+// Switch draws only its whichChoice child, and nothing at -1 (the default);
+// LOD draws only its first level. Every child was imported before: 7 cubes.
+// Here: Switch 1 -> the cube at 3; Switch -1 and a bare Switch -> nothing;
+// LOD -> the cube at 9. Two cubes, x 3..10.
+TEST(ImportModuleContext, X3dSwitchAndLodImportOnlyTheSelectedChild) {
+    const std::string x3d = "<X3D><Scene><Switch whichChoice=\"1\">" + x3dCubeAt(0) + x3dCubeAt(3) +
+                            "</Switch><Switch whichChoice=\"-1\">" + x3dCubeAt(6) + "</Switch><Switch>" +
+                            x3dCubeAt(6) + "</Switch><Switch whichChoice=\"5\">" + x3dCubeAt(6) + "</Switch><LOD>" +
+                            x3dCubeAt(9) + x3dCubeAt(12) + "</LOD></Scene></X3D>";
+    const Imported r = importText("switch.x3d", x3d);
+    EXPECT_NEAR(r.volume, 2.0, 1e-9);
+    EXPECT_NEAR(r.box.min.x, 3, 1e-9);
+    EXPECT_NEAR(r.box.max.x, 10, 1e-9);
+}
+
+TEST(ImportModuleContext, VrmlSwitchAndLodImportOnlyTheSelectedChild) {
+    const std::string wrl = "#VRML V2.0 utf8\nSwitch { whichChoice 1 choice [ " + wrlCubeAt(0) + wrlCubeAt(3) +
+                            " ] }\nSwitch { whichChoice -1 choice [ " + wrlCubeAt(6) + " ] }\nSwitch { choice [ " +
+                            wrlCubeAt(6) + " ] }\nSwitch { whichChoice 5 choice [ " + wrlCubeAt(6) +
+                            " ] }\nLOD { level [ " + wrlCubeAt(9) + wrlCubeAt(12) + " ] }\n";
+    const Imported r = importText("switch.wrl", wrl);
+    EXPECT_NEAR(r.volume, 2.0, 1e-9);
+    EXPECT_NEAR(r.box.min.x, 3, 1e-9);
+    EXPECT_NEAR(r.box.max.x, 10, 1e-9);
+}
+
+// Prototypes are not expanded. An X3D ProtoDeclare's body is a template, so
+// it is no longer imported as if it were geometry (it was: a cube at the
+// origin), and the declaration and the instance are both reported.
+TEST(ImportModuleContext, X3dPrototypesAreSkippedWithAWarning) {
+    const std::string x3d = "<X3D><Scene><ProtoDeclare name=\"Box1\"><ProtoInterface><field name=\"t\" "
+                            "type=\"SFVec3f\" accessType=\"initializeOnly\" value=\"0 0 0\"/></ProtoInterface><ProtoBody>" +
+                            x3dCubeAt(0) + "</ProtoBody></ProtoDeclare><ProtoInstance name=\"Box1\"><fieldValue name=\"t\" "
+                            "value=\"5 0 0\"/></ProtoInstance>" + x3dCubeAt(20) + "</Scene></X3D>";
+    const Imported r = importText("proto.x3d", x3d);
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    EXPECT_NEAR(r.box.min.x, 20, 1e-9);
+    EXPECT_TRUE(anyContains(r.messages, "skipped what is not a mesh: 1 ProtoDeclare, 1 ProtoInstance"))
+        << ::testing::PrintToString(r.messages);
+}
+
+// A VRML PROTO instance's geometry is lost; it used to be lost silently.
+TEST(ImportModuleContext, VrmlProtoInstanceIsReported) {
+    const std::string wrl = "#VRML V2.0 utf8\nPROTO Box1 [ field SFVec3f t 0 0 0 ] { " + wrlCubeAt(0) +
+                            " }\nEXTERNPROTO Far [ ] \"far.wrl\"\nBox1 { t 5 0 0 }\nFar { }\n" + wrlCubeAt(20);
+    const Imported r = importText("proto.wrl", wrl);
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    EXPECT_TRUE(anyContains(r.messages, "skipped what is not a mesh: 2 PROTO instance"))
+        << ::testing::PrintToString(r.messages);
+}
+
+namespace {
+
 std::string inchCubeAmf() {
     const int tris[12][3] = {{0, 3, 2}, {0, 2, 1}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
                              {1, 2, 6}, {1, 6, 5}, {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}};

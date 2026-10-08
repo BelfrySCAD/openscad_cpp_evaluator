@@ -16,8 +16,13 @@
 // OpenSCAD's (checked, 2026.02.01); OpenSCAD cannot import X3D or VRML, so
 // theirs follows AMF and 3MF, where each object is a solid on its own.
 //
+// Switch imports only its whichChoice child (none at the default -1) and
+// LOD only its first level.
+//
 // What is skipped says so, through LoadedMesh::warnings: X3D/VRML
-// primitives (Box, Sphere, ...), Inline references, and AMF constellations.
+// primitives (Box, Sphere, ...), Inline references, prototypes (not
+// expanded: X3D ProtoDeclare/ExternProtoDeclare/ProtoInstance, VRML
+// instances of a PROTO/EXTERNPROTO type), and AMF constellations.
 // None of them is a mesh, and inventing one would be a different model from
 // the file.
 #include "openscad_cpp_evaluator/mesh_import.hpp"
@@ -342,6 +347,17 @@ public:
             for (const auto& c : n.children) geometry(resolve(*c), m);
         } else if (n.name == "Inline") {
             ++skipped["Inline"];
+        } else if (n.name == "Switch") {
+            // Only the chosen child; whichChoice defaults to -1, nothing.
+            const std::vector<double> w = nums(n, "whichChoice");
+            const long k = w.empty() ? -1 : static_cast<long>(w[0]);
+            if (k >= 0 && static_cast<size_t>(k) < n.children.size()) walk(*n.children[static_cast<size_t>(k)], m);
+        } else if (n.name == "LOD") {
+            if (!n.children.empty()) walk(*n.children[0], m);  // the first, most detailed level
+        } else if (n.name == "ProtoDeclare" || n.name == "ExternProtoDeclare" || n.name == "ProtoInstance") {
+            // Prototypes are not expanded: a declaration's body is a template,
+            // not geometry, and an instance has nothing to place without it.
+            ++skipped[n.name];
         } else {
             for (const auto& c : n.children) walk(*c, m);
         }
@@ -411,6 +427,9 @@ class VrmlParser {
 public:
     explicit VrmlParser(const std::string& text) { tokenize(text); }
 
+    // Node type names a PROTO or EXTERNPROTO declares.
+    std::set<std::string> protos;
+
     std::vector<VNodePtr> parseScene() {
         std::vector<VNodePtr> nodes;
         while (i_ < toks_.size()) {
@@ -418,6 +437,7 @@ public:
             if (t == "ROUTE") {
                 i_ += 4;  // ROUTE a.b TO c.d
             } else if (t == "PROTO" || t == "EXTERNPROTO") {
+                protos.insert(peek(1));
                 i_ += 2;
                 skipBalanced("[", "]");
                 if (t == "PROTO") {
@@ -549,10 +569,23 @@ class VrmlWalker {
 public:
     LoadedMesh out;
     std::map<std::string, int> skipped;
+    std::set<std::string> protos;
 
     void walk(const VNodePtr& n, const Mat& m) {
         if (!n) return;
-        if (n->type == "Transform") {
+        if (protos.count(n->type)) {
+            // Prototypes are not expanded, so an instance's geometry is lost.
+            ++skipped["PROTO instance"];
+        } else if (n->type == "Switch") {
+            // Only the chosen child; whichChoice defaults to -1, nothing.
+            const std::vector<double> w = nums(*n, "whichChoice");
+            const long k = w.empty() ? -1 : static_cast<long>(w[0]);
+            const auto& choice = kids(*n, "choice");
+            if (k >= 0 && static_cast<size_t>(k) < choice.size()) walk(choice[static_cast<size_t>(k)], m);
+        } else if (n->type == "LOD") {
+            const auto& level = kids(*n, "level");
+            if (!level.empty()) walk(level[0], m);  // the first, most detailed level
+        } else if (n->type == "Transform") {
             const Mat t = transformNode(nums(*n, "translation"), nums(*n, "rotation"), nums(*n, "scale"),
                                         nums(*n, "center"), nums(*n, "scaleOrientation"));
             for (const auto& c : kids(*n, "children")) walk(c, mul(m, t));
@@ -561,8 +594,8 @@ public:
         } else if (n->type == "Inline") {
             ++skipped["Inline"];
         } else {
-            // Group, Anchor, Billboard, Collision, Switch (choice), LOD (level)
-            // and anything else holding nodes: walk every node-valued field.
+            // Group, Anchor, Billboard, Collision and anything else holding
+            // nodes: walk every node-valued field.
             for (const auto& [name, f] : n->fields) {
                 for (const auto& c : f.nodes) walk(c, m);
             }
@@ -714,6 +747,7 @@ LoadedMesh loadVrml(const std::string& path) {
     VrmlParser parser(text);
     const std::vector<VNodePtr> scene = parser.parseScene();
     VrmlWalker walker;
+    walker.protos = parser.protos;
     for (const VNodePtr& n : scene) walker.walk(n, identity());
     if (!walker.skipped.empty()) walker.out.warnings.push_back(skippedWarning(walker.skipped));
     return std::move(walker.out);
