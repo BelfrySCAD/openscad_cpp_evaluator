@@ -347,8 +347,8 @@ struct RoofResult {
     double slopeError; // roof area / (floor area * sqrt 2) - 1: 0 if every face rises at 45 degrees
 };
 
-RoofResult straightRoof(const std::string& shape) {
-    Evaluated e = evalSrc("roof(method=\"straight\") " + shape);
+RoofResult straightRoof(const std::string& shape, const std::string& method = "straight") {
+    Evaluated e = evalSrc("roof(method=\"" + method + "\") " + shape);
     EXPECT_EQ(e.bodies.size(), 1u);
     if (e.bodies.empty() || !e.bodies[0].body) return {0, 0, manifold::Manifold::Error::InvalidConstruction, 1};
     const manifold::Manifold& m = *e.bodies[0].body;
@@ -461,6 +461,83 @@ TEST(Roof, StraightHandlesThousandsOfVertices) {
     EXPECT_EQ(g.status, manifold::Manifold::Error::NoError);
     EXPECT_NEAR(g.height, 9, 1e-4);
     EXPECT_NEAR(g.slopeError, 0, 1e-5);
+}
+
+// -- method="voronoi" over unions of pieces that touch along edges. These
+// all gave no roof at all before: Clipper returns the pieces as outlines a
+// hairline apart, which on the grid overlap or cross, and Boost's Voronoi
+// builder needs segments that meet only at their ends.
+
+namespace {
+
+void expectVoronoiRoof(const std::string& shape, double volume, double height, double tol) {
+    SCOPED_TRACE(shape);
+    const RoofResult r = straightRoof(shape, "voronoi");
+    EXPECT_EQ(r.status, manifold::Manifold::Error::NoError);
+    EXPECT_NEAR(r.volume, volume, tol * volume);
+    EXPECT_NEAR(r.height, height, tol);
+}
+
+} // namespace
+
+// Four triangles sharing edges. The reference agrees: 23.67785 / 2.39894.
+TEST(Roof, VoronoiJoinsTrianglesThatShareEdges) {
+    expectVoronoiRoof("union() { polygon([[2.764760357, 4.118581106], [5.901400476, 6.372929785], [8.606126287, 1.988496895]]); "
+                      "polygon([[5.901400476, 6.372929785], [8.606126287, 1.988496895], [11.028736411, 6.50946765]]); "
+                      "polygon([[8.606126287, 1.988496895], [2.764760357, 4.118581106], [4.975336337, 1.106200614]]); "
+                      "polygon([[8.606126287, 1.988496895], [2.764760357, 4.118581106], [6.985603416, 6.618989998]]); }",
+                      23.677855, 2.39894, 1e-5);
+}
+
+// Rotated rectangles sharing (parts of) edges. OpenSCAD 2026.02.01 draws
+// nothing for it; the volume is the integral of the distance to the outline
+// to within the faceting of the cones (170.68 numerically).
+TEST(Roof, VoronoiJoinsRotatedRectanglesThatShareEdges) {
+    expectVoronoiRoof("union() { polygon([[-3.369828352, 0.413896268], [-7.46233132, 4.010047378], [-11.05848243, -0.08245559], [-6.965979462, -3.6786067]]); "
+                      "polygon([[-4.919727978, -5.476682255], [-9.012230946, -1.880531145], [-14.406457611, -8.019285597], [-10.313954643, -11.615436707]]); "
+                      "polygon([[6.613253139, -4.732154468], [0.474498687, 0.662072197], [-4.919727978, -5.476682255], [1.219026474, -10.87090892]]); "
+                      "polygon([[10.457580178, -4.483978539], [8.411328694, -2.685902984], [6.613253139, -4.732154468], [8.659504623, -6.530230023]]); }",
+                      170.76468, 4.08601, 1e-5);
+}
+
+// Here the outline as Clipper leaves it crosses itself on the grid, and the
+// Voronoi builder never finished, allocating until the process was killed
+// (tens of gigabytes). (The integral of the distance to the outline is
+// 221.3; the cones over corners meeting head on are faceted coarsely, as by
+// the reference.)
+TEST(Roof, VoronoiRoofOfACrossingOutlineStaysBounded) {
+    expectVoronoiRoof("union() { polygon([[8.304902057, -8.407695464], [0.596294574, -9.683488249], [1.872087359, -17.392095732], [9.580694842, -16.116302947]]); "
+                      "polygon([[14.737716755, 0.576704804], [7.029109272, -0.699087981], [8.304902057, -8.407695464], [16.01350954, -7.131902679]]); "
+                      "polygon([[8.304902057, -8.407695464], [-3.258009167, -10.321384641], [-2.620112775, -14.175688383], [8.94279845, -12.261999205]]); "
+                      "polygon([[2.536909139, 2.517319368], [-1.317394603, 1.879422976], [0.596294574, -9.683488249], [4.450598316, -9.045591856]]); }",
+                      222.74776, 3.90673, 1e-5);
+}
+
+// A staircase of triangles. Outside it, two of its edges are all but
+// parallel, so their Voronoi bisectors meet some 10^12 away; that vertex,
+// used by no facet, stretched the bounding box Manifold sizes its tolerance
+// by, and its cleanup collapsed the whole roof to nothing. (The integral of
+// the distance to the outline is 78.02.)
+TEST(Roof, VoronoiRoofIgnoresFarVoronoiVertices) {
+    expectVoronoiRoof("union() { polygon([[-1.015413575, -0.344245093], [-1.006343725, -5.505019653], [4.154430835, -5.495949802]]); "
+                      "polygon([[-1.015413575, -0.344245093], [4.154430835, -5.495949802], [4.145360985, -0.335175242]]); "
+                      "polygon([[-1.006343725, -5.505019653], [4.163500685, -10.656724363], [4.154430835, -5.495949802]]); "
+                      "polygon([[4.154430835, -5.495949802], [4.163500685, -10.656724363], [9.324275246, -10.647654512]]); "
+                      "polygon([[4.163500685, -10.656724363], [9.333345096, -15.808429072], [9.324275246, -10.647654512]]); "
+                      "polygon([[-6.176188135, -0.353314943], [-1.006343725, -5.505019653], [-1.015413575, -0.344245093]]); }",
+                      78.047622, 3.02312, 1e-5);
+}
+
+// Axis-aligned rectangles: a clean outline, but rounded to the grid four
+// sites are all but equidistant at one point, and Boost's builder leaves a
+// cell with no finite edges. A coarser grid rounds it differently.
+// OpenSCAD 2026.02.01 draws nothing here either; the integral of the
+// distance to the outline is 1.348 (the faceted cone sits a little above).
+TEST(Roof, VoronoiRetriesWhereTheBuilderFails) {
+    expectVoronoiRoof("union() { polygon([[0.7, -0.7], [2.1, -0.7], [2.1, 0.0], [0.7, 0.0]]); "
+                      "polygon([[2.1, -0.7], [2.8, -0.7], [2.8, 0.7], [2.1, 0.7]]); "
+                      "polygon([[2.8, -1.4], [4.2, -1.4], [4.2, 0.7], [2.8, 0.7]]); }",
+                      1.3513906, 0.820101, 1e-5);
 }
 
 TEST(Roof, UnknownMethodWarnsAndFallsBackToVoronoi) {
