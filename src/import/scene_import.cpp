@@ -653,13 +653,13 @@ LoadedMesh loadAmf(const std::string& path) {
     LoadedMesh out;
     for (std::string_view object : segments(xml, "object")) {
         const std::string_view verticesBlock = elementText(object, "vertices");
-        const int base = static_cast<int>(out.verts.size());
+        LoadedMesh obj;
         for (std::string_view vertex : segments(verticesBlock, "vertex")) {
             const std::string_view c = elementText(vertex, "coordinates");
-            out.verts.push_back({amfNumber(elementText(c, "x"), "x") * unit, amfNumber(elementText(c, "y"), "y") * unit,
+            obj.verts.push_back({amfNumber(elementText(c, "x"), "x") * unit, amfNumber(elementText(c, "y"), "y") * unit,
                                  amfNumber(elementText(c, "z"), "z") * unit});
         }
-        const int count = static_cast<int>(out.verts.size()) - base;
+        const int count = static_cast<int>(obj.verts.size());
         for (std::string_view volume : segments(object, "volume")) {
             for (std::string_view tri : segments(volume, "triangle")) {
                 std::array<int, 3> t{};
@@ -669,11 +669,20 @@ LoadedMesh loadAmf(const std::string& path) {
                     if (i < 0 || i >= count)
                         throw std::runtime_error("AMF: triangle vertex " + std::to_string(i) + " is past its object's " +
                                                  std::to_string(count) + " vertices");
-                    t[k] = base + i;
+                    t[k] = i;
                 }
-                out.tris.push_back(t);
+                obj.tris.push_back(t);
             }
         }
+        // OpenSCAD treats vertices at exactly the same position as one
+        // (checked, 2026.02.01): a closed object written as a triangle soup,
+        // or with its vertices listed twice, imports as a closed solid.
+        // Within each object only -- two open halves in separate objects
+        // stay open there too. Near-coincident vertices are not merged.
+        obj = weldVertices(obj.verts, obj.tris);
+        const int base = static_cast<int>(out.verts.size());
+        out.verts.insert(out.verts.end(), obj.verts.begin(), obj.verts.end());
+        for (const auto& t : obj.tris) out.tris.push_back({base + t[0], base + t[1], base + t[2]});
     }
     if (xml.find("<constellation") != std::string::npos) {
         out.warnings.push_back("AMF constellations are not applied: each object is imported where it was modeled");
