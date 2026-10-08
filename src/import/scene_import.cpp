@@ -5,11 +5,24 @@
 // through import()). Each format's scene structure IS honoured, though:
 // X3D/VRML Transforms (translation, rotation, scale, center,
 // scaleOrientation) nest and apply, DEF/USE reuse resolves, `ccw FALSE`
-// flips winding, and polygons are fan-triangulated. AMF's `unit` scales to
-// millimetres, and a zipped AMF is read like 3MF.
+// flips winding, and polygons are fan-triangulated. AMF's `unit` is
+// ignored, as OpenSCAD ignores it (its numbers are read as millimetres),
+// and a zipped AMF is read like 3MF.
+//
+// Vertices at exactly the same position are merged (weldVertices) within
+// each AMF object and within each X3D/VRML Shape's geometry, never across
+// them -- so a closed object written as a triangle soup imports closed, and
+// two open halves in separate objects stay open. AMF's granularity is
+// OpenSCAD's (checked, 2026.02.01); OpenSCAD cannot import X3D or VRML, so
+// theirs follows AMF and 3MF, where each object is a solid on its own.
+//
+// Switch imports only its whichChoice child (none at the default -1) and
+// LOD only its first level.
 //
 // What is skipped says so, through LoadedMesh::warnings: X3D/VRML
-// primitives (Box, Sphere, ...), Inline references, and AMF constellations.
+// primitives (Box, Sphere, ...), Inline references, prototypes (not
+// expanded: X3D ProtoDeclare/ExternProtoDeclare/ProtoInstance, VRML
+// instances of a PROTO/EXTERNPROTO type), and AMF constellations.
 // None of them is a mesh, and inventing one would be a different model from
 // the file.
 #include "openscad_cpp_evaluator/mesh_import.hpp"
@@ -143,14 +156,14 @@ Mat transformNode(const std::vector<double>& t, const std::vector<double>& r, co
 void emitIndexedFaces(LoadedMesh& out, const std::vector<double>& points, const std::vector<double>& index,
                       const Mat& m, bool ccw, const std::string& what) {
     const int n = static_cast<int>(points.size() / 3);
-    const int base = static_cast<int>(out.verts.size());
-    for (int i = 0; i < n; ++i) out.verts.push_back(apply(m, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]));
+    LoadedMesh part;
+    for (int i = 0; i < n; ++i) part.verts.push_back(apply(m, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]));
     std::vector<int> poly;
     const auto flush = [&]() {
         for (size_t k = 1; k + 1 < poly.size(); ++k) {
-            std::array<int, 3> tri{base + poly[0], base + poly[k], base + poly[k + 1]};
+            std::array<int, 3> tri{poly[0], poly[k], poly[k + 1]};
             if (!ccw) std::swap(tri[1], tri[2]);
-            out.tris.push_back(tri);
+            part.tris.push_back(tri);
         }
         poly.clear();
     };
@@ -165,6 +178,9 @@ void emitIndexedFaces(LoadedMesh& out, const std::vector<double>& points, const 
         poly.push_back(i);
     }
     flush();
+    // One geometry node is one Shape's mesh: welded on its own, like an AMF
+    // or 3MF object.
+    appendWelded(out, part);
 }
 
 // IndexedTriangleSet / TriangleSet: every three indices (or points) are one
@@ -331,6 +347,17 @@ public:
             for (const auto& c : n.children) geometry(resolve(*c), m);
         } else if (n.name == "Inline") {
             ++skipped["Inline"];
+        } else if (n.name == "Switch") {
+            // Only the chosen child; whichChoice defaults to -1, nothing.
+            const std::vector<double> w = nums(n, "whichChoice");
+            const long k = w.empty() ? -1 : static_cast<long>(w[0]);
+            if (k >= 0 && static_cast<size_t>(k) < n.children.size()) walk(*n.children[static_cast<size_t>(k)], m);
+        } else if (n.name == "LOD") {
+            if (!n.children.empty()) walk(*n.children[0], m);  // the first, most detailed level
+        } else if (n.name == "ProtoDeclare" || n.name == "ExternProtoDeclare" || n.name == "ProtoInstance") {
+            // Prototypes are not expanded: a declaration's body is a template,
+            // not geometry, and an instance has nothing to place without it.
+            ++skipped[n.name];
         } else {
             for (const auto& c : n.children) walk(*c, m);
         }
@@ -400,6 +427,9 @@ class VrmlParser {
 public:
     explicit VrmlParser(const std::string& text) { tokenize(text); }
 
+    // Node type names a PROTO or EXTERNPROTO declares.
+    std::set<std::string> protos;
+
     std::vector<VNodePtr> parseScene() {
         std::vector<VNodePtr> nodes;
         while (i_ < toks_.size()) {
@@ -407,6 +437,7 @@ public:
             if (t == "ROUTE") {
                 i_ += 4;  // ROUTE a.b TO c.d
             } else if (t == "PROTO" || t == "EXTERNPROTO") {
+                protos.insert(peek(1));
                 i_ += 2;
                 skipBalanced("[", "]");
                 if (t == "PROTO") {
@@ -538,10 +569,23 @@ class VrmlWalker {
 public:
     LoadedMesh out;
     std::map<std::string, int> skipped;
+    std::set<std::string> protos;
 
     void walk(const VNodePtr& n, const Mat& m) {
         if (!n) return;
-        if (n->type == "Transform") {
+        if (protos.count(n->type)) {
+            // Prototypes are not expanded, so an instance's geometry is lost.
+            ++skipped["PROTO instance"];
+        } else if (n->type == "Switch") {
+            // Only the chosen child; whichChoice defaults to -1, nothing.
+            const std::vector<double> w = nums(*n, "whichChoice");
+            const long k = w.empty() ? -1 : static_cast<long>(w[0]);
+            const auto& choice = kids(*n, "choice");
+            if (k >= 0 && static_cast<size_t>(k) < choice.size()) walk(choice[static_cast<size_t>(k)], m);
+        } else if (n->type == "LOD") {
+            const auto& level = kids(*n, "level");
+            if (!level.empty()) walk(level[0], m);  // the first, most detailed level
+        } else if (n->type == "Transform") {
             const Mat t = transformNode(nums(*n, "translation"), nums(*n, "rotation"), nums(*n, "scale"),
                                         nums(*n, "center"), nums(*n, "scaleOrientation"));
             for (const auto& c : kids(*n, "children")) walk(c, mul(m, t));
@@ -550,8 +594,8 @@ public:
         } else if (n->type == "Inline") {
             ++skipped["Inline"];
         } else {
-            // Group, Anchor, Billboard, Collision, Switch (choice), LOD (level)
-            // and anything else holding nodes: walk every node-valued field.
+            // Group, Anchor, Billboard, Collision and anything else holding
+            // nodes: walk every node-valued field.
             for (const auto& [name, f] : n->fields) {
                 for (const auto& c : f.nodes) walk(c, m);
             }
@@ -679,10 +723,7 @@ LoadedMesh loadAmf(const std::string& path) {
         // or with its vertices listed twice, imports as a closed solid.
         // Within each object only -- two open halves in separate objects
         // stay open there too. Near-coincident vertices are not merged.
-        obj = weldVertices(obj.verts, obj.tris);
-        const int base = static_cast<int>(out.verts.size());
-        out.verts.insert(out.verts.end(), obj.verts.begin(), obj.verts.end());
-        for (const auto& t : obj.tris) out.tris.push_back({base + t[0], base + t[1], base + t[2]});
+        appendWelded(out, obj);
     }
     if (xml.find("<constellation") != std::string::npos) {
         out.warnings.push_back("AMF constellations are not applied: each object is imported where it was modeled");
@@ -706,6 +747,7 @@ LoadedMesh loadVrml(const std::string& path) {
     VrmlParser parser(text);
     const std::vector<VNodePtr> scene = parser.parseScene();
     VrmlWalker walker;
+    walker.protos = parser.protos;
     for (const VNodePtr& n : scene) walker.walk(n, identity());
     if (!walker.skipped.empty()) walker.out.warnings.push_back(skippedWarning(walker.skipped));
     return std::move(walker.out);

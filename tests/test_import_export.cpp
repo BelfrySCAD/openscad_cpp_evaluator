@@ -227,6 +227,72 @@ TEST(ImportModuleContext, VrmlIndexPastItsPointsErrors) {
 
 namespace {
 
+// The unit cube translated by `x` as one X3D / VRML node.
+std::string x3dCubeAt(int x) {
+    return "<Transform translation=\"" + std::to_string(x) + " 0 0\"><Shape><IndexedFaceSet coordIndex=\"" +
+           kCubeQuads + "\"><Coordinate point=\"" + kCubePoints + "\"/></IndexedFaceSet></Shape></Transform>";
+}
+std::string wrlCubeAt(int x) {
+    return "Transform { translation " + std::to_string(x) +
+           " 0 0 children [ Shape { geometry IndexedFaceSet { coord Coordinate { point [ " + kCubePoints +
+           " ] } coordIndex [ " + kCubeQuads + " ] } } ] }\n";
+}
+
+} // namespace
+
+// Switch draws only its whichChoice child, and nothing at -1 (the default);
+// LOD draws only its first level. Every child was imported before: 7 cubes.
+// Here: Switch 1 -> the cube at 3; Switch -1 and a bare Switch -> nothing;
+// LOD -> the cube at 9. Two cubes, x 3..10.
+TEST(ImportModuleContext, X3dSwitchAndLodImportOnlyTheSelectedChild) {
+    const std::string x3d = "<X3D><Scene><Switch whichChoice=\"1\">" + x3dCubeAt(0) + x3dCubeAt(3) +
+                            "</Switch><Switch whichChoice=\"-1\">" + x3dCubeAt(6) + "</Switch><Switch>" +
+                            x3dCubeAt(6) + "</Switch><Switch whichChoice=\"5\">" + x3dCubeAt(6) + "</Switch><LOD>" +
+                            x3dCubeAt(9) + x3dCubeAt(12) + "</LOD></Scene></X3D>";
+    const Imported r = importText("switch.x3d", x3d);
+    EXPECT_NEAR(r.volume, 2.0, 1e-9);
+    EXPECT_NEAR(r.box.min.x, 3, 1e-9);
+    EXPECT_NEAR(r.box.max.x, 10, 1e-9);
+}
+
+TEST(ImportModuleContext, VrmlSwitchAndLodImportOnlyTheSelectedChild) {
+    const std::string wrl = "#VRML V2.0 utf8\nSwitch { whichChoice 1 choice [ " + wrlCubeAt(0) + wrlCubeAt(3) +
+                            " ] }\nSwitch { whichChoice -1 choice [ " + wrlCubeAt(6) + " ] }\nSwitch { choice [ " +
+                            wrlCubeAt(6) + " ] }\nSwitch { whichChoice 5 choice [ " + wrlCubeAt(6) +
+                            " ] }\nLOD { level [ " + wrlCubeAt(9) + wrlCubeAt(12) + " ] }\n";
+    const Imported r = importText("switch.wrl", wrl);
+    EXPECT_NEAR(r.volume, 2.0, 1e-9);
+    EXPECT_NEAR(r.box.min.x, 3, 1e-9);
+    EXPECT_NEAR(r.box.max.x, 10, 1e-9);
+}
+
+// Prototypes are not expanded. An X3D ProtoDeclare's body is a template, so
+// it is no longer imported as if it were geometry (it was: a cube at the
+// origin), and the declaration and the instance are both reported.
+TEST(ImportModuleContext, X3dPrototypesAreSkippedWithAWarning) {
+    const std::string x3d = "<X3D><Scene><ProtoDeclare name=\"Box1\"><ProtoInterface><field name=\"t\" "
+                            "type=\"SFVec3f\" accessType=\"initializeOnly\" value=\"0 0 0\"/></ProtoInterface><ProtoBody>" +
+                            x3dCubeAt(0) + "</ProtoBody></ProtoDeclare><ProtoInstance name=\"Box1\"><fieldValue name=\"t\" "
+                            "value=\"5 0 0\"/></ProtoInstance>" + x3dCubeAt(20) + "</Scene></X3D>";
+    const Imported r = importText("proto.x3d", x3d);
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    EXPECT_NEAR(r.box.min.x, 20, 1e-9);
+    EXPECT_TRUE(anyContains(r.messages, "skipped what is not a mesh: 1 ProtoDeclare, 1 ProtoInstance"))
+        << ::testing::PrintToString(r.messages);
+}
+
+// A VRML PROTO instance's geometry is lost; it used to be lost silently.
+TEST(ImportModuleContext, VrmlProtoInstanceIsReported) {
+    const std::string wrl = "#VRML V2.0 utf8\nPROTO Box1 [ field SFVec3f t 0 0 0 ] { " + wrlCubeAt(0) +
+                            " }\nEXTERNPROTO Far [ ] \"far.wrl\"\nBox1 { t 5 0 0 }\nFar { }\n" + wrlCubeAt(20);
+    const Imported r = importText("proto.wrl", wrl);
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    EXPECT_TRUE(anyContains(r.messages, "skipped what is not a mesh: 2 PROTO instance"))
+        << ::testing::PrintToString(r.messages);
+}
+
+namespace {
+
 std::string inchCubeAmf() {
     const int tris[12][3] = {{0, 3, 2}, {0, 2, 1}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
                              {1, 2, 6}, {1, 6, 5}, {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}};
@@ -245,8 +311,7 @@ std::string inchCubeAmf() {
 
 } // namespace
 
-// unit="inch" scales to millimetres; a constellation is not applied, and
-// says so.
+// unit="inch" is ignored; a constellation is not applied, and says so.
 TEST(ImportModuleContext, AmfUnitIsIgnoredAsInOpenSCAD) {
     // OpenSCAD reads an AMF's numbers as millimetres whatever its unit says
     // (checked, 2026.02.01: a unit="inch" unit cube imports as a unit cube),
@@ -358,6 +423,132 @@ TEST(ImportModuleContext, AmfWeldsWithinAnObjectOnly) {
     const std::vector<Tri> c = cubeTris(0, 0, 0);
     const Imported r = importText("halves.amf", soupAmf({{c.begin(), c.begin() + 6}, {c.begin() + 6, c.end()}}));
     EXPECT_TRUE(anyContains(r.messages, "not a closed solid")) << ::testing::PrintToString(r.messages);
+}
+
+namespace {
+
+// `objects` as a triangle soup (every triangle with its own three vertex
+// copies) in `ext`'s own notion of an object: an `o` group for OBJ, an
+// <object> for 3MF, a Shape for X3D/VRML. OFF has no objects, so they are
+// simply concatenated.
+Imported importSoup(const std::string& ext, const std::vector<std::vector<Tri>>& objects) {
+    const auto num = [](double d) { return std::to_string(d); };
+    std::string text;
+    if (ext == "off") {
+        size_t n = 0;
+        for (const auto& o : objects) n += o.size();
+        text = "OFF\n" + std::to_string(3 * n) + " " + std::to_string(n) + " 0\n";
+        for (const auto& o : objects)
+            for (const Tri& t : o)
+                for (const auto& p : t) text += num(p[0]) + " " + num(p[1]) + " " + num(p[2]) + "\n";
+        for (size_t i = 0; i < n; ++i)
+            text += "3 " + std::to_string(3 * i) + " " + std::to_string(3 * i + 1) + " " + std::to_string(3 * i + 2) + "\n";
+    } else if (ext == "obj") {
+        size_t base = 1;
+        for (size_t k = 0; k < objects.size(); ++k) {
+            text += "o part" + std::to_string(k) + "\n";
+            for (const Tri& t : objects[k])
+                for (const auto& p : t) text += "v " + num(p[0]) + " " + num(p[1]) + " " + num(p[2]) + "\n";
+            for (size_t i = 0; i < objects[k].size(); ++i, base += 3)
+                text += "f " + std::to_string(base) + " " + std::to_string(base + 1) + " " + std::to_string(base + 2) + "\n";
+        }
+    } else if (ext == "3mf") {
+        text = "<?xml version=\"1.0\"?><model unit=\"millimeter\"><resources>";
+        for (size_t k = 0; k < objects.size(); ++k) {
+            text += "<object id=\"" + std::to_string(k + 1) + "\" type=\"model\"><mesh><vertices>";
+            for (const Tri& t : objects[k])
+                for (const auto& p : t) text += "<vertex x=\"" + num(p[0]) + "\" y=\"" + num(p[1]) + "\" z=\"" + num(p[2]) + "\"/>";
+            text += "</vertices><triangles>";
+            for (size_t i = 0; i < objects[k].size(); ++i)
+                text += "<triangle v1=\"" + std::to_string(3 * i) + "\" v2=\"" + std::to_string(3 * i + 1) + "\" v3=\"" +
+                        std::to_string(3 * i + 2) + "\"/>";
+            text += "</triangles></mesh></object>";
+        }
+        text += "</resources><build/></model>";
+        const auto path = tempPath("soup.3mf");
+        writeDeflateZip(path.string(), {ZipEntry{"3D/3dmodel.model", std::vector<uint8_t>(text.begin(), text.end())}});
+        Imported out;
+        Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");",
+                              [&](const std::string& m) { out.messages.push_back(m); });
+        std::filesystem::remove(path);
+        if (!e.bodies.empty() && e.bodies[0].body) out.volume = e.bodies[0].body->Volume();
+        return out;
+    } else {
+        const bool x3d = ext == "x3d";
+        text = x3d ? "<?xml version=\"1.0\"?><X3D><Scene>" : "#VRML V2.0 utf8\n";
+        for (const auto& o : objects) {
+            std::string pts, idx;
+            for (size_t i = 0; i < o.size(); ++i) {
+                for (const auto& p : o[i]) pts += num(p[0]) + " " + num(p[1]) + " " + num(p[2]) + ", ";
+                idx += std::to_string(3 * i) + " " + std::to_string(3 * i + 1) + " " + std::to_string(3 * i + 2) + " -1 ";
+            }
+            text += x3d ? "<Shape><IndexedFaceSet coordIndex=\"" + idx + "\"><Coordinate point=\"" + pts +
+                              "\"/></IndexedFaceSet></Shape>"
+                        : "Shape { geometry IndexedFaceSet { coord Coordinate { point [ " + pts + "] } coordIndex [ " +
+                              idx + "] } }\n";
+        }
+        if (x3d) text += "</Scene></X3D>";
+    }
+    return importText("soup." + ext, text);
+}
+
+std::vector<std::vector<Tri>> cubeHalves() {
+    const std::vector<Tri> c = cubeTris(0, 0, 0);
+    return {{c.begin(), c.begin() + 6}, {c.begin() + 6, c.end()}};
+}
+
+} // namespace
+
+// Every mesh format welds exactly-equal vertices, as AMF and STL do, so a
+// closed solid written as a triangle soup imports closed. OpenSCAD
+// 2026.02.01 imports such an OFF, OBJ or 3MF as a solid that takes part in
+// CSG; X3D and VRML (which it cannot import) follow AMF. Without the weld
+// each was an open surface with 36 boundary edges.
+TEST(ImportModuleContext, EveryMeshFormatWeldsATriangleSoupClosed) {
+    for (const char* ext : {"off", "obj", "3mf", "x3d", "wrl"}) {
+        const Imported r = importSoup(ext, {cubeTris(0, 0, 0)});
+        EXPECT_NEAR(r.volume, 1.0, 1e-9) << ext;
+        EXPECT_FALSE(anyContains(r.messages, "not a closed solid")) << ext << ::testing::PrintToString(r.messages);
+    }
+}
+
+// Where the weld stops. OFF is one mesh, and OBJ welds across its `o`
+// groups (checked, 2026.02.01: two cube halves in separate `o` groups, each
+// with its own vertex copies, import as one closed cube) -- so the halves
+// close. 3MF welds each object on its own (OpenSCAD reports both halves
+// not closed), and X3D/VRML each Shape, as AMF does -- so they stay open.
+TEST(ImportModuleContext, MeshWeldObjectBoundaryRule) {
+    for (const char* ext : {"off", "obj"}) {
+        const Imported r = importSoup(ext, cubeHalves());
+        EXPECT_NEAR(r.volume, 1.0, 1e-9) << ext;
+        EXPECT_FALSE(anyContains(r.messages, "not a closed solid")) << ext << ::testing::PrintToString(r.messages);
+    }
+    for (const char* ext : {"3mf", "x3d", "wrl"})
+        EXPECT_TRUE(anyContains(importSoup(ext, cubeHalves()).messages, "not a closed solid")) << ext;
+}
+
+// A cube whose eight vertices are listed twice, plus a triangle naming a
+// vertex and its copy: welded, that triangle has two equal corners and
+// drops out, leaving the closed cube (as OpenSCAD has it).
+TEST(ImportModuleContext, OffDuplicatedVerticesAndATriangleDegenerateAfterWelding) {
+    const Imported r = importText("dup.off",
+                                  "OFF\n16 13 0\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n0 0 1\n1 0 1\n1 1 1\n0 1 1\n"
+                                  "0 0 0\n1 0 0\n1 1 0\n0 1 0\n0 0 1\n1 0 1\n1 1 1\n0 1 1\n"
+                                  "3 0 11 2\n3 8 2 1\n3 4 13 6\n3 12 6 7\n3 0 9 5\n3 8 5 4\n"
+                                  "3 1 10 6\n3 9 6 5\n3 2 11 7\n3 10 7 6\n3 3 8 4\n3 11 4 7\n3 0 8 1\n");
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
+    EXPECT_FALSE(anyContains(r.messages, "not a closed solid")) << ::testing::PrintToString(r.messages);
+}
+
+// A face index past the vertex list is an error, now that the weld reads
+// every index (it was handed to Manifold unchecked before).
+TEST(ImportModuleContext, ObjFaceIndexPastItsVerticesErrors) {
+    const auto path = tempPath("bad.obj");
+    std::ofstream(path) << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 9\n";
+    const std::string err = importFailure("import(\"" + path.generic_string() + "\");");
+    EXPECT_EQ(err.rfind("ERROR: ", 0), 0u) << err;
+    EXPECT_NE(err.find("face index 8 is past its 3 vertices"), std::string::npos) << err;
+    std::filesystem::remove(path);
 }
 
 TEST(ImportModuleContext, UnsupportedExtensionErrors) {
