@@ -5,8 +5,16 @@
 // through import()). Each format's scene structure IS honoured, though:
 // X3D/VRML Transforms (translation, rotation, scale, center,
 // scaleOrientation) nest and apply, DEF/USE reuse resolves, `ccw FALSE`
-// flips winding, and polygons are fan-triangulated. AMF's `unit` scales to
-// millimetres, and a zipped AMF is read like 3MF.
+// flips winding, and polygons are fan-triangulated. AMF's `unit` is
+// ignored, as OpenSCAD ignores it (its numbers are read as millimetres),
+// and a zipped AMF is read like 3MF.
+//
+// Vertices at exactly the same position are merged (weldVertices) within
+// each AMF object and within each X3D/VRML Shape's geometry, never across
+// them -- so a closed object written as a triangle soup imports closed, and
+// two open halves in separate objects stay open. AMF's granularity is
+// OpenSCAD's (checked, 2026.02.01); OpenSCAD cannot import X3D or VRML, so
+// theirs follows AMF and 3MF, where each object is a solid on its own.
 //
 // What is skipped says so, through LoadedMesh::warnings: X3D/VRML
 // primitives (Box, Sphere, ...), Inline references, and AMF constellations.
@@ -143,14 +151,14 @@ Mat transformNode(const std::vector<double>& t, const std::vector<double>& r, co
 void emitIndexedFaces(LoadedMesh& out, const std::vector<double>& points, const std::vector<double>& index,
                       const Mat& m, bool ccw, const std::string& what) {
     const int n = static_cast<int>(points.size() / 3);
-    const int base = static_cast<int>(out.verts.size());
-    for (int i = 0; i < n; ++i) out.verts.push_back(apply(m, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]));
+    LoadedMesh part;
+    for (int i = 0; i < n; ++i) part.verts.push_back(apply(m, points[i * 3], points[i * 3 + 1], points[i * 3 + 2]));
     std::vector<int> poly;
     const auto flush = [&]() {
         for (size_t k = 1; k + 1 < poly.size(); ++k) {
-            std::array<int, 3> tri{base + poly[0], base + poly[k], base + poly[k + 1]};
+            std::array<int, 3> tri{poly[0], poly[k], poly[k + 1]};
             if (!ccw) std::swap(tri[1], tri[2]);
-            out.tris.push_back(tri);
+            part.tris.push_back(tri);
         }
         poly.clear();
     };
@@ -165,6 +173,9 @@ void emitIndexedFaces(LoadedMesh& out, const std::vector<double>& points, const 
         poly.push_back(i);
     }
     flush();
+    // One geometry node is one Shape's mesh: welded on its own, like an AMF
+    // or 3MF object.
+    appendWelded(out, part);
 }
 
 // IndexedTriangleSet / TriangleSet: every three indices (or points) are one
@@ -679,10 +690,7 @@ LoadedMesh loadAmf(const std::string& path) {
         // or with its vertices listed twice, imports as a closed solid.
         // Within each object only -- two open halves in separate objects
         // stay open there too. Near-coincident vertices are not merged.
-        obj = weldVertices(obj.verts, obj.tris);
-        const int base = static_cast<int>(out.verts.size());
-        out.verts.insert(out.verts.end(), obj.verts.begin(), obj.verts.end());
-        for (const auto& t : obj.tris) out.tris.push_back({base + t[0], base + t[1], base + t[2]});
+        appendWelded(out, obj);
     }
     if (xml.find("<constellation") != std::string::npos) {
         out.warnings.push_back("AMF constellations are not applied: each object is imported where it was modeled");

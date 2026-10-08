@@ -3,6 +3,7 @@
 #include "openscad_cpp_evaluator/zip_stored.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -69,9 +70,10 @@ std::string attrValue(std::string_view tag, std::string_view attrName) {
 
 } // namespace
 
-// Exact-match vertex welding (STL has no shared-index concept; each
-// triangle carries its own private corner copies) -- matches
-// _weld_stl_vertices's np.unique(axis=0) exact-equality behavior.
+// Exact-match vertex welding: every position keeps its first index. Only
+// bit-identical coordinates merge; near-coincident ones stay apart (that is
+// repair=true's job). A face index past the vertex list is an error here
+// rather than a bad read.
 LoadedMesh weldVertices(const std::vector<std::array<double, 3>>& verts, const std::vector<std::array<int, 3>>& tris) {
     std::map<std::array<double, 3>, int> seen;
     LoadedMesh out;
@@ -87,9 +89,22 @@ LoadedMesh weldVertices(const std::vector<std::array<double, 3>>& verts, const s
             remap[i] = idx;
         }
     }
+    const auto at = [&](int i) {
+        if (i < 0 || static_cast<size_t>(i) >= verts.size())
+            throw std::runtime_error("face index " + std::to_string(i) + " is past its " + std::to_string(verts.size()) +
+                                     " vertices");
+        return remap[static_cast<size_t>(i)];
+    };
     out.tris.reserve(tris.size());
-    for (const auto& t : tris) out.tris.push_back({remap[t[0]], remap[t[1]], remap[t[2]]});
+    for (const auto& t : tris) out.tris.push_back({at(t[0]), at(t[1]), at(t[2])});
     return out;
+}
+
+void appendWelded(LoadedMesh& out, const LoadedMesh& part) {
+    const LoadedMesh w = weldVertices(part.verts, part.tris);
+    const int base = static_cast<int>(out.verts.size());
+    out.verts.insert(out.verts.end(), w.verts.begin(), w.verts.end());
+    for (const auto& t : w.tris) out.tris.push_back({base + t[0], base + t[1], base + t[2]});
 }
 
 LoadedMesh loadStl(const std::string& path) {
@@ -162,7 +177,11 @@ LoadedMesh loadObj(const std::string& path) {
             for (size_t i = 1; i + 1 < idx.size(); ++i) out.tris.push_back({idx[0], idx[i], idx[i + 1]});
         }
     }
-    return out;
+    // OpenSCAD welds an OBJ's exactly-equal vertices across the whole file,
+    // `o`/`g` boundaries included (checked, 2026.02.01: two halves of a cube
+    // in separate `o` objects, each with its own vertex copies, import as
+    // one closed cube).
+    return weldVertices(out.verts, out.tris);
 }
 
 LoadedMesh loadOff(const std::string& path) {
@@ -231,7 +250,10 @@ LoadedMesh loadOff(const std::string& path) {
         }
         for (int k = 1; k + 1 < cnt; ++k) out.tris.push_back({faceIdx[0], faceIdx[static_cast<size_t>(k)], faceIdx[static_cast<size_t>(k) + 1]});
     }
-    return out;
+    // An OFF is one mesh, and OpenSCAD merges its exactly-equal vertices
+    // when the mesh becomes a solid (checked, 2026.02.01: a triangle soup
+    // or a duplicated vertex list takes part in CSG as a closed solid).
+    return weldVertices(out.verts, out.tris);
 }
 
 LoadedMesh loadThreeMf(const std::string& path) {
@@ -248,26 +270,33 @@ LoadedMesh loadThreeMf(const std::string& path) {
         const std::string_view segment(xml.data() + meshStart, meshEnd - meshStart);
         searchPos = meshEnd + 7;
 
-        const int base = static_cast<int>(out.verts.size());
+        LoadedMesh obj;
         for (size_t p = 0;;) {
             const size_t vStart = segment.find("<vertex", p);
             if (vStart == std::string_view::npos) break;
             const size_t vEnd = segment.find('>', vStart);
             if (vEnd == std::string_view::npos) break;
             const std::string_view tag = segment.substr(vStart, vEnd - vStart + 1);
-            out.verts.push_back({std::stod(attrValue(tag, "x")), std::stod(attrValue(tag, "y")), std::stod(attrValue(tag, "z"))});
+            obj.verts.push_back({std::stod(attrValue(tag, "x")), std::stod(attrValue(tag, "y")), std::stod(attrValue(tag, "z"))});
             p = vEnd + 1;
         }
         for (size_t p = 0;;) {
             const size_t tStart = segment.find("<triangle", p);
             if (tStart == std::string_view::npos) break;
+            if (tStart + 9 < segment.size() && std::isalpha(static_cast<unsigned char>(segment[tStart + 9]))) {  // <triangles>, not a triangle
+                p = tStart + 9;
+                continue;
+            }
             const size_t tEnd = segment.find('>', tStart);
             if (tEnd == std::string_view::npos) break;
             const std::string_view tag = segment.substr(tStart, tEnd - tStart + 1);
-            out.tris.push_back({base + std::stoi(attrValue(tag, "v1")), base + std::stoi(attrValue(tag, "v2")),
-                                 base + std::stoi(attrValue(tag, "v3"))});
+            obj.tris.push_back({std::stoi(attrValue(tag, "v1")), std::stoi(attrValue(tag, "v2")), std::stoi(attrValue(tag, "v3"))});
             p = tEnd + 1;
         }
+        // Welded per object, as OpenSCAD makes each 3MF object a solid on
+        // its own (checked, 2026.02.01): a soup object closes, but two open
+        // halves in separate objects stay open.
+        appendWelded(out, obj);
     }
     return out;
 }

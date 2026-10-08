@@ -1237,8 +1237,20 @@ grep for `ponytail:`.
   `text_metrics.hpp`'s `measureText`/`textAlignOffset` plus `Evaluator::fontProvider()`) are
   implemented here too.
 - `include/openscad_cpp_evaluator/mesh_import.hpp`, `src/import/mesh_import.cpp` — STL (ASCII +
-  binary, exact-match vertex welding)/OBJ/OFF/3MF mesh loaders, returning plain `(verts, tris)` —
-  no `Evaluator`/`Value` dependency, so these are reusable from both `import()` contexts below.
+  binary)/OBJ/OFF/3MF mesh loaders, returning plain `(verts, tris)` — no `Evaluator`/`Value`
+  dependency, so these are reusable from both `import()` contexts below. **Every mesh loader welds
+  vertices at exactly the same position** (`weldVertices`, or `appendWelded` for one object of
+  many), so a closed solid written as a triangle soup or with a duplicated vertex list imports
+  closed. The granularity is OpenSCAD 2026.02.01's, checked by running it: the **whole file** for
+  STL, OBJ (across `o`/`g` groups -- two cube halves in separate `o` groups with their own vertex
+  copies import as one closed cube) and OFF (one mesh); **each object** for 3MF and AMF (two open
+  halves in separate objects stay open; OpenSCAD reports each not closed). OpenSCAD welds OBJ at
+  import, but OFF and single-object 3MF only when the mesh becomes a solid (a lone import exported
+  there keeps the raw soup) -- welding at import gives the same solid. Exact positions only: the
+  near-coincident soups (1e-9, 1e-7) OpenSCAD closes through its "repair and reconstruct" fallback
+  stay open here without `repair=true`. `weldVertices` also rejects a face index past the vertex
+  list (OBJ/3MF used to hand one to Manifold unchecked). The 3MF reader skips `<triangles>`, which
+  its `<triangle` search used to read as one degenerate triangle per mesh.
 - `src/import/scene_import.cpp` — AMF, X3D and VRML97 import, the three multi-object formats export
   writes that nothing could read back (current upstream OpenSCAD removed its AMF importer, so all
   three go beyond it). Geometry only, like the loaders above, but each format's scene structure is
@@ -1249,8 +1261,14 @@ grep for `ponytail:`.
   node parser that steps over `PROTO`/`EXTERNPROTO`/`ROUTE` (VRML 1.0 is refused by name). AMF's
   `unit` is ignored (OpenSCAD reads millimetres whatever it says), a zipped AMF (`PK` header) is read
   through `readStoredZipEntryBySuffix`, and each AMF object's vertices are welded by exact position
-  (`weldVertices`, STL's), so a closed object written as a triangle soup imports closed, as in
-  OpenSCAD -- per object, never across objects, and never near-coincident vertices.
+  (`appendWelded`), so a closed object written as a triangle soup imports closed, as in
+  OpenSCAD -- per object, never across objects, and never near-coincident vertices. X3D and VRML,
+  which OpenSCAD cannot import, weld each Shape's geometry node the same way (in
+  `emitIndexedFaces`), matching AMF/3MF's per-object rule; a `USE`d Shape is a separate mesh.
+  Known gaps, all silent: a VRML `PROTO` instance is not expanded (its body's geometry is lost); an
+  X3D `ProtoDeclare`'s body is imported once as plain nodes, `IS` connections ignored, while each
+  `ProtoInstance` is lost; and `Switch`/`LOD` import every child in both formats rather than
+  `whichChoice` / the first level.
   What is not a mesh — primitives (Box, Sphere, ...), `Inline`, AMF constellations — lands in
   `LoadedMesh::warnings`, which both `import()` faces emit as `import: '<file>': ...`.
 - `include/openscad_cpp_evaluator/import_builtin.hpp`, `include/openscad_cpp_evaluator/
