@@ -913,17 +913,10 @@ public:
             }
 
             case NodeKind::AssertOp: {
-                // Every argument is evaluated, pass or fail, as OpenSCAD
-                // does -- see Evaluator::checkAssert.
+                // Only the condition unless it fails -- see Evaluator::evalAssert.
                 auto& n = static_cast<const oscad::AssertOp&>(node);
-                CompiledChunk::AssertSite site;
-                site.node = &n;
-                site.arguments = &n.arguments;
-                site.argCount = static_cast<int>(n.arguments.size());
-                for (const auto& arg : n.arguments) compileExpr(*argExpr(*arg), out, scope); // never tail
-                int siteIdx = static_cast<int>(chunk_.assertSites.size());
-                chunk_.assertSites.push_back(std::move(site));
-                out.push_back({Op::AssertStatement, siteIdx, 0, &n.position()});
+                compileAssert(n.arguments, n, nullptr, out,
+                              [&](const oscad::Expression& e) { compileExpr(e, out, scope); }); // never tail
                 compileExpr(*n.body, out, scope, tail);
                 return;
             }
@@ -1313,6 +1306,40 @@ public:
         out.push_back({Op::CloseExprScope, 0, 0, nullptr});
     }
 
+    // assert(), either form, mirroring Evaluator::evalAssert:
+    //     <condition> JumpIfFalse fail [AssertPass] Jump end
+    //   fail: <every other argument, source order> AssertFail
+    //   end:
+    // AssertPass only when there is something for it to do; with no
+    // condition at all, straight to the failure path.
+    template <typename CompileArg>
+    void compileAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, const oscad::ASTNode& node,
+                       const oscad::ModularAssert* statement, std::vector<Instruction>& out, CompileArg compileArg) {
+        CompiledChunk::AssertSite site;
+        site.layout = assertLayout(arguments);
+        site.node = &node;
+        site.statement = statement;
+        site.arguments = &arguments;
+        const int siteIdx = static_cast<int>(chunk_.assertSites.size());
+        chunk_.assertSites.push_back(site);
+        const int cond = site.layout.cond;
+        std::optional<size_t> jumpEnd;
+        if (cond >= 0) {
+            compileArg(*argExpr(*arguments[static_cast<size_t>(cond)]));
+            const size_t jumpFail = out.size();
+            out.push_back({Op::JumpIfFalse, 0, 0, nullptr});
+            if (site.layout.warns || (statement && !statement->children.empty()))
+                out.push_back({Op::AssertPass, siteIdx, 0, &node.position()});
+            jumpEnd = out.size();
+            out.push_back({Op::Jump, 0, 0, nullptr});
+            out[jumpFail].a = static_cast<int>(out.size());
+        }
+        for (size_t i = 0; i < arguments.size(); ++i)
+            if (static_cast<int>(i) != cond) compileArg(*argExpr(*arguments[i]));
+        out.push_back({Op::AssertFail, siteIdx, 0, &node.position()});
+        if (jumpEnd) out[*jumpEnd].a = static_cast<int>(out.size());
+    }
+
     // Shared by ModularCall's Transform/Color-kind branch and the 3 real
     // modifier cases (ModularModifierHighlight/Background/ShowOnly),
     // below -- emits one Op::PushBuiltinWrap/PopBuiltinWrap bracket around
@@ -1544,7 +1571,7 @@ public:
                 return;
             // Assignment/ModularEcho/ModularAssert: real bytecode instead
             // of Op::NativeStatement -- a throughput improvement (see
-            // CheckDebugStatement/StoreModuleVar/AssertStatement's own doc
+            // CheckDebugStatement/StoreModuleVar/AssertPass+AssertFail's own doc
             // comments, bytecode.hpp), NOT a recursion-safety one (these
             // were never the risk Stage 2 targeted -- see NativeStatement's
             // own doc comment). Assignment specifically closes a real
@@ -1602,16 +1629,9 @@ public:
                 // Like AssertOp's compiled form, plus chained children.
                 auto& n = static_cast<const oscad::ModularAssert&>(stmt);
                 out.push_back({Op::CheckDebugStatement, internNativeStatement(&stmt), 0, nullptr});
-                CompiledChunk::AssertSite site;
-                site.node = &n;
-                site.statement = &n;
-                site.arguments = &n.arguments;
-                site.argCount = static_cast<int>(n.arguments.size());
                 CompileScope exprScope;
-                for (const auto& arg : n.arguments) compileIsolatedExpr(*argExpr(*arg), out, exprScope);
-                int siteIdx = static_cast<int>(chunk_.assertSites.size());
-                chunk_.assertSites.push_back(std::move(site));
-                out.push_back({Op::AssertStatement, siteIdx, 0, &n.position()});
+                compileAssert(n.arguments, n, &n, out,
+                              [&](const oscad::Expression& e) { compileIsolatedExpr(e, out, exprScope); });
                 return;
             }
             case NodeKind::ModularLet: {

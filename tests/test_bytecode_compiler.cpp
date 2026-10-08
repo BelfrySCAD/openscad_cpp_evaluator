@@ -1867,17 +1867,91 @@ TEST(ModuleBodyCompiles, EchoStatementCompilesWithNamedAndPositionalArgs) {
     EXPECT_EQ(runCapturingEcho("echo(1, b=2, 3);"), "ECHO: 1, b = 2, 3");
 }
 
-TEST(ModuleBodyCompiles, AssertStatementCompilesWithNamedArgsMessageAndEagerSideEffects) {
+TEST(ModuleBodyCompiles, AssertStatementCompilesWithNamedArgsInReverseOrder) {
     ScopedVm vm(true);
     // Named args in reverse order (message before condition), PLUS a 3rd,
-    // logically-unused positional argument -- must still be evaluated
-    // eagerly for its own side effect (mirrors evalAssertStatement's own
-    // resolveArgs() call, unlike AssertOp's lazy message).
+    // logically-unused positional argument: the condition is found, the
+    // pass skips every other argument (see Evaluator::evalAssert), and the
+    // extra positional argument still warns.
     std::string captured =
-        runCapturingEcho("assert(message=\"unused, condition true\", condition=true, echo(\"side effect\"));\n"
+        runCapturingEcho("assert(message=\"unused, condition true\", condition=true, echo(\"side effect\") 1);\n"
                           "echo(\"reached\");\n");
-    EXPECT_NE(captured.find("ECHO: \"side effect\""), std::string::npos);
-    EXPECT_NE(captured.find("ECHO: \"reached\""), std::string::npos);
+    EXPECT_EQ(captured.find("ECHO: \"side effect\""), std::string::npos) << captured;
+    EXPECT_NE(captured.find("ECHO: \"reached\""), std::string::npos) << captured;
+}
+
+// A passing assert() evaluates only its condition -- a deliberate
+// divergence from OpenSCAD, which evaluates the message too (see
+// Evaluator::evalAssert). Each script runs interpreted and compiled, in
+// both the statement and the expression form.
+namespace {
+struct AssertRun {
+    std::string log;
+    std::string error;
+};
+AssertRun runAssert(const std::string& code, bool vm) {
+    ScopedVm scoped(vm);
+    AssertRun r;
+    Evaluator ev([&](const std::string& msg) { r.log += (r.log.empty() ? "" : "\n") + msg; });
+    auto ast = parseSrc(code);
+    auto scope = oscad::buildScopes(ast);
+    EvalContext ctx = EvalContext::makeRoot(scope.get());
+    try {
+        ev.resolveTree(ast, ctx);
+    } catch (const EvalError& e) {
+        r.error = e.what();
+    }
+    return r;
+}
+const char* const kAssertPrelude = "function noisy() = echo(\"called\") \"m\";\n";
+} // namespace
+
+TEST(AssertShortCircuit, PassingAssertSkipsTheMessage) {
+    for (bool vm : {false, true}) {
+        for (const std::string msg : {"echo(\"e\") \"m\"", "nosuch", "noisy()", "undef + 1"}) {
+            for (const std::string code : {"assert(true, " + msg + ");",
+                                           "function f(x) = assert(x, " + msg + ") 1; y = f(true);",
+                                           "x = assert(true, " + msg + ") 2;"}) {
+                const AssertRun r = runAssert(kAssertPrelude + code, vm);
+                EXPECT_EQ(r.log, "") << "vm=" << vm << ": " << code;
+                EXPECT_EQ(r.error, "") << "vm=" << vm << ": " << code;
+            }
+        }
+    }
+}
+
+TEST(AssertShortCircuit, FailingAssertStillEvaluatesTheMessage) {
+    for (bool vm : {false, true}) {
+        for (const std::string code : {"assert(false, noisy());", "function f(x) = assert(x, noisy()) 1; y = f(false);",
+                                       "x = assert(false, noisy()) 2;"}) {
+            const AssertRun r = runAssert(kAssertPrelude + code, vm);
+            EXPECT_EQ(r.log, "ECHO: \"called\"") << "vm=" << vm << ": " << code;
+            EXPECT_NE(r.error.find("failed: \"m\""), std::string::npos) << "vm=" << vm << ": " << r.error;
+        }
+        const AssertRun w = runAssert("assert(0, nosuch);", vm);
+        EXPECT_NE(w.log.find("Ignoring unknown variable \"nosuch\""), std::string::npos) << "vm=" << vm << ": " << w.log;
+        EXPECT_NE(w.error.find("Assertion '0' failed: undef"), std::string::npos) << "vm=" << vm << ": " << w.error;
+        // Message given before the condition: the condition is still
+        // evaluated first.
+        const AssertRun o = runAssert("assert(message=echo(\"msg\") \"m\", condition=echo(\"cond\") false);", vm);
+        EXPECT_EQ(o.log, "ECHO: \"cond\"\nECHO: \"msg\"") << "vm=" << vm;
+        EXPECT_NE(o.error.find("failed: \"m\""), std::string::npos) << "vm=" << vm << ": " << o.error;
+    }
+}
+
+TEST(AssertShortCircuit, PassingAssertStillWarnsAboutUnexpectedArguments) {
+    for (bool vm : {false, true}) {
+        for (const std::string code : {"assert(true, \"m\", 3);", "function f(x) = assert(x, \"m\", 3) 1; y = f(true);",
+                                       "assert(true, bogus=1);", "x = assert(true, bogus=1) 2;"}) {
+            const AssertRun r = runAssert(code, vm);
+            EXPECT_TRUE(r.log.find("Too many unnamed arguments supplied") != std::string::npos ||
+                        r.log.find("variable bogus not specified as parameter") != std::string::npos)
+                << "vm=" << vm << ": " << code << " -> " << r.log;
+            EXPECT_EQ(r.error, "") << "vm=" << vm << ": " << code;
+        }
+        // `assert(...) children` still runs the children once passed.
+        EXPECT_EQ(runAssert("assert(true, nosuch) echo(\"child\");", vm).log, "ECHO: \"child\"") << "vm=" << vm;
+    }
 }
 
 TEST(ModuleBodyCompiles, AssertStatementCompiledFormFailsWithNamedMessage) {

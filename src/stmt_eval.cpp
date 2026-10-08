@@ -74,41 +74,79 @@ void Evaluator::doEcho(const std::vector<std::unique_ptr<oscad::Argument>>& argu
     emitEcho(pairs);
 }
 
-void Evaluator::checkAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
-                            const std::vector<Value>& values, const oscad::ASTNode& node) {
-    static const std::vector<std::string> kParams{"condition", "message"};
-    warnUnexpectedArgs(*this, kParams, arguments);
+namespace {
+const std::vector<std::string> kAssertParams{"condition", "message"};
+}
+
+AssertLayout assertLayout(const std::vector<std::unique_ptr<oscad::Argument>>& arguments) {
     // A named argument wins; positional 0/1 fill whichever is left.
-    std::optional<size_t> cond, msg;
+    AssertLayout layout;
     for (size_t i = 0; i < arguments.size(); ++i) {
         if (arguments[i]->kind() != oscad::NodeKind::NamedArgument) continue;
         const std::string& name = static_cast<const oscad::NamedArgument&>(*arguments[i]).name->name;
-        if (name == "condition" && !cond) cond = i;
-        else if (name == "message" && !msg) msg = i;
+        if (name == "condition" && layout.cond < 0) layout.cond = static_cast<int>(i);
+        else if (name == "message" && layout.msg < 0) layout.msg = static_cast<int>(i);
+        else if (name != "condition" && name != "message" && !isConfigVariable(name)) layout.warns = true;
     }
-    size_t positional = 0;
+    int positional = 0;
     for (size_t i = 0; i < arguments.size(); ++i) {
         if (arguments[i]->kind() == oscad::NodeKind::NamedArgument) continue;
-        if (positional == 0 && !cond) cond = i;
-        else if (positional == 1 && !msg) msg = i;
-        ++positional;
+        if (positional == 0 && layout.cond < 0) layout.cond = static_cast<int>(i);
+        else if (positional == 1 && layout.msg < 0) layout.msg = static_cast<int>(i);
+        if (++positional > static_cast<int>(kAssertParams.size())) layout.warns = true;
     }
-    if (cond && truthy(values[*cond])) return;
+    return layout;
+}
+
+void Evaluator::warnAssertArgs(const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                               const AssertLayout& layout) {
+    if (layout.warns) warnUnexpectedArgs(*this, kAssertParams, arguments);
+}
+
+void Evaluator::failAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                           const AssertLayout& layout, const Value* message, const oscad::ASTNode& node) {
+    warnAssertArgs(arguments, layout);
     std::string err = "Assertion";
-    if (cond) err += " '" + formatExpression(*argExpr(*arguments[*cond])) + "'";
+    if (layout.cond >= 0) err += " '" + formatExpression(*argExpr(*arguments[static_cast<size_t>(layout.cond)])) + "'";
     err += " failed";
-    if (msg) err += ": " + fmtValue(values[*msg]);
+    if (message) err += ": " + fmtValue(*message);
     error(err, node, "assert");
 }
 
+// DELIBERATE DIVERGENCE FROM OPENSCAD: a passing assert() evaluates its
+// condition and nothing else, the way `||` skips its right operand.
+// OpenSCAD's Assert::performAssert evaluates every argument first, so there
+// a passing `assert(true, echo("e") "m")` echoes, `assert(true, nosuch)`
+// warns, and a message calling a user function runs it; here none of them
+// does. BOSL2 validates nearly every call with `assert(cond, str(...))`,
+// and building those never-shown messages was ~4% of its evaluation time.
+// A failing (or condition-less) assert evaluates every other argument, in
+// source order, after the condition, so its output is unchanged; the
+// unexpected-argument warnings depend only on the call's shape and still
+// print on every call. The compiled form (Op::AssertPass/AssertFail) does
+// the same.
+void Evaluator::evalAssert(const std::vector<std::unique_ptr<oscad::Argument>>& arguments, const oscad::ASTNode& node,
+                           EvalContext& ctx, bool maybeCompiled) {
+    const AssertLayout layout = assertLayout(arguments);
+    auto eval = [&](size_t i) {
+        const oscad::Expression& e = *argExpr(*arguments[i]);
+        return maybeCompiled ? evalExprMaybeCompiled(e, ctx) : evalExpr(e, ctx);
+    };
+    if (layout.cond >= 0 && truthy(eval(static_cast<size_t>(layout.cond)))) {
+        warnAssertArgs(arguments, layout);
+        return;
+    }
+    Value message;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+        if (static_cast<int>(i) == layout.cond) continue;
+        Value v = eval(i);
+        if (static_cast<int>(i) == layout.msg) message = std::move(v);
+    }
+    failAssert(arguments, layout, layout.msg >= 0 ? &message : nullptr, node);
+}
+
 void Evaluator::evalAssertStatement(const oscad::ModularAssert& node, EvalContext& ctx) {
-    // The statement form supports named arguments (assert(condition=...,
-    // message=...)), unlike the expression form's raw positional indexing
-    // -- see evalAssertExpr. Mirrors _eval_statement_impl's ModularAssert
-    // branch exactly.
-    std::vector<Value> values;
-    for (const auto& arg : node.arguments) values.push_back(evalExprMaybeCompiled(*argExpr(*arg), ctx));
-    checkAssert(node.arguments, values, node);
+    evalAssert(node.arguments, node, ctx, /*maybeCompiled=*/true);
     // Assertion passed -- propagate any chained child geometry (e.g.
     // `assert(...) translate(...) children();`).
     if (!node.children.empty()) evalChildren(node.children, ctx);

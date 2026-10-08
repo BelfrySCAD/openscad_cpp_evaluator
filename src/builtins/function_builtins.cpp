@@ -1242,9 +1242,12 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
     // was 0, concat(a=[1], b=[2]) was [], rands(seed_value=) went unseeded.
     // (textmetrics/fontmetrics -- with declaredParams -- and dxf_dim/
     // dxf_cross bind by name in OpenSCAD too.)
+    // The common all-positional call goes straight through, with no
+    // reordered copy built (or destroyed) on its way.
     const bool byName = declaredParams || id == BuiltinFnId::DxfDim || id == BuiltinFnId::DxfCross;
+    if (byName || args.named.empty()) return evalBuiltinFunctionInOrder(ev, id, name, args, node);
     CallArgs ordered;
-    if (!byName && node.kind() == oscad::NodeKind::PrimaryCall && !args.named.empty()) {
+    if (node.kind() == oscad::NodeKind::PrimaryCall) {
         int k = 0, out = 0;
         for (const auto& a : static_cast<const oscad::PrimaryCall&>(node).arguments) {
             const Value* v = nullptr;
@@ -1258,8 +1261,7 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
             ordered.setPositional(out++, v ? *v : Value{});
         }
     }
-    const CallArgs& argsInOrder = (!byName && !args.named.empty()) ? ordered : args;
-    return evalBuiltinFunctionInOrder(ev, id, name, argsInOrder, node);
+    return evalBuiltinFunctionInOrder(ev, id, name, ordered, node);
 }
 
 Value evalBuiltinFunctionInOrder(Evaluator& ev, BuiltinFnId id, const std::string& name, const CallArgs& args,
