@@ -601,6 +601,11 @@ grep for `ponytail:`.
   One `LevelSet` pass either way; a bounded range *could* be
   `difference(levelset(hi), levelset(lo))` but that meshes twice and then booleans.
   3D wraps `Manifold::LevelSet` with a C++ sampling lambda; no new Manifold API.
+  **`edge` may be a vector**, one spacing per axis (`[ex,ey,ez]`, or `[ex,ey]` in 2D), as BOSL2's
+  `isosurface()` takes `voxel_size`. `LevelSet` takes one edge length, so the 3D path meshes the
+  field squashed to unit spacing and `Scale`s the result back -- exact, since with tolerance -1 a
+  vertex is a linear interpolation along a lattice edge, which commutes with an axis scale. A plain
+  number takes the old path unchanged. `supported_feature("levelset")` is **2** from this change.
   **The field is a grid OR a `function(x,y,z)`, and the two trade off against each other** —
   neither is simply better:
 

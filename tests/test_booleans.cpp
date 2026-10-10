@@ -1248,6 +1248,83 @@ TEST(LevelSetFn, AFunctionFieldRequiresEdge) {
     EXPECT_NE(w[0].find("edge="), std::string::npos) << w[0];
 }
 
+// edge= as one spacing per axis (#729 on BelfrySCAD), as BOSL2's
+// isosurface() takes voxel_size. LevelSet itself takes one edge length, so
+// the field is squashed to unit spacing and the mesh stretched back.
+
+TEST(LevelSetFn, AnEqualVectorEdgeMatchesTheNumber) {
+    const std::string f = "levelset(function(x,y,z) sqrt(x*x+y*y+z*z), "
+                          "bounds=[[-30,-30,-30],[30,30,30]], isovalue=20, edge=";
+    Evaluated num = evalSrc(f + "1.5);");
+    Evaluated vec = evalSrc(f + "[1.5,1.5,1.5]);");
+    ASSERT_EQ(num.bodies.size(), 1u);
+    ASSERT_EQ(vec.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(vec).NumTri(), soleBody(num).NumTri());
+    EXPECT_NEAR(soleBody(vec).Volume(), soleBody(num).Volume(), 1e-9 * soleBody(num).Volume());
+}
+
+TEST(LevelSetFn, AVectorEdgeIsExactlyAStretchedLattice) {
+    // A sphere stretched 4x in z, sampled 4x coarser in z, is the sphere's
+    // own mesh stretched: a vertex is a linear interpolation along a lattice
+    // edge, and that commutes with an axis scale. So the volume is exactly
+    // 4x, not merely close -- anything else means the lattice is not the
+    // one asked for.
+    Evaluated sphere = evalSrc(
+        "levelset(function(x,y,z) sqrt(x*x+y*y+z*z), "
+        "bounds=[[-30,-30,-30],[30,30,30]], isovalue=20, edge=1.5);");
+    Evaluated tall = evalSrc(
+        "levelset(function(x,y,z) sqrt(x*x+y*y+z*z/16), "
+        "bounds=[[-30,-30,-120],[30,30,120]], isovalue=20, edge=[1.5,1.5,6]);");
+    ASSERT_EQ(sphere.bodies.size(), 1u);
+    ASSERT_EQ(tall.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(tall).NumTri(), soleBody(sphere).NumTri());
+    EXPECT_NEAR(soleBody(tall).Volume(), 4.0 * soleBody(sphere).Volume(), 1e-6 * soleBody(tall).Volume());
+    EXPECT_EQ(soleBody(tall).Genus(), 0);
+}
+
+TEST(LevelSetFn, AVectorEdgeAlsoAppliesToAGrid) {
+    Evaluated fine = evalSrc(sphereFieldSrc(50, 30) +
+                              "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=20);");
+    Evaluated coarseZ = evalSrc(sphereFieldSrc(50, 30) +
+                                 "levelset(f, bounds=[[-30,-30,-30],[30,30,30]], isovalue=20, edge=[1.2,1.2,4]);");
+    ASSERT_EQ(coarseZ.bodies.size(), 1u);
+    EXPECT_LT(soleBody(coarseZ).NumTri(), soleBody(fine).NumTri() * 3 / 4);  // measured 56%
+    EXPECT_NEAR(soleBody(coarseZ).Volume(), soleBody(fine).Volume(), 0.03 * soleBody(fine).Volume());
+}
+
+TEST(LevelSetFn, AVectorEdgeIn2DSetsEachAxis) {
+    // A circle sampled finely in x and coarsely in y has fewer contour
+    // points than one sampled finely in both, and still the circle's area.
+    const std::string f = "levelset(function(x,y) sqrt(x*x+y*y), "
+                          "bounds=[[-30,-30],[30,30]], isovalue=20, edge=";
+    Evaluated fine = evalSrc(f + "0.5);");
+    Evaluated mixed = evalSrc(f + "[0.5,3]);");
+    ASSERT_EQ(mixed.bodies.size(), 1u);
+    ASSERT_TRUE(mixed.bodies[0].section);
+    EXPECT_LT(mixed.bodies[0].section->NumVert(), fine.bodies[0].section->NumVert());
+    const double circle = 3.14159265358979 * 400;
+    EXPECT_NEAR(mixed.bodies[0].section->Area(), circle, 0.02 * circle);
+}
+
+TEST(LevelSetFn, AVectorEdgeOfTheWrongSizeWarns) {
+    for (const char* bad : {"[1,1]", "[1,1,0]", "[1,1,-2]", "[1,\"a\",1]"}) {
+        const std::vector<std::string> w = levelsetWarnings(
+            std::string("levelset(function(x,y,z) sqrt(x*x+y*y+z*z), "
+                        "bounds=[[-3,-3,-3],[3,3,3]], isovalue=2, edge=") + bad + ");");
+        ASSERT_GE(w.size(), 1u) << bad;
+        EXPECT_NE(w[0].find("[ex, ey, ez]"), std::string::npos) << bad << ": " << w[0];
+    }
+}
+
+TEST(LevelSetFn, SupportedFeatureSaysAVectorEdgeWorks) {
+    // Level 2 is how a library such as BOSL2 tells a build with per-axis
+    // edge= from one that would reject it.
+    std::vector<std::string> out;
+    evalSrc("echo(supported_feature(\"levelset\"));", [&](const std::string& m) { out.push_back(m); });
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_NE(out[0].find("2"), std::string::npos) << out[0];
+}
+
 TEST(LevelSetFn, AFunctionOfTheWrongArityWarns) {
     // One parameter is wrong for either dimension, so the message names both.
     const std::vector<std::string> one = levelsetWarnings(

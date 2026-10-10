@@ -991,11 +991,31 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     const std::array<double, 3> origin = *lo;
     std::array<double, 3> spacing{1.0, 1.0, 1.0};
     double edge = 0.0;
+    // edge may also be one spacing per axis, as BOSL2's isosurface() takes
+    // voxel_size -- a thin plate wants fine sampling across it and coarse
+    // along it (#729 on BelfrySCAD). edgeV is then the vector and `edge`
+    // its smallest component; for a plain number edgeV is unused.
+    std::array<double, 3> edgeV{0.0, 0.0, 0.0};
+    bool edgeVec = false;
     // Grid spacing is filled in below, once the array has been read at the
     // right dimensionality. Finer than the grid buys nothing.
-    if (const double* e = std::get_if<double>(&params.at("edge"))) {
+    const Value& edgeArg = params.at("edge");
+    if (const double* e = std::get_if<double>(&edgeArg)) {
         if (*e > 0.0) edge = *e;
         else ev.warn("levelset(): edge must be positive", &node.position());
+    } else if (!std::holds_alternative<std::monostate>(edgeArg)) {
+        const std::optional<std::vector<double>> ev3 = numbersOrInf(edgeArg);
+        bool ok = ev3 && ev3->size() == bLo->size();
+        for (size_t a = 0; ok && a < ev3->size(); ++a) ok = std::isfinite((*ev3)[a]) && (*ev3)[a] > 0.0;
+        if (ok) {
+            edgeVec = true;
+            for (size_t a = 0; a < ev3->size(); ++a) edgeV[a] = (*ev3)[a];
+            edge = *std::min_element(ev3->begin(), ev3->end());
+        } else {
+            ev.warn(is2d ? "levelset(): edge must be a positive number or [ex, ey]"
+                         : "levelset(): edge must be a positive number or [ex, ey, ez]",
+                    &node.position());
+        }
     }
     if (edge <= 0.0 && fieldFn) {
         // No grid to infer it from. Guessing would silently pick either a
@@ -1060,8 +1080,9 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
             return out;
         }
         // function(x,y): edge= gives the spacing, as in 3D
-        nx = static_cast<size_t>(std::floor(((*bHi)[0] - (*bLo)[0]) / edge)) + 1;
-        ny = static_cast<size_t>(std::floor(((*bHi)[1] - (*bLo)[1]) / edge)) + 1;
+        const double ex = edgeVec ? edgeV[0] : edge, ey = edgeVec ? edgeV[1] : edge;
+        nx = static_cast<size_t>(std::floor(((*bHi)[0] - (*bLo)[0]) / ex)) + 1;
+        ny = static_cast<size_t>(std::floor(((*bHi)[1] - (*bLo)[1]) / ey)) + 1;
         if (nx < 2 || ny < 2) {
             ev.warn("levelset(): edge is larger than the bounds", &node.position());
             return {};
@@ -1114,7 +1135,9 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
         spacing = {((*bHi)[0] - (*bLo)[0]) / static_cast<double>(field->nx - 1),
                     ((*bHi)[1] - (*bLo)[1]) / static_cast<double>(field->ny - 1),
                     ((*bHi)[2] - (*bLo)[2]) / static_cast<double>(field->nz - 1)};
-        if (!std::get_if<double>(&params.at("edge"))) edge = std::min({spacing[0], spacing[1], spacing[2]});
+        // Also when edge= was given but unusable (warned above): edge 0
+        // would ask Manifold for an infinitely fine lattice.
+        if (edge <= 0.0) edge = std::min({spacing[0], spacing[1], spacing[2]});
     }
 
     if (fieldFn && fnParams2.size() < 3) {
@@ -1187,9 +1210,10 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     //
     // Exactly the fix already applied to the 2D path (clipToBounds); it was
     // not applied here at the time because the 2D error was the one measured.
-    const double pad = 2.0 * edge;
-    manifold::Box bounds(manifold::vec3(origin[0] - pad, origin[1] - pad, origin[2] - pad),
-                          manifold::vec3((*hi)[0] + pad, (*hi)[1] + pad, (*hi)[2] + pad));
+    const manifold::vec3 E = edgeVec ? manifold::vec3(edgeV[0], edgeV[1], edgeV[2]) : manifold::vec3(edge);
+    const manifold::vec3 pad = 2.0 * E;
+    manifold::Box bounds(manifold::vec3(origin[0], origin[1], origin[2]) - pad,
+                          manifold::vec3((*hi)[0], (*hi)[1], (*hi)[2]) + pad);
     // tolerance -1: a positive value makes Manifold do EXTRA evaluations per
     // output vertex to snap nearer the true surface. Against a fixed grid
     // those only re-interpolate data already used -- cost, no information.
@@ -1199,9 +1223,24 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     // C++, and NOT safe for a function, which re-enters the evaluator.
     // Manifold: parallel policies "will crash language runtimes with runtime
     // locks that expect to not be called back by unregistered threads".
-    manifold::Manifold solid =
-        fieldFn ? manifold::Manifold::LevelSet(sampleFn, bounds, edge, 0.0, -1.0, /*canParallel=*/false)
-                 : manifold::Manifold::LevelSet(sampleGrid, bounds, edge, 0.0, -1.0, /*canParallel=*/true);
+    //
+    // LevelSet takes a single edge length, so a per-axis edge meshes a field
+    // squashed to unit spacing on every axis and stretches the result back.
+    // Exact, not an approximation: with tolerance -1 a vertex is a linear
+    // interpolation along a lattice edge, and a linear interpolation commutes
+    // with an axis scale.
+    manifold::Manifold solid;
+    if (!edgeVec) {
+        solid = fieldFn ? manifold::Manifold::LevelSet(sampleFn, bounds, edge, 0.0, -1.0, /*canParallel=*/false)
+                        : manifold::Manifold::LevelSet(sampleGrid, bounds, edge, 0.0, -1.0, /*canParallel=*/true);
+    } else {
+        const manifold::Box unit(bounds.min / E, bounds.max / E);
+        solid = fieldFn ? manifold::Manifold::LevelSet([&](manifold::vec3 q) { return sampleFn(q * E); },
+                                                       unit, 1.0, 0.0, -1.0, /*canParallel=*/false)
+                        : manifold::Manifold::LevelSet([&](manifold::vec3 q) { return sampleGrid(q * E); },
+                                                       unit, 1.0, 0.0, -1.0, /*canParallel=*/true);
+        solid = solid.Scale(E);
+    }
 
     if (solid.IsEmpty()) return {};
     solid = solid ^ manifold::Manifold::Cube(
