@@ -976,9 +976,8 @@ namespace {
 // is supposed to be safe).
 //
 // A LEVEL rather than a boolean so a feature whose semantics change later
-// can be told apart from its earlier self. Everything here is 1 today;
-// nothing has changed since this function existed, and a script cannot
-// observe what a build without supported_feature() did anyway.
+// can be told apart from its earlier self. A script cannot observe what a
+// build without supported_feature() did, so every feature starts at 1.
 //
 // This is the answer to a real hazard: OpenSCAD does not reject arguments or
 // names it doesn't know -- children(separate=true) is silently ignored there
@@ -988,7 +987,7 @@ const std::unordered_map<std::string, double>& featureLevels() {
     static const std::unordered_map<std::string, double> levels = {
         {"render-expr", 1.0},        // render() in expression position
         {"linear-solve", 1.0},       // linear_solve(A, b) -> {x, det, singular}
-        {"levelset", 1.0},           // levelset(field, bounds, isovalue)
+        {"levelset", 2.0},           // levelset(field, bounds, isovalue); 2: edge may be a vector
         {"polyhedron-vnf", 1.0},     // polyhedron(vnf) / polyhedron(object)
         {"separate-children", 1.0},  // children(..., separate=true)
         {"minkowski-diff", 1.0},     // minkowski_difference()

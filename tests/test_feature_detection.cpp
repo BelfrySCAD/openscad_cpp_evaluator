@@ -68,10 +68,10 @@ TEST(FeatureDetection, EveryDocumentedFeatureReportsALevel) {
         ScopedVm guard(vm);
         for (const char* f : kFeatures) {
             const std::vector<std::string> e =
-                echoesFrom(std::string("echo(supported_feature(\"") + f + "\"));");
+                echoesFrom(std::string("echo(supported_feature(\"") + f + "\") >= 1);");
             ASSERT_EQ(e.size(), 1u) << f << ", vm=" << vm;
-            EXPECT_NE(e[0].find("1"), std::string::npos) << f << ", vm=" << vm << ", got " << e[0];
-            EXPECT_EQ(e[0].find("0"), std::string::npos) << f << " reported unsupported, vm=" << vm;
+            EXPECT_NE(e[0].find("true"), std::string::npos) << f << " reported unsupported, vm=" << vm
+                                                           << ", got " << e[0];
         }
     }
 }
