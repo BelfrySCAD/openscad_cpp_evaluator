@@ -1192,6 +1192,60 @@ TEST(LevelSet, MalformedFieldsWarn) {
     }
 }
 
+TEST(LevelSet, InfinityIsASampleNotAMalformedField) {
+    // INF is BOSL2's name for 1/0, not a builtin, so each script defines it.
+    // #744 on BelfrySCAD: a metaball field is 1/0 where a grid point lands on
+    // a centre. The field is rectangular; INF made it read as malformed and
+    // nothing was drawn. A metaball r/d around the origin, centre sample INF:
+    // [1, INF] is the ball of radius r.
+    const std::string field =
+        "INF = 1/0; N = 21; H = 10;\nfunction co(t) = -H + 2*H*t/(N-1);\n"
+        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1])\n"
+        "      let(d = norm([co(i), co(j), co(k)])) d == 0 ? INF : 6 / d ]]];\n";
+    const std::vector<std::string> w =
+        levelsetWarnings(field + "levelset(f, bounds=[[-H,-H,-H],[H,H,H]], isovalue=[1, INF]);");
+    EXPECT_TRUE(w.empty()) << w.front();
+    Evaluated e = evalSrc(field + "levelset(f, bounds=[[-H,-H,-H],[H,H,H]], isovalue=[1, INF]);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const double analytic = 4.0 / 3.0 * 3.14159265358979 * 6 * 6 * 6;
+    EXPECT_NEAR(soleBody(e).Volume(), analytic, 0.05 * analytic);
+    EXPECT_EQ(soleBody(e).Genus(), 0);
+
+    // -INF keeps its sign: the same ball, as a field that is -INF at the centre.
+    Evaluated neg = evalSrc(
+        "INF = 1/0; N = 21; H = 10;\nfunction co(t) = -H + 2*H*t/(N-1);\n"
+        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1])\n"
+        "      let(d = norm([co(i), co(j), co(k)])) d == 0 ? -INF : -6 / d ]]];\n"
+        "levelset(f, bounds=[[-H,-H,-H],[H,H,H]], isovalue=-1);");
+    ASSERT_EQ(neg.bodies.size(), 1u);
+    EXPECT_NEAR(soleBody(neg).Volume(), analytic, 0.05 * analytic);
+
+    // And the 2D reader the same way.
+    EXPECT_TRUE(levelsetWarnings(
+                    "INF = 1/0; f = [for (i=[-5:5]) [for (j=[-5:5]) let(d = norm([i,j])) d == 0 ? INF : 3 / d]];\n"
+                    "levelset(f, bounds=[[-5,-5],[5,5]], isovalue=[1, INF]);")
+                    .empty());
+}
+
+TEST(LevelSet, NanIsStillAMalformedField) {
+    EXPECT_FALSE(levelsetWarnings(
+                     "levelset([[[1,2],[3,0/0]],[[5,6],[7,8]]], bounds=[[0,0,0],[1,1,1]]);").empty());
+}
+
+TEST(LevelSet, AFunctionReturningMinusInfinityIsFarBelowNotFarAbove) {
+    // Every non-finite value used to become +DBL_MAX, so -INF counted as
+    // ABOVE every isovalue -- outside a scalar one. -INF over a ball of
+    // radius 6 and 0 elsewhere: at or below -1 is that ball, not nothing.
+    const std::string src =
+        "INF = 1/0; levelset(function(x,y,z) norm([x,y,z]) < 6 ? -INF : 0,\n"
+        "         bounds=[[-10,-10,-10],[10,10,10]], isovalue=-1, edge=0.5);";
+    EXPECT_TRUE(levelsetWarnings(src).empty());
+    Evaluated e = evalSrc(src);
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const double analytic = 4.0 / 3.0 * 3.14159265358979 * 6 * 6 * 6;
+    EXPECT_NEAR(soleBody(e).Volume(), analytic, 0.1 * analytic);
+}
+
 // -- levelset, function form ----------------------------------------------
 //
 // Same builtin, field given as function(x,y,z) instead of a grid. Slower --
