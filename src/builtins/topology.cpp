@@ -671,6 +671,21 @@ std::vector<ColoredBody> generateMeshRepair(Evaluator& ev, const CSGParams& para
 
 namespace {
 
+// A sample as the field arrays and field functions hand it over. +-INF is a
+// legal sample -- a metaball field is 1/0 wherever a grid point lands on a
+// centre (#744 on BelfrySCAD) -- but it cannot be used as is: the trilinear
+// sampler weights corners, and 0 * INF is NaN. So it becomes a huge FINITE
+// value, which is the limit BOSL2's isosurface() takes (an edge to an INF
+// corner crosses at the other end). A quarter of DBL_MAX so that sums of
+// weighted corners and bandDistance's subtraction cannot overflow. NaN, or
+// anything not a number, has no meaning and is nullopt.
+std::optional<double> fieldSample(const Value& item) {
+    const double* d = std::get_if<double>(&item);
+    if (!d || std::isnan(*d)) return std::nullopt;
+    constexpr double kHuge = std::numeric_limits<double>::max() / 4;
+    return std::clamp(*d, -kHuge, kHuge);
+}
+
 struct ScalarField {
     std::vector<double> v;      // flat, x fastest
     size_t nx = 0, ny = 0, nz = 0;
@@ -698,8 +713,8 @@ std::optional<ScalarField> readField(const Value& val) {
                 return std::nullopt;
             }
             for (size_t k = 0; k < f.nz; ++k) {
-                const double* d = std::get_if<double>(&(*zs)->items[k]);
-                if (!d || !std::isfinite(*d)) return std::nullopt;
+                const std::optional<double> d = fieldSample((*zs)->items[k]);
+                if (!d) return std::nullopt;
                 f.v[(k * f.ny + j) * f.nx + i] = *d;
             }
         }
@@ -722,8 +737,8 @@ std::optional<std::vector<std::vector<double>>> readPlane(const Value& val) {
         std::vector<double> row;
         row.reserve(ny);
         for (const Value& item : (*ys)->items) {
-            const double* d = std::get_if<double>(&item);
-            if (!d || !std::isfinite(*d)) return std::nullopt;
+            const std::optional<double> d = fieldSample(item);
+            if (!d) return std::nullopt;
             row.push_back(*d);
         }
         out.push_back(std::move(row));
@@ -1104,8 +1119,7 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
                 bound.set(fnParams2[1], Value{(*bLo)[1] + static_cast<double>(j) * sy});
                 const Value outv =
                     ev.evalFunctionLiteralFromBound(**fieldFn, std::move(bound), *fnCtx, &node.position());
-                const double* d = std::get_if<double>(&outv);
-                const double val = (d && std::isfinite(*d)) ? *d : std::numeric_limits<double>::max();
+                const double val = fieldSample(outv).value_or(std::numeric_limits<double>::max());
                 g.v[(j + 1) * g.nx + (i + 1)] = bandDistance(val, isoLo, isoHi, invert);
             }
         }
@@ -1151,10 +1165,9 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
         const double xyz[3] = {p.x, p.y, p.z};
         for (int a = 0; a < 3; ++a) bound.set(fnParams2[static_cast<size_t>(a)], Value{xyz[a]});
         const Value out = ev.evalFunctionLiteralFromBound(**fieldFn, std::move(bound), *fnCtx, &node.position());
-        const double* d = std::get_if<double>(&out);
         // A field that returns junk at one point must not abort the whole
-        // build; treat it as far outside instead.
-        const double v = (d && std::isfinite(*d)) ? *d : std::numeric_limits<double>::max();
+        // build; it becomes a huge value instead. +-INF keeps its sign.
+        const double v = fieldSample(out).value_or(std::numeric_limits<double>::max());
         return bandDistance(v, isoLo, isoHi, invert);
     };
 
