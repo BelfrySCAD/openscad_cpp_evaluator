@@ -1511,15 +1511,63 @@ TEST(LevelSet, PaddingDoesNotDisturbAShapeInsideTheBox) {
 }
 
 TEST(LevelSet, AGridFieldIsAlsoCutCleanlyAtTheBox) {
-    // The grid intake cannot sample beyond its data, so the sampler reads
-    // "outside" past the block rather than clamping and smearing the edge
-    // values outward. Same clean cut as the function form.
-    Evaluated e = evalSrc(
-        "N = 41;\nfunction co(t) = -20 + 40*t/(N-1);\n"
-        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1]) co(i) ]]];\n"
-        "levelset(f, bounds=[[-20,-20,-20],[20,20,20]], isovalue=[-1e18,0]);");
-    ASSERT_EQ(e.bodies.size(), 1u);
-    EXPECT_NEAR(soleBody(e).Volume(), 32000.0, 40.0);   // one sample layer of slack
+    // The grid intake cannot sample beyond its data, so past the block the
+    // sampler clamps -- the edge values run on into the padding -- and the
+    // clip to the bounds makes the cut. It used to read "outside" there
+    // instead, which closed the surface AT the box face along Manifold's
+    // lattice: a waffle-textured staircase inside the bounds that the clip
+    // could not reach (#745 on BelfrySCAD). This test then needed one
+    // sample layer of slack; a clean cut needs none.
+    for (const char* edge : {"", ", edge=2", ", edge=[1,2,0.5]"}) {
+        Evaluated e = evalSrc(
+            std::string("N = 41;\nfunction co(t) = -20 + 40*t/(N-1);\n"
+                        "f = [for (i=[0:N-1]) [for (j=[0:N-1]) [for (k=[0:N-1]) co(i) ]]];\n"
+                        "levelset(f, bounds=[[-20,-20,-20],[20,20,20]], isovalue=[-1e18,0]") + edge + ");");
+        ASSERT_EQ(e.bodies.size(), 1u) << edge;
+        EXPECT_NEAR(soleBody(e).Volume(), 32000.0, 1e-6) << edge;
+    }
+    // And a curved surface the box cuts through: a sphere of radius 25 in a
+    // box of half-width 20. The faces lying flat on x=20 together make the
+    // full disc the plane cuts, not a staircase short of it.
+    Evaluated s = evalSrc(sphereFieldSrc(41, 20) +
+                           "levelset(f, bounds=[[-20,-20,-20],[20,20,20]], isovalue=25);");
+    ASSERT_EQ(s.bodies.size(), 1u);
+    const manifold::MeshGL m = soleBody(s).GetMeshGL();
+    double capArea = 0;
+    for (size_t t = 0; t + 2 < m.triVerts.size(); t += 3) {
+        manifold::vec3 p[3];
+        for (int k = 0; k < 3; ++k) {
+            const size_t v = static_cast<size_t>(m.triVerts[t + static_cast<size_t>(k)]) * m.numProp;
+            p[k] = manifold::vec3(m.vertProperties[v], m.vertProperties[v + 1], m.vertProperties[v + 2]);
+        }
+        if (std::abs(p[0].x - 20) < 1e-6 && std::abs(p[1].x - 20) < 1e-6 && std::abs(p[2].x - 20) < 1e-6)
+            capArea += 0.5 * manifold::la::length(manifold::la::cross(p[1] - p[0], p[2] - p[0]));
+    }
+    // The plane x=20 cuts the sphere in a disc of radius sqrt(25^2 - 20^2)
+    // = 15, which fits inside the 40x40 face.
+    const double r = 15.0;
+    EXPECT_NEAR(capArea, 3.14159265358979 * r * r, 0.03 * 3.14159265358979 * r * r);
+}
+
+TEST(LevelSetFn, VerticesLieOnTheTrueSurface) {
+    // A positive tolerance makes Manifold root-find along each lattice edge
+    // instead of interpolating linearly between its two samples, so a
+    // function field's vertices land on the surface itself. Measured on
+    // #745 on BelfrySCAD: 0.2 off at edge=2 before, on the surface after;
+    // the coarse, curved 1/r field there is where linear interpolation is
+    // worst.
+    for (const char* edge : {"2", "[1,2,0.4]"}) {
+        Evaluated e = evalSrc(std::string("levelset(function(x,y,z) 5 / norm([x,y,z]), "
+                                           "bounds=[[-8,-8,-8],[8,8,8]], isovalue=[1, 1/0], edge=") +
+                               edge + ");");
+        ASSERT_EQ(e.bodies.size(), 1u) << edge;
+        const manifold::MeshGL m = soleBody(e).GetMeshGL();
+        double worst = 0;
+        for (size_t v = 0; v + 2 < m.vertProperties.size(); v += m.numProp)
+            worst = std::max(worst, std::abs(manifold::la::length(manifold::vec3(m.vertProperties[v], m.vertProperties[v + 1],
+                                                                       m.vertProperties[v + 2])) - 5.0));
+        EXPECT_LT(worst, 0.03) << edge;
+    }
 }
 
 // -- 2D union keeps every colour (bug report: "multiple colors inside a
