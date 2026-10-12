@@ -1374,11 +1374,12 @@ TEST(LevelSetFn, AVectorEdgeOfTheWrongSizeWarns) {
 
 TEST(LevelSetFn, SupportedFeatureSaysAVectorEdgeWorks) {
     // Level 2 is how a library such as BOSL2 tells a build with per-axis
-    // edge= from one that would reject it.
+    // edge= from one that would reject it; level 3, one that places a
+    // field array from edge= alone (#749 on BelfrySCAD).
     std::vector<std::string> out;
     evalSrc("echo(supported_feature(\"levelset\"));", [&](const std::string& m) { out.push_back(m); });
     ASSERT_EQ(out.size(), 1u);
-    EXPECT_NE(out[0].find("2"), std::string::npos) << out[0];
+    EXPECT_NE(out[0].find("3"), std::string::npos) << out[0];
 }
 
 TEST(LevelSetFn, AFunctionOfTheWrongArityWarns) {
@@ -1672,6 +1673,73 @@ TEST(LevelSetGrid, TheDefaultMarchesTheGridItself) {
                               "levelset(f, bounds=[[-20,-20,-20],[20,20,20]], isovalue=15, edge=[1,1,1]);");
     ASSERT_EQ(same.bodies.size(), 1u);
     EXPECT_EQ(soleBody(same).NumTri(), soleBody(e).NumTri());
+}
+
+TEST(LevelSetGrid, EdgeWithoutBoundsCentresTheGridOnTheOrigin) {
+    // #749 on BelfrySCAD: edge= alone places a field array, its samples
+    // edge apart and centred on the origin, as BOSL2's isosurface() places
+    // an array given voxel_size. Same mesh as the explicit bounds.
+    Evaluated e = evalSrc(sphereFieldSrc(41, 20) + "levelset(f, isovalue=15, edge=1);");
+    Evaluated ref = evalSrc(sphereFieldSrc(41, 20) +
+                             "levelset(f, bounds=[[-20,-20,-20],[20,20,20]], isovalue=15);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_EQ(ref.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(e).NumTri(), soleBody(ref).NumTri());
+    EXPECT_NEAR(soleBody(e).Volume(), soleBody(ref).Volume(), 1e-9 * soleBody(ref).Volume());
+    EXPECT_GT(onGridLines(soleBody(e), manifold::vec3(-20.0), manifold::vec3(1.0)), 0.5);
+}
+
+TEST(LevelSetGrid, AVectorEdgeWithoutBoundsSpacesEachAxis) {
+    // Every sample inside, so the solid is the whole box: 5 x 3 x 4 samples
+    // at [1, 2, 0.5] span 4 x 4 x 1.5, centred.
+    Evaluated e = evalSrc("f = [for (i=[0:4]) [for (j=[0:2]) [for (k=[0:3]) -1 ]]];\n"
+                           "levelset(f, edge=[1, 2, 0.5]);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Box b = soleBody(e).BoundingBox();
+    EXPECT_NEAR(b.min.x, -2.0, 1e-9); EXPECT_NEAR(b.max.x, 2.0, 1e-9);
+    EXPECT_NEAR(b.min.y, -2.0, 1e-9); EXPECT_NEAR(b.max.y, 2.0, 1e-9);
+    EXPECT_NEAR(b.min.z, -0.75, 1e-9); EXPECT_NEAR(b.max.z, 0.75, 1e-9);
+}
+
+TEST(LevelSetGrid, A2DFieldArrayIsPlacedByEdgeToo) {
+    // field[i][j] says 2D without a bounds to say so.
+    Evaluated e = evalSrc("f = [for (i=[0:4]) [for (j=[0:2]) -1 ]];\nlevelset(f, edge=2);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    const manifold::Rect r = e.bodies[0].section->Bounds();
+    EXPECT_NEAR(r.min.x, -4.0, 1e-9); EXPECT_NEAR(r.max.x, 4.0, 1e-9);
+    EXPECT_NEAR(r.min.y, -2.0, 1e-9); EXPECT_NEAR(r.max.y, 2.0, 1e-9);
+}
+
+TEST(LevelSetGrid, A2DGridIsResampledAtADifferentEdge) {
+    // As in 3D: edge= beside bounds re-samples the plane (bilinearly), where
+    // it used to be ignored. A cone sampled every 2, contoured at r=7.
+    const std::string field =
+        "f = [for (i=[0:10]) [for (j=[0:10]) let(x=-10+2*i, y=-10+2*j) sqrt(x*x+y*y) ]];\n";
+    const std::string box = "bounds=[[-10,-10],[10,10]], isovalue=7";
+    Evaluated own = evalSrc(field + "levelset(f, " + box + ");");
+    Evaluated same = evalSrc(field + "levelset(f, " + box + ", edge=2);");
+    Evaluated fine = evalSrc(field + "levelset(f, " + box + ", edge=0.25);");
+    for (Evaluated* e : {&own, &same, &fine}) {
+        ASSERT_EQ(e->bodies.size(), 1u);
+        ASSERT_TRUE(e->bodies[0].section.has_value());
+    }
+    EXPECT_EQ(same.bodies[0].section->NumVert(), own.bodies[0].section->NumVert());
+    EXPECT_GT(fine.bodies[0].section->NumVert(), 4 * own.bodies[0].section->NumVert());
+    const double disc = 3.14159265358979 * 49;
+    EXPECT_NEAR(fine.bodies[0].section->Area(), disc, 0.03 * disc);
+}
+
+TEST(LevelSetGrid, NeitherBoundsNorEdgeSaysWhatIsMissing) {
+    const std::vector<std::string> w =
+        levelsetWarnings("f = [for (i=[0:4]) [for (j=[0:2]) [for (k=[0:3]) -1 ]]];\nlevelset(f);");
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NE(w[0].find("bounds=, or edge="), std::string::npos) << w[0];
+    // A function field has no sizes to infer from: bounds stays required.
+    const std::vector<std::string> fw =
+        levelsetWarnings("levelset(function(x,y,z) x, edge=1);");
+    ASSERT_EQ(fw.size(), 1u);
+    EXPECT_NE(fw[0].find("bounds must be"), std::string::npos) << fw[0];
 }
 
 TEST(LevelSetGrid, ADifferentEdgeStillResamples) {

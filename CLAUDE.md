@@ -606,6 +606,12 @@ grep for `ponytail:`.
   field squashed to unit spacing and `Scale`s the result back -- exact, since with tolerance -1 a
   vertex is a linear interpolation along a lattice edge, which commutes with an axis scale. A plain
   number takes the old path unchanged. `supported_feature("levelset")` is **2** from this change.
+  **A field array needs `bounds` OR `edge`**: given only `edge` (number or vector), the samples sit
+  `edge` apart **centred on the origin**, as BOSL2's `isosurface()` places an array given
+  `voxel_size`, and the array's depth (`field[i][j]` vs `field[i][j][k]`) decides 2D or 3D
+  (`boundsFromEdge`, #749 on BelfrySCAD). Both given: `edge` re-samples the field inside `bounds`
+  (trilinear in 3D, bilinear in 2D -- 2D used to ignore `edge` here) unless it equals the grid's own spacing. A function field still needs `bounds`.
+  `supported_feature("levelset")` is **3** from this change.
   **The field is a grid OR a `function(x,y,z)`, and the two trade off against each other** —
   neither is simply better:
 
