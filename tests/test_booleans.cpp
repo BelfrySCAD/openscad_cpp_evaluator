@@ -1606,13 +1606,13 @@ TEST(LevelSet, AGridFieldIsAlsoCutCleanlyAtTheBox) {
     EXPECT_NEAR(capArea, 3.14159265358979 * r * r, 0.03 * 3.14159265358979 * r * r);
 }
 
-TEST(LevelSetFn, VerticesLieOnTheTrueSurface) {
-    // A positive tolerance makes Manifold root-find along each lattice edge
-    // instead of interpolating linearly between its two samples, so a
-    // function field's vertices land on the surface itself. Measured on
-    // #745 on BelfrySCAD: 0.2 off at edge=2 before, on the surface after;
-    // the coarse, curved 1/r field there is where linear interpolation is
-    // worst.
+TEST(LevelSetFn, VerticesInterpolateAsBOSL2Does) {
+    // #745 on BelfrySCAD, second round: a function field is sampled onto a
+    // regular grid and marched, as BOSL2's isosurface() does, rather than
+    // meshed by Manifold::LevelSet, whose body-centred lattice shaded as
+    // dimples. Vertices are interpolated linearly along grid edges, so they
+    // are near the surface, not on it: the 1/r field at edge=2 is where that
+    // is worst. A per-axis edge must mesh as well as a plain one.
     for (const char* edge : {"2", "[1,2,0.4]"}) {
         Evaluated e = evalSrc(std::string("levelset(function(x,y,z) 5 / norm([x,y,z]), "
                                            "bounds=[[-8,-8,-8],[8,8,8]], isovalue=[1, 1/0], edge=") +
@@ -1623,7 +1623,8 @@ TEST(LevelSetFn, VerticesLieOnTheTrueSurface) {
         for (size_t v = 0; v + 2 < m.vertProperties.size(); v += m.numProp)
             worst = std::max(worst, std::abs(manifold::la::length(manifold::vec3(m.vertProperties[v], m.vertProperties[v + 1],
                                                                        m.vertProperties[v + 2])) - 5.0));
-        EXPECT_LT(worst, 0.03) << edge;
+        EXPECT_LT(worst, 0.3) << edge;
+        EXPECT_EQ(soleBody(e).Genus(), 0) << edge;
     }
 }
 
@@ -1699,6 +1700,28 @@ TEST(LevelSetGrid, AVectorEdgeWithoutBoundsSpacesEachAxis) {
     EXPECT_NEAR(b.min.x, -2.0, 1e-9); EXPECT_NEAR(b.max.x, 2.0, 1e-9);
     EXPECT_NEAR(b.min.y, -2.0, 1e-9); EXPECT_NEAR(b.max.y, 2.0, 1e-9);
     EXPECT_NEAR(b.min.z, -0.75, 1e-9); EXPECT_NEAR(b.max.z, 0.75, 1e-9);
+}
+
+TEST(LevelSetGrid, AFunctionIsMarchedOnAGridLandingOnTheBounds) {
+    // Per-axis edge [1, 2, 0.4] over a 12 x 16 x 7 box: x and y divide it,
+    // z does not (17.5 cells), so z is shrunk to 7/18 -- never coarsened --
+    // and the grid's last nodes lie exactly on the box. Every vertex is then
+    // on a grid edge.
+    Evaluated e = evalSrc("levelset(function(x,y,z) 5 / norm([x,y,z]), isovalue=[1, 1/0], "
+                           "bounds=[[-6,-8,0],[6,8,7]], edge=[1,2,0.4]);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_GT(onGridLines(soleBody(e), manifold::vec3(-6, -8, 0), manifold::vec3(1, 2, 7.0 / 18.0)), 0.5);
+}
+
+TEST(LevelSetGrid, AnArrayAtAnotherEdgeIsResampledOntoAGridLandingOnTheBounds) {
+    // #745 on BelfrySCAD: an array resampled at an edge= not dividing the box
+    // cut faces that did not follow the rest of the surface, since
+    // LevelSet's lattice did not land on the box. 40/2.7 is 14.8 cells, so
+    // the grid is 15 cells of 40/15 and the cut faces are its own.
+    Evaluated e = evalSrc(sphereFieldSrc(41, 20) +
+                           "levelset(f, bounds=[[-20,-20,-20],[20,20,20]], isovalue=25, edge=2.7);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_GT(onGridLines(soleBody(e), manifold::vec3(-20.0), manifold::vec3(40.0 / 15.0)), 0.5);
 }
 
 TEST(LevelSetGrid, A2DFieldArrayIsPlacedByEdgeToo) {
