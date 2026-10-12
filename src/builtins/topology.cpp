@@ -1193,18 +1193,13 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
             if (i0[a] > n[a] - 2) i0[a] = n[a] - 2;
             t[a] = g[a] - static_cast<double>(i0[a]);
         }
-        // Outside the sampled block the answer is "outside", falling away
-        // with distance. Clamping instead (which is what the interpolation
-        // above does on its own) would smear the boundary values outward and
-        // extend the surface rather than close it.
-        double outside = 0.0;
-        for (int a = 0; a < 3; ++a) {
-            const double maxg = static_cast<double>(n[a] - 1);
-            const double raw = (pos[a] - origin[a]) / spacing[a];
-            if (raw < 0.0) outside = std::max(outside, -raw);
-            else if (raw > maxg) outside = std::max(outside, raw - maxg);
-        }
-        if (outside > 0.0) return invert ? (1.0 + outside) : -(1.0 + outside);
+        // Outside the sampled block the clamping above extends the boundary
+        // values outward, so a surface meeting the box runs straight on into
+        // the padding and the clip to `bounds` below leaves a clean plane.
+        // Answering "outside" there instead (as this once did) made Manifold
+        // close the surface right AT the box face, along its own lattice: a
+        // waffle-textured staircase INSIDE the bounds, which the clip could
+        // not remove (#745 on BelfrySCAD).
 
         double acc = 0.0;
         for (int c = 0; c < 8; ++c) {
@@ -1229,11 +1224,15 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     const manifold::vec3 pad = 2.0 * E;
     manifold::Box bounds(manifold::vec3(origin[0], origin[1], origin[2]) - pad,
                           manifold::vec3((*hi)[0], (*hi)[1], (*hi)[2]) + pad);
-    // tolerance -1: a positive value makes Manifold do EXTRA evaluations per
-    // output vertex to snap nearer the true surface. Against a fixed grid
-    // those only re-interpolate data already used -- cost, no information.
-    // canParallel true: the lambda is pure C++ and never re-enters the
-    // evaluator, which is the whole point of taking a grid.
+    // tolerance: Manifold root-finds along each crossing lattice edge until
+    // the bracket is within it (a distance along the edge, so independent of
+    // the field's units), instead of interpolating linearly between the two
+    // lattice samples. 1% of the edge. Measured on #745 on BelfrySCAD: the
+    // function form's vertices go from up to 0.2 off the true surface to on
+    // it, and the mean face-normal error on a per-axis edge halves to
+    // BOSL2's own; a grid gains too, since the trilinear field between
+    // samples is not linear along a lattice edge. Costs 11-20% more work.
+    //
     // canParallel is the crux: safe for a grid because the lambda is pure
     // C++, and NOT safe for a function, which re-enters the evaluator.
     // Manifold: parallel policies "will crash language runtimes with runtime
@@ -1241,19 +1240,18 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     //
     // LevelSet takes a single edge length, so a per-axis edge meshes a field
     // squashed to unit spacing on every axis and stretches the result back.
-    // Exact, not an approximation: with tolerance -1 a vertex is a linear
-    // interpolation along a lattice edge, and a linear interpolation commutes
-    // with an axis scale.
+    // The tolerance there is 1% of the unit edge, so 1% of each axis's own.
+    const double tol = 0.01 * (edgeVec ? 1.0 : edge);
     manifold::Manifold solid;
     if (!edgeVec) {
-        solid = fieldFn ? manifold::Manifold::LevelSet(sampleFn, bounds, edge, 0.0, -1.0, /*canParallel=*/false)
-                        : manifold::Manifold::LevelSet(sampleGrid, bounds, edge, 0.0, -1.0, /*canParallel=*/true);
+        solid = fieldFn ? manifold::Manifold::LevelSet(sampleFn, bounds, edge, 0.0, tol, /*canParallel=*/false)
+                        : manifold::Manifold::LevelSet(sampleGrid, bounds, edge, 0.0, tol, /*canParallel=*/true);
     } else {
         const manifold::Box unit(bounds.min / E, bounds.max / E);
         solid = fieldFn ? manifold::Manifold::LevelSet([&](manifold::vec3 q) { return sampleFn(q * E); },
-                                                       unit, 1.0, 0.0, -1.0, /*canParallel=*/false)
+                                                       unit, 1.0, 0.0, tol, /*canParallel=*/false)
                         : manifold::Manifold::LevelSet([&](manifold::vec3 q) { return sampleGrid(q * E); },
-                                                       unit, 1.0, 0.0, -1.0, /*canParallel=*/true);
+                                                       unit, 1.0, 0.0, tol, /*canParallel=*/true);
         solid = solid.Scale(E);
     }
 
