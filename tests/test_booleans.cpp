@@ -1711,6 +1711,25 @@ TEST(LevelSetGrid, A2DFieldArrayIsPlacedByEdgeToo) {
     EXPECT_NEAR(r.min.y, -2.0, 1e-9); EXPECT_NEAR(r.max.y, 2.0, 1e-9);
 }
 
+TEST(LevelSetGrid, A2DGridIsResampledAtADifferentEdge) {
+    // As in 3D: edge= beside bounds re-samples the plane (bilinearly), where
+    // it used to be ignored. A cone sampled every 2, contoured at r=7.
+    const std::string field =
+        "f = [for (i=[0:10]) [for (j=[0:10]) let(x=-10+2*i, y=-10+2*j) sqrt(x*x+y*y) ]];\n";
+    const std::string box = "bounds=[[-10,-10],[10,10]], isovalue=7";
+    Evaluated own = evalSrc(field + "levelset(f, " + box + ");");
+    Evaluated same = evalSrc(field + "levelset(f, " + box + ", edge=2);");
+    Evaluated fine = evalSrc(field + "levelset(f, " + box + ", edge=0.25);");
+    for (Evaluated* e : {&own, &same, &fine}) {
+        ASSERT_EQ(e->bodies.size(), 1u);
+        ASSERT_TRUE(e->bodies[0].section.has_value());
+    }
+    EXPECT_EQ(same.bodies[0].section->NumVert(), own.bodies[0].section->NumVert());
+    EXPECT_GT(fine.bodies[0].section->NumVert(), 4 * own.bodies[0].section->NumVert());
+    const double disc = 3.14159265358979 * 49;
+    EXPECT_NEAR(fine.bodies[0].section->Area(), disc, 0.03 * disc);
+}
+
 TEST(LevelSetGrid, NeitherBoundsNorEdgeSaysWhatIsMissing) {
     const std::vector<std::string> w =
         levelsetWarnings("f = [for (i=[0:4]) [for (j=[0:2]) [for (k=[0:3]) -1 ]]];\nlevelset(f);");

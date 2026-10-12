@@ -1258,74 +1258,82 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
 
     // ---- 2D: sample onto a padded grid, contour it, hand to CrossSection.
     if (is2d) {
-        size_t nx = 0, ny = 0;
-        double sx = 0, sy = 0;
         if (field) {
             ev.warn("levelset(): a 2D field must be field[i][j]; a 3D array was given",
                     &node.position());
             return {};
         }
+        const double x0 = (*bLo)[0], y0 = (*bLo)[1];
+        const double wx = (*bHi)[0] - x0, wy = (*bHi)[1] - y0;
+        double ex = edgeVec ? edgeV[0] : edge, ey = edgeVec ? edgeV[1] : edge;
+        std::optional<std::vector<std::vector<double>>> plane;
+        size_t px = 0, py = 0;
+        bool ownSamples = false;
         if (!fieldFn) {
-            const std::optional<std::vector<std::vector<double>>> plane = readPlane(fieldArg);
+            plane = readPlane(fieldArg);
             if (!plane || plane->size() < 2 || (*plane)[0].size() < 2) {
                 ev.warn("levelset(): 2D field must be a rectangular field[i][j] of numbers",
                         &node.position());
                 return {};
             }
-            nx = plane->size();
-            ny = (*plane)[0].size();
-            sx = ((*bHi)[0] - (*bLo)[0]) / static_cast<double>(nx - 1);
-            sy = ((*bHi)[1] - (*bLo)[1]) / static_cast<double>(ny - 1);
-            Contours2d g;
-            g.nx = nx + 2;
-            g.ny = ny + 2;
-            g.dx = sx;
-            g.dy = sy;
-            g.ox = (*bLo)[0] - sx;
-            g.oy = (*bLo)[1] - sy;
-            // Padded with a ring that is firmly OUTSIDE, so a contour meeting
-            // the box edge closes along it instead of running off. This is
-            // BOSL2's closed=true, and the only behaviour offered.
-            g.v.assign(g.nx * g.ny, -1.0);
-            for (size_t i = 0; i < nx; ++i)
-                for (size_t j = 0; j < ny; ++j)
-                    g.v[(j + 1) * g.nx + (i + 1)] = bandDistance((*plane)[i][j], isoLo, isoHi, invert);
-            const manifold::Polygons polys = marchingSquares(g);
-            if (polys.empty()) return {};
-            ColoredBody b;
-            b.section = clipToBounds(manifold::CrossSection(polys, manifold::CrossSection::FillRule::EvenOdd),
-                                      *bLo, *bHi);
-            if (b.section->IsEmpty()) return {};
-            std::vector<ColoredBody> out;
-            out.push_back(std::move(b));
-            return out;
+            px = plane->size();
+            py = (*plane)[0].size();
+            // Contoured on its own samples unless edge= asks for another
+            // spacing, as the 3D grid is marched; then re-sampled bilinearly.
+            const double gx = wx / static_cast<double>(px - 1), gy = wy / static_cast<double>(py - 1);
+            const auto same = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(a, b); };
+            ownSamples = ex <= 0.0 || (same(ex, gx) && same(ey, gy));
         }
-        // function(x,y): edge= gives the spacing, as in 3D
-        const double ex = edgeVec ? edgeV[0] : edge, ey = edgeVec ? edgeV[1] : edge;
-        nx = static_cast<size_t>(std::floor(((*bHi)[0] - (*bLo)[0]) / ex)) + 1;
-        ny = static_cast<size_t>(std::floor(((*bHi)[1] - (*bLo)[1]) / ey)) + 1;
+        // Counted from the array, not floor(width / spacing): rounding there
+        // could drop the last sample row.
+        const size_t nx = ownSamples ? px : static_cast<size_t>(std::floor(wx / ex)) + 1;
+        const size_t ny = ownSamples ? py : static_cast<size_t>(std::floor(wy / ey)) + 1;
         if (nx < 2 || ny < 2) {
             ev.warn("levelset(): edge is larger than the bounds", &node.position());
             return {};
         }
-        sx = ((*bHi)[0] - (*bLo)[0]) / static_cast<double>(nx - 1);
-        sy = ((*bHi)[1] - (*bLo)[1]) / static_cast<double>(ny - 1);
+        const double sx = wx / static_cast<double>(nx - 1), sy = wy / static_cast<double>(ny - 1);
+        // The plane at a point between its samples. Clamped at the edges,
+        // like the 3D grid sampler, so the clip below cuts a clean line.
+        const auto bilinear = [&](double x, double y) {
+            const auto cell = [](double u, size_t n, size_t& i0) {
+                i0 = static_cast<size_t>(std::clamp(std::floor(u), 0.0, static_cast<double>(n - 2)));
+                return std::clamp(u - static_cast<double>(i0), 0.0, 1.0);
+            };
+            size_t i, j;
+            const double tx = cell((x - x0) / wx * static_cast<double>(px - 1), px, i);
+            const double ty = cell((y - y0) / wy * static_cast<double>(py - 1), py, j);
+            const auto& p = *plane;
+            return (1 - tx) * ((1 - ty) * p[i][j] + ty * p[i][j + 1])
+                 + tx * ((1 - ty) * p[i + 1][j] + ty * p[i + 1][j + 1]);
+        };
         Contours2d g;
         g.nx = nx + 2;
         g.ny = ny + 2;
         g.dx = sx;
         g.dy = sy;
-        g.ox = (*bLo)[0] - sx;
-        g.oy = (*bLo)[1] - sy;
+        g.ox = x0 - sx;
+        g.oy = y0 - sy;
+        // Padded with a ring that is firmly OUTSIDE, so a contour meeting
+        // the box edge closes along it instead of running off. This is
+        // BOSL2's closed=true, and the only behaviour offered.
         g.v.assign(g.nx * g.ny, -1.0);
         for (size_t i = 0; i < nx; ++i) {
             for (size_t j = 0; j < ny; ++j) {
-                BoundArgs bound;
-                bound.set(fnParams2[0], Value{(*bLo)[0] + static_cast<double>(i) * sx});
-                bound.set(fnParams2[1], Value{(*bLo)[1] + static_cast<double>(j) * sy});
-                const Value outv =
-                    ev.evalFunctionLiteralFromBound(**fieldFn, std::move(bound), *fnCtx, &node.position());
-                const double val = fieldSample(outv).value_or(std::numeric_limits<double>::max());
+                const double x = x0 + static_cast<double>(i) * sx, y = y0 + static_cast<double>(j) * sy;
+                double val;
+                if (ownSamples) {
+                    val = (*plane)[i][j];
+                } else if (plane) {
+                    val = bilinear(x, y);
+                } else {
+                    BoundArgs bound;
+                    bound.set(fnParams2[0], Value{x});
+                    bound.set(fnParams2[1], Value{y});
+                    const Value outv =
+                        ev.evalFunctionLiteralFromBound(**fieldFn, std::move(bound), *fnCtx, &node.position());
+                    val = fieldSample(outv).value_or(std::numeric_limits<double>::max());
+                }
                 g.v[(j + 1) * g.nx + (i + 1)] = bandDistance(val, isoLo, isoHi, invert);
             }
         }
