@@ -7,6 +7,7 @@
 #include <manifold/polygon.h>
 
 #include <algorithm>
+#include <utility>
 
 namespace oscadeval {
 
@@ -689,6 +690,44 @@ std::optional<double> fieldSample(const Value& item) {
     return std::clamp(*d, -kHuge, kHuge);
 }
 
+// bounds for a field ARRAY given edge= and no bounds (#749 on BelfrySCAD):
+// the samples edge apart, centred on the origin, as BOSL2's isosurface()
+// places an array given voxel_size. The array's depth (field[i][j] or
+// field[i][j][k]) says 2D or 3D; the sizes come from its first row, and
+// readField/readPlane check the rest later. nullopt when edge is missing
+// or does not fit, leaving the caller's "bounds must be ..." warning.
+std::optional<std::pair<std::vector<double>, std::vector<double>>>
+boundsFromEdge(const Value& field, const Value& edge) {
+    std::vector<size_t> dims;
+    for (const Value* cur = &field; dims.size() < 3;) {
+        const ListPtr* l = std::get_if<ListPtr>(cur);
+        if (!l || !*l || (*l)->items.empty()) break;
+        dims.push_back((*l)->items.size());
+        cur = &(*l)->items[0];
+    }
+    if (dims.size() < 2) return std::nullopt;
+    std::vector<double> step;
+    if (const double* e = std::get_if<double>(&edge)) {
+        step.assign(dims.size(), *e);
+    } else if (const ListPtr* l = std::get_if<ListPtr>(&edge); l && *l && (*l)->items.size() == dims.size()) {
+        for (const Value& item : (*l)->items) {
+            const double* d = std::get_if<double>(&item);
+            if (!d) return std::nullopt;
+            step.push_back(*d);
+        }
+    } else {
+        return std::nullopt;
+    }
+    std::vector<double> lo, hi;
+    for (size_t a = 0; a < dims.size(); ++a) {
+        if (!std::isfinite(step[a]) || step[a] <= 0.0 || dims[a] < 2) return std::nullopt;
+        const double half = 0.5 * step[a] * static_cast<double>(dims[a] - 1);
+        lo.push_back(-half);
+        hi.push_back(half);
+    }
+    return std::make_pair(lo, hi);
+}
+
 struct ScalarField {
     std::vector<double> v;      // flat, x fastest
     size_t nx = 0, ny = 0, nz = 0;
@@ -1108,12 +1147,20 @@ std::vector<ColoredBody> generateLevelSet(Evaluator& ev, const CSGParams& params
     // matches how the caller already has to think about the box.
     const ListPtr* bb = std::get_if<ListPtr>(&params.at("bounds"));
     std::optional<std::vector<double>> bLo, bHi;
+    const bool noBounds = std::holds_alternative<std::monostate>(params.at("bounds"));
     if (bb && *bb && (*bb)->items.size() == 2) {
         bLo = numbersOrInf((*bb)->items[0]);
         bHi = numbersOrInf((*bb)->items[1]);
+    } else if (noBounds && !fieldFn) {
+        if (const auto inferred = boundsFromEdge(fieldArg, params.at("edge"))) {
+            bLo = inferred->first;
+            bHi = inferred->second;
+        }
     }
     if (!bLo || !bHi || bLo->size() != bHi->size() || (bLo->size() != 2 && bLo->size() != 3)) {
-        ev.warn("levelset(): bounds must be [[x0,y0],[x1,y1]] or [[x0,y0,z0],[x1,y1,z1]]",
+        ev.warn(noBounds && !fieldFn
+                    ? "levelset(): a field array needs bounds=, or edge= (its sample spacing) to place it"
+                    : "levelset(): bounds must be [[x0,y0],[x1,y1]] or [[x0,y0,z0],[x1,y1,z1]]",
                 &node.position());
         return {};
     }
