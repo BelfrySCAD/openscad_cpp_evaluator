@@ -6,6 +6,8 @@
 
 #include <manifold/polygon.h>
 
+#include <algorithm>
+
 namespace oscadeval {
 
 // simplify()'s default tolerance, as a fraction of the body's bounding-box
