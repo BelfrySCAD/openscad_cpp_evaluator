@@ -1444,11 +1444,15 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     ++f.pc;
                     break;
                 }
+                case Op::SetLastIfTaken:
+                    ev.lastIfTaken = ins.a != 0;
+                    ++f.pc;
+                    break;
                 case Op::CsgGroupEnd: {
                     PendingCsgWrap& pending = f.csgWrapStack.back();
                     const size_t after = ev.treeStack_.back().size();
                     pending.groupSizes.push_back(Value{static_cast<double>(after - pending.groupStartSize)});
-                    pending.emptyIsAGroup.push_back(Value{(ins.a & 1) != 0});
+                    pending.emptyIsAGroup.push_back(Value{(ins.a & 1) != 0 || ((ins.a & 4) != 0 && ev.lastIfTaken)});
                     pending.backgroundStmt.push_back(Value{(ins.a & 2) != 0});
                     ++f.pc;
                     break;

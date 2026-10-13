@@ -228,6 +228,11 @@ public:
     // contributed by comparing this before/after evaluating just that one
     // statement.
     size_t currentTreeFrameSize() const { return treeStack_.back().size(); }
+    // Whether the last `if` (no else) to finish took its branch. Written as
+    // the statement ENDS, so after evaluating an outer `if` it describes
+    // that one and not an `if` nested inside it. Read by the CSG operand
+    // rule (emptyStatementIsAnOperand), which is its only reason to exist.
+    bool lastIfTaken = false;
 
 
     // Generate pass: walks `tree` bottom-up (children before their own

@@ -406,8 +406,13 @@ enum class Op {
     // for an attachable()-style multi-body operand) and appends it, as a
     // Value, onto csgWrapStack.back().groupSizes -- exactly one entry per
     // top-level geometry statement, in source order, mirroring resolveCsg's
-    // own `groupSizes.push_back(Value{...})` loop.
+    // own `groupSizes.push_back(Value{...})` loop. Bit 4 of `a`: the statement is an `if` (no else), an operand
+    // exactly when it took its branch, read from ev.lastIfTaken.
     CsgGroupEnd,
+
+    // Sets ev.lastIfTaken = (a != 0) as an `if` (no else) finishes. See
+    // Evaluator::lastIfTaken.
+    SetLastIfTaken,
 
     // One `children(..., separate=true)` statement inside a CSG bracket.
     // `a` interns the ModularCall in nativeStatements.
