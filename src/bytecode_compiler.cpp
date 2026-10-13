@@ -1480,9 +1480,11 @@ public:
             compileStatementList(std::vector<const oscad::ASTNode*>{geoNode}, out);
             // `a` = whether a group that turns out EMPTY is still an
             // operand. See emptyStatementIsAnOperand (booleans.cpp).
-            // and bit 2 = it is a `%` statement, never an operand at all.
+            // and bit 2 = it is a `%` statement, never an operand at all,
+            // and bit 4 = an `if`, decided at run time.
             const int flags = (emptyStatementIsAnOperand(*geoNode) ? 1 : 0) |
-                              (geoNode->kind() == oscad::NodeKind::ModularModifierBackground ? 2 : 0);
+                              (geoNode->kind() == oscad::NodeKind::ModularModifierBackground ? 2 : 0) |
+                              (geoNode->kind() == oscad::NodeKind::ModularIf ? 4 : 0);
             out.push_back({Op::CsgGroupEnd, flags, 0, nullptr});
         }
     }
@@ -1794,7 +1796,12 @@ public:
                 out.push_back({Op::OpenLetScope, 0, 0, nullptr});
                 compileStatementList(n.trueBranch, out);
                 out.push_back({Op::CloseExprScope, 0, 0, nullptr});
+                out.push_back({Op::SetLastIfTaken, 1, 0, nullptr});
+                const int jumpEndIdx = static_cast<int>(out.size());
+                out.push_back({Op::Jump, 0, 0, nullptr});
                 out[static_cast<size_t>(jumpFalseIdx)].b = static_cast<int>(out.size());
+                out.push_back({Op::SetLastIfTaken, 0, 0, nullptr});
+                out[static_cast<size_t>(jumpEndIdx)].a = static_cast<int>(out.size());
                 return;
             }
             case NodeKind::ModularIfElse: {

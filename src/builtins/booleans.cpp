@@ -97,7 +97,12 @@ bool emptyStatementIsAnOperand(const oscad::ASTNode& stmt) {
     const oscad::NodeKind k = stmt.kind();
     return k == oscad::NodeKind::ModularCall || k == oscad::NodeKind::ModularFor ||
            k == oscad::NodeKind::ModularIntersectionFor || k == oscad::NodeKind::ModularLet ||
-           k == oscad::NodeKind::ModularModifierShowOnly || k == oscad::NodeKind::ModularModifierHighlight;
+           k == oscad::NodeKind::ModularModifierShowOnly || k == oscad::NodeKind::ModularModifierHighlight ||
+           k == oscad::NodeKind::ModularIfElse;
+}
+
+bool emptyStatementIsAnOperand(const oscad::ASTNode& stmt, bool ifTaken) {
+    return emptyStatementIsAnOperand(stmt) || (stmt.kind() == oscad::NodeKind::ModularIf && ifTaken);
 }
 
 CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
@@ -140,16 +145,20 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
         //
         // The reference builds a node for a module instantiation and for a
         // loop whatever they contain, so an empty one is an empty operand
-        // and annihilates an intersection. An `if` that takes no branch, a
-        // bare block, and a `*`-disabled statement build no node at all, so
-        // they are not operands and must be skipped.
+        // and annihilates an intersection. So does an `if` that TAKES a
+        // branch, even one that draws nothing -- `if (true) {}` empties an
+        // intersection, and so does BOSL2's partition() when its child
+        // draws only one half (`if ($children>0) children();`). An `if`
+        // that takes no branch, a bare block, and a `*`-disabled statement
+        // build no node at all, so they are not operands and must be
+        // skipped. An if/else always takes one.
         //
         // Every line of this was checked against OpenSCAD rather than
         // reasoned about -- `intersection(){ cube(10); X; }` keeps the cube
         // for `if(false) sphere(6)`, `{ }` and `*cube(1)`, and comes out
         // empty for `for(i=[1:0]) sphere(6)`, `union(){}`, `group(){}` and
         // a call to an empty user module.
-        emptyIsAGroup.push_back(Value{emptyStatementIsAnOperand(*geoNode)});
+        emptyIsAGroup.push_back(Value{emptyStatementIsAnOperand(*geoNode, ev.lastIfTaken)});
         backgroundStmt.push_back(Value{geoNode->kind() == oscad::NodeKind::ModularModifierBackground});
     }
 

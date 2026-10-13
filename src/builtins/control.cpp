@@ -138,7 +138,7 @@ CSGParams resolveIntersectionFor(Evaluator& ev, const oscad::ModularIntersection
                 const size_t before = ev.currentTreeFrameSize();
                 ev.evalChildren(std::vector<const oscad::ASTNode*>{stmt}, parentCtx);
                 groupSizes.push_back(Value{static_cast<double>(ev.currentTreeFrameSize() - before)});
-                emptyIsAGroup.push_back(Value{emptyStatementIsAnOperand(*stmt)});
+                emptyIsAGroup.push_back(Value{emptyStatementIsAnOperand(*stmt, ev.lastIfTaken)});
                 backgroundStmt.push_back(Value{stmt->kind() == oscad::NodeKind::ModularModifierBackground});
             }
             return;

@@ -264,6 +264,8 @@ std::vector<ColoredBody> generateSurface(Evaluator& ev, const CSGParams& params,
 // Whether a statement that produced no geometry still counts as a boolean
 // operand (and so empties an intersection) -- see resolveCsg.
 bool emptyStatementIsAnOperand(const oscad::ASTNode& stmt);
+// The same, for a statement just evaluated: `ifTaken` is ev.lastIfTaken.
+bool emptyStatementIsAnOperand(const oscad::ASTNode& stmt, bool ifTaken);
 
 // OpenSCAD's sin_degrees/cos_degrees/tan_degrees/atan2_degrees: exact at
 // multiples of 30 and 45 degrees.

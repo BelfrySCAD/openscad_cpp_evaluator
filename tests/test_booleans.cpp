@@ -11,6 +11,14 @@
 using namespace oscadeval;
 using namespace oscadeval::test;
 
+namespace {
+class ScopedVm {
+public:
+    explicit ScopedVm(bool enabled) { Evaluator::setBytecodeVmEnabledForTesting(enabled); }
+    ~ScopedVm() { Evaluator::setBytecodeVmEnabledForTesting(std::nullopt); }
+};
+} // namespace
+
 // -- difference / intersection -------------------------------------------
 
 TEST(Difference, SubtractsInnerCubeVolume) {
@@ -66,10 +74,17 @@ TEST(Intersection, EmptyStatementsFollowTheReferenceExactly) {
     // falls out: a module instantiation or a loop builds a node whatever it
     // contains, so an empty one is an empty operand and annihilates; an
     // `if` with no branch taken, a bare block and a `*`-disabled statement
-    // build no node at all and are not operands.
+    // build no node at all and are not operands. An `if` that takes a
+    // branch is one, whatever the branch draws.
     struct Case { const char* stmt; bool keepsTheCube; };
     const Case cases[] = {
         {"if (false) sphere(6);",            true},
+        {"if (true) { }",                    false},
+        {"if (true) if (false) sphere(6);",  false},
+        {"if (true) { x = 1; }",             false},
+        {"if (false) sphere(6); else { }",   false},
+        {"if (false) sphere(6); else if (false) sphere(6);", false},
+        {"{ if (false) sphere(6); }",        true},
         {"{ }",                              true},
         {"*cube(1);",                        true},
         {"for (i = [1:0]) sphere(6);",       false},
@@ -78,9 +93,16 @@ TEST(Intersection, EmptyStatementsFollowTheReferenceExactly) {
         {"let(x = 1) { }",                   false},
         {"#union() { }",                     false},
     };
+    // Each at top level and inside a module body, under both the
+    // interpreter and the VM, which decide an `if` separately.
+    for (const bool vm : {false, true})
+    for (const char* wrap : {"%s", "module w() { %s } w();"})
     for (const Case& c : cases) {
-        const std::string src =
+        ScopedVm scoped(vm);
+        const std::string inner =
             std::string("intersection() { cube(10, center=true); ") + c.stmt + " }";
+        std::string src = wrap;
+        src.replace(src.find("%s"), 2, inner);
         Evaluated e = evalSrc(src);
         if (c.keepsTheCube) {
             ASSERT_EQ(e.bodies.size(), 1u) << src;
@@ -91,6 +113,24 @@ TEST(Intersection, EmptyStatementsFollowTheReferenceExactly) {
                 [](const ColoredBody& b) { return b.body && !b.body->IsEmpty(); });
             EXPECT_FALSE(anyVolume) << src;
         }
+    }
+}
+
+TEST(Intersection, BOSL2PartitionShowsOnlyTheHalfItsChildDraws) {
+    // partition()'s own shape: `intersection() { if ($children>0)
+    // children(); mask }`, once per half. A child drawing nothing for one
+    // half must empty that half, not leave its mask behind -- which is what
+    // `partition() if ($idx==0) cylinder(...)` drew. Verified against
+    // OpenSCAD: only the cube's own volume.
+    for (const bool vm : {false, true}) {
+        ScopedVm scoped(vm);
+        Evaluated e = evalSrc(
+            "module m() { intersection() { if ($children > 0) children(); cube(10); } }"
+            "m() if (false) sphere(5);");
+        const bool anyVolume = std::any_of(
+            e.bodies.begin(), e.bodies.end(),
+            [](const ColoredBody& b) { return b.body && !b.body->IsEmpty(); });
+        EXPECT_FALSE(anyVolume) << "vm=" << vm;
     }
 }
 

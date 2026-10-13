@@ -279,12 +279,14 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
         // `_check_debug(branch[0] if branch else node, ctx, expr_level=True)`.
         case oscad::NodeKind::ModularIf: {
             auto& n = static_cast<const oscad::ModularIf&>(node);
-            if (truthy(evalExprMaybeCompiled(*n.condition, ctx))) {
+            const bool taken = truthy(evalExprMaybeCompiled(*n.condition, ctx));
+            if (taken) {
                 checkDebug(n.trueBranch.empty() ? node : *n.trueBranch.front(), ctx, /*forced=*/false,
                             /*exprLevel=*/true);
                 EvalContext branchCtx = blockScope(ctx);
                 evalChildren(n.trueBranch, branchCtx);
             }
+            lastIfTaken = taken;
             return;
         }
         case oscad::NodeKind::ModularIfElse: {
