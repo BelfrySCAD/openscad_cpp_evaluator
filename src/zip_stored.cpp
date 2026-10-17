@@ -52,6 +52,7 @@ uint16_t readU16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] <
 uint32_t readU32(const uint8_t* p) {
     return static_cast<uint32_t>(p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24));
 }
+uint64_t readU64(const uint8_t* p) { return readU32(p) | (static_cast<uint64_t>(readU32(p + 4)) << 32); }
 
 // A fixed, valid DOS date/time (2020-01-01 00:00:00) -- the exact instant
 // doesn't matter for a generated 3MF, just that it's a well-formed DOS
@@ -156,9 +157,9 @@ void writeZipEntries(const std::string& path, const std::vector<PlacedEntry>& en
 struct CentralDirEntry {
     std::string name;
     uint16_t method;
-    uint32_t compressedSize;
-    uint32_t uncompressedSize;
-    uint32_t localHeaderOffset;
+    uint64_t compressedSize;
+    uint64_t uncompressedSize;
+    uint64_t localHeaderOffset;
 };
 
 std::vector<uint8_t> readWholeFile(const std::string& path) {
@@ -189,25 +190,57 @@ std::vector<CentralDirEntry> parseCentralDirectory(const std::vector<uint8_t>& f
     }
     if (eocd == std::string::npos) throw std::runtime_error("'" + path + "' is not a valid ZIP archive (no EOCD)");
 
-    const uint16_t entryCount = readU16(&file[eocd + 10]);
-    const uint32_t cdOffset = readU32(&file[eocd + 16]);
+    uint64_t entryCount = readU16(&file[eocd + 10]);
+    uint64_t cdOffset = readU32(&file[eocd + 16]);
+    // ZIP64: a field too big for the classic record is all ones, and the
+    // real value is in the ZIP64 end record the locator just before it
+    // points to. lib3mf -- behind OpenSCAD's and most slicers' 3MF export --
+    // writes one even for a tiny file, so without this nearly every 3MF
+    // read as "corrupt central directory offset" (BelfrySCAD #800).
+    if ((entryCount == 0xFFFFu || cdOffset == 0xFFFFFFFFu) && eocd >= 20 &&
+        readU32(&file[eocd - 20]) == 0x07064b50u) {
+        const uint64_t z64 = readU64(&file[eocd - 20 + 8]);
+        if (z64 + 56 > file.size() || readU32(&file[z64]) != 0x06064b50u) {
+            throw std::runtime_error("'" + path + "': corrupt ZIP64 end of central directory");
+        }
+        entryCount = readU64(&file[z64 + 32]);
+        cdOffset = readU64(&file[z64 + 48]);
+    }
     if (cdOffset >= file.size()) throw std::runtime_error("'" + path + "': corrupt central directory offset");
 
     std::vector<CentralDirEntry> entries;
     size_t p = cdOffset;
-    for (uint16_t i = 0; i < entryCount; ++i) {
+    for (uint64_t i = 0; i < entryCount; ++i) {
         if (p + 46 > file.size() || readU32(&file[p]) != 0x02014b50u) {
             throw std::runtime_error("'" + path + "': corrupt central directory entry");
         }
         const uint16_t method = readU16(&file[p + 10]);
-        const uint32_t compressedSize = readU32(&file[p + 20]);
-        const uint32_t uncompressedSize = readU32(&file[p + 24]);
+        uint64_t compressedSize = readU32(&file[p + 20]);
+        uint64_t uncompressedSize = readU32(&file[p + 24]);
         const uint16_t nameLen = readU16(&file[p + 28]);
         const uint16_t extraLen = readU16(&file[p + 30]);
         const uint16_t commentLen = readU16(&file[p + 32]);
-        const uint32_t localHeaderOffset = readU32(&file[p + 42]);
-        if (p + 46 + nameLen > file.size()) throw std::runtime_error("'" + path + "': corrupt central directory entry name");
+        uint64_t localHeaderOffset = readU32(&file[p + 42]);
+        if (p + 46 + nameLen + extraLen > file.size()) throw std::runtime_error("'" + path + "': corrupt central directory entry name");
         std::string name(reinterpret_cast<const char*>(&file[p + 46]), nameLen);
+        // A ZIP64 extra field (id 1) holds, in this order, only the values
+        // whose 32-bit field above is all ones.
+        for (size_t x = p + 46 + nameLen, xEnd = x + extraLen; x + 4 <= xEnd;) {
+            const uint16_t id = readU16(&file[x]);
+            const uint16_t len = readU16(&file[x + 2]);
+            size_t q = x + 4;
+            const size_t qEnd = std::min<size_t>(q + len, xEnd);
+            if (id == 0x0001u) {
+                for (uint64_t* v : {&uncompressedSize, &compressedSize, &localHeaderOffset}) {
+                    if (*v != 0xFFFFFFFFu) continue;
+                    if (q + 8 > qEnd) throw std::runtime_error("'" + path + "': corrupt ZIP64 extra field");
+                    *v = readU64(&file[q]);
+                    q += 8;
+                }
+                break;
+            }
+            x = q + len;
+        }
         entries.push_back(CentralDirEntry{std::move(name), method, compressedSize, uncompressedSize, localHeaderOffset});
         p += 46 + nameLen + extraLen + commentLen;
     }
