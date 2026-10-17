@@ -253,3 +253,90 @@ TEST(ZipStored, StoredZipWritesMethod0) {
     EXPECT_EQ(centralDirMethodBySuffix(path.string(), "3dmodel.model"), 0);
     std::filesystem::remove(path);
 }
+
+TEST(ZipStored, ReadsZip64Archive) {
+    // The shape lib3mf writes (BelfrySCAD #800): every size and offset in the
+    // central directory and classic end record all ones, the real values in a
+    // ZIP64 extra field and a ZIP64 end record found through its locator.
+    const std::string name = "3D/3dmodel.model";
+    const std::string content = "zip64 payload";
+    std::vector<uint8_t> out;
+
+    putLE<uint32_t>(out, 0x04034b50u);
+    putLE<uint16_t>(out, 45);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint32_t>(out, 0);
+    putLE<uint32_t>(out, static_cast<uint32_t>(content.size()));
+    putLE<uint32_t>(out, static_cast<uint32_t>(content.size()));
+    putLE<uint16_t>(out, static_cast<uint16_t>(name.size()));
+    putLE<uint16_t>(out, 0);
+    out.insert(out.end(), name.begin(), name.end());
+    out.insert(out.end(), content.begin(), content.end());
+
+    const uint64_t cdStart = out.size();
+    putLE<uint32_t>(out, 0x02014b50u);
+    putLE<uint16_t>(out, 45);
+    putLE<uint16_t>(out, 45);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint32_t>(out, 0);
+    putLE<uint32_t>(out, 0xFFFFFFFFu);
+    putLE<uint32_t>(out, 0xFFFFFFFFu);
+    putLE<uint16_t>(out, static_cast<uint16_t>(name.size()));
+    putLE<uint16_t>(out, 4 + 24 + 4 + 4); // an unrelated field first, then ZIP64
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint32_t>(out, 0);
+    putLE<uint32_t>(out, 0xFFFFFFFFu);
+    out.insert(out.end(), name.begin(), name.end());
+    putLE<uint16_t>(out, 0x5455);
+    putLE<uint16_t>(out, 4);
+    putLE<uint32_t>(out, 0);
+    putLE<uint16_t>(out, 0x0001);
+    putLE<uint16_t>(out, 24);
+    putLE<uint64_t>(out, content.size());
+    putLE<uint64_t>(out, content.size());
+    putLE<uint64_t>(out, 0);
+    const uint64_t cdSize = out.size() - cdStart;
+
+    const uint64_t z64 = out.size();
+    putLE<uint32_t>(out, 0x06064b50u);
+    putLE<uint64_t>(out, 44);
+    putLE<uint16_t>(out, 45);
+    putLE<uint16_t>(out, 45);
+    putLE<uint32_t>(out, 0);
+    putLE<uint32_t>(out, 0);
+    putLE<uint64_t>(out, 1);
+    putLE<uint64_t>(out, 1);
+    putLE<uint64_t>(out, cdSize);
+    putLE<uint64_t>(out, cdStart);
+
+    putLE<uint32_t>(out, 0x07064b50u);
+    putLE<uint32_t>(out, 0);
+    putLE<uint64_t>(out, z64);
+    putLE<uint32_t>(out, 1);
+
+    putLE<uint32_t>(out, 0x06054b50u);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0);
+    putLE<uint16_t>(out, 0xFFFF);
+    putLE<uint16_t>(out, 0xFFFF);
+    putLE<uint32_t>(out, 0xFFFFFFFFu);
+    putLE<uint32_t>(out, 0xFFFFFFFFu);
+    putLE<uint16_t>(out, 0);
+
+    const auto path = tempPath("zip64.zip");
+    {
+        std::ofstream f(path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    }
+    const std::vector<uint8_t> read = readStoredZipEntry(path.string(), name);
+    EXPECT_EQ(std::string(read.begin(), read.end()), content);
+    std::filesystem::remove(path);
+}
