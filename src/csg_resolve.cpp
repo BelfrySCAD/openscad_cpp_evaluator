@@ -247,6 +247,7 @@ std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTreeImpl(const NodeList&
     stmtExprChunkCache_.clear();
     assignBlockChunkCache_.clear();
     childrenListChunkCache_.clear();
+    mergedListCache_.clear();
     ResolvePassGuard resolvePassGuard(inResolvePass_);
     evalChildren(nodes, ctx);
     std::vector<std::unique_ptr<CSGNode>> tree = std::move(treeStack_.back());

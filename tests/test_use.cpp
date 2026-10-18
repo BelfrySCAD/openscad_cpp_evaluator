@@ -173,3 +173,34 @@ TEST(UseStatement, MainFileGlobalReadFromFunctionIsStable) {
     EXPECT_EQ(echoed[2], "ECHO: undef");
     std::filesystem::remove(main);
 }
+
+// BelfrySCAD #809: OpenSCAD evaluates a reassigned variable at its FIRST
+// assignment with its LAST value, so a main file overriding an included
+// library's default changes everything the library derives from it -- the
+// standard way to configure a library. And it says nothing: overriding an
+// included file's variable is configuration, not a mistake. Expected values
+// and warnings checked against OpenSCAD 2026.02.01.
+TEST(IncludeReassignment, MainFileOverrideReachesValuesTheLibraryDerives) {
+    auto lib = writeFile("reassign_lib.scad", "x = 1;\ny = x * 10;\no = object(k = 5);\np = o.k;\n");
+    auto main = writeFile("reassign_main.scad", "include <" + lib.string() + ">\n"
+                                                 "x = 2;\no = object(k = 7);\necho(y = y, p = p);\n");
+    std::vector<std::string> out;
+    evalFile(main, [&](const std::string& m) { out.push_back(m); });
+    ASSERT_EQ(out.size(), 1u) << "no warnings: overriding an include is configuration";
+    EXPECT_EQ(out[0], "ECHO: y = 20, p = 7");
+    std::filesystem::remove(lib);
+    std::filesystem::remove(main);
+}
+
+TEST(IncludeReassignment, IncludeOverwritingTheMainFileWarnsNamingIt) {
+    auto lib = writeFile("reassign_lib2.scad", "a = 1;\n");
+    auto main = writeFile("reassign_main2.scad", "a = 2;\ninclude <" + lib.string() + ">\necho(a = a);\n");
+    std::vector<std::string> out;
+    evalFile(main, [&](const std::string& m) { out.push_back(m); });
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0], "WARNING: a was assigned on line 1 of " + main.filename().string() +
+                          " but was overwritten in file " + lib.string() + ", line 1");
+    EXPECT_EQ(out[1], "ECHO: a = 1");
+    std::filesystem::remove(lib);
+    std::filesystem::remove(main);
+}

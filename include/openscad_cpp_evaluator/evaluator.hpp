@@ -592,8 +592,11 @@ public:
         return false;
     }
     std::unordered_set<const oscad::StringLiteral*> undefinedEscapesWarned_;
+    // Warnings a chunk's compile found, given once it is built: undefined
+    // string escapes, and reassignments its statement lists merged.
     void warnUndefinedEscapes(const CompiledChunk& chunk) {
         for (const auto& [lit, n] : chunk.undefinedEscapeLiterals) warnUndefinedEscapes(*lit, n);
+        for (const Reassignment& r : chunk.reassignments) warnReassignment(r);
     }
     // Hands one already-formatted warning line to echoFn_, recording it in
     // warnCapture first when one is active. Every warning path goes through
@@ -1393,6 +1396,19 @@ private:
     };
     std::unordered_map<std::pair<const oscad::ASTNode*, size_t>, std::optional<CompiledChunk>, ChildrenListKeyHash>
         childrenListChunkCache_;
+    // A statement list with its reassignments merged (see
+    // mergedStatementList), or nullopt when it has none -- the common
+    // case, which then costs one lookup. Same key, same clearing, same
+    // dangling-pointer reasoning as childrenListChunkCache_ above.
+    std::unordered_map<std::pair<const oscad::ASTNode*, size_t>, std::optional<std::vector<const oscad::ASTNode*>>,
+                       ChildrenListKeyHash>
+        mergedListCache_;
+    // "origin:line:name" of each reassignment already warned about, so a
+    // cleared mergedListCache_ never warns twice. Strings, not node
+    // pointers: these outlive the ASTs the cache is cleared for.
+    std::unordered_set<std::string> warnedReassignments_;
+    const std::vector<const oscad::ASTNode*>& mergedStatementList(const std::vector<const oscad::ASTNode*>& children);
+    void warnReassignment(const Reassignment& r);
 
     // See stmtExprChunkCache_'s own doc comment, immediately above, for why
     // this exists. Not a reentrancy guard (resolveTreeImpl is never called
