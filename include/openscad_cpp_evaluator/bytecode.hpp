@@ -1,6 +1,7 @@
 #pragma once
 
 #include "openscad_cpp_evaluator/function_builtins.hpp"
+#include "openscad_cpp_evaluator/reassign.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
 
 #include "openscad_cpp_parser/ast/ast_node.hpp"
@@ -756,6 +757,9 @@ struct CompiledChunk {
     // with how many: the Evaluator warns for them once, when the chunk is
     // compiled (it has the warning channel; the compiler does not).
     std::vector<std::pair<const oscad::StringLiteral*, int>> undefinedEscapeLiterals;
+    // Reassignments merged in the statement lists compiled into this chunk
+    // (see mergeReassignments), warned about the same way.
+    std::vector<Reassignment> reassignments;
     struct Param {
         std::string name;
         int slot = 0; // unused when isDyn is true -- $-params are never slot-addressed

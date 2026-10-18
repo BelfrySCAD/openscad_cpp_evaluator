@@ -1,5 +1,6 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
 #include "openscad_cpp_evaluator/format_closure.hpp"
+#include "openscad_cpp_evaluator/reassign.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 
@@ -325,7 +326,37 @@ void Evaluator::evalStatement(const oscad::ASTNode& node, EvalContext& ctx) {
     }
 }
 
-void Evaluator::evalChildren(const std::vector<const oscad::ASTNode*>& children, EvalContext& ctx) {
+// A statement list inside a module body or a block, with its reassignments
+// merged (mergeReassignments, reassign.hpp). The top level of each file is
+// merged once before scopes are built (eval_use.cpp); these lists live in
+// shared, immutable ASTs, so they are merged here, as they are run, and
+// cached. The compiler merges the lists it compiles inline itself
+// (compileStatementList), so both paths agree.
+const std::vector<const oscad::ASTNode*>& Evaluator::mergedStatementList(
+    const std::vector<const oscad::ASTNode*>& children) {
+    if (children.size() < 2) return children;
+    const auto key = std::make_pair(children.front(), children.size());
+    auto it = mergedListCache_.find(key);
+    if (it == mergedListCache_.end()) {
+        std::vector<Reassignment> found;
+        it = mergedListCache_.emplace(key, mergeReassignments(children, &found)).first;
+        for (const Reassignment& r : found) warnReassignment(r);
+    }
+    return it->second ? *it->second : children;
+}
+
+void Evaluator::warnReassignment(const Reassignment& r) {
+    // A body is one file, so parser.y's rule reduces to: always warn (its
+    // same-line exemption is for one file included twice, which only the
+    // top level can see). Once per assignment however often its list is
+    // run or recompiled.
+    const std::string tag = r.here->origin + ":" + std::to_string(r.here->start_offset) + ":" + r.name;
+    if (!warnedReassignments_.insert(tag).second) return;
+    warn(r.name + " was assigned on line " + std::to_string(r.first->line) + " but was overwritten", r.here);
+}
+
+void Evaluator::evalChildren(const std::vector<const oscad::ASTNode*>& childrenIn, EvalContext& ctx) {
+    const std::vector<const oscad::ASTNode*>& children = mergedStatementList(childrenIn);
     // Whole-LIST compile first (see tryRunCompiledChildren's own doc
     // comment, evaluator.hpp) -- tries the FULL `children` as one chunk
     // before falling back to assignments-then-others below. This is what

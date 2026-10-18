@@ -1283,7 +1283,11 @@ public:
     // necessarily one this Compiler's own declaration owns) -- see
     // tryCompileChildrenList's own doc comment, below, for the entry point
     // that needs this shape directly.
-    void compileStatementList(const std::vector<const oscad::ASTNode*>& children, std::vector<Instruction>& out) {
+    void compileStatementList(const std::vector<const oscad::ASTNode*>& childrenIn, std::vector<Instruction>& out) {
+        // Reassignments merged first, as Evaluator::evalChildren does for the
+        // interpreted path: a list compiled inline here never reaches it.
+        const auto merged = mergeReassignments(childrenIn, &chunk_.reassignments);
+        const std::vector<const oscad::ASTNode*>& children = merged ? *merged : childrenIn;
         std::vector<const oscad::ASTNode*> assignments;
         std::vector<const oscad::ASTNode*> others;
         for (const oscad::ASTNode* c : children) {

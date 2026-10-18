@@ -1,7 +1,12 @@
 #include "openscad_cpp_evaluator/eval_use.hpp"
 
+#include "openscad_cpp_evaluator/eval_error.hpp"
+#include "openscad_cpp_evaluator/reassign.hpp"
 #include "openscad_cpp_parser/ast/declarations.hpp"
+#include "openscad_cpp_parser/ast/expression.hpp"
 
+#include <filesystem>
+#include <unordered_map>
 #include <utility>
 
 namespace oscadeval {
@@ -19,6 +24,55 @@ ResolvedUseScopes resolveUseScopes(const std::vector<std::unique_ptr<oscad::ASTN
 
 namespace {
 
+namespace fs = std::filesystem;
+
+std::string normalPath(const std::string& p) {
+    std::error_code ec;
+    fs::path abs = fs::absolute(fs::path(p), ec);
+    return (ec ? fs::path(p) : abs).lexically_normal().generic_string();
+}
+
+// Each file's top-level list, merged before any scope is built (see
+// mergeReassignments, reassign.hpp), so the interpreter, the compiled VM
+// and the scope tables all see one assignment per name. This is where an
+// include<>'d library's defaults meet the main file's overrides.
+//
+// Warnings follow parser.y's rules exactly. The deliberate silence is the
+// main file overriding an included file's variable: that is configuration,
+// not a mistake. Two different included files overriding each other are
+// silent too.
+std::vector<const oscad::ASTNode*> mergeTopLevel(const std::vector<const oscad::ASTNode*>& nodes,
+                                                 const std::string& mainFile,
+                                                 const std::function<void(const std::string&)>& logFn) {
+    std::vector<Reassignment> found;
+    auto merged = mergeReassignments(nodes, &found);
+    if (!merged) return nodes;
+    const std::string main = normalPath(mainFile);
+    for (const Reassignment& r : found) {
+        const std::string prevFile = normalPath(r.first->origin);
+        const std::string currFile = normalPath(r.here->origin);
+        std::string where;   // the file named in the message, if not the main one
+        bool warnIt = false;
+        if (prevFile == main && currFile == main) {
+            warnIt = true;
+        } else if (prevFile == currFile) {
+            warnIt = r.first->line != r.here->line;   // equal: one file included twice
+            where = prevFile;
+        } else if (prevFile == main) {
+            warnIt = true;   // the main file's value overwritten by an include
+            where = prevFile;
+        }
+        if (!warnIt || !logFn) continue;
+        std::string msg = r.name + " was assigned on line " + std::to_string(r.first->line);
+        if (!where.empty()) {
+            const fs::path rel = fs::path(where).lexically_relative(fs::path(main).parent_path());
+            msg += " of " + (rel.empty() ? where : rel.generic_string());
+        }
+        logFn(formatWarning(msg + " but was overwritten", r.here, {}));
+    }
+    return *merged;
+}
+
 // The recursion. `table` is threaded through every level rather than each
 // level building its own: `use <file>` gives each used file its own root
 // Scope, but one evaluation reads all of them back, so every node's scope
@@ -26,11 +80,13 @@ namespace {
 // could not see anything a nested resolution recorded -- every node of a
 // used file read back as having no scope, and `use` silently resolved to
 // undef. BelfrySCAD's own suite caught that; this repo's did not.
-ResolvedUseScopes resolveUseScopesInto(const std::vector<const oscad::ASTNode*>& ownNodes,
+ResolvedUseScopes resolveUseScopesInto(const std::vector<const oscad::ASTNode*>& ownNodesIn,
                                         const std::string& currentFile,
+                                        const std::string& mainFile,
                                         const std::function<void(const std::string&)>& logFn,
                                         oscad::ScopeTable& table) {
     ResolvedUseScopes result;
+    const std::vector<const oscad::ASTNode*> ownNodes = mergeTopLevel(ownNodesIn, mainFile, logFn);
 
     std::vector<const oscad::ASTNode*> injected;
     // Declarations pulled in from one used file, paired with that file's
@@ -70,7 +126,7 @@ ResolvedUseScopes resolveUseScopesInto(const std::vector<const oscad::ASTNode*>&
         std::vector<const oscad::ASTNode*> libBorrowed;
         libBorrowed.reserve(libAst.size());
         for (const auto& n : libAst) libBorrowed.push_back(n.get());
-        ResolvedUseScopes nested = resolveUseScopesInto(libBorrowed, lib.resolvedPath, logFn, table);
+        ResolvedUseScopes nested = resolveUseScopesInto(libBorrowed, lib.resolvedPath, mainFile, logFn, table);
 
         std::vector<const oscad::ASTNode*> libInjected;
         for (const oscad::ASTNode* n : nested.ownNodesFiltered) {
@@ -137,7 +193,7 @@ ResolvedUseScopes resolveUseScopes(const std::vector<const oscad::ASTNode*>& own
     // One table for the whole resolution, handed to the root scope at the
     // end so it lives exactly as long as the scopes it points into.
     auto table = std::make_unique<oscad::ScopeTable>();
-    ResolvedUseScopes result = resolveUseScopesInto(ownNodes, currentFile, logFn, *table);
+    ResolvedUseScopes result = resolveUseScopesInto(ownNodes, currentFile, currentFile, logFn, *table);
     if (result.rootScope) result.rootScope->adoptTable(std::move(table));
     return result;
 }
