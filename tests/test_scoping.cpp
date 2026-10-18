@@ -212,3 +212,18 @@ TEST(Scoping, ReassignedVariableTakesItsLastValueAtItsFirstPosition) {
     for (const auto& m : out) warnings += m.find("but was overwritten") != std::string::npos;
     EXPECT_EQ(warnings, 3u) << "one per reassignment, even though m() could run again";
 }
+
+// #815: BOSL2's attachable() runs its children by index, and children(N)
+// used to skip the child block's assignments, so `last` was unknown.
+TEST(Scoping, IndexedChildrenSeeTheirBlocksAssignments) {
+    std::vector<std::string> out;
+    evaluateSrc("module one() children(0);\n"
+                "module both() { children(1); children([0:1]); }\n"
+                "one() { n = 2; for (i = [0:n]) echo(a = i); }\n"
+                "both() { k = 3; echo(b = k); echo(c = k + 1); }\n",
+                [&](const std::string& m) { out.push_back(m); });
+    EXPECT_TRUE(anyContains(out, "ECHO: a = 2"));
+    EXPECT_TRUE(anyContains(out, "ECHO: b = 3"));
+    EXPECT_TRUE(anyContains(out, "ECHO: c = 4"));
+    EXPECT_FALSE(anyContains(out, "unknown variable"));
+}
