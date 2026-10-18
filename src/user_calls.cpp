@@ -1043,9 +1043,12 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
     // subsequent body-index lookup, so the Nth statement is evaluated
     // directly instead.
     std::vector<const oscad::ASTNode*> geoNodes;
+    std::vector<const oscad::ASTNode*> assignments;
     for (const oscad::ASTNode* c : *ctx.childrenNodes) {
-        if (c->kind() != oscad::NodeKind::Assignment && c->kind() != oscad::NodeKind::ModuleDeclaration &&
-            c->kind() != oscad::NodeKind::FunctionDeclaration) {
+        if (c->kind() == oscad::NodeKind::Assignment) {
+            assignments.push_back(c);
+        } else if (c->kind() != oscad::NodeKind::ModuleDeclaration &&
+                   c->kind() != oscad::NodeKind::FunctionDeclaration) {
             geoNodes.push_back(c);
         }
     }
@@ -1112,6 +1115,14 @@ std::optional<Evaluator::ChildrenForward> Evaluator::prepareChildrenForward(cons
         pickedIndices.push_back(static_cast<size_t>(idx));
     }
     if (picked.empty()) return std::nullopt;
+    // The picked statement runs in its block's scope, so the block's
+    // assignments must be in it: `m() { n = 2; for (i=[0:n]) ...; }` with
+    // `children(0)` in m() read n as unknown (#815, BOSL2's attachable()).
+    // evalChildren runs them into evalCtx's let_, which the picked
+    // statements' scopes share (withScope).
+    // ponytail: a children(i, separate=true) expansion prepares twice, so a
+    // side effect in one of these assignments (echo, rands) runs twice there.
+    if (!assignments.empty()) evalChildren(assignments, evalCtx);
     return ChildrenForward{std::move(evalCtx), std::move(picked), separate, std::move(pickedIndices)};
 }
 
