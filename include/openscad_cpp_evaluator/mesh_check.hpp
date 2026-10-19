@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -81,6 +82,19 @@ struct MeshRepairReport {
     // "welded 12 vertices, filled 1 hole (4 triangles)" -- empty if nothing.
     std::string summary() const;
 };
+
+// Weld points on a grid of `tolerance`: returns, for each point, the index
+// of the lowest-numbered point it welds to (itself if none). Points in one
+// grid cell weld, as rounding to the grid always did -- and so do points
+// within tolerance/32 of each other across a cell boundary, which rounding
+// alone splits however close they are: two copies of a vertex at x*1e6 ==
+// 10454062.5, a few ULPs apart, round to different cells (BelfrySCAD #832).
+// `data` holds `n` points, each starting `stride` values after the last.
+// A tolerance of 0 or less welds exact duplicates only.
+template <typename T>
+std::vector<size_t> weldPoints(const T* data, size_t n, size_t stride, double tolerance);
+extern template std::vector<size_t> weldPoints<float>(const float*, size_t, size_t, double);
+extern template std::vector<size_t> weldPoints<double>(const double*, size_t, size_t, double);
 
 //: Default welding tolerance: OpenSCAD's own GRID_FINE, 2^-20. Theirs is
 //: the constant their Grid.h uses to decide two points are one, so a mesh

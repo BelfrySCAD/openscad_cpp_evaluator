@@ -153,6 +153,23 @@ TEST(Polyhedron, TetrahedronVolumeMatchesAnalyticFormula) {
     EXPECT_NEAR(e.bodies[0].body->Volume(), 4.0 / 3.0, 1e-6);
 }
 
+// Two copies of a corner a few ULPs apart, either side of a weld-grid
+// boundary (x*1e6 == 0.5): rounding to the grid put them in different cells,
+// so the seam stayed open and a sound BOSL2 thread drew as an open surface
+// (BelfrySCAD #832). They weld now, and the solid is closed.
+TEST(Polyhedron, TwinVerticesStraddlingTheWeldGridStillWeld) {
+    std::vector<std::string> log;
+    Evaluated e = evalSrc("a = 5e-7 * (1 - 1e-12); b = 5e-7 * (1 + 1e-12);"
+                          "polyhedron("
+                          "points=[[a,0,0],[2,0,0],[0,2,0],[0,0,2],[b,0,0]], "
+                          "faces=[[0,1,2],[0,3,1],[4,2,3],[1,3,2]]);",
+                          [&](const std::string& m) { log.push_back(m); });
+    EXPECT_TRUE(log.empty()) << log[0];
+    ASSERT_TRUE(e.bodies[0].body.has_value());
+    EXPECT_EQ(e.bodies[0].body->Status(), manifold::Manifold::Error::NoError);
+    EXPECT_NEAR(e.bodies[0].body->Volume(), 4.0 / 3.0, 1e-5);
+}
+
 TEST(Polyhedron, MissingFacesWarnsAndDrawsNothing) {
     // Upstream builtin_polyhedron warns and draws nothing; the rest of the
     // script carries on (this used to stop the render).
