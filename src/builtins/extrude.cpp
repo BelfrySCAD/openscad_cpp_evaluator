@@ -478,7 +478,11 @@ std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
     const ColoredBody combined = combineBodies(bodies3d);
     manifold::CrossSection cs;
     if (std::get<bool>(params.at("cut"))) {
-        cs = manifold::CrossSection(combined.body->Slice(0.0), manifold::CrossSection::FillRule::EvenOdd);
+        // Positive, as OpenSCAD fills it. A self-overlapping polyhedron (a
+        // rope spool whose loops overlap, BelfrySCAD #831) slices to
+        // overlapping contours, and EvenOdd cut every overlap out as a hole.
+        // A clean solid slices the same either way.
+        cs = manifold::CrossSection(combined.body->Slice(0.0), manifold::CrossSection::FillRule::Positive);
     } else {
         const manifold::Polygons polys = combined.body->Project();
         cs = polys.empty() ? manifold::CrossSection() : manifold::CrossSection(polys, manifold::CrossSection::FillRule::Positive);

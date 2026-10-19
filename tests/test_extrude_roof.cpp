@@ -245,6 +245,21 @@ TEST(Projection, CutSlicesAtZEqualsZero) {
     EXPECT_TRUE(area < 1e-6 || std::fabs(area - 6.0) < 1e-6);
 }
 
+// One polyhedron holding two overlapping cube shells, as a self-overlapping
+// mesh like a tightly wound rope spool is (BelfrySCAD #831). Its slice is
+// the union of the two squares, as OpenSCAD fills it -- not the two squares
+// with their overlap cut out.
+TEST(Projection, CutFillsWhereAPolyhedronOverlapsItself) {
+    Evaluated e = evalSrc(
+        "function box(o) = [for (z=[-1,1], y=[0,2], x=[0,2]) [x+o, y, z]];"
+        "f = [[0,1,3,2],[4,6,7,5],[0,4,5,1],[2,3,7,6],[0,2,6,4],[1,5,7,3]];"
+        "projection(cut=true) polyhedron(concat(box(0), box(1)),"
+        "    concat([for (q=f) [for (i=q) i]], [for (q=f) [for (i=q) i+8]]));");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    ASSERT_TRUE(e.bodies[0].section.has_value());
+    EXPECT_NEAR(e.bodies[0].section->Area(), 6.0, 1e-6);
+}
+
 // -- offset -----------------------------------------------------------------
 
 TEST(Offset, RoundGrowsAreaBySquarePerimeterPlusCircleCorners) {
