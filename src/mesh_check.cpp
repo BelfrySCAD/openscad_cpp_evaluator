@@ -1,6 +1,8 @@
 #include "openscad_cpp_evaluator/mesh_check.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <cmath>
 #include <map>
 #include <set>
@@ -65,14 +67,9 @@ template <typename M>
 size_t countUnwelded(const M& m) {
     const size_t stride = m.numProp ? m.numProp : 3;
     const size_t n = stride ? m.vertProperties.size() / stride : 0;
-    std::map<std::tuple<long long, long long, long long>, size_t> seen;
+    const std::vector<size_t> rep = weldPoints(m.vertProperties.data(), n, stride, 1e-6);
     size_t extra = 0;
-    for (size_t v = 0; v < n; ++v) {
-        double p[3];
-        pos(m, static_cast<Vert>(v), p);
-        auto key = std::make_tuple(llround(p[0] * 1e6), llround(p[1] * 1e6), llround(p[2] * 1e6));
-        if (++seen[key] > 1) ++extra;
-    }
+    for (size_t v = 0; v < n; ++v) extra += rep[v] != v;
     return extra;
 }
 
@@ -312,45 +309,12 @@ template <typename M>
 std::vector<Vert> weldMap(const M& m, size_t& welded, double tolerance) {
     const size_t stride = m.numProp ? m.numProp : 3;
     const size_t n = stride ? m.vertProperties.size() / stride : 0;
+    const std::vector<size_t> rep = weldPoints(m.vertProperties.data(), n, stride, tolerance);
     std::vector<Vert> remap(n);
     welded = 0;
-
-    // Grid key plus the vertex it came from, sorted so that equal positions
-    // land in a run. This was a std::map keyed by the tuple -- one tree node
-    // per VERTEX, ~885,000 of them for a 295K-triangle import -- and sorting
-    // gets the same answer with one allocation. Sorting by (key, vertex)
-    // puts the LOWEST-numbered vertex first in its run, which is the one
-    // emplace() kept as the representative, so the remap is unchanged.
-    struct Keyed {
-        long long x, y, z;
-        Vert v;
-        bool operator<(const Keyed& o) const {
-            if (x != o.x) return x < o.x;
-            if (y != o.y) return y < o.y;
-            if (z != o.z) return z < o.z;
-            return v < o.v;
-        }
-        bool samePos(const Keyed& o) const { return x == o.x && y == o.y && z == o.z; }
-    };
-    // Snap to a grid of `tolerance`. Guarded because a caller can pass 0 or
-    // a negative to mean "weld only exact duplicates" -- dividing by that
-    // would give inf/NaN keys and weld the whole mesh into one point.
-    const double inv = tolerance > 0.0 ? 1.0 / tolerance : 0.0;
-    std::vector<Keyed> keyed;
-    keyed.reserve(n);
     for (size_t v = 0; v < n; ++v) {
-        double p[3];
-        pos(m, static_cast<Vert>(v), p);
-        keyed.push_back({llround(p[0] * inv), llround(p[1] * inv), llround(p[2] * inv),
-                         static_cast<Vert>(v)});
-    }
-    std::sort(keyed.begin(), keyed.end());
-    for (size_t i = 0; i < keyed.size();) {
-        size_t j = i + 1;
-        while (j < keyed.size() && keyed[j].samePos(keyed[i])) ++j;
-        for (size_t k = i; k < j; ++k) remap[keyed[k].v] = keyed[i].v;
-        welded += j - i - 1;
-        i = j;
+        remap[v] = static_cast<Vert>(rep[v]);
+        welded += rep[v] != v;
     }
     return remap;
 }
@@ -849,6 +813,93 @@ M stripSlivers(const M& mesh, SliverStripReport& report) {
 }
 
 
+template <typename T>
+std::vector<size_t> weldPoints(const T* data, size_t n, size_t stride, double tolerance) {
+    std::vector<size_t> parent(n);
+    for (size_t i = 0; i < n; ++i) parent[i] = i;
+    auto find = [&](size_t v) {
+        while (parent[v] != v) v = parent[v] = parent[parent[v]];
+        return v;
+    };
+    // The lower index stays the root, so each point maps to the lowest it welds to.
+    auto unite = [&](size_t a, size_t b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) parent[std::max(a, b)] = std::min(a, b);
+    };
+
+    // Grid key plus the point it came from, sorted so that one cell is a
+    // run. Sorting rather than a map: one allocation, not a tree or hash
+    // node per vertex (~885,000 of them for a 295K-triangle import).
+    struct Keyed {
+        int64_t k[3];
+        size_t v;
+        bool operator<(const Keyed& o) const {
+            for (int a = 0; a < 3; ++a)
+                if (k[a] != o.k[a]) return k[a] < o.k[a];
+            return v < o.v;
+        }
+    };
+    const bool exact = !(tolerance > 0.0);
+    const double inv = exact ? 0.0 : 1.0 / tolerance;
+    // How near a cell boundary a point must be to be compared with the
+    // next cell's points. Well above rounding noise, well below a grid
+    // step, and rare enough (~6% of points) to cost nothing.
+    constexpr double kNear = 1.0 / 64;
+    std::vector<Keyed> keyed(n);
+    std::vector<std::pair<size_t, std::array<int, 3>>> leaning;  // (point, which way per axis)
+    for (size_t i = 0; i < n; ++i) {
+        const T* p = data + i * stride;
+        std::array<int, 3> lean{};
+        for (int a = 0; a < 3; ++a) {
+            if (exact) {
+                const double c = static_cast<double>(p[a]) + 0.0;  // -0 and 0 are one position
+                std::memcpy(&keyed[i].k[a], &c, sizeof c);
+                continue;
+            }
+            const double s = p[a] * inv;
+            keyed[i].k[a] = std::llround(s);
+            const double f = s - static_cast<double>(keyed[i].k[a]);  // in [-0.5, 0.5]
+            lean[a] = f > 0.5 - kNear ? 1 : f < -0.5 + kNear ? -1 : 0;
+        }
+        keyed[i].v = i;
+        if (lean[0] || lean[1] || lean[2]) leaning.push_back({i, lean});
+    }
+    std::vector<Keyed> sorted = keyed;
+    std::sort(sorted.begin(), sorted.end());
+    for (size_t i = 1; i < n; ++i)
+        if (std::equal(sorted[i].k, sorted[i].k + 3, sorted[i - 1].k)) unite(sorted[i - 1].v, sorted[i].v);
+
+    // Across a boundary: each cell the point leans toward, by each subset
+    // of the axes it leans on, compared point by point.
+    const double reach = 2 * kNear * tolerance;
+    for (const auto& [i, lean] : leaning) {
+        const T* p = data + i * stride;
+        for (int mask = 1; mask < 8; ++mask) {
+            Keyed probe{{keyed[i].k[0], keyed[i].k[1], keyed[i].k[2]}, 0};
+            bool any = true;
+            for (int a = 0; a < 3; ++a) {
+                if (!(mask & (1 << a))) continue;
+                if (!lean[a]) { any = false; break; }
+                probe.k[a] += lean[a];
+            }
+            if (!any) continue;
+            for (auto it = std::lower_bound(sorted.begin(), sorted.end(), probe);
+                 it != sorted.end() && std::equal(it->k, it->k + 3, probe.k); ++it) {
+                const T* q = data + it->v * stride;
+                if (std::abs(p[0] - q[0]) <= reach && std::abs(p[1] - q[1]) <= reach
+                    && std::abs(p[2] - q[2]) <= reach)
+                    unite(i, it->v);
+            }
+        }
+    }
+
+    std::vector<size_t> rep(n);
+    for (size_t i = 0; i < n; ++i) rep[i] = find(i);
+    return rep;
+}
+
+
 // Instantiated for both precisions: MeshGL for the paths that are float by
 // nature (STL, the renderer), MeshGL64 wherever the caller still has its
 // real coordinates. Keeping the definitions in this file, rather than the
@@ -859,5 +910,7 @@ template manifold::MeshGL repairMesh<manifold::MeshGL>(const manifold::MeshGL&, 
 template manifold::MeshGL64 repairMesh<manifold::MeshGL64>(const manifold::MeshGL64&, MeshRepairReport&, double);
 template manifold::MeshGL stripSlivers<manifold::MeshGL>(const manifold::MeshGL&, SliverStripReport&);
 template manifold::MeshGL64 stripSlivers<manifold::MeshGL64>(const manifold::MeshGL64&, SliverStripReport&);
+template std::vector<size_t> weldPoints<float>(const float*, size_t, size_t, double);
+template std::vector<size_t> weldPoints<double>(const double*, size_t, size_t, double);
 
 }  // namespace oscadeval

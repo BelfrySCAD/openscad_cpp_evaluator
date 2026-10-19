@@ -889,21 +889,16 @@ CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalC
 
     std::vector<std::array<double, 3>> uniqueVerts;
     std::vector<size_t> remap(rawVerts.size());
-    std::map<std::array<int64_t, 3>, size_t> seen;
-    for (size_t i = 0; i < rawVerts.size(); ++i) {
-        const std::array<int64_t, 3> key = {
-            static_cast<int64_t>(std::llround(rawVerts[i][0] * 1e6)),
-            static_cast<int64_t>(std::llround(rawVerts[i][1] * 1e6)),
-            static_cast<int64_t>(std::llround(rawVerts[i][2] * 1e6)),
-        };
-        auto it = seen.find(key);
-        if (it != seen.end()) {
-            remap[i] = it->second;
-        } else {
-            const size_t newIdx = uniqueVerts.size();
-            uniqueVerts.push_back(rawVerts[i]);
-            seen[key] = newIdx;
-            remap[i] = newIdx;
+    {
+        const std::vector<size_t> rep =
+            weldPoints(rawVerts.empty() ? nullptr : rawVerts.front().data(), rawVerts.size(), 3, 1e-6);
+        for (size_t i = 0; i < rawVerts.size(); ++i) {
+            if (rep[i] == i) {
+                remap[i] = uniqueVerts.size();
+                uniqueVerts.push_back(rawVerts[i]);
+            } else {
+                remap[i] = remap[rep[i]];  // rep[i] < i, so already numbered
+            }
         }
     }
 
