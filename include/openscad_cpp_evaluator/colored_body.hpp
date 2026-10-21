@@ -132,6 +132,12 @@ struct ColoredBody {
     bool isDisplayOnly() const { return rawMesh.has_value(); }
 };
 
+// A `%` body or a `#` operand's ghost copy: drawn, never part of the model,
+// so an operation that consumes its children's geometry must skip it.
+inline bool isModifierGhost(const ColoredBody& b) {
+    return b.role == BodyRole::Background || b.role == BodyRole::HighlightGhost;
+}
+
 // The cached questions -- see ColoredBody::knownEmpty. Ask Manifold once per
 // body, never once per tree level.
 inline bool bodyIsEmpty(ColoredBody& b) {

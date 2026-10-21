@@ -260,6 +260,31 @@ TEST(Projection, CutFillsWhereAPolyhedronOverlapsItself) {
     EXPECT_NEAR(e.bodies[0].section->Area(), 6.0, 1e-6);
 }
 
+// A `#` operand is drawn again as a ghost and a `%` body is drawn but not
+// modelled; neither may reach the operation. Both leaked into projection()
+// and every 2D-consuming operation (BelfrySCAD #866): the ghost refilled
+// the cut-away corner and the `%` cube added its square.
+TEST(Projection, ModifierGhostsAreNotProjected) {
+    for (const char* src : {
+             "projection() difference() { cube([4,4,1]); #translate([-1,-1,-1]) cube(3); }",
+             "projection() union() { difference() { cube([4,4,1]); #translate([-1,-1,-1]) cube(3); }"
+             "  %translate([10,0,0]) cube(1); }"}) {
+        Evaluated e = evalSrc(src);
+        double area = 0;
+        for (const ColoredBody& b : e.bodies)
+            if (b.section) area += b.section->Area();
+        EXPECT_NEAR(area, 12.0, 1e-6) << src;
+    }
+}
+
+TEST(LinearExtrude, ModifierGhostsAreNotExtruded) {
+    Evaluated e = evalSrc("linear_extrude(1) difference() { square(4); #translate([-1,-1]) square(3); }");
+    double volume = 0;
+    for (const ColoredBody& b : e.bodies)
+        if (b.body) volume += b.body->Volume();
+    EXPECT_NEAR(volume, 12.0, 1e-6);
+}
+
 // -- offset -----------------------------------------------------------------
 
 TEST(Offset, RoundGrowsAreaBySquarePerimeterPlusCircleCorners) {
