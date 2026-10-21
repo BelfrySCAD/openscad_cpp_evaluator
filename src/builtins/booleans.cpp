@@ -64,11 +64,14 @@ RoleSplit splitByRole(const std::vector<ColoredBody>& bodies) {
 
 // Unions every 2D child into a single CrossSection; nullopt if there are no
 // 2D children at all. Mirrors _to_cross_section. Shared by
-// linear_extrude/rotate_extrude/roof (extrude.cpp, roof.cpp).
+// linear_extrude/rotate_extrude/offset/roof (extrude.cpp, roof.cpp).
+// A `%` body and a `#` operand's ghost copy are display aids, not model:
+// unioning them in filled a differenced-away notch back in (BelfrySCAD
+// #866). OpenSCAD shows neither under these operations, so they are dropped.
 std::optional<manifold::CrossSection> toCrossSection(const std::vector<ColoredBody>& bodies) {
     std::optional<manifold::CrossSection> cs;
     for (const ColoredBody& b : bodies) {
-        if (!b.section) continue;
+        if (!b.section || isModifierGhost(b)) continue;
         cs = cs ? (*cs + *b.section) : *b.section;
     }
     return cs;

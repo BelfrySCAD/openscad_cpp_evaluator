@@ -471,7 +471,9 @@ std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
     const std::vector<ColoredBody> bodies = flattenCsgTree(children);
     std::vector<ColoredBody> bodies3d;
     for (const ColoredBody& c : bodies) {
-        if (c.body) bodies3d.push_back(c);
+        // Not a `%` body or a `#` ghost: projecting them drew the
+        // differenced-away part's outline (BelfrySCAD #866). See toCrossSection.
+        if (c.body && !isModifierGhost(c)) bodies3d.push_back(c);
     }
     if (bodies3d.empty()) return {};
 
