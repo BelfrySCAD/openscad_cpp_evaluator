@@ -1,4 +1,5 @@
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/export.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
 
 #include "test_helpers.hpp"
@@ -73,7 +74,7 @@ TEST(MultiColorCsgMerge, DifferenceCutFaceGetsTheCutGreen) {
     const auto distinct = distinctColors(*e.bodies[0].triColors);
     EXPECT_EQ(distinct.size(), 3u);
     EXPECT_TRUE(std::any_of(distinct.begin(), distinct.end(), [](const auto& c) { return approxEqual(c, {0.0f, 1.0f, 1.0f, 0.5f}); }));
-    EXPECT_TRUE(std::any_of(distinct.begin(), distinct.end(), [](const auto& c) { return approxEqual(c, kCutFaceColor); }));
+    EXPECT_TRUE(std::any_of(distinct.begin(), distinct.end(), [](const auto& c) { return approxEqual(c, kThemeCutColor); }));
 }
 
 TEST(MultiColorCsgMerge, UncolouredMinuendCutByUncolouredToolStillShowsTheCut) {
@@ -83,6 +84,20 @@ TEST(MultiColorCsgMerge, UncolouredMinuendCutByUncolouredToolStillShowsTheCut) {
     ASSERT_EQ(e.bodies.size(), 1u);
     ASSERT_TRUE(e.bodies[0].triColors.has_value());
     const auto distinct = distinctColors(*e.bodies[0].triColors);
+    EXPECT_EQ(distinct.size(), 2u);
+    // Both are the theme stand-ins, not baked colours, so a renderer can
+    // draw them in its live theme rather than always yellow and green.
+    EXPECT_TRUE(std::any_of(distinct.begin(), distinct.end(), [](const auto& c) { return approxEqual(c, kThemeCutColor); }));
+    EXPECT_TRUE(std::any_of(distinct.begin(), distinct.end(), [](const auto& c) { return approxEqual(c, kThemeBodyColor); }));
+}
+
+TEST(MultiColorCsgMerge, ExportWritesRealColoursForTheThemeStandIns) {
+    // A file has no theme: the stand-ins are written as the colours they
+    // replaced, so exports are unchanged.
+    Evaluated e = evalSrc("difference() { cube(10); translate([5,5,-1]) cylinder(h=12, d=6, $fn=16); }");
+    const std::vector<ExportObject> objs = splitBodiesForExport(e.bodies, nullptr, false, true);
+    ASSERT_EQ(objs.size(), 1u);
+    const auto distinct = distinctColors(objs[0].triColors);
     EXPECT_EQ(distinct.size(), 2u);
     EXPECT_TRUE(std::any_of(distinct.begin(), distinct.end(), [](const auto& c) { return approxEqual(c, kCutFaceColor); }));
     EXPECT_TRUE(std::any_of(distinct.begin(), distinct.end(), [](const auto& c) { return approxEqual(c, kDefaultGeometryColor); }));

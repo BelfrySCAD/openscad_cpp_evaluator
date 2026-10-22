@@ -214,12 +214,12 @@ void attachTriColors(Evaluator& ev, ColoredBody& cb) {
         std::all_of(perRunColor.begin(), perRunColor.end(), [&](const auto& c) { return c == perRunColor.front(); });
     if (allSame) return;
 
-    std::vector<std::array<float, 4>> triColors(numTris, kDefaultGeometryColor);
+    std::vector<std::array<float, 4>> triColors(numTris, kThemeBodyColor);
     for (size_t i = 0; i + 1 < runIdx.size(); ++i) {
         const size_t start = runIdx[i] / 3;
         const size_t end = std::min<size_t>(runIdx[i + 1] / 3, numTris);
         if (start >= numTris) continue;
-        const std::array<float, 4> color = perRunColor[i].value_or(kDefaultGeometryColor);
+        const std::array<float, 4> color = perRunColor[i].value_or(kThemeBodyColor);
         for (size_t t = start; t < end; ++t) triColors[t] = color;
     }
     cb.triColors = std::move(triColors);
@@ -458,7 +458,7 @@ std::vector<ColoredBody> generateCsg(Evaluator& ev, const CSGParams& params, con
         if (op == "difference" && res3d && !ev.measuring()) {
             for (ColoredBody& c : bodies3d) {
                 if (c.color || c.triColors) continue;
-                ev.recordRunColors(c, kCutFaceColor);
+                ev.recordRunColors(c, kThemeCutColor);
                 mixedColors = true;
             }
         }
