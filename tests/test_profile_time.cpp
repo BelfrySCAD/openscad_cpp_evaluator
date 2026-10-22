@@ -133,7 +133,7 @@ TEST(ProfileTime, ExpressionFormRunsUnderTheBytecodeVm) {
 }
 
 TEST(ProfileTime, UnderAMillisecondIsInMicroseconds) {
-    EXPECT_EQ(fmtMs(0.0047), "4.7 \u00b5s");
-    EXPECT_EQ(fmtMs(0.5), "500.0 \u00b5s");
+    EXPECT_EQ(fmtMs(0.0047), "4.7 \xC2\xB5s");   // UTF-8 bytes, not the literal: MSVC once wrote 0xB5
+    EXPECT_EQ(fmtMs(0.5), "500.0 \xC2\xB5s");
     EXPECT_EQ(fmtMs(12.4), "12.40 ms");
 }

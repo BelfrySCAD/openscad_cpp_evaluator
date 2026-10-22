@@ -79,6 +79,10 @@ if(MSVC)
   # unconditionally (a POSIX extension our code already relies on), so no
   # equivalent is needed there.
   add_compile_definitions(_USE_MATH_DEFINES)
+  # Narrow string literals as UTF-8, as every other compiler writes them.
+  # Without it MSVC encodes "\u00b5" in the ANSI code page, a lone 0xB5 byte,
+  # and profile_time()'s "4.7 µs" failed to decode on reaching Python.
+  add_compile_options(/utf-8)
   # /MP: compile a target's source files in parallel. MSBuild's own /m (what
   # `cmake --build -j` passes) runs PROJECTS in parallel but each project's
   # files one at a time, and nearly everything here is one big library, so a
