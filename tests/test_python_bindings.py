@@ -1319,3 +1319,10 @@ def test_export_of_an_empty_model_uses_openscads_words(tmp_path):
         export_model(str(tmp_path / "empty.stl"), ev.geometry)
     with pytest.raises(EvalError, match=r"Current top level object is not a 2D object\."):
         export_model(str(tmp_path / "empty.svg"), ev.geometry)
+
+
+def test_profile_time_microseconds_reach_python_as_utf8(tmp_path):
+    """MSVC without /utf-8 wrote the µ as a lone cp1252 byte, and the echo
+    failed to decode, aborting the script (BelfrySCAD #883's CI)."""
+    out = _echoes(tmp_path, 'x = profile_time("t") 1;\n')
+    assert any("µs" in e or " ms" in e for e in out), out
