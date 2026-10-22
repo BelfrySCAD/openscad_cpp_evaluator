@@ -459,6 +459,16 @@ std::vector<std::string> mixedDimensionWarnings(const std::vector<ColoredBody>& 
     return out;
 }
 
+// A file has no theme: the stand-ins a renderer draws in its theme's colours
+// are written as the colours they stand in for (colored_body.hpp).
+static std::vector<std::array<float, 4>> resolveThemeColors(std::vector<std::array<float, 4>> colors) {
+    for (auto& c : colors) {
+        if (c == kThemeBodyColor) c = kDefaultGeometryColor;
+        else if (c == kThemeCutColor) c = kCutFaceColor;
+    }
+    return colors;
+}
+
 std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& bodies, std::vector<int>* openParts,
                                                 bool splitComponents, bool splitColors) {
     struct Solid {
@@ -492,7 +502,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
             meshToArrays(*cb.rawMesh, obj.verts, obj.tris);
             if (obj.tris.empty()) continue;
             obj.color = cb.color.value_or(kDefaultExportColor);
-            if (cb.triColors) obj.triColors = *cb.triColors;
+            if (cb.triColors) obj.triColors = resolveThemeColors(*cb.triColors);
             loose.push_back(std::move(obj));
             if (openParts) openParts->push_back(index);
             continue;
@@ -501,7 +511,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
         Solid s;
         s.man = *cb.body;
         s.color = cb.color;
-        if (cb.triColors) s.triColors = *cb.triColors;
+        if (cb.triColors) s.triColors = resolveThemeColors(*cb.triColors);
         s.tris = s.man.GetMeshGL().triVerts;
         if (s.tris.empty()) continue;
         solids.push_back(std::move(s));

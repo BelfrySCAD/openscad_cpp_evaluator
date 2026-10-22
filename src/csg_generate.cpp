@@ -517,7 +517,7 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
         if (cb.triColors && cb.body) {
             const manifold::MeshGL rebuilt = cb.body->GetMeshGL();
             const size_t numTris = rebuilt.triVerts.size() / 3;
-            std::vector<std::array<float, 4>> triColors(numTris, cb.color.value_or(kDefaultGeometryColor));
+            std::vector<std::array<float, 4>> triColors(numTris, cb.color.value_or(kThemeBodyColor));
             for (size_t i = 0; i + 1 < rebuilt.runIndex.size() && i < rebuilt.runOriginalID.size(); ++i) {
                 auto it = runColor.find(rebuilt.runOriginalID[i]);
                 if (it == runColor.end()) continue;

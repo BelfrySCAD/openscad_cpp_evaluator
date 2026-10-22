@@ -45,6 +45,16 @@ inline constexpr std::array<float, 4> kDefaultGeometryColor{0.9f, 0.85f, 0.1f, 1
 // geometry colour so a cut reads as a cut.
 inline constexpr std::array<float, 4> kCutFaceColor{157.0f / 255.0f, 203.0f / 255.0f, 81.0f / 255.0f, 1.0f};
 
+// What a per-triangle colour array holds for the two colours above, so a
+// renderer can still draw them in its live theme: baking the real values
+// painted every uncoloured difference() yellow and green whatever the
+// theme (BelfrySCAD #884's follow-up). Negative RGB is no colour a script
+// can make; alpha 1 keeps them opaque for a renderer's alpha split.
+// Export writes the real colours in their place (resolveThemeColors), so
+// files are unchanged.
+inline constexpr std::array<float, 4> kThemeBodyColor{-1.0f, -1.0f, -1.0f, 1.0f};
+inline constexpr std::array<float, 4> kThemeCutColor{-2.0f, -2.0f, -2.0f, 1.0f};
+
 struct ColoredBody {
     std::optional<manifold::Manifold> body;
     std::optional<std::array<float, 4>> color; // RGBA; nullopt = "no explicit color() -- follow the live theme"
