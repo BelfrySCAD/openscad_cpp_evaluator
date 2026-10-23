@@ -335,7 +335,10 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     if (anyShowOnly) {
         std::vector<ColoredBody> filtered;
         for (ColoredBody& b : result) {
-            if (b.role == BodyRole::ShowOnly || b.role == BodyRole::Highlight || b.role == BodyRole::HighlightGhost)
+            // rerootAtShowOnly already dropped everything outside the `!`;
+            // what is left is its subtree, `%` and `#` bodies included.
+            if (b.role == BodyRole::ShowOnly || b.role == BodyRole::Highlight ||
+                b.role == BodyRole::HighlightGhost || b.role == BodyRole::Background)
                 filtered.push_back(std::move(b));
         }
         return filtered;
