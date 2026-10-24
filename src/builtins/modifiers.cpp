@@ -25,10 +25,16 @@ std::vector<ColoredBody> generateBackground(Evaluator&, const CSGParams&,
     return result;
 }
 
+// Only the ordinary bodies are re-tagged. A `#` or `%` inside the subtree
+// keeps its own look, as in OpenSCAD -- and a `#` operand's drawing-only
+// copy (HighlightGhost) has to stay one: stamped ShowOnly, it was drawn as
+// solid geometry, so a cut-away cylinder stood out of the part (BelfrySCAD
+// #912).
 std::vector<ColoredBody> generateShowOnly(Evaluator&, const CSGParams&,
                                            const std::vector<std::unique_ptr<CSGNode>>& children, const oscad::ASTNode&) {
     std::vector<ColoredBody> result = flattenCsgTree(children);
-    for (ColoredBody& b : result) b.role = BodyRole::ShowOnly;
+    for (ColoredBody& b : result)
+        if (b.role == BodyRole::Normal) b.role = BodyRole::ShowOnly;
     return result;
 }
 

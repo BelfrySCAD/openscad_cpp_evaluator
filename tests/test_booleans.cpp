@@ -336,6 +336,38 @@ TEST(Modifiers, MoreThanOneShowOnlyTakesTheFirstAndWarns) {
     })) << "no warning in: " << (echoed.empty() ? "(nothing)" : echoed.front());
 }
 
+// BelfrySCAD #912: a `#` operand inside a `!` subtree. The cut still
+// happens, and the operand's drawing-only copy stays a HighlightGhost --
+// stamped ShowOnly, it was drawn as solid, standing out of the part.
+TEST(Modifiers, ShowOnlyKeepsAHighlightedOperandsGhost) {
+    Evaluated e = evaluateSrc(
+        "module M() difference() { cube(10); translate([5,5,-5]) #cylinder(h=20, r=2, $fn=16); }\n"
+        "!M();");
+    ASSERT_EQ(e.bodies.size(), 2u);
+    const auto solid = std::find_if(e.bodies.begin(), e.bodies.end(),
+                                    [](const ColoredBody& b) { return b.role == BodyRole::ShowOnly; });
+    const auto ghost = std::find_if(e.bodies.begin(), e.bodies.end(),
+                                    [](const ColoredBody& b) { return b.role == BodyRole::HighlightGhost; });
+    ASSERT_NE(solid, e.bodies.end());
+    ASSERT_NE(ghost, e.bodies.end());
+    EXPECT_LT(solid->body->Volume(), 1000.0 - 40.0) << "the cylinder was not cut away";
+}
+
+// As in OpenSCAD: inside the `!`, `%` and `#` keep their looks; outside it,
+// nothing survives.
+TEST(Modifiers, ShowOnlyKeepsBackgroundAndHighlightInsideIt) {
+    Evaluated e = evaluateSrc(
+        "!union() { cube(10); %translate([15,0,0]) cube(10); #translate([0,15,0]) cube(10); }\n"
+        "translate([-20,0,0]) cube(5);");
+    std::vector<BodyRole> roles;
+    for (const ColoredBody& b : e.bodies) roles.push_back(b.role);
+    EXPECT_EQ(std::count(roles.begin(), roles.end(), BodyRole::Background), 1);
+    // A `#` union operand is merged into the solid and drawn by its red copy.
+    EXPECT_EQ(std::count(roles.begin(), roles.end(), BodyRole::HighlightGhost), 1);
+    EXPECT_EQ(std::count(roles.begin(), roles.end(), BodyRole::ShowOnly), 1);
+    EXPECT_EQ(e.bodies.size(), 3u) << "the cube outside the ! survived";
+}
+
 TEST(Modifiers, NoShowOnlyMeansAllRolesPassThrough) {
     Evaluated e = evaluateSrc("%cube(1); cube(2);");
     EXPECT_EQ(e.bodies.size(), 2u);
