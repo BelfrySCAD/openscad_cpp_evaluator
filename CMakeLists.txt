@@ -11,7 +11,8 @@ if(NOT _oscad_pyproject MATCHES "\nversion = \"([0-9]+)\.([0-9]+)\.([0-9]+)\"")
 endif()
 set(OSCAD_EVAL_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
 
-project(openscad_cpp_evaluator VERSION ${OSCAD_EVAL_VERSION} LANGUAGES CXX)
+# C for third_party/predicates (Shewchuk's robust predicates, used by alpha_wrap).
+project(openscad_cpp_evaluator VERSION ${OSCAD_EVAL_VERSION} LANGUAGES C CXX)
 
 # On Apple Silicon, warn (don't fail -- a universal or intentionally-x86_64
 # build is legitimate) if the effective target architecture is x86_64 while

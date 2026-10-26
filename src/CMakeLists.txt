@@ -47,6 +47,8 @@ add_library(openscad_cpp_evaluator STATIC
   builtins/function_builtins.cpp
   builtins/import.cpp
   builtins/topology.cpp
+  builtins/alpha_wrap.cpp
+  ../third_party/predicates/predicates.c
   builtins/extrude.cpp
   builtins/roof.cpp
   builtins/surface.cpp
@@ -72,6 +74,11 @@ target_link_libraries(openscad_cpp_evaluator PRIVATE linenoise freetype harfbuzz
 target_compile_options(openscad_cpp_evaluator PRIVATE
   $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra>
 )
+
+# Shewchuk's predicates are 1996 K&R C, kept as published: quiet, and never
+# with fast-math, which would break their exact arithmetic.
+set_source_files_properties(../third_party/predicates/predicates.c PROPERTIES
+  COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>")
 
 # -Wall -Wextra above is about OUR code, but two TUs pull a vendored header
 # in wholesale and inherit its warnings: 27 from Boost.Polygon's voronoi
