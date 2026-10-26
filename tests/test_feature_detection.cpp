@@ -36,7 +36,7 @@ std::vector<std::string> echoesFrom(const std::string& src) {
 const char* kFeatures[] = {"separate-children", "minkowski-diff", "sphere-styles",   "export-name",
                             "simplify-op",       "expr-import",    "object-function", "roof-op",
                             "render-expr",       "polyhedron-vnf", "linear-solve",    "levelset",
-                            "svg-class"};
+                            "svg-class",         "alpha-wrap"};
 
 } // namespace
 

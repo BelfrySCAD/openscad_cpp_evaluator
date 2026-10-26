@@ -1001,6 +1001,7 @@ const std::unordered_map<std::string, double>& featureLevels() {
         {"svg-class", 1.0},          // import(svg, class=); id= is upstream's
         {"discretization-by-error", 1.0}, // $fe, always on (upstream: behind --enable)
         {"profile-time", 1.0},       // profile_time(label) { ... } and profile_time(label) expr
+        {"alpha-wrap", 1.0},         // alpha_wrap(alpha, offset)
     };
     return levels;
 }

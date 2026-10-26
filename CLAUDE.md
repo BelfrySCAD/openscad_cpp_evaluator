@@ -1970,3 +1970,40 @@ is evaluated before the clock starts. Times under 1 ms print in microseconds (`f
   after the body, which a tail step would not wait for.
 - `PROFILE:` lines go straight to `echoFn_`, not through `emitWarning`, so the ManifoldCache never
   stores or replays them (a replay would print a stale time as if it were current).
+
+## `alpha_wrap()`
+
+`alpha_wrap(alpha, offset) { ... }` shrink-wraps its children in a closed, manifold skin
+(BelfrySCAD #941; `supported_feature("alpha-wrap")` is 1). The skin follows any concavity a ball
+of radius `alpha` can enter and bridges any gap or hole narrower than that; every point of it lies
+`offset` outside the input. Defaults are CGAL's: alpha 1/20 of the bounding-box diagonal, offset
+alpha/30. All Normal 3D children are wrapped together into one body taking the first one's colour,
+**including an open `polyhedron()`'s raw triangles** (`ColoredBody::rawMesh`) -- wrapping geometry
+too broken for Manifold is half the point. 2D children and `%`/`#` bodies pass through (2D with a
+warning). A non-positive or non-numeric `alpha`/`offset` warns and leaves the children as they were.
+
+### Implementation notes
+
+- `src/builtins/alpha_wrap.cpp`, written **from the paper** (Portaneri et al., "Alpha Wrapping with
+  an Offset", SIGGRAPH 2022) and CGAL's user manual -- **not** from CGAL's `Alpha_wrap_3` source,
+  which is GPL and cannot be carried into this MIT project. Keep it that way: do not paste from CGAL.
+- Delaunay is our own Bowyer-Watson insertion over **Shewchuk's exact predicates**
+  (`third_party/predicates/`, public domain, the original file minus its `random()` test helpers,
+  which MSVC lacks). They are K&R C, so the project enables `C`; `predicates.c` is compiled with
+  warnings off and must never see fast-math. `exactinit()` runs once (`std::call_once`).
+- Four far "super" vertices stand in for the infinite vertex; a cell using one is outside and never
+  entered. The loose box's 8 corners are jittered by 1e-9 of the diagonal so no four are
+  cospherical; Steiner points are not jittered, and a tie (`insphere == 0`) counts as no conflict.
+- Gates are ordered by the smallest empty sphere through the face (its centre on the dual Voronoi
+  edge, nearest the face's circumcentre). Rule 1 finds where the Voronoi edge first meets the offset
+  surface by **sphere tracing** -- the distance to the input is 1-Lipschitz, so stepping by
+  `distance - offset` cannot overshoot. Rule 2 projects the circumcentre of a cell that overlaps the
+  input (separating-axis tet/triangle test over a BVH) onto the offset surface.
+- The skin is built as `MeshGL64`: rounding Steiner points to float can fold the thin triangles a
+  small offset produces. Input is read from each body's float `MeshGL`.
+- `checkCancel()` every 256 gates; a 5M-Steiner-point runaway guard warns and returns the children.
+- Measured: a 242-triangle bracket wraps in 5 ms at alpha 3 (362 faces) and 137 ms at alpha 0.5
+  (11.9k faces); extruded text, 2,468 triangles, 0.7 s at alpha 0.5 and 4 s at alpha 0.2 (102k
+  faces). Time follows OUTPUT size. Not done: CGAL's manifold post-pass for very thin features
+  (no failure seen yet), and the same input scaled can differ by a near-tie or two (same shape,
+  volume within 0.2%), which is why `DefaultsScaleWithTheModel` compares within tolerances.

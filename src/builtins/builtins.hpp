@@ -198,6 +198,11 @@ CSGParams resolveMeshRepair(Evaluator& ev, const oscad::ModularCall& node, EvalC
 std::vector<ColoredBody> generateMeshRepair(Evaluator& ev, const CSGParams& params,
                                             const std::vector<std::unique_ptr<CSGNode>>& children,
                                             const oscad::ASTNode& node);
+// alpha_wrap(alpha, offset) -- shrink-wrap the children (alpha_wrap.cpp).
+CSGParams resolveAlphaWrap(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateAlphaWrap(Evaluator& ev, const CSGParams& params,
+                                           const std::vector<std::unique_ptr<CSGNode>>& children,
+                                           const oscad::ASTNode& node);
 CSGParams resolveSimplify(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params,
                                            const std::vector<std::unique_ptr<CSGNode>>& children,
