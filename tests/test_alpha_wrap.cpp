@@ -40,6 +40,16 @@ TEST(AlphaWrap, BridgesGapsNarrowerThanAlpha) {
     EXPECT_EQ(soleBody(narrow).Genus(), 2);
 }
 
+TEST(AlphaWrap, FlatSidesAreMerged) {
+    // Two cubes: without the merge the skin was 7,282 triangles; merged at
+    // offset/100 it is ~2.2k, with the volume unchanged (#941).
+    const std::string two = "{ cube(10); translate([11,0,0]) cube(5); }";
+    Evaluated w = evalSrc("alpha_wrap(0.5, 0.01) " + two);
+    EXPECT_EQ(soleBody(w).Status(), manifold::Manifold::Error::NoError);
+    EXPECT_LT(soleBody(w).NumTri(), 3000u);
+    EXPECT_NEAR(soleBody(w).Volume(), 1132.51, 0.01);
+}
+
 TEST(AlphaWrap, SkinSitsOffsetOutsideTheInput) {
     Evaluated w = evalSrc(std::string("alpha_wrap(0.5, 0.1) ") + kBracket + ";");
     const manifold::Box bb = soleBody(w).BoundingBox();

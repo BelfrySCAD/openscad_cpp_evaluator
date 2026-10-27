@@ -2003,6 +2003,9 @@ warning). A non-positive or non-numeric `alpha`/`offset` warns and leaves the ch
   input (separating-axis tet/triangle test over a BVH) onto the offset surface.
 - The skin is built as `MeshGL64`: rounding Steiner points to float can fold the thin triangles a
   small offset produces. Input is read from each body's float `MeshGL`.
+- The finished skin is `Simplify(offset / 100)`ed: its points all lie on the offset surface, so its
+  flat sides are many coplanar triangles. Measured 1.05-3.3x fewer triangles (two cubes 7,284 ->
+  2,238; bracket at alpha 0.5 11,858 -> 4,134), volume within 0.001%, no measurable time (#941).
 - `checkCancel()` every 256 gates; a 5M-Steiner-point runaway guard warns and returns the children.
 - Measured: a 242-triangle bracket wraps in 5 ms at alpha 3 (362 faces) and 137 ms at alpha 0.5
   (11.9k faces); extruded text, 2,468 triangles, 0.7 s at alpha 0.5 and 4 s at alpha 0.2 (102k
