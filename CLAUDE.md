@@ -1975,7 +1975,9 @@ is evaluated before the clock starts. Times under 1 ms print in microseconds (`f
 
 `alpha_wrap(alpha, offset) { ... }` shrink-wraps its children in a closed, manifold skin
 (BelfrySCAD #941; `supported_feature("alpha-wrap")` is 1). The skin follows any concavity a ball
-of radius `alpha` can enter and bridges any gap or hole narrower than that; every point of it lies
+of radius `alpha` can enter and bridges any gap or hole that ball cannot pass, i.e. narrower than about
+`2*alpha` (not a sharp cut-off: from ~1.5x alpha to 2x alpha + offset a gap may be bridged only
+partly, leaving strands, which CGAL's own Alpha_wrap_3 does too -- BelfrySCAD #941); every point of it lies
 `offset` outside the input. Defaults are CGAL's: alpha 1/20 of the bounding-box diagonal, offset
 alpha/30. All Normal 3D children are wrapped together into one body taking the first one's colour,
 **including an open `polyhedron()`'s raw triangles** (`ColoredBody::rawMesh`) -- wrapping geometry
