@@ -56,6 +56,11 @@ constexpr double kDefaultOffsetFraction = 1.0 / 30.0;
 // A runaway guard, not a quality knob: a tiny alpha on a big model asks for
 // tens of millions of points, which would exhaust memory long before ending.
 constexpr size_t kMaxSteinerPoints = 5'000'000;
+// The skin's flat sides are cut into many small coplanar triangles, its
+// points all lying on the offset surface. Merging at a tolerance this small
+// next to the offset leaves the rounded edges' shape and the volume alone
+// while cutting the triangle count by up to ~3x (#941).
+constexpr double kMergeFraction = 1.0 / 100.0;
 
 using V3 = std::array<double, 3>;
 V3 operator+(V3 a, V3 b) { return {a[0] + b[0], a[1] + b[1], a[2] + b[2]}; }
@@ -583,6 +588,8 @@ std::vector<ColoredBody> generateAlphaWrap(Evaluator& ev, const CSGParams& param
     manifold::Manifold body(wrap.skin());
     if (body.Status() != manifold::Manifold::Error::NoError) {
         ev.warn("alpha_wrap: the skin is not manifold", &node.position());
+    } else {
+        body = body.Simplify(kMergeFraction * *offset);
     }
     ColoredBody cb = ev.tagGenerated(std::move(body), node, Value{});
     cb.color = color;
