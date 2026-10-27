@@ -2,7 +2,7 @@
 // manifold skin. A BelfrySCAD extension (BelfrySCAD #941).
 //
 // The skin follows any concavity a ball of radius `alpha` can enter and
-// bridges any gap or hole narrower than that, and every point of it lies
+// bridges any gap or hole that ball cannot pass (about 2*alpha wide), and every point of it lies
 // `offset` outside the input. So it is also a robust rounded outward offset,
 // and a way to wrap geometry too broken for Manifold to accept: an open
 // polyhedron()'s raw triangles are wrapped like any other.
