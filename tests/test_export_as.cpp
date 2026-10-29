@@ -61,8 +61,10 @@ TEST(ExportAs, NamedPartIsOneObjectEvenWithColorsNotSplit) {
 
 TEST(ExportAs, PiecesOfOnePartAreNumbered) {
     const std::string code = R"(export_as("leg") { cube(1); translate([5,0,0]) cube(1); })";
-    EXPECT_EQ(split(code), (std::vector<std::string>{"leg"}));
+    // Whatever the components option says: a named part always splits.
+    EXPECT_EQ(split(code), (std::vector<std::string>{"leg_1", "leg_2"}));
     EXPECT_EQ(split(code, /*components=*/true), (std::vector<std::string>{"leg_1", "leg_2"}));
+    EXPECT_EQ(split(R"(export_as("leg") cube(1);)"), (std::vector<std::string>{"leg"}));
 }
 
 TEST(ExportAs, InnerNameWins) {
@@ -81,7 +83,8 @@ TEST(ExportAs, NameInsideAMergingOperationWarns) {
 TEST(ExportAs, DuplicateNameWarnsAndMerges) {
     const std::string code = R"(export_as("jar") cube(1); export_as("jar") translate([5,0,0]) cube(1);)";
     EXPECT_TRUE(anyContains(warningsOf(code), "export_as(\"jar\") is used more than once"));
-    EXPECT_EQ(split(code), (std::vector<std::string>{"jar"}));
+    // One name, two disjoint pieces: numbered.
+    EXPECT_EQ(split(code), (std::vector<std::string>{"jar_1", "jar_2"}));
 }
 
 TEST(ExportAs, MissingNameWarns) {

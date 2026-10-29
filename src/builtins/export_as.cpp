@@ -65,8 +65,8 @@ void walkExportAs(Evaluator& ev, const std::vector<std::unique_ptr<CSGNode>>& no
                                 "its siblings, so the name is lost",
                             &c->node->position());
                 } else if (++uses[name] == 2) {
-                    ev.warn("export_as(\"" + name + "\") is used more than once; those parts are exported as one " +
-                                "object named \"" + name + "\"",
+                    ev.warn("export_as(\"" + name + "\") is used more than once; those parts are merged into one " +
+                                "part named \"" + name + "\"",
                             &c->node->position());
                 }
             }

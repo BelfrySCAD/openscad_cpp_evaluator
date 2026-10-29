@@ -664,10 +664,12 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
     for (const Claimed& g : claimedGroups) {
         // Decompose() is the rule-3 split, and it is opt-in: without it this
         // colour group stays one object however many disjoint pieces it is
-        // in, which is what OpenSCAD writes. A single-component solid comes
-        // back as a one-element list either way, so there is no special case.
+        // in, which is what OpenSCAD writes. A named part always splits: its
+        // pieces are numbered below, so they stay one part by name. A
+        // single-component solid comes back as a one-element list either
+        // way, so there is no special case.
         std::vector<manifold::Manifold> parts;
-        if (splitComponents) parts = g.man.Decompose();
+        if (splitComponents || g.key.name) parts = g.man.Decompose();
         if (parts.empty()) parts.push_back(g.man);
         for (const manifold::Manifold& part : parts) {
             if (part.IsEmpty()) continue;

@@ -2028,10 +2028,11 @@ formats have no object names and ignore it. Geometry outside any `export_as()` i
   what is still unnamed.
 - **Export** (`splitBodiesForExport`): the name is part of the object key, so a named part is its own
   object whatever the colour options say, and two touching same-coloured parts no longer weld. With
-  colours split, colour still keys inside a name. A name that ends up as several objects (separate
-  pieces with `splitComponents`, colours, an open shell beside a solid) is numbered `name_1`,
-  `name_2`, ... so every object stays told apart. The same name on two `export_as()` calls warns and
-  merges them into one object.
+  colours split, colour still keys inside a name. A named part is **always** split into its connected
+  pieces, whatever `splitComponents` says, and a name that ends up as several objects (pieces,
+  colours, an open shell beside a solid) is numbered `name_1`, `name_2`, ... so every object stays
+  told apart. The same name on two `export_as()` calls warns and merges them into one part, so
+  touching uses weld and disjoint ones are numbered pieces.
 - A missing or empty name warns and leaves the children unnamed. Not upstream: OpenSCAD has no
   `export_as()` and drops an unknown module's children, so a portable script guards on
   `supported_feature("export-as")`.
