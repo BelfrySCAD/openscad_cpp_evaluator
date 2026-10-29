@@ -293,6 +293,7 @@ std::vector<ColoredBody> Evaluator::evaluateImpl(const NodeList& nodes, EvalCont
     } generateRequestedGuard{generateRequested_};
     std::vector<std::unique_ptr<CSGNode>> tree = resolveTreeImpl(nodes, ctx);
     rerootAtShowOnly(tree);
+    checkExportNames(tree);
     const Clock::time_point resolveEnd = profiling_ ? Clock::now() : Clock::time_point{};
     // generate = false is the resolve-only path: the language has run and
     // the tree is built, so anything the script itself gets wrong has already

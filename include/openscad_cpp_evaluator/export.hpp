@@ -22,6 +22,10 @@ struct ExportObject {
     std::vector<uint32_t> tris; // vertex-index triples
     std::array<float, 4> color = kDefaultExportColor;
     std::vector<std::array<float, 4>> triColors;
+    // export_as()'s name, numbered "name_1", "name_2", ... when the part
+    // comes out as several objects. Empty for geometry no export_as()
+    // named; each writer then names it as it always has.
+    std::string name;
 };
 
 // The implicit top-level union, cut into objects that never overlap.

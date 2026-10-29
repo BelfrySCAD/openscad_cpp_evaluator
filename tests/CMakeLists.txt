@@ -46,6 +46,7 @@ add_executable(oscad_eval_tests
   test_viewport_params.cpp
   test_unexpected_args.cpp
   test_alpha_wrap.cpp
+  test_export_as.cpp
   test_cli.cpp
 )
 # oscad_cli_lib PUBLIC-links openscad_cpp_evaluator, so naming it here too

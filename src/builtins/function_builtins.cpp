@@ -1002,6 +1002,7 @@ const std::unordered_map<std::string, double>& featureLevels() {
         {"discretization-by-error", 1.0}, // $fe, always on (upstream: behind --enable)
         {"profile-time", 1.0},       // profile_time(label) { ... } and profile_time(label) expr
         {"alpha-wrap", 1.0},         // alpha_wrap(alpha, offset)
+        {"export-as", 1.0},          // export_as(name) { ... }
     };
     return levels;
 }

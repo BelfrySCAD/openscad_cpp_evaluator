@@ -8,6 +8,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace oscadeval {
@@ -92,6 +93,10 @@ struct ColoredBody {
     manifold::mat3x4 sectionXform{manifold::vec3(1, 0, 0), manifold::vec3(0, 1, 0),
                                    manifold::vec3(0, 0, 1), manifold::vec3(0, 0, 0)};
     BodyRole role = BodyRole::Normal;
+    // The name export_as() gave this body: the object it becomes in a file
+    // that holds several (splitBodiesForExport). Copied along by everything
+    // that copies the body; an op that builds a new body drops it.
+    std::optional<std::string> exportName;
     std::optional<std::vector<std::array<float, 4>>> triColors; // per-triangle RGBA, multi-color CSG merges only
 
     // The operands a union() merged into this body, kept unmerged, each as

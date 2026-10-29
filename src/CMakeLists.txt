@@ -48,6 +48,7 @@ add_library(openscad_cpp_evaluator STATIC
   builtins/import.cpp
   builtins/topology.cpp
   builtins/alpha_wrap.cpp
+  builtins/export_as.cpp
   ../third_party/predicates/predicates.c
   builtins/extrude.cpp
   builtins/roof.cpp
