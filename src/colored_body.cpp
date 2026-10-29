@@ -62,6 +62,7 @@ std::vector<ColoredBody> toRenderableBodies(const std::vector<ColoredBody>& bodi
             flat.section = cb.section;
             flat.sectionXform = cb.sectionXform;
             flat.role = cb.role;
+            flat.exportName = cb.exportName;
             out.push_back(std::move(flat));
         } else {
             out.push_back(cb);

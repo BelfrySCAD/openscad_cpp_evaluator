@@ -8,12 +8,14 @@
 #include <manifold/manifold.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <locale>
+#include <map>
 #include <sstream>
 #include <optional>
 #include <stdexcept>
@@ -103,6 +105,21 @@ void writeStl(const std::string& path, const std::vector<ColoredBody>& bodies) {
     }
 }
 
+// An export_as() name as XML attribute or element text.
+static std::string xmlEscape(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
 void writeObj(const std::string& path, const std::vector<ExportObject>& objects) {
     // OBJ carries no colour of its own: `usemtl` names an entry in a .mtl
     // sitting next to the .obj, so an OBJ export writes TWO files. A reader
@@ -140,7 +157,16 @@ void writeObj(const std::string& path, const std::vector<ExportObject>& objects)
     size_t objIndex = 0;
     for (const ExportObject& o : objects) {
         ++objIndex;
-        out << "o object_" << objIndex << "\n";
+        if (o.name.empty()) {
+            out << "o object_" << objIndex << "\n";
+        } else {
+            // An OBJ name runs to the end of the line, and readers split it
+            // at whitespace.
+            std::string name = o.name;
+            for (char& c : name)
+                if (std::isspace(static_cast<unsigned char>(c))) c = '_';
+            out << "o " << name << "\n";
+        }
         const size_t vertCount = o.verts.size() / 3;
         for (size_t v = 0; v < vertCount; ++v) {
             out << "v " << formatG6(o.verts[v * 3]) << " " << formatG6(o.verts[v * 3 + 1]) << " "
@@ -265,7 +291,9 @@ void writeThreeMf(const std::string& path, const std::vector<ExportObject>& obje
         resources += "</m:colorgroup>";
 
         const int objectId = nextId++;
-        resources += "<object id=\"" + std::to_string(objectId) + "\" type=\"model\" pid=\"" +
+        resources += "<object id=\"" + std::to_string(objectId) + "\" type=\"model\"";
+        if (!o.name.empty()) resources += " name=\"" + xmlEscape(o.name) + "\"";
+        resources += " pid=\"" +
                      std::to_string(colorGroupId) + "\" pindex=\"0\"><mesh><vertices>";
         const size_t vertCount = o.verts.size() / 3;
         for (size_t v = 0; v < vertCount; ++v) {
@@ -374,13 +402,21 @@ bool boxesOverlap(const manifold::Box& ba, const manifold::Box& bb) {
 // A colour key that keeps per-triangle-coloured bodies apart from
 // everything, including each other. Their colours index their own triangle
 // list, and a union would rewrite that list and lose them.
+//
+// An export_as() name keys too: a named part is its own object whatever
+// the colour options say. With colours not split (`byColor` false), the
+// name is all that keys.
 struct ColorKey {
     bool perTriangle = false;
     size_t index = 0; // position in `solids`, for the per-triangle case
     bool hasColor = false;
     std::array<float, 4> color{};
+    std::optional<std::string> name;
+    bool byColor = true;
 
     bool operator==(const ColorKey& o) const {
+        if (name != o.name) return false;
+        if (!byColor) return true;
         if (perTriangle != o.perTriangle) return false;
         if (perTriangle) return index == o.index;
         if (hasColor != o.hasColor) return false;
@@ -476,6 +512,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
         std::optional<std::array<float, 4>> color;
         std::vector<std::array<float, 4>> triColors;
         std::vector<uint32_t> tris;
+        std::optional<std::string> name;
     };
 
     std::vector<Solid> solids;
@@ -503,6 +540,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
             if (obj.tris.empty()) continue;
             obj.color = cb.color.value_or(kDefaultExportColor);
             if (cb.triColors) obj.triColors = resolveThemeColors(*cb.triColors);
+            obj.name = cb.exportName.value_or("");
             loose.push_back(std::move(obj));
             if (openParts) openParts->push_back(index);
             continue;
@@ -511,6 +549,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
         Solid s;
         s.man = *cb.body;
         s.color = cb.color;
+        s.name = cb.exportName;
         if (cb.triColors) s.triColors = resolveThemeColors(*cb.triColors);
         s.tris = s.man.GetMeshGL().triVerts;
         if (s.tris.empty()) continue;
@@ -527,6 +566,8 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
             k.index = i;
             k.hasColor = solids[i].color.has_value();
             if (k.hasColor) k.color = *solids[i].color;
+            k.name = solids[i].name;
+            k.byColor = splitColors;
             keys.push_back(k);
         }
         // Splitting by colour is for a MULTI-MATERIAL print, where each
@@ -536,7 +577,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
         // separate walls. Unioning everything here (rather than
         // concatenating the per-colour objects afterwards) is what makes
         // touching regions weld instead of leaving coincident faces.
-        const bool allSame = !splitColors ||
+        const bool allSame =
             std::all_of(keys.begin(), keys.end(), [&](const ColorKey& k) { return k == keys[0]; });
 
         if (allSame) {
@@ -597,7 +638,7 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
                 Claimed c;
                 c.man = std::move(piece);
                 c.color = s.color;
-                c.triColors = s.triColors;
+                if (splitColors) c.triColors = s.triColors;
                 c.sourceTris = s.tris;
                 c.key = keys[n];
                 owned.push_back(std::move(c));
@@ -635,10 +676,20 @@ std::vector<ExportObject> splitBodiesForExport(const std::vector<ColoredBody>& b
             if (obj.tris.empty()) continue;
             obj.color = g.color.value_or(kDefaultExportColor);
             obj.triColors = carryTriColors(g.triColors, g.sourceTris, obj.tris);
+            obj.name = g.key.name.value_or("");
             out.push_back(std::move(obj));
         }
     }
     out.insert(out.end(), std::make_move_iterator(loose.begin()), std::make_move_iterator(loose.end()));
+
+    // A name that came out as several objects -- disconnected pieces,
+    // colours, an open shell beside a solid -- is numbered, so every object
+    // in the file is still told apart by name.
+    std::map<std::string, int> total, seen;
+    for (const ExportObject& o : out)
+        if (!o.name.empty()) ++total[o.name];
+    for (ExportObject& o : out)
+        if (!o.name.empty() && total[o.name] > 1) o.name += "_" + std::to_string(++seen[o.name]);
     return out;
 }
 
@@ -924,7 +975,9 @@ void writeAmf(const std::string& path, const std::vector<ExportObject>& objects)
     }
     for (size_t oi = 0; oi < objects.size(); ++oi) {
         const ExportObject& o = objects[oi];
-        out << "  <object id=\"" << (oi + 1) << "\">\n    <mesh>\n      <vertices>\n";
+        out << "  <object id=\"" << (oi + 1) << "\">\n";
+        if (!o.name.empty()) out << "    <metadata type=\"name\">" << xmlEscape(o.name) << "</metadata>\n";
+        out << "    <mesh>\n      <vertices>\n";
         for (size_t v = 0; v < o.verts.size() / 3; ++v) {
             out << "        <vertex><coordinates><x>" << formatG6(o.verts[v * 3]) << "</x><y>"
                 << formatG6(o.verts[v * 3 + 1]) << "</y><z>" << formatG6(o.verts[v * 3 + 2])

@@ -203,6 +203,11 @@ CSGParams resolveAlphaWrap(Evaluator& ev, const oscad::ModularCall& node, EvalCo
 std::vector<ColoredBody> generateAlphaWrap(Evaluator& ev, const CSGParams& params,
                                            const std::vector<std::unique_ptr<CSGNode>>& children,
                                            const oscad::ASTNode& node);
+// export_as(name) -- names its children's object in an export (export_as.cpp).
+CSGParams resolveExportAs(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
+std::vector<ColoredBody> generateExportAs(Evaluator& ev, const CSGParams& params,
+                                          const std::vector<std::unique_ptr<CSGNode>>& children,
+                                          const oscad::ASTNode& node);
 CSGParams resolveSimplify(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx);
 std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params,
                                            const std::vector<std::unique_ptr<CSGNode>>& children,

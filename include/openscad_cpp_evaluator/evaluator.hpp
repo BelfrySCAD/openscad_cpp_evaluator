@@ -620,6 +620,12 @@ public:
     // definition for why this cannot be done by tagging bodies.
     void rerootAtShowOnly(std::vector<std::unique_ptr<CSGNode>>& tree);
 
+    // Warns about an export_as() whose name cannot reach the file: one
+    // inside an operation that merges it with its siblings, or a name used
+    // by more than one export_as(). Read off the resolved tree, so a
+    // ManifoldCache hit says the same as a fresh build. See export_as.cpp.
+    void checkExportNames(const std::vector<std::unique_ptr<CSGNode>>& tree);
+
     // parent_module(idx) support: walks the live module-call stack
     // (innermost last) and returns the name `idx` levels up from the
     // current module, or undef if out of range. Public because

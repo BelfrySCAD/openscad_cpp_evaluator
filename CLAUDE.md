@@ -2012,3 +2012,27 @@ warning). A non-positive or non-numeric `alpha`/`offset` warns and leaves the ch
   faces). Time follows OUTPUT size. Not done: CGAL's manifold post-pass for very thin features
   (no failure seen yet), and the same input scaled can differ by a near-tie or two (same shape,
   volume within 0.2%), which is why `DefaultsScaleWithTheModel` compares within tolerances.
+
+## `export_as()`
+
+`export_as("name") { ... }` names its children's geometry as one object in a file that holds several
+(BelfrySCAD #918; `supported_feature("export-as")` is 1). In 3MF it is the `<object name="...">`
+attribute, in OBJ the `o` line (whitespace becomes `_`), in AMF `<metadata type="name">`; the other
+formats have no object names and ignore it. Geometry outside any `export_as()` is named as before.
+
+- **The name rides on the body** (`ColoredBody::exportName`), so everything that copies its
+  children's bodies carries it: transforms, `color()`, the modifiers, `render()`, `profile_time()`,
+  user modules. An op that **builds** a new body (any boolean, hull, extrude, ...) drops it, and
+  `checkExportNames` warns about an `export_as()` inside one, read off the resolved tree so a
+  ManifoldCache hit warns the same. An inner `export_as()` keeps its name; the outer one names only
+  what is still unnamed.
+- **Export** (`splitBodiesForExport`): the name is part of the object key, so a named part is its own
+  object whatever the colour options say, and two touching same-coloured parts no longer weld. With
+  colours split, colour still keys inside a name. A name that ends up as several objects (separate
+  pieces with `splitComponents`, colours, an open shell beside a solid) is numbered `name_1`,
+  `name_2`, ... so every object stays told apart. The same name on two `export_as()` calls warns and
+  merges them into one object.
+- A missing or empty name warns and leaves the children unnamed. Not upstream: OpenSCAD has no
+  `export_as()` and drops an unknown module's children, so a portable script guards on
+  `supported_feature("export-as")`.
+- `src/builtins/export_as.cpp`; tests in `tests/test_export_as.cpp`.
