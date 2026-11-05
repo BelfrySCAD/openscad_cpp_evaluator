@@ -1003,6 +1003,7 @@ const std::unordered_map<std::string, double>& featureLevels() {
         {"profile-time", 1.0},       // profile_time(label) { ... } and profile_time(label) expr
         {"alpha-wrap", 1.0},         // alpha_wrap(alpha, offset)
         {"export-as", 1.0},          // export_as(name) { ... }
+        {"offset-3d", 1.0},          // offset(r=|delta=, chamfer=) on a solid, in and out
     };
     return levels;
 }

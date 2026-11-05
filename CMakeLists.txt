@@ -120,9 +120,13 @@ target_include_directories(openscad_cpp_parser PUBLIC
 include(FetchContent)
 
 # MANIFOLD_TEST off: we don't want Manifold's own (large) test/sample/extras
-# suite built as part of this project. MANIFOLD_PAR stays at its own default
-# (OFF) -- no TBB parallel backend needed yet; revisit if profiling later
-# shows single-threaded Boolean ops are a bottleneck. MANIFOLD_CROSS_SECTION
+# suite built as part of this project. MANIFOLD_PAR on: Manifold's TBB
+# backend made 3D offset() 2.1-3.3x faster (sphere(10,32) delta=1: 3.6 s ->
+# 1.7 s), and big booleans with it. TBB is always Manifold's own pinned copy
+# (oneTBB v2022.3.0, fetched and linked statically): a system TBB found by
+# find_package would make the wheel depend on a library it does not ship.
+# Booleans are not order-independent under it -- the same pieces unioned
+# differently -- which offset3d.cpp's lostPieces() checks for. MANIFOLD_CROSS_SECTION
 # stays at its own default (ON) -- 2D CrossSection support is needed from
 # Phase 3 onward.
 #
@@ -137,6 +141,8 @@ include(FetchContent)
 # fixes Windows and is a no-op everywhere else this project already worked.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(MANIFOLD_TEST OFF CACHE BOOL "" FORCE)
+set(MANIFOLD_PAR ON CACHE BOOL "" FORCE)
+set(MANIFOLD_USE_BUILTIN_TBB ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
   manifold
   GIT_REPOSITORY https://github.com/elalish/manifold.git
