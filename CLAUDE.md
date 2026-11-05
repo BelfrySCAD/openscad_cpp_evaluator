@@ -2097,8 +2097,13 @@ own convex patch (faces joined through convex or flat edges), which keeps separa
   out.
 - `|d|` below `1e-7` of the part's size returns the input: double precision cannot place it.
 
-**Known limits.** Exact-contact chamfer cases (two faces meeting at precisely the distance where a
-chamfer closes) can come out with the wrong genus, 4 of the 96 in the review suite. Speed is about
+**Exact contact.** Where parts meet at precisely the offset distance, every contact joins (the
+growth by `1e-9·scale` above), so the result is the one just past contact. Do not check that
+against Manifold's own `MinkowskiSum`/`MinkowskiDifference` at the same distance: there it joins
+only some of the contacts (two meeting in two places came out genus 0, not 1) or leaves a
+zero-volume shell. Compare topology against the reference at `d + 1e-7` instead.
+
+**Known limits.** Speed is about
 2 s for a 32-segment sphere's `delta=1` (pieces built single-threaded 1.1 s, union 0.85 s, lost
 check 0.4 s), so it is a tool for parts, not for dense scans. `OFFSET3D_TIMING=1` prints each phase's
 wall time to stderr. `_offset3d(verts, tris, d, mode, segs)` in the Python facade is the test hook

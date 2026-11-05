@@ -107,6 +107,22 @@ TEST(Offset3D, TopologyChangesAreKept) {
     EXPECT_EQ(solid("offset(delta=-1) " + U).Decompose().size(), 1u);
 }
 
+TEST(Offset3D, TouchingAtExactlyTheDistanceJoinsEveryContact) {
+    // Grown by 0.5 with chamfers, two parts of this block meet in two places at
+    // once: genus -1 (two shells) just short of 0.5, genus 1 just past it. At
+    // exactly 0.5 touching counts as joined, at both contacts -- Manifold's own
+    // Minkowski sum joins only one of them there (genus 0).
+    const std::string P =
+        "difference() { difference() { difference() { union() { union() { union() { cube(8);"
+        " translate([2, -2, -2]) cube([5, 1, 4]); } translate([3, 3, -2]) cube([5, 4, 6]); }"
+        " translate([6, 6, -1]) cube([2, 6, 4]); } translate([2, 7, -1]) cube([5, 6, 6]); }"
+        " translate([4, 2, 5]) cube([3, 1, 3]); } translate([2, -1, -2]) cube([2, 6, 6]); }";
+    const Manifold o = solid("offset(delta=0.5, chamfer=true) " + P);
+    EXPECT_EQ(o.Decompose().size(), 1u);
+    EXPECT_EQ(o.Genus(), 1);
+    EXPECT_NEAR(o.Volume(), 818.75, 1e-6 * 818.75);
+}
+
 TEST(Offset3D, FarFromTheOriginIsTheSame) {
     // The offset runs at the origin: Manifold's union lost 0.35 of this
     // volume at 1e5 from it.
