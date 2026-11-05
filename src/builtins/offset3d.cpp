@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <string>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -35,6 +36,7 @@
 #include <numeric>
 #include <optional>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -352,7 +354,26 @@ struct Edge {
     std::vector<int> ts;
 };
 
+// fn(0..n-1) on every core. ponytail: one thread per core over an atomic
+// counter; Manifold's own TBB work nests inside, which TBB handles.
+void parallelFor(size_t n, const std::function<void(size_t)>& fn) {
+    std::atomic<size_t> next{0};
+    auto worker = [&] {
+        for (size_t i; (i = next++) < n;) fn(i);
+    };
+    const unsigned k = unsigned(std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), n));
+    std::vector<std::thread> pool;
+    for (unsigned t = 1; t < k; ++t) pool.emplace_back(worker);
+    worker();
+    for (std::thread& t : pool) t.join();
+}
+
 class Builder {
+    // Each piece is a job, run in parallel by build(): the planning that
+    // decides what to build (and fills the wedge bookkeeping the caps read)
+    // stays serial, the hulls and trims run on every core.
+    using Jobs = std::vector<std::function<Manifold()>>;
+
 public:
     Builder(const std::vector<vec3>& V, std::vector<std::array<int, 3>> T, double d, Offset3DMode mode, int segs, bool flip)
         : V_(V), T_(std::move(T)), d_(d), mode_(mode), ball_(sphereDirs(segs)) {
@@ -379,7 +400,21 @@ public:
     }
 
     std::vector<Manifold> build() {
-        std::vector<Manifold> out;
+        Jobs out;
+        plan(out);
+        std::vector<Manifold> made(out.size());
+        parallelFor(out.size(), [&](size_t i) {
+            const Manifold m = out[i]();
+            if (!m.IsEmpty()) made[i] = bare(m);
+        });
+        std::vector<Manifold> res;
+        for (Manifold& m : made)
+            if (!m.IsEmpty()) res.push_back(std::move(m));
+        return res;
+    }
+
+private:
+    void plan(Jobs& out) {
         if (mode_ == Offset3DMode::Round) {
             // Each triangle swept by the one faceted ball: exactly the
             // Minkowski sum with it.
@@ -388,19 +423,17 @@ public:
                 for (int k = 0; k < 3; ++k) pts.push_back(V_[T_[t][k]] - e_ * N_[t]);
                 for (int k = 0; k < 3; ++k)
                     for (const vec3& b : ball_) pts.push_back(V_[T_[t][k]] + d_ * b);
-                push(out, hullChecked(pts));
+                push(out, [pts] { return hullChecked(pts); });
             }
-            return out;
+            return;
         }
         indexEdges();
-        slabs(out);
         classify();
+        slabs(out);
         wedges(out);
         caps(out);
-        return out;
     }
 
-private:
     const std::vector<vec3>& V_;
     std::vector<std::array<int, 3>> T_;
     double d_;
@@ -424,9 +457,7 @@ private:
     std::map<int, std::vector<int>> members_;
     std::map<int, bool> gone_;
 
-    static void push(std::vector<Manifold>& out, Manifold m) {
-        if (!m.IsEmpty()) out.push_back(bare(m));
-    }
+    static void push(Jobs& out, std::function<Manifold()> job) { out.push_back(std::move(job)); }
 
     uint64_t key(int a, int b) const {
         return (uint64_t(std::min(a, b)) << 32) | uint64_t(std::max(a, b));
@@ -470,8 +501,82 @@ private:
     // Past a concave edge the sliver lands inside A outward, outside A
     // inward, and past a flat one inside the neighbour's slab: within d of the
     // surface every time. Convex edges have their wedges' strips.
-    void slabs(std::vector<Manifold>& out) {
+    // The boundary of a convex flat face, or nothing if the face is not convex
+    // (or has a hole): every face vertex on the inner side of every boundary
+    // edge. q gets the face's vertices, plus each non-convex boundary edge's
+    // ends pushed e outward, as the triangle slabs below widen them.
+    bool convexFace(int g, const std::vector<int>& ts, std::vector<vec3>& q) const {
+        const vec3 n = N_[ts[0]];
+        std::set<int> vs;
+        for (int t : ts)
+            for (int v : T_[t]) vs.insert(v);
+        std::vector<vec3> wide;
+        for (int t : ts)
+            for (int i = 0; i < 3; ++i) {
+                const int a = T_[t][i], b = T_[t][(i + 1) % 3];
+                const int u = across(t, a, b);
+                if (flat_[u] == g) continue;
+                const vec3 in = la::cross(n, V_[b] - V_[a]);   // left of a->b: the face's side
+                const double tol = 1e-9 * scale_ * la::length(in);
+                for (int v : vs)
+                    if (la::dot(in, V_[v] - V_[a]) < -tol) return false;
+                if (isConvex(t, u, a, b)) continue;
+                const vec3 k = -la::normalize(in);
+                wide.push_back(V_[a] + e_ * k);
+                wide.push_back(V_[b] + e_ * k);
+            }
+        std::vector<vec3> all;
+        for (int v : vs) all.push_back(V_[v]);
+        all.insert(all.end(), wide.begin(), wide.end());
+        q = corners2D(all, n);
+        return q.size() >= 3;
+    }
+
+    // The strict corners of coplanar points (normal n): a 2D hull in the
+    // plane, collinear points dropped. refine() leaves midpoints along every
+    // edge; Manifold's hull kept them as zero-area slivers (a 422-triangle
+    // slab), and the union with them lost 0.27 of t41 seed 18 once moved back.
+    std::vector<vec3> corners2D(const std::vector<vec3>& P, const vec3& n) const {
+        const vec3 u = la::normalize(std::fabs(n.x) < 0.9 ? la::cross(n, vec3(1, 0, 0)) : la::cross(n, vec3(0, 1, 0)));
+        const vec3 w = la::cross(n, u);
+        std::vector<std::pair<std::array<double, 2>, size_t>> pts;
+        for (size_t i = 0; i < P.size(); ++i) pts.push_back({{la::dot(P[i], u), la::dot(P[i], w)}, i});
+        std::sort(pts.begin(), pts.end());
+        const double tol = 1e-12 * scale_ * scale_;
+        auto cross = [](const std::array<double, 2>& o, const std::array<double, 2>& a, const std::array<double, 2>& b) {
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        };
+        std::vector<size_t> h(2 * pts.size());
+        size_t k = 0;
+        for (size_t i = 0; i < pts.size(); ++i) {   // Andrew's monotone chain
+            while (k >= 2 && cross(pts[h[k - 2]].first, pts[h[k - 1]].first, pts[i].first) <= tol) --k;
+            h[k++] = i;
+        }
+        for (size_t i = pts.size() - 1, t = k + 1; i-- > 0;) {
+            while (k >= t && cross(pts[h[k - 2]].first, pts[h[k - 1]].first, pts[i].first) <= tol) --k;
+            h[k++] = i;
+        }
+        std::vector<vec3> out;
+        for (size_t i = 0; i + 1 < k; ++i) out.push_back(P[pts[h[i]].second]);
+        return out;
+    }
+
+    void slabs(Jobs& out) {
+        // One slab per convex flat face: a fan of 254 slabs meeting at one
+        // vertex (a cylinder's end) made the union several times slower.
+        std::vector<char> done(T_.size(), 0);
+        for (const auto& [g, ts] : members_) {
+            std::vector<vec3> q;
+            if (ts.size() < 2 || !convexFace(g, ts, q)) continue;
+            for (int t : ts) done[t] = 1;
+            const vec3 n = N_[ts[0]];
+            std::vector<vec3> pts;
+            for (const vec3& p : q) pts.push_back(p - e_ * n);
+            for (const vec3& p : q) pts.push_back(p + d_ * n);
+            push(out, [pts] { return hullChecked(pts); });
+        }
         for (size_t t = 0; t < T_.size(); ++t) {
+            if (done[t]) continue;
             const vec3 n = N_[t];
             std::vector<vec3> q;
             for (int k = 0; k < 3; ++k) q.push_back(V_[T_[t][k]]);
@@ -487,7 +592,7 @@ private:
             std::vector<vec3> pts;
             for (const vec3& p : q) pts.push_back(p - e_ * n);
             for (const vec3& p : q) pts.push_back(p + d_ * n);
-            push(out, hullChecked(pts));
+            push(out, [pts] { return hullChecked(pts); });
         }
     }
 
@@ -690,7 +795,12 @@ private:
         return {walk(e.b, e.a), walk(e.a, e.b)};
     }
 
-    void wedges(std::vector<Manifold>& out) {
+    // One wedge per straight convex edge, however many triangle edges it is
+    // made of: refine() split an edge in two, and the halves' wedges met face
+    // to face at the midpoint -- a zero-width crack (genus 1 for 0), which
+    // Manifold later collapsed and took 0.27 of t41 seed 18's volume with it.
+    void wedges(Jobs& out) {
+        std::map<std::pair<int, int>, std::vector<size_t>> chains;
         for (size_t ei = 0; ei < edges_.size(); ++ei) {
             const Edge& e = edges_[ei];
             const int a = e.a, b = e.b, t1 = e.ts[0], t2 = e.ts[1];
@@ -701,38 +811,52 @@ private:
             convEdgeOther_[a].push_back(b);
             convEdgeNormals_[b].push_back({n1, n2});
             convEdgeOther_[b].push_back(a);
-            const vec3 pa = V_[a], pb = V_[b];
-            const vec3 c1 = V_[otherVertex(t1, a, b)], c2 = V_[otherVertex(t2, a, b)];
-            // A sliver of each adjacent slab, so the wedge overlaps both:
-            // walls that touch exactly leave rounding-thin tunnels.
+            const auto [ea, eb] = chainEnds(ei);
+            chains[{std::min(ea, eb), std::max(ea, eb)}].push_back(ei);
+        }
+        for (const auto& [ends, members] : chains) {
+            const auto [ea, eb] = ends;
+            const Edge& e0 = edges_[members[0]];
+            const vec3 n1 = N_[e0.ts[0]], n2 = N_[e0.ts[1]];
+            const vec3 pa = V_[ea], pb = V_[eb];
             std::vector<vec3> pts{pa - e_ * (n1 + n2), pb - e_ * (n1 + n2), pa + d_ * n1, pb + d_ * n1,
                                   pa + d_ * n2, pb + d_ * n2};
-            for (const auto& [c, n] : {std::pair{c1, n1}, std::pair{c2, n2}})
-                for (const vec3& p : {pa, pb})
-                    for (const vec3& h : {-e_ * n, d_ * n}) pts.push_back(toward(p, c, kLam * d_) + h);
+            std::vector<int> tris;
+            // A sliver of each adjacent slab, so the wedge overlaps both:
+            // walls that touch exactly leave rounding-thin tunnels.
+            for (size_t ei : members) {
+                const Edge& e = edges_[ei];
+                for (int t : e.ts) {
+                    tris.push_back(t);
+                    const vec3 c = V_[otherVertex(t, e.a, e.b)], n = N_[t];
+                    for (const vec3& p : {V_[e.a], V_[e.b]})
+                        for (const vec3& h : {-e_ * n, d_ * n}) pts.push_back(toward(p, c, kLam * d_) + h);
+                }
+            }
             if (mode_ != Offset3DMode::Delta) {
-                push(out, hullChecked(pts));
+                push(out, [pts] { return hullChecked(pts); });
                 continue;
             }
             const vec3 m = miter(n1, n2);
             pts.push_back(pa + d_ * m);
             pts.push_back(pb + d_ * m);
-            Manifold w = hullChecked(pts);
             // The miter must not run past any plane meeting at either end (a
             // sharp edge's miter line would otherwise overshoot a third face
             // that tilts over it).
-            const auto [ea, eb] = chainEnds(ei);
-            for (const int v : {ea, eb})
-                if (!concaveAt_[v]) {
-                    std::vector<vec3> ns;
-                    for (int t : vertFaces_[v]) ns.push_back(N_[t]);
-                    w = clipPlanes(w, ns, V_[v], d_);
-                }
-            push(out, clipFar(w, {V_[ea], V_[eb]}, pts, reach({t1, t2})));
+            push(out, [this, pts, ea, eb, tris] {
+                Manifold w = hullChecked(pts);
+                for (const int v : {ea, eb})
+                    if (!concaveAt_[v]) {
+                        std::vector<vec3> ns;
+                        for (int t : vertFaces_[v]) ns.push_back(N_[t]);
+                        w = clipPlanes(w, ns, V_[v], d_);
+                    }
+                return clipFar(w, {V_[ea], V_[eb]}, pts, reach(tris));
+            });
         }
     }
 
-    void caps(std::vector<Manifold>& out) {
+    void caps(Jobs& out) {
         for (size_t v = 0; v < V_.size(); ++v) {
             const std::vector<int>& faces = vertFaces_[v];
             if (faces.empty()) continue;
@@ -753,7 +877,7 @@ private:
                     for (int t : faces)
                         for (int c : T_[t])
                             if (c != int(v)) pts.push_back(toward(pv, V_[c], kLam * d_) + d_ * N_[t]);
-                    push(out, hullChecked(pts));
+                    push(out, [pts] { return hullChecked(pts); });
                 }
                 continue;
             }
@@ -763,7 +887,7 @@ private:
                 // d of v is in any true mitered offset, so the ball is safe.
                 std::vector<vec3> pts;
                 for (const vec3& b : ball_) pts.push_back(pv + d_ * b);
-                push(out, hullChecked(pts));
+                push(out, [pts] { return hullChecked(pts); });
             }
             if (ns.size() < 3) continue;   // the edge wedges already meet here
             std::vector<vec3> pts{pv - e_ * sum};
@@ -777,7 +901,7 @@ private:
                 if (mode_ == Offset3DMode::Delta) pts.push_back(q + d_ * miter(n1, n2));
             }
             if (mode_ != Offset3DMode::Delta || concaveAt_[v]) {
-                push(out, hullChecked(pts));
+                push(out, [pts] { return hullChecked(pts); });
                 continue;
             }
             for (const vec3& x : cornerPoints(pv, ns, d_)) pts.push_back(x);
@@ -792,6 +916,7 @@ private:
             } else {
                 for (const auto& nn : convEdgeNormals_[v]) pts.push_back(pv + d_ * miter(nn[0], nn[1]));
             }
+            push(out, [this, pts, pv, fn, faces] {
             Manifold cap = hullChecked(pts);
             // The cap is the hull of a few points of the mitered corner, which
             // need not hold the ball of radius d round v -- though the corner
@@ -812,7 +937,8 @@ private:
                 }
             }
             cap = clipPlanes(cap, fn, pv, d_);
-            push(out, clipFar(cap, {pv}, pts, reach(faces)));
+            return clipFar(cap, {pv}, pts, reach(faces));
+            });
         }
     }
 };
@@ -914,23 +1040,27 @@ std::vector<size_t> lostPieces(const std::vector<Manifold>& ps, const Manifold& 
         ncol = std::max(ncol, c + 1);
         grid[k].push_back(i);
     }
-    std::set<size_t> lost;
-    for (int c = 0; c < ncol; ++c) {
+    // Each colour is its own check: all of them at once.
+    std::vector<std::vector<size_t>> lostBy(ncol);
+    parallelFor(size_t(ncol), [&](size_t c) {
         std::vector<Manifold> group;
         std::vector<size_t> who;
         for (size_t i = 0; i < n; ++i)
-            if (colour[i] == c) { group.push_back(ps[i]); who.push_back(i); }
+            if (colour[i] == int(c)) { group.push_back(ps[i]); who.push_back(i); }
         const Manifold G = Manifold::Compose(group);
         const Manifold R = wantInside ? G - u : G ^ u;
-        if (R.IsEmpty()) continue;
+        if (R.IsEmpty()) return;
         for (const Manifold& comp : R.Decompose()) {
             const double v = std::fabs(comp.Volume()), a = comp.SurfaceArea();
             if (!(a > 0) || 2 * v / a <= 10 * e) continue;
             const manifold::Box cb = comp.BoundingBox();
             for (size_t i : who)
-                if (la::all(la::lequal(box[i].min, cb.max)) && la::all(la::lequal(cb.min, box[i].max))) lost.insert(i);
+                if (la::all(la::lequal(box[i].min, cb.max)) && la::all(la::lequal(cb.min, box[i].max)))
+                    lostBy[c].push_back(i);
         }
-    }
+    });
+    std::set<size_t> lost;
+    for (const auto& l : lostBy) lost.insert(l.begin(), l.end());
     return {lost.begin(), lost.end()};
 }
 
@@ -1030,6 +1160,39 @@ Manifold cleanShells(const Manifold& out, const Manifold& A, const std::function
     return holes.empty() ? res : res - unionPieces(holes);
 }
 
+// One closed, connected surface with no concave edge: a convex solid (a
+// locally convex closed surface bounds a convex body).
+bool convexSolid(const Mesh& mesh) {
+    const size_t nt = mesh.T.size();
+    if (nt < 4) return false;
+    std::vector<vec3> N(nt);
+    for (size_t t = 0; t < nt; ++t) {
+        const auto& f = mesh.T[t];
+        N[t] = la::normalize(la::cross(mesh.V[f[1]] - mesh.V[f[0]], mesh.V[f[2]] - mesh.V[f[0]]));
+    }
+    std::unordered_map<uint64_t, std::vector<int>> edges;
+    for (size_t t = 0; t < nt; ++t)
+        for (int i = 0; i < 3; ++i) {
+            const int a = mesh.T[t][i], b = mesh.T[t][(i + 1) % 3];
+            edges[(uint64_t(std::min(a, b)) << 32) | uint64_t(std::max(a, b))].push_back(int(t));
+        }
+    std::vector<int> root(nt);
+    std::iota(root.begin(), root.end(), 0);
+    std::function<int(int)> find = [&](int i) { return root[i] == i ? i : root[i] = find(root[i]); };
+    const double tol = 1e-9 * std::max(1.0, maxAbs(mesh.V));
+    for (const auto& [k, ts] : edges) {
+        if (ts.size() != 2) return false;
+        const int a = int(k >> 32), t1 = ts[0], t2 = ts[1];
+        root[find(t1)] = find(t2);
+        if (la::dot(N[t1], N[t2]) > kFlat) continue;
+        for (int v : mesh.T[t2])
+            if (la::dot(N[t1], mesh.V[v] - mesh.V[a]) > tol) return false;   // concave
+    }
+    for (size_t t = 0; t < nt; ++t)
+        if (find(int(t)) != find(0)) return false;
+    return true;
+}
+
 Manifold offsetCentered(const Manifold& m, double d, Offset3DMode mode, int segs) {
     const manifold::Box bb = m.BoundingBox();
     const vec3 size = bb.max - bb.min;
@@ -1061,7 +1224,85 @@ Manifold offsetCentered(const Manifold& m, double d, Offset3DMode mode, int segs
         const double mu = 1e-9 * std::max(1.0, maxAbs(mesh.V));
         ps = Builder(mesh.V, mesh.T, std::fabs(d) + mu, mode, segs, d < 0).build();
         timer.lap("pieces");
-        tools = unionPieces(ps);
+        if (d > 0 && mode == Offset3DMode::Delta && convexSolid(mesh)) {
+            // The mitered offset of a convex solid is convex, so it is the
+            // hull of the pieces that fill it: one hull, not a union of
+            // hundreds of near-coplanar wedges (a 256-sided cone: 4.4 s).
+            // Not chamfer=: its offset of a convex solid need not be convex.
+            const double tol = 1e-9 * std::max(1.0, maxAbs(mesh.V)), D = d + mu;
+            std::vector<vec3> fn;
+            std::vector<double> fc;
+            for (const auto& f : mesh.T) {
+                const vec3 n = la::normalize(la::cross(mesh.V[f[1]] - mesh.V[f[0]], mesh.V[f[2]] - mesh.V[f[0]]));
+                fn.push_back(n);
+                fc.push_back(la::dot(n, mesh.V[f[0]]) + D);
+            }
+            // The pieces' vertices, near-duplicates (shared corners, ~1e-9 apart)
+            // merged to one exact point each rather than snapped to a grid.
+            std::map<std::array<long long, 3>, vec3> near;
+            const double q = 10 * tol;
+            for (const Manifold& p : ps)
+                for (const vec3& v : meshOf(p).V)
+                    near.emplace(std::array<long long, 3>{std::llround(v.x / q), std::llround(v.y / q), std::llround(v.z / q)}, v);
+            // Only the offset's corners go in: a vertex of an intersection of
+            // half-spaces lies on three or more planes whose normals span 3D.
+            // Manifold's hull of every piece vertex (11k-24k of them, most on a
+            // face's plane) came out with two shells, or points 3e-4 outside.
+            std::vector<vec3> all;
+            for (const auto& kv : near) all.push_back(kv.second);
+            std::vector<char> corner(all.size(), 0);
+            parallelFor(all.size(), [&](size_t a) {
+                const vec3 v = all[a];
+                std::vector<vec3> on;
+                bool inside = true;
+                for (size_t j = 0; j < fn.size() && inside; ++j) {
+                    const double w = la::dot(fn[j], v) - fc[j];
+                    if (w > 10 * tol) inside = false;
+                    else if (w > -10 * tol) on.push_back(fn[j]);
+                }
+                if (!inside || on.size() < 3) return;
+                bool span = false;
+                for (size_t i = 1; i < on.size() && !span; ++i) {
+                    const vec3 c = la::cross(on[0], on[i]);
+                    if (la::length(c) < 1e-9) continue;
+                    for (size_t j = i + 1; j < on.size() && !span; ++j)
+                        span = std::fabs(la::dot(c, on[j])) > 1e-9;
+                }
+                corner[a] = span;
+            });
+            std::vector<vec3> pts;
+            for (size_t a = 0; a < all.size(); ++a)
+                if (corner[a]) pts.push_back(all[a]);
+            // Trusted only if provably the offset: one shell, inside every
+            // shifted plane (so within the offset), and holding every piece
+            // vertex (so every piece, and their union). Otherwise the union
+            // runs as for any other input.
+            Manifold h = pts.size() >= 4 ? whitenedHull(pts) : Manifold();
+            bool good = !h.IsEmpty() && h.Status() == Manifold::Error::NoError && h.Genus() == 0 &&
+                        h.Decompose().size() == 1;
+            if (good) {
+                const Planes pl = planesOf(h);
+                std::atomic<bool> ok{true};
+                parallelFor(all.size(), [&](size_t a) {
+                    for (size_t j = 0; ok && j < pl.n.size(); ++j)
+                        if (la::dot(all[a], pl.n[j]) > pl.c[j] + 10 * tol) ok = false;
+                });
+                const std::vector<vec3> hv = meshOf(h).V;
+                parallelFor(hv.size(), [&](size_t a) {
+                    for (size_t j = 0; ok && j < fn.size(); ++j)
+                        if (la::dot(fn[j], hv[a]) > fc[j] + 10 * tol) ok = false;
+                });
+                good = ok;
+            }
+            if (good) {
+                ps.clear();   // nothing for lostPieces() to check: no union ran
+                tools = h;
+            } else {
+                tools = unionPieces(ps);
+            }
+        } else {
+            tools = unionPieces(ps);
+        }
         timer.lap("union");
         out = d > 0 ? m + tools : m - tools;
         out.NumTri();

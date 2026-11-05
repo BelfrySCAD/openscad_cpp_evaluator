@@ -2066,6 +2066,9 @@ point verified against the hull's planes). Mitered pieces are trimmed by the shi
 of the faces at their end vertices -- the ends of the whole straight edge (`chainEnds`), not of the
 triangle edge, or `refine()`'s midpoints left a 0.6 spike -- and by far faces only within their
 own convex patch (faces joined through convex or flat edges), which keeps separate parts apart.
+A straight convex edge made of several triangle edges gets **one** wedge: refine()'s halves each
+had their own, which met face to face at the midpoint and left a zero-width crack (genus 1 for 0),
+and Manifold later collapsed it with 0.27 of the volume.
 
 **Robustness rules, each from a failure:**
 - Pieces start `e = min(d, max(1e-5·d, 1e-9·scale))` behind the surface, so none shares a plane
@@ -2103,8 +2106,33 @@ against Manifold's own `MinkowskiSum`/`MinkowskiDifference` at the same distance
 only some of the contacts (two meeting in two places came out genus 0, not 1) or leaves a
 zero-volume shell. Compare topology against the reference at `d + 1e-7` instead.
 
-**Known limits.** Speed is about
-2 s for a 32-segment sphere's `delta=1` (pieces built single-threaded 1.1 s, union 0.85 s, lost
-check 0.4 s), so it is a tool for parts, not for dense scans. `OFFSET3D_TIMING=1` prints each phase's
+**Speed.**
+- Pieces are planned serially, since the wedge bookkeeping feeds the caps, and built as jobs on
+  every core (`parallelFor`, plain `std::thread`s; Manifold's TBB nests inside them).
+- A convex flat face gets one slab, not one per triangle.
+- The lost check runs its colours in parallel.
+- **Outward `delta=` of a convex solid skips the union.** Its offset is convex, so it is the hull
+  of the pieces. Only the corners go into the hull: vertices on three or more shifted planes
+  whose normals span 3D. Manifold's hull of every piece vertex (11k-24k points) came out with two
+  shells. The hull is used only if it has one shell, lies inside every shifted plane, and contains
+  every piece vertex; otherwise the union runs.
+- Not for `chamfer=`: a convex solid's chamfered offset is not always convex (the hull was up to
+  2% larger).
+- Union chunking (parallel sub-unions) was tried and gained nothing: `BatchBoolean` already runs
+  in parallel.
+
+Against 1.52.0, same machine and load (load average 7-10):
+
+| Case | 1.52.0 | Now |
+|---|---|---|
+| sphere(10,32) `delta=1` | 2.2 s | 0.42 s |
+| cone256 `delta=1` | 5.1 s | 0.28 s |
+| sphere(5,48) `delta=1` | 4.9 s | 1.25 s |
+| sphere(10,32) `r=-1` | 1.57 s | 0.90 s |
+| sphere(10,32) `chamfer=1` | 0.74 s | 0.59 s |
+| sphere(10,32) `delta=-1` | 0.38 s | 0.36 s |
+
+The union of a non-convex part's pieces is now the main cost. It is a tool for parts, not for
+dense scans. `OFFSET3D_TIMING=1` prints each phase's
 wall time to stderr. `_offset3d(verts, tris, d, mode, segs)` in the Python facade is the test hook
 the prototype's suites run against; not public API. Tests: `tests/test_offset3d.cpp`.
