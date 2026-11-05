@@ -63,6 +63,13 @@ TEST(Offset3D, CubeEveryModeBothWays) {
     EXPECT_GT(r, exact * 0.99);
 }
 
+TEST(Offset3D, ConvexMiteredOffsetIsExact) {
+    // A convex solid's delta= offset is built as one hull: a 64-sided prism
+    // grows to the 64-gon whose apothem is one more, extruded 2 taller.
+    const double n = 64, a = 5 * std::cos(M_PI / n) + 1;
+    EXPECT_VOL("offset(delta=1) cylinder(h=10, r=5, $fn=64);", 12 * n * a * a * std::tan(M_PI / n));
+}
+
 TEST(Offset3D, ThinPlateVanishesInward) {
     EXPECT_NEAR(vol("offset(delta=-1) cube([10, 10, 1.5]);"), 0, 1e-9);
     EXPECT_NEAR(vol("offset(r=-1) cube([10, 10, 1.5]);"), 0, 1e-9);
@@ -105,6 +112,47 @@ TEST(Offset3D, TopologyChangesAreKept) {
     const std::string U = "difference() { cube([20, 10, 15]); translate([5, -1, 3]) cube([10, 12, 20]); }";
     EXPECT_EQ(solid("offset(delta=-2) " + U).Decompose().size(), 2u);
     EXPECT_EQ(solid("offset(delta=-1) " + U).Decompose().size(), 1u);
+}
+
+TEST(Offset3D, TouchingAtExactlyTheDistanceJoinsEveryContact) {
+    // Grown by 0.5 with chamfers, two parts of this block meet in two places at
+    // once: genus -1 (two shells) just short of 0.5, genus 1 just past it. At
+    // exactly 0.5 touching counts as joined, at both contacts -- Manifold's own
+    // Minkowski sum joins only one of them there (genus 0).
+    const std::string P =
+        "difference() { difference() { difference() { union() { union() { union() { cube(8);"
+        " translate([2, -2, -2]) cube([5, 1, 4]); } translate([3, 3, -2]) cube([5, 4, 6]); }"
+        " translate([6, 6, -1]) cube([2, 6, 4]); } translate([2, 7, -1]) cube([5, 6, 6]); }"
+        " translate([4, 2, 5]) cube([3, 1, 3]); } translate([2, -1, -2]) cube([2, 6, 6]); }";
+    const Manifold o = solid("offset(delta=0.5, chamfer=true) " + P);
+    EXPECT_EQ(o.Decompose().size(), 1u);
+    EXPECT_EQ(o.Genus(), 1);
+    EXPECT_NEAR(o.Volume(), 818.75, 1e-6 * 818.75);
+}
+
+TEST(Offset3D, SplitEdgesGiveTheSameOffset) {
+    // A 10-cube whose faces are each a 2x2 grid: every edge is two triangle
+    // edges and every face eight triangles. Its offset is the plain cube's.
+    // (The halves of a split edge once got a wedge each, meeting face to face;
+    // on t41 seed 18's refine(2) that left a zero-width crack, genus 1, that
+    // cost 0.27 of volume. This cube came out right even then: it guards the
+    // one-wedge-per-straight-edge path, it does not reproduce that crack.)
+    const std::string grid =
+    "polyhedron([[0,0,0],[0,0,5],[0,0,10],[0,5,0],[0,5,5],[0,5,10],[0,10,0],[0,10,5],[0,10,10],[5,0,0"
+    "],[5,0,5],[5,0,10],[5,5,0],[5,5,10],[5,10,0],[5,10,5],[5,10,10],[10,0,0],[10,0,5],[10,0,10],[10,"
+    "5,0],[10,5,5],[10,5,10],[10,10,0],[10,10,5],[10,10,10]], [[0,3,4],[0,4,1],[1,4,5],[1,5,2],[3,6,7"
+    "],[3,7,4],[4,7,8],[4,8,5],[18,21,20],[18,20,17],[19,22,21],[19,21,18],[21,24,23],[21,23,20],[22,"
+    "25,24],[22,24,21],[1,10,9],[1,9,0],[2,11,10],[2,10,1],[10,18,17],[10,17,9],[11,19,18],[11,18,10]"
+    ",[6,14,15],[6,15,7],[7,15,16],[7,16,8],[14,23,24],[14,24,15],[15,24,25],[15,25,16],[0,9,12],[0,1"
+    "2,3],[3,12,14],[3,14,6],[9,17,20],[9,20,12],[12,20,23],[12,23,14],[5,13,11],[5,11,2],[8,16,13],["
+    "8,13,5],[13,22,19],[13,19,11],[16,25,22],[16,22,13]]);";
+    ASSERT_NEAR(vol(grid), 1000, 1e-9);
+    for (const std::string& mode : {"delta=1", "delta=1, chamfer=true", "delta=-1", "delta=-1, chamfer=true"}) {
+        const Manifold a = solid("offset(" + mode + ") cube(10);"), b = solid("offset(" + mode + ") " + grid);
+        EXPECT_NEAR(b.Volume(), a.Volume(), 1e-6 * a.Volume()) << mode;
+        EXPECT_EQ(b.Genus(), 0) << mode;
+        EXPECT_EQ(b.Decompose().size(), 1u) << mode;
+    }
 }
 
 TEST(Offset3D, FarFromTheOriginIsTheSame) {
