@@ -249,7 +249,9 @@ bool keepsMixedDimensions(const std::string& kind) {
 }
 
 DimRule dimRuleFor(const std::string& kind) {
-    if (kind == "linear_extrude" || kind == "rotate_extrude" || kind == "offset") return DimRule::Only2D;
+    if (kind == "linear_extrude" || kind == "rotate_extrude") return DimRule::Only2D;
+    // offset() takes either: a 2D shape (Clipper's polygon offset) or a
+    // solid (offset3d.cpp). The first real child picks, as for a boolean.
     if (kind == "projection") return DimRule::Only3D;
     // roof() warns for neither in the reference, so neither do we.
     if (kind == "roof") return DimRule::None;

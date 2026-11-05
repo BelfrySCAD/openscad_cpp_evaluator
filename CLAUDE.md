@@ -535,11 +535,12 @@ cmake -S . -B build -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DBUILD_TESTING=OFF \
   -DFETCHCONTENT_SOURCE_DIR_BOOST_CONFIG=...  -DFETCHCONTENT_SOURCE_DIR_BOOST_POLYGON=... \
   -DFETCHCONTENT_SOURCE_DIR_FREETYPE=...      -DFETCHCONTENT_SOURCE_DIR_HARFBUZZ=... \
   -DFETCHCONTENT_SOURCE_DIR_STB=...           -DFETCHCONTENT_SOURCE_DIR_CPP_LINENOISE=... \
-  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=...
+  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=... -DFETCHCONTENT_SOURCE_DIR_TBB=...
 ```
 
-That is the whole list for a wheel build (tests off; GoogleTest is the only other download, and
-TBB only with `MANIFOLD_PAR`). Clipper2 is Manifold's own download, pinned in Manifold's
+That is the whole list for a wheel build (tests off; GoogleTest is the only other download).
+Clipper2 and oneTBB (v2022.3.0, for `MANIFOLD_PAR`, which the root `CMakeLists.txt` forces on
+with Manifold's builtin static TBB) are Manifold's own downloads, pinned in Manifold's
 `cmake/manifoldDeps.cmake`; nlohmann_json is the parser's. FetchContent skips `PATCH_COMMAND` for a
 supplied source, so the root `CMakeLists.txt` runs `cmake/patch_manifold.cmake` itself when
 `FETCHCONTENT_SOURCE_DIR_MANIFOLD` is set -- otherwise an offline build would quietly ship the heap
@@ -1070,9 +1071,10 @@ grep for `ponytail:`.
   reference's `isValidDim` + `collectChildren2D`/`collectChildren3D`: a node's dimension is fixed by
   its first non-background, non-empty child, and every child of the other dimension is dropped with
   `Mixing 2D and 3D objects is not supported` followed by `Ignoring {N}D child object for {M}D
-  operation`. `linear_extrude`/`rotate_extrude`/`offset` are always-2D and `projection` always-3D, so
+  operation`. `linear_extrude`/`rotate_extrude` are always-2D and `projection` always-3D, so
   they skip the "mixing" line and emit only the second; `roof()` emits neither, matching the
-  reference. Background (`%`) children are exempt.
+  reference. `offset()` takes either dimension (the solid offset of `offset3d.cpp`), so it follows
+  the boolean rule: the first real child decides. Background (`%`) children are exempt.
   **The emptiness test is cached on the body (`ColoredBody::knownEmpty`, v1.17.0).** It used to
   call `Manifold::NumTri()` on every child at every level, and every Manifold accessor goes through
   `GetImpl()`, which materialises a lazy transform (a full mesh + collider copy) and runs a lazy
@@ -1123,10 +1125,8 @@ grep for `ponytail:`.
   (`Manifold::MinkowskiDifference`). 3D only, matching `minkowski()`'s own 3D-wins dispatch, since
   Manifold has no CrossSection erosion and 2D already has one in `offset(r=-N)`.
 
-  Worth knowing why this is a module rather than an extension of `offset()`: a *positive* 3D offset
-  is already expressible as `minkowski() { X; sphere(r); }`, so `offset(r=N)` on a solid would have
-  been pure sugar. Erosion is the half that is genuinely unavailable, and naming it after the
-  operation beats borrowing a 2D name for it. Eroding a cube by a cube is exact (no curved tool to
+  It predates the 3D `offset()` (see `## offset() in 3D`), which now erodes a solid too, and is kept
+  because it erodes by any tool, not only a ball, cube or octahedron. Eroding a cube by a cube is exact (no curved tool to
   tessellate), which is what the tests assert on; a sphere tool lands a little large, and that gap
   is the sphere's tessellation rather than an error in the erosion.
 - `src/builtins/extrude.cpp` — `linear_extrude()`/`rotate_extrude()`/`projection(cut=)`. All three
@@ -1140,7 +1140,9 @@ grep for `ponytail:`.
   `generateOffset`, also in this file) is the other CrossSection-transform-shaped builtin sharing
   `toCrossSection`; no children/generate-time-bounds dependency, so its resolve/generate split is
   the simple kind (segment count for `r=` IS resolvable early here, unlike `rotate_extrude`'s,
-  since `offset`'s own radius argument is already known at resolve time).
+  since `offset`'s own radius argument is already known at resolve time). A 3D child takes
+  `offset3d()` instead (`## offset() in 3D`): the foreground solids are unioned and offset as one,
+  `join` round/miter/square selecting r/delta/chamfer, and the result tagged as generated.
 - `src/builtins/roof.cpp` — `roof()`: the default `method="voronoi"` built on Boost.Polygon's
   segment Voronoi diagram (see the `roof()` note above for the full story of why this replaced an
   earlier straight-skeleton approximation mid-Phase-6), and `method="straight"`'s straight-skeleton
@@ -2037,3 +2039,67 @@ formats have no object names and ignore it. Geometry outside any `export_as()` i
   `export_as()` and drops an unknown module's children, so a portable script guards on
   `supported_feature("export-as")`.
 - `src/builtins/export_as.cpp`; tests in `tests/test_export_as.cpp`.
+
+## `offset()` in 3D
+
+`offset(r=)`, `offset(delta=)` and `offset(delta=, chamfer=true)` of a solid, outward and inward
+(`src/builtins/offset3d.cpp`, entry `offset3d()` in `include/openscad_cpp_evaluator/offset3d.hpp`;
+`supported_feature("offset-3d")` is 1). Upstream OpenSCAD's `offset()` is 2D only and drops a 3D
+child, so a portable script guards it. The modes mean what they mean in 2D: every face moves `d`
+along its normal; `delta=` keeps edges and corners sharp (**no miter limit**, as Clipper's 1e6 is
+none, so a sharp edge's miter reaches `d/sin(half its angle)`); `chamfer=true` cuts them flat
+(exactly `minkowski()` with an octahedron on an axis-aligned part); `r=` rounds them with a faceted
+ball **inscribed** in the true sphere (every vertex on it), `$fn`/`$fa`/`$fs` counted from `|r|` as
+in 2D -- so the default gives `r=1` five sides, and `$fn` is usually wanted. No published method
+covers all three modes (Cao 2024's mitered offset needs exact rationals; Zint 2023 and PCO round
+only), so the construction is our own, worked out in a Python prototype and checked by suites of
+exact volumes, topology, fuzzing, refine invariance and pathological meshes before the port.
+
+**Construction.** Outward is `A ∪ pieces`: a slab per triangle (the face swept by `d`), a wedge per
+convex edge (hull of the two faces' offset points; plus the miter points for `delta=`; a capsule
+for `r=`) and a cap per vertex (the same at a corner). Inward builds the same pieces on A with
+every triangle flipped and subtracts their union from A -- no bounding box, and a feature thinner
+than `2d` vanishes by construction. Outward `r=` is Manifold's `MinkowskiSum` with the inscribed
+ball, which is this construction and faster. Each piece is convex, made by `hullChecked` (hull in a
+PCA-whitened frame, since Manifold's hull dropped corners of long thin point sets, then every input
+point verified against the hull's planes). Mitered pieces are trimmed by the shifted half-spaces
+of the faces at their end vertices -- the ends of the whole straight edge (`chainEnds`), not of the
+triangle edge, or `refine()`'s midpoints left a 0.6 spike -- and by far faces only within their
+own convex patch (faces joined through convex or flat edges), which keeps separate parts apart.
+
+**Robustness rules, each from a failure:**
+- Pieces start `e = min(d, max(1e-5·d, 1e-9·scale))` behind the surface, so none shares a plane
+  with A (coincident faces left a rounding-thin skin); slabs widen by `e` past concave and flat
+  edges (otherwise zero-thickness fins, genus -87); wedges reach `1e-3·d` into both slabs and caps
+  along their edges, as absolute distances (fractions of an edge made `refine(2)` change the result).
+- Every piece is grown by `1e-9·scale`, so offsets meeting exactly overlap rather than touch
+  (touching counts as joined, as in Minkowski). Expect volumes ~1e-9 relative off exact.
+- The work runs at the origin (Manifold's union lost 0.35 of a chamfered cube at 1e5 from it), and
+  the result is moved back as a bare mesh: `Translate()` of a lazy CSG result re-runs its booleans
+  out there.
+- **`bare()` everywhere**: pieces and intermediate leaves are rebuilt from vertices and triangles
+  alone. A Manifold rebuilt from `GetMeshGL64()` keeps face IDs and the like, and unions of such
+  pieces lost whole wedges (adding six pieces once made the volume smaller). Manifold 3.5.4 does
+  the same, so a bump does not help.
+- **`lostPieces()` checks the union against its pieces.** Manifold's union is order- and
+  thread-dependent (TBB lost 0.045 of one piece where the single-threaded build did not). Pieces are
+  coloured so that no two of a colour have overlapping boxes, each colour `Compose`d (exact for
+  disjoint pieces) and tested with one boolean against the bare result -- against a lazy one,
+  Manifold flattened `G - (A + pieces)` into `G - A - pieces` and hid every loss. A remnant thicker
+  than `10e` (`2V/A`) marks its pieces lost; they are added again onto the bare result, up to 3 rounds.
+- `Simplify()` is not shape-safe (it moved 0.063 of a volume at 9e-12): each simplify is kept only
+  if the volume and the count and genus of non-empty shells are unchanged. The last one, at
+  `1e-9·scale` before moving back, collapses Manifold's own boolean slivers (vertices 1e-12 apart)
+  while that is safe -- off the origin, Manifold collapsed them itself and once lost 0.114.
+- `cleanShells`: zero-volume shells are dropped, and each remaining shell is probed against the
+  definition (in A, in a piece) so a spurious solid or void goes and a real one stays. A void is
+  never `Compose`d back (Compose ignores an inside-out shell): solids minus voids turned right side
+  out.
+- `|d|` below `1e-7` of the part's size returns the input: double precision cannot place it.
+
+**Known limits.** Exact-contact chamfer cases (two faces meeting at precisely the distance where a
+chamfer closes) can come out with the wrong genus, 4 of the 96 in the review suite. Speed is about
+2 s for a 32-segment sphere's `delta=1` (pieces built single-threaded 1.1 s, union 0.85 s, lost
+check 0.4 s), so it is a tool for parts, not for dense scans. `OFFSET3D_TIMING=1` prints each phase's
+wall time to stderr. `_offset3d(verts, tris, d, mode, segs)` in the Python facade is the test hook
+the prototype's suites run against; not public API. Tests: `tests/test_offset3d.cpp`.

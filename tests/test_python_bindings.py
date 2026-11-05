@@ -1326,3 +1326,19 @@ def test_profile_time_microseconds_reach_python_as_utf8(tmp_path):
     failed to decode, aborting the script (BelfrySCAD #883's CI)."""
     out = _echoes(tmp_path, 'x = profile_time("t") 1;\n')
     assert any("µs" in e or " ms" in e for e in out), out
+
+
+def test_offset3d_hook_offsets_a_cube():
+    # The 3D offset's test hook (flat lists in and out), as its suites use it.
+    from openscad_cpp_evaluator import _offset3d
+    V = [x for i in range(8) for x in ((i & 1) * 10.0, (i >> 1 & 1) * 10.0, (i >> 2 & 1) * 10.0)]
+    T = [0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4,
+         2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5]
+    for mode, d, want in (("delta", 1, 1728), ("chamfer", 1, 1661 + 1 / 3), ("delta", -1, 512)):
+        verts, tris = _offset3d(V, T, d, mode)
+        P = [verts[i:i + 3] for i in range(0, len(verts), 3)]
+        vol = sum(a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                  + a[2] * (b[0] * c[1] - b[1] * c[0])
+                  for a, b, c in ((P[tris[i]], P[tris[i + 1]], P[tris[i + 2]])
+                                  for i in range(0, len(tris), 3))) / 6
+        assert abs(vol - want) < 1e-5 * want, (mode, d, vol)

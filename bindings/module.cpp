@@ -25,6 +25,7 @@
 #include "openscad_cpp_evaluator/export.hpp"
 #include "openscad_cpp_evaluator/freetype_font_provider.hpp"
 #include "openscad_cpp_evaluator/mesh_check.hpp"
+#include "openscad_cpp_evaluator/offset3d.hpp"
 #include "openscad_cpp_evaluator/manifold_cache.hpp"
 #include "openscad_cpp_evaluator/coverage.hpp"
 #include "openscad_cpp_evaluator/profile.hpp"
@@ -304,6 +305,30 @@ nb::tuple stripSliversPy(const std::vector<float>& verts, const std::vector<uint
     rep["left_behind"] = r.leftBehind;
     rep["passes"] = r.passes;
     return nb::make_tuple(out.vertProperties, out.triVerts, rep);
+}
+
+// offset() on one closed mesh, without a script round trip: what the 3D
+// offset's test suites drive. Double precision both ways -- the float32
+// MeshGL is ~0.008 of resolution at 1e5. mode is "r", "delta" or "chamfer".
+nb::tuple offset3dPy(const std::vector<double>& verts, const std::vector<uint64_t>& tris, double d,
+                     const std::string& mode, int segs) {
+    manifold::MeshGL64 m;
+    m.numProp = 3;
+    m.vertProperties = verts;
+    m.triVerts = tris;
+    const oscadeval::Offset3DMode md = mode == "r"         ? oscadeval::Offset3DMode::Round
+                                       : mode == "chamfer" ? oscadeval::Offset3DMode::Chamfer
+                                                           : oscadeval::Offset3DMode::Delta;
+    manifold::MeshGL64 out;
+    std::vector<double> ov;
+    {
+        nb::gil_scoped_release rel;
+        out = oscadeval::offset3d(manifold::Manifold(m), d, md, segs).GetMeshGL64();
+        ov.reserve(out.NumVert() * 3);
+        for (size_t i = 0; i < out.NumVert(); ++i)
+            for (size_t k = 0; k < 3; ++k) ov.push_back(out.vertProperties[i * out.numProp + k]);
+    }
+    return nb::make_tuple(ov, out.triVerts);
 }
 
 nb::dict checkMeshPy(const std::vector<float>& verts, const std::vector<uint32_t>& tris) {
@@ -1052,6 +1077,9 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
     m.def("strip_slivers", &stripSliversPy, nb::arg("verts"), nb::arg("tris"),
           "Remove zero-area faces and repair the T-joints their removal "
           "exposes. Returns (verts, tris, report).");
+    m.def("offset3d", &offset3dPy, nb::arg("verts"), nb::arg("tris"), nb::arg("d"), nb::arg("mode"),
+          nb::arg("segs"),
+          "3D offset of one closed mesh: returns (verts, tris) as flat lists.");
     m.def("check_mesh", &checkMeshPy, nb::arg("verts"), nb::arg("tris"),
           "Diagnose a triangle mesh against the manifoldness conditions. "
           "verts is a flat [x,y,z,...] list, tris a flat index list. Returns "

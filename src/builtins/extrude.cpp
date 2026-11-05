@@ -1,4 +1,5 @@
 #include "builtins.hpp"
+#include "openscad_cpp_evaluator/offset3d.hpp"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
@@ -542,17 +543,46 @@ CSGParams resolveOffset(Evaluator& ev, const oscad::ModularCall& node, EvalConte
     return std::move(result.params);
 }
 
-std::vector<ColoredBody> generateOffset(Evaluator&, const CSGParams& params, const std::vector<std::unique_ptr<CSGNode>>& children,
-                                         const oscad::ASTNode&) {
+std::vector<ColoredBody> generateOffset(Evaluator& ev, const CSGParams& params,
+                                         const std::vector<std::unique_ptr<CSGNode>>& children,
+                                         const oscad::ASTNode& node) {
     const std::vector<ColoredBody> bodies = flattenCsgTree(children);
-    const std::optional<manifold::CrossSection> cs = toCrossSection(bodies);
-    if (!cs) return {};
-
     const double delta = std::get<double>(params.at("delta"));
-    // An infinite (or NaN) distance has no shape to give.
-    if (!std::isfinite(delta)) return {};
     const std::string& join = std::get<std::string>(params.at("join"));
     const int segs = static_cast<int>(std::get<double>(params.at("segs")));
+
+    // 3D children (the dimension rule has already settled on one dimension
+    // and warned about the rest): the solid offset of offset3d.cpp.
+    const RoleSplit split = splitByRole(bodies);
+    std::vector<const ColoredBody*> solids;
+    for (const ColoredBody& b : split.foreground)
+        if (b.body && !b.body->IsEmpty()) solids.push_back(&b);
+    if (!solids.empty()) {
+        std::vector<ColoredBody> out;
+        if (std::isfinite(delta)) {
+            std::vector<manifold::Manifold> ms;
+            for (const ColoredBody* b : solids) ms.push_back(*b->body);
+            const manifold::Manifold a =
+                ms.size() == 1 ? ms[0] : manifold::Manifold::BatchBoolean(ms, manifold::OpType::Add);
+            const Offset3DMode mode = join == "round"    ? Offset3DMode::Round
+                                      : join == "square" ? Offset3DMode::Chamfer
+                                                         : Offset3DMode::Delta;
+            manifold::Manifold result = offset3d(a, delta, mode, segs);
+            if (!result.IsEmpty()) {
+                ColoredBody cb = ev.tagGenerated(std::move(result), node, Value{});
+                cb.color = valueToColor(params.at("color"));
+                out.push_back(std::move(cb));
+            }
+        }
+        for (const auto* group : {&split.background, &split.highlight, &split.showOnly, &split.displayOnly})
+            out.insert(out.end(), group->begin(), group->end());
+        return out;
+    }
+
+    const std::optional<manifold::CrossSection> cs = toCrossSection(bodies);
+    if (!cs) return {};
+    // An infinite (or NaN) distance has no shape to give.
+    if (!std::isfinite(delta)) return {};
     using JT = manifold::CrossSection::JoinType;
     const JT jt = join == "round" ? JT::Round : join == "square" ? JT::Square : JT::Miter;
     // "miter" joins stay sharp however acute the corner: no realistic

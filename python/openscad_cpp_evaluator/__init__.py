@@ -419,6 +419,13 @@ def export_extensions() -> list:
     return list(_ext.export_extensions())
 
 
+def _offset3d(verts, tris, d, mode="delta", segs=24):
+    """3D offset of one closed mesh, as offset() does it for a solid: flat
+    vertex/triangle lists in, flat lists out. mode is "r", "delta" or
+    "chamfer". A test hook for the offset's suites, not public API."""
+    return _ext.offset3d([float(v) for v in verts], [int(t) for t in tris], float(d), mode, int(segs))
+
+
 def check_mesh(verts, tris) -> dict:
     """Diagnose a triangle mesh against the manifoldness conditions.
 

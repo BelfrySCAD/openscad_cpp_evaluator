@@ -739,14 +739,15 @@ TEST(MixedDimensions, CombiningOperationsStillPickOne) {
     EXPECT_EQ(dimWarnings("difference() { square(4); cube(1); }"), expected);
     EXPECT_EQ(dimWarnings("intersection() { square(4); cube(1); }"), expected);
     EXPECT_EQ(dimWarnings("hull() { square(4); cube(1); }"), expected);
+    // offset() takes either dimension since 3D offset; the first child fixes it.
+    EXPECT_EQ(dimWarnings("offset(1) { square(4); cube(1); }"), expected);
+    EXPECT_TRUE(dimWarnings("offset(1) cube(1);").empty());
 }
 
 TEST(MixedDimensions, FixedDimensionOperationsWarnOnlyOnce) {
     // These are always 2D input, so there is no "mixing" to report -- just
     // the one dropped child. Same for projection, which is always 3D input.
     EXPECT_EQ(dimWarnings("linear_extrude(1) { square(4); cube(1); }"),
-              (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation"}));
-    EXPECT_EQ(dimWarnings("offset(1) cube(1);"),
               (std::vector<std::string>{"WARNING: Ignoring 3D child object for 2D operation"}));
     EXPECT_EQ(dimWarnings("projection() { square(4); }"),
               (std::vector<std::string>{"WARNING: Ignoring 2D child object for 3D operation"}));
