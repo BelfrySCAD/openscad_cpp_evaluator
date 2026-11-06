@@ -1,5 +1,6 @@
 // alpha_wrap(alpha, offset) -- shrink-wrap the children in a closed,
-// manifold skin. A BelfrySCAD extension (BelfrySCAD #941).
+// manifold skin. A BelfrySCAD extension (BelfrySCAD #941). alpha_wrap(points=)
+// wraps a point cloud instead (BelfrySCAD #1037).
 //
 // The skin follows any concavity a ball of radius `alpha` can enter and
 // bridges any gap or hole that ball cannot pass (about 2*alpha wide), and every point of it lies
@@ -53,6 +54,12 @@ namespace {
 // the offset 1/30 of alpha -- small, so sharp features survive.
 constexpr double kDefaultAlphaFraction = 1.0 / 20.0;
 constexpr double kDefaultOffsetFraction = 1.0 / 30.0;
+// A point cloud's default alpha is at least this many times the median
+// distance from a point to its nearest neighbour: smaller, and the ball
+// passes between the points, wrapping each one on its own -- 40 points 5.3
+// apart on a sphere came out as 40 specks at diag/20 (#1037). 1x already
+// closed even samplings; the rest is for a real scan's uneven spacing.
+constexpr double kDefaultAlphaSpacing = 1.5;
 // A runaway guard, not a quality knob: a tiny alpha on a big model asks for
 // tens of millions of points, which would exhaust memory long before ending.
 constexpr size_t kMaxSteinerPoints = 5'000'000;
@@ -147,6 +154,29 @@ public:
         return bp;
     }
     double dist(V3 p) const { return len(closest(p) - p); }
+
+    // The distance from `p` to the nearest input point other than one
+    // exactly at p: a point cloud's spacing, its triangles being points.
+    double nearestOther(V3 p) const {
+        double best = 1e300;
+        std::vector<int> st{0};
+        while (!st.empty()) {
+            const Node& n = nodes_[st.back()];
+            st.pop_back();
+            if (boxDist2(n, p) >= best) continue;
+            if (n.left < 0) {
+                for (int k = n.first; k < n.first + n.count; ++k) {
+                    V3 c = closestOnTri(p, tris_[k]);
+                    double d = dot(c - p, c - p);
+                    if (d > 0 && d < best) best = d;
+                }
+            } else {
+                st.push_back(n.left);
+                st.push_back(n.right);
+            }
+        }
+        return std::sqrt(best);
+    }
 
     bool overlapsTet(const V3 q[4]) const {
         V3 lo = q[0], hi = q[0];
@@ -507,6 +537,27 @@ manifold::MeshGL64 Wrapper::skin() const {
     return mesh;
 }
 
+// A point cloud, as triangles with all three corners on one point: the
+// oracle's nearest point and tetrahedron overlap are both exact for those,
+// so the wrap needs no separate point oracle (#1037). False: not a list of
+// [x, y, z] numbers.
+bool appendPoints(const Value& v, std::vector<Tri>& out) {
+    const ListPtr* list = std::get_if<ListPtr>(&v);
+    if (!list) return false;
+    for (const Value& item : (*list)->items) {
+        const ListPtr* pt = std::get_if<ListPtr>(&item);
+        if (!pt || (*pt)->items.size() != 3) return false;
+        V3 p;
+        for (int k = 0; k < 3; ++k) {
+            const double* c = std::get_if<double>(&(*pt)->items[k]);
+            if (!c || !std::isfinite(*c)) return false;
+            p[k] = *c;
+        }
+        out.push_back({p, p, p});
+    }
+    return true;
+}
+
 void appendTriangles(const manifold::MeshGL& m, std::vector<Tri>& out) {
     const size_t np = m.numProp;
     auto at = [&](uint32_t v) {
@@ -523,6 +574,13 @@ CSGParams resolveAlphaWrap(Evaluator& ev, const oscad::ModularCall& node, EvalCo
     CSGParams params;
     params["alpha"] = getArg(args, 0, "alpha", Value{});
     params["offset"] = getArg(args, 1, "offset", Value{});
+    params["points"] = getArg(args, std::nullopt, "points", Value{});
+    // One input or the other (#1037): wrapping a cloud makes a solid where
+    // there was none, wrapping children skins solids that exist, and no use
+    // was found for both at once. Refused rather than guessed at, so that
+    // allowing it later breaks no script.
+    if (!std::holds_alternative<std::monostate>(params["points"]) && !node.children.empty())
+        ev.error("alpha_wrap: give points= or children, not both", node);
     EvalContext blockCtx = ev.blockScope(effCtx);
     ev.evalChildren(node.children, blockCtx);
     return params;
@@ -532,14 +590,22 @@ std::vector<ColoredBody> generateAlphaWrap(Evaluator& ev, const CSGParams& param
                                            const std::vector<std::unique_ptr<CSGNode>>& children,
                                            const oscad::ASTNode& node) {
     const std::vector<ColoredBody> bodies = flattenCsgTree(children);
-    if (bodies.empty()) return {};
+    std::vector<Tri> tris;
+    std::vector<ColoredBody> out;
+    std::optional<std::array<float, 4>> color;
+    const Value& points = params.at("points");
+    if (!std::holds_alternative<std::monostate>(points)) {
+        if (!appendPoints(points, tris)) {
+            ev.warn("alpha_wrap: points must be a list of [x, y, z] points", &node.position());
+            return {};
+        }
+        if (tris.empty()) return {};
+    }
+    if (bodies.empty() && tris.empty()) return {};
 
     // Background/highlight geometry and 2D sections pass through untouched;
     // every other solid, including an open polyhedron()'s raw triangles, is
     // wrapped together.
-    std::vector<Tri> tris;
-    std::vector<ColoredBody> out;
-    std::optional<std::array<float, 4>> color;
     bool colorTaken = false, sawSection = false;
     for (const ColoredBody& b : bodies) {
         if (b.role != BodyRole::Normal || (!b.body && !b.rawMesh)) {
@@ -555,9 +621,25 @@ std::vector<ColoredBody> generateAlphaWrap(Evaluator& ev, const CSGParams& param
     if (sawSection) ev.warn("alpha_wrap: 2D children are not wrapped", &node.position());
     if (tris.empty()) return out;
 
+    std::vector<V3> cloud;
+    if (!std::holds_alternative<std::monostate>(points))
+        for (const Tri& t : tris) cloud.push_back(t.a);
     Oracle oracle(std::move(tris));
     const V3 d = oracle.hi() - oracle.lo();
     const double diag = len(d);
+    double defaultAlpha = kDefaultAlphaFraction * diag;
+    if (cloud.size() > 1) {
+        std::vector<double> nn;
+        nn.reserve(cloud.size());
+        for (const V3& p : cloud) {
+            const double r = oracle.nearestOther(p);
+            if (r < 1e299) nn.push_back(r);
+        }
+        if (!nn.empty()) {
+            std::nth_element(nn.begin(), nn.begin() + nn.size() / 2, nn.end());
+            defaultAlpha = std::max(defaultAlpha, kDefaultAlphaSpacing * nn[nn.size() / 2]);
+        }
+    }
 
     auto number = [&](const char* name, double fallback) -> std::optional<double> {
         const Value& v = params.at(name);
@@ -567,7 +649,7 @@ std::vector<ColoredBody> generateAlphaWrap(Evaluator& ev, const CSGParams& param
         ev.warn(std::string("alpha_wrap: ") + name + " must be a positive number", &node.position());
         return std::nullopt;
     };
-    const std::optional<double> alpha = number("alpha", kDefaultAlphaFraction * diag);
+    const std::optional<double> alpha = number("alpha", defaultAlpha);
     if (!alpha) return bodies;
     const std::optional<double> offset = number("offset", kDefaultOffsetFraction * *alpha);
     if (!offset) return bodies;

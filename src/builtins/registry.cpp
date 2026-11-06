@@ -139,7 +139,7 @@ const std::vector<std::string>* builtinParamNames(const std::string& name) {
         {"minkowski_difference", {}},
         {"simplify", {"tolerance"}},
         {"mesh_repair", {"tolerance"}},
-        {"alpha_wrap", {"alpha", "offset"}},
+        {"alpha_wrap", {"alpha", "offset", "points"}},
         {"export_as", {"name"}},
         {"levelset", {"field", "bounds", "isovalue", "invert", "edge"}},
         {"offset", {"r", "delta", "chamfer"}},

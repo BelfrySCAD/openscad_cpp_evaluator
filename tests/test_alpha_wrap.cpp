@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+
 #include "test_helpers.hpp"
 
 using namespace oscadeval;
@@ -127,4 +129,69 @@ TEST(AlphaWrap, StopsWhenCancelled) {
     auto tree = ev.resolveTree(ast, ctx);
     flag->store(true);
     EXPECT_THROW(ev.generateTree(tree), EvalError);
+}
+
+namespace {
+
+// 400 points spread evenly over a sphere of radius 10 (a Fibonacci lattice):
+// about 1.8 apart, no faces at all.
+const char* kSphereCloud =
+    "pts = [for (i = [0:399]) let(t = i * 137.508, z = 1 - 2 * (i + 0.5) / 400, r = sqrt(1 - z * z))"
+    " 10 * [r * cos(t), r * sin(t), z]];";
+
+} // namespace
+
+TEST(AlphaWrap, PointsWrapACloudIntoASolid) {
+    // #1037: a point cloud becomes a closed solid. alpha 3 bridges the ~1.8
+    // spacing; the skin sits the default offset, alpha/30, out.
+    Evaluated e = evalSrc(std::string(kSphereCloud) + "alpha_wrap(alpha = 3, points = pts);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    const manifold::Manifold& m = soleBody(e);
+    EXPECT_EQ(m.Status(), manifold::Manifold::Error::NoError);
+    EXPECT_EQ(m.Genus(), 0);
+    EXPECT_EQ(m.Decompose().size(), 1u);
+    const double ball = 4.0 / 3 * M_PI;
+    EXPECT_GT(m.Volume(), 0.95 * ball * 1000);            // the sphere the points sample
+    EXPECT_LT(m.Volume(), ball * std::pow(10.1, 3));      // no bigger than one offset out
+    EXPECT_NEAR(m.BoundingBox().max.z, 10 * (1 - 1.0 / 400) + 0.1, 0.05);
+}
+
+TEST(AlphaWrap, ACloudsDefaultAlphaBridgesItsSpacing) {
+    // 40 points ~5.3 apart: at the solids' default, 1/20 of the diagonal
+    // (1.7), the ball passed between them and each point was wrapped alone,
+    // 40 specks. A cloud's default is at least 1.5x its median spacing.
+    Evaluated e = evalSrc(
+        "pts = [for (i = [0:39]) let(t = i * 137.508, z = 1 - 2 * (i + 0.5) / 40, r = sqrt(1 - z * z))"
+        " 10 * [r * cos(t), r * sin(t), z]]; alpha_wrap(points = pts);");
+    ASSERT_EQ(e.bodies.size(), 1u);
+    EXPECT_EQ(soleBody(e).Genus(), 0);
+    EXPECT_EQ(soleBody(e).Decompose().size(), 1u);
+    EXPECT_GT(soleBody(e).Volume(), 3000);
+    // A dense cloud closes at the default too.
+    Evaluated dense = evalSrc(std::string(kSphereCloud) + "alpha_wrap(points = pts);");
+    EXPECT_EQ(soleBody(dense).Genus(), 0);
+    EXPECT_EQ(soleBody(dense).Decompose().size(), 1u);
+}
+
+TEST(AlphaWrap, PointsAndChildrenTogetherIsAnError) {
+    // One input or the other: allowing both later would break no script.
+    EXPECT_THROW(evalSrc("alpha_wrap(points = [[0,0,0], [1,0,0], [0,1,0], [0,0,1]]) cube(1);"), EvalError);
+}
+
+TEST(AlphaWrap, PointsThatAreNotThreeDWarnAndWrapNothing) {
+    for (const char* call : {"alpha_wrap(points = [[0, 0], [1, 0]]);", "alpha_wrap(points = 5);",
+                             "alpha_wrap(points = [[0, 0, \"z\"]]);"}) {
+        const std::vector<std::string> w = warningsOf(call);
+        ASSERT_EQ(w.size(), 1u) << call;
+        EXPECT_NE(w[0].find("points must be a list of [x, y, z] points"), std::string::npos) << w[0];
+        EXPECT_TRUE(evalSrc(call).bodies.empty()) << call;
+    }
+    EXPECT_TRUE(evalSrc("alpha_wrap(points = []);").bodies.empty());
+}
+
+TEST(AlphaWrap, FeatureLevelTwoMeansPoints) {
+    std::vector<std::string> out;
+    evalSrc("echo(supported_feature(\"alpha-wrap\"));", [&](const std::string& m) { out.push_back(m); });
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], "ECHO: 2");
 }
