@@ -1976,7 +1976,7 @@ is evaluated before the clock starts. Times under 1 ms print in microseconds (`f
 ## `alpha_wrap()`
 
 `alpha_wrap(alpha, offset) { ... }` shrink-wraps its children in a closed, manifold skin
-(BelfrySCAD #941; `supported_feature("alpha-wrap")` is 1). The skin follows any concavity a ball
+(BelfrySCAD #941; `supported_feature("alpha-wrap")` is 1, and 2 once `points=` exists -- below). The skin follows any concavity a ball
 of radius `alpha` can enter and bridges any gap or hole that ball cannot pass, i.e. narrower than about
 `2*alpha` (not a sharp cut-off: from ~1.5x alpha to 2x alpha + offset a gap may be bridged only
 partly, leaving strands, which CGAL's own Alpha_wrap_3 does too -- BelfrySCAD #941); every point of it lies
@@ -1985,6 +1985,21 @@ alpha/30. All Normal 3D children are wrapped together into one body taking the f
 **including an open `polyhedron()`'s raw triangles** (`ColoredBody::rawMesh`) -- wrapping geometry
 too broken for Manifold is half the point. 2D children and `%`/`#` bodies pass through (2D with a
 warning). A non-positive or non-numeric `alpha`/`offset` warns and leaves the children as they were.
+
+**`alpha_wrap(alpha, offset, points=[...])`** wraps a point cloud instead (BelfrySCAD #1037;
+`supported_feature("alpha-wrap")` is **2** from this version): a list of `[x, y, z]` points, with no
+faces, as a scanner or photogrammetry gives them, becomes one closed solid. **`points=` and children
+together is an error**, not a union: wrapping a cloud makes a solid where there was none and wrapping
+children skins solids that exist, and nobody found a use for both at once (decided on the issue);
+refusing now means allowing it later breaks no script. A list that is not all `[x, y, z]` numbers
+warns and wraps nothing; an empty one wraps nothing silently. The default alpha for a cloud is the
+larger of the solids' default (1/20 of the diagonal) and **1.5x the median nearest-neighbour
+distance**: below the spacing the ball passes between the points and wraps each alone -- 40 points
+5.3 apart on a sphere came out as 40 specks at diag/20, and 1x the median already closed even
+samplings, so 1.5x leaves room for a real scan's uneven spacing. Points enter the oracle as
+degenerate triangles `{p, p, p}`: `closestOnTri` and the separating-axis tet test are exact for
+those, so there is no separate point oracle; `Oracle::nearestOther` skips distance 0 to measure the
+spacing. A 20,000-point cloud wraps in 0.16 s, all in.
 
 ### Implementation notes
 
