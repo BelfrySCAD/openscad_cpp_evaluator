@@ -230,8 +230,15 @@ std::vector<Contour2d> importSvg(Evaluator& ev, const CallArgs& args, const Valu
                     &node.position());
         }
     }
-    bool matched = true;
-    std::vector<Contour2d> contours = loadSvgContours(path, filter, &matched, dpi, center, disc);
+    bool matched = true, bitmapOnly = false;
+    std::vector<Contour2d> contours = loadSvgContours(path, filter, &matched, dpi, center, disc, &bitmapOnly);
+    if (bitmapOnly) {
+        // A picture saved as SVG, not a drawing: OpenSCAD imports nothing
+        // here and says nothing, which cost a user hours (#1045).
+        ev.warn("import: '" + path + "': the SVG holds only a bitmap <image>, which has no outline to import; "
+                "trace it into paths first (e.g. Inkscape's Path > Trace Bitmap)",
+                &node.position());
+    }
     if (!matched) {
         // Nothing imported, rather than silently falling back to the whole
         // drawing -- a cut layer that quietly became every layer is the
