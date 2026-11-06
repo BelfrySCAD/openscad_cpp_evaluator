@@ -857,6 +857,27 @@ TEST(SvgFilter, AMissImportsNothingAndWarns) {
     std::filesystem::remove(path);
 }
 
+TEST(SvgImport, ABitmapOnlyDrawingWarnsWhyItImportsNothing) {
+    // #1045: a picture saved as SVG -- one <image>, no shapes -- imports
+    // nothing, in OpenSCAD too, and said nothing about why.
+    const auto path = tempPath("bitmap_only.svg");
+    writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10">
+<g transform="translate(1,1)"><image width="8" height="8" href="data:image/png;base64,AAAA"/></g></svg>)svg");
+    std::vector<std::string> warned;
+    Evaluator ev([&](const std::string& m) { warned.push_back(m); });
+    EXPECT_EQ(contourCount(path.generic_string(), "", ev), 0u);
+    ASSERT_EQ(warned.size(), 1u);
+    EXPECT_NE(warned[0].find("only a bitmap <image>"), std::string::npos) << warned[0];
+
+    // A bitmap traced over, beside its paths, is an ordinary drawing.
+    writeFile(path, R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10">
+<image width="8" height="8" href="data:image/png;base64,AAAA"/><rect width="4" height="4"/></svg>)svg");
+    warned.clear();
+    EXPECT_EQ(contourCount(path.generic_string(), "", ev), 1u);
+    EXPECT_TRUE(warned.empty()) << warned[0];
+    std::filesystem::remove(path);
+}
+
 TEST(SvgFilter, IdAndClassTogetherMatchEither) {
     const auto path = tempPath("filter_both.svg");
     writeFile(path, kFilterSvg);

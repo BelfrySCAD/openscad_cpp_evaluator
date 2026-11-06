@@ -57,11 +57,14 @@ struct SvgFilter {
 // `dpi`), the viewBox under preserveAspectRatio, Y flipped about the page
 // height -- or about the drawing's centre with `center`. The result is
 // filled: overlapping contours have already been combined.
+// `bitmapOnly`, when given, reports a drawing whose only content is
+// <image> bitmaps: nothing to import, and nothing says why (#1045).
 std::vector<Contour2d> loadSvgContours(const std::string& path,
                                        const SvgFilter& filter = {},
                                        bool* matched = nullptr,
                                        double dpi = 72.0,
                                        bool center = false,
-                                       const Discretizer& disc = {});
+                                       const Discretizer& disc = {},
+                                       bool* bitmapOnly = nullptr);
 
 } // namespace oscadeval

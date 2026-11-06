@@ -772,6 +772,7 @@ struct Walk {
     std::map<std::string, const XmlNode*> defs;   // <defs> shapes by id, as seen so far
     std::vector<PathList> shapes;                 // one entry per drawn element
     bool matched = false;
+    int images = 0;                               // drawn <image>s: bitmaps, no outline
 
     enum class Mode { Normal, Defs, Clone };
 
@@ -798,6 +799,7 @@ struct Walk {
     void walk(const XmlNode& el, const Mat3& mat, bool included, std::vector<std::string> layers, Mode mode) {
         if (el.tag == "defs") mode = Mode::Defs;
         if (!isShapeTag(el.tag)) {  // not a shape: transparent, transform and all
+            if (el.tag == "image" && included && mode != Mode::Defs) ++images;
             for (const XmlNode& child : el.children) walk(child, mat, included, layers, mode);
             return;
         }
@@ -995,7 +997,7 @@ std::vector<Contour2d> fill(const std::vector<PathList>& shapes) {
 } // namespace
 
 std::vector<Contour2d> loadSvgContours(const std::string& path, const SvgFilter& filter, bool* matched, double dpi,
-                                       bool center, const Discretizer& disc) {
+                                       bool center, const Discretizer& disc, bool* bitmapOnly) {
     if (!(dpi > 0.0)) dpi = 72.0;
     std::ifstream in(path);
     if (!in) throw std::runtime_error("could not open '" + path + "'");
@@ -1010,6 +1012,7 @@ std::vector<Contour2d> loadSvgContours(const std::string& path, const SvgFilter&
     // A filter that matched nothing imports nothing -- it does NOT fall
     // back to the whole drawing. The caller turns this into the warning.
     if (matched) *matched = !filtered || w.matched;
+    if (bitmapOnly) *bitmapOnly = w.images > 0 && w.shapes.empty();
     pageMap(*root, dpi, center, w.shapes);
     return fill(w.shapes);
 }
