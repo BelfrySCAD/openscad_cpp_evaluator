@@ -886,6 +886,11 @@ private:
     // definition (csg_generate.cpp) for why non-owning pointers, not
     // unique_ptr, let both callers share one implementation.
     std::vector<ColoredBody> generateTreeImpl(const std::vector<CSGNode*>& tree);
+    // `node`'s ManifoldCache key, or none when it must not be cached (no
+    // cache, rands() taint, a closure in the key).
+    std::optional<std::string> manifoldCacheKey(CSGNode& node);
+    // Marks every cached descendant of `node` used, for keep_renders.
+    void touchCachedDescendants(CSGNode& node);
 
     // Evaluates one top-level element of a `[...]` list literal (a plain
     // expression, or one of the 6 list-comprehension clause kinds --

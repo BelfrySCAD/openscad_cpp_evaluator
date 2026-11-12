@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/csg_node.hpp"
 
+#include <cstdint>
 #include <mutex>
 #include <vector>
 #include <optional>
@@ -38,13 +39,30 @@ struct CachedSubtree {
 
 class ManifoldCache {
 public:
+    // Eviction (BelfrySCAD #1117): an animation makes new keys every frame
+    // ($t moves the parts), so a cache that kept everything grew by a
+    // frame's geometry per frame until a long animation took all of RAM.
+    // With `keepRenders` N > 0, beginRender() -- called once per top-level
+    // generateTree() -- drops every entry no get()/put() touched in the
+    // last N renders. A part unchanged between frames is hit every frame
+    // and stays. 0 keeps everything, as before.
+    explicit ManifoldCache(unsigned keepRenders = 0) : keepRenders_(keepRenders) {}
     std::optional<CachedSubtree> get(const std::string& key) const;
     void put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings);
     void clear();
+    void touch(const std::string& key);  // marks it used, as get() does
+    void beginRender();
+    size_t size() const;
 
 private:
+    struct Entry {
+        CachedSubtree value;
+        uint64_t lastUsed;
+    };
     mutable std::mutex mutex_;
-    std::unordered_map<std::string, CachedSubtree> entries_;
+    mutable std::unordered_map<std::string, Entry> entries_;  // get() stamps lastUsed
+    unsigned keepRenders_;
+    uint64_t generation_ = 0;
 };
 
 // Structural content-hash key for `node`, used by generateTree()'s

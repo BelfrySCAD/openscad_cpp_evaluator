@@ -11,17 +11,39 @@ std::optional<CachedSubtree> ManifoldCache::get(const std::string& key) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = entries_.find(key);
     if (it == entries_.end()) return std::nullopt;
-    return it->second;
+    it->second.lastUsed = generation_;
+    return it->second.value;
 }
 
 void ManifoldCache::put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings) {
     std::lock_guard<std::mutex> lock(mutex_);
-    entries_[std::move(key)] = CachedSubtree{std::move(bodies), std::move(warnings)};
+    entries_[std::move(key)] = Entry{CachedSubtree{std::move(bodies), std::move(warnings)}, generation_};
 }
 
 void ManifoldCache::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     entries_.clear();
+}
+
+void ManifoldCache::touch(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(key);
+    if (it != entries_.end()) it->second.lastUsed = generation_;
+}
+
+void ManifoldCache::beginRender() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++generation_;
+    if (keepRenders_ == 0) return;
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (generation_ - it->second.lastUsed > keepRenders_) it = entries_.erase(it);
+        else ++it;
+    }
+}
+
+size_t ManifoldCache::size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return entries_.size();
 }
 
 namespace {
