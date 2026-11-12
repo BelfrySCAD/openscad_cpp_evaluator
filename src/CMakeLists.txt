@@ -78,9 +78,13 @@ target_compile_options(openscad_cpp_evaluator PRIVATE
 )
 
 # Shewchuk's predicates are 1996 K&R C, kept as published: quiet, and never
-# with fast-math, which would break their exact arithmetic.
+# with fast-math, which would break their exact arithmetic. Nor with
+# multiply-adds fused: their error terms assume every product is rounded on
+# its own. GCC fuses by default (-ffp-contract=fast) wherever the target has
+# FMA, and GCC 15 on ubuntu-latest made alpha_wrap() return an empty mesh
+# (#319).
 set_source_files_properties(../third_party/predicates/predicates.c PROPERTIES
-  COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>")
+  COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w;/fp:precise,-w;-ffp-contract=off>")
 
 # -Wall -Wextra above is about OUR code, but two TUs pull a vendored header
 # in wholesale and inherit its warnings: 27 from Boost.Polygon's voronoi
