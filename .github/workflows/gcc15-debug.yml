@@ -1,0 +1,26 @@
+# Temporary, never merged: openscad_cpp_evaluator#319.
+name: gcc15-debug
+on: pull_request
+jobs:
+  alpha-wrap:
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - {name: asan-ubsan, type: RelWithDebInfo, flags: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"}
+          - {name: O0, type: Debug, flags: ""}
+          - {name: O2-no-strict-aliasing, type: Release, flags: "-fno-strict-aliasing"}
+          - {name: O2-no-fp-contract, type: Release, flags: "-ffp-contract=off"}
+    name: ${{ matrix.build.name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: {submodules: recursive}
+      - run: sudo apt-get update && sudo apt-get install -y bison flex && g++ --version | head -1
+      - run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build.type }}
+          "-DCMAKE_CXX_FLAGS=${{ matrix.build.flags }}" "-DCMAKE_C_FLAGS=${{ matrix.build.flags }}"
+          "-DCMAKE_EXE_LINKER_FLAGS=${{ matrix.build.flags }}"
+      - run: cmake --build build -j $(nproc) --target oscad_eval_tests
+      - run: build/tests/oscad_eval_tests --gtest_filter='AlphaWrap.*'
+        env: {ASAN_OPTIONS: "detect_leaks=0"}
