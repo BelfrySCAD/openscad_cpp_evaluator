@@ -33,6 +33,29 @@ std::vector<ColoredBody> flattenCsgTree(const std::vector<std::unique_ptr<CSGNod
 // to the pointee, so mutating node.bodies here is legal even from a const
 // vector<unique_ptr<CSGNode>>& (see csg_node.hpp) -- this overload just
 // makes that non-owning access explicit for the treeStack_ caller too.
+std::optional<std::string> Evaluator::manifoldCacheKey(CSGNode& node) {
+    if (!manifoldCache_ || node.uncacheable) return std::nullopt;
+    std::string key = cacheKey(node);
+    // A key that serialized a function literal is not a pure function of
+    // content -- it embeds a raw AST address that the next parse can hand
+    // out again. No key means both the get() and the put() are skipped.
+    // See CSGNode::keyHasClosure.
+    if (node.keyHasClosure) return std::nullopt;
+    // A difference() built with keepMinuendColor colours its cut faces
+    // differently, so the two modes must never serve each other's bodies.
+    // Prefixing every key (not only differences) keeps the rule simple; the
+    // cache holds both.
+    if (keepMinuendColor) key.insert(0, "keepMinuendColor;");
+    return key;
+}
+
+void Evaluator::touchCachedDescendants(CSGNode& node) {
+    for (const std::unique_ptr<CSGNode>& c : node.children) {
+        if (auto key = manifoldCacheKey(*c)) manifoldCache_->touch(*key);
+        touchCachedDescendants(*c);
+    }
+}
+
 std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>& tree) {
     std::vector<ColoredBody> topLevelBodies;
     const auto& dispatch = generateDispatch();
@@ -51,23 +74,14 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
         // children are never generated at all -- no wasted Manifold work
         // re-deriving results that would just be discarded. Mirrors
         // generate_tree()'s own cache check exactly.
-        std::optional<std::string> key;
-        if (manifoldCache_ && !node.uncacheable) {
-            key = cacheKey(node);
-            // A difference() built with keepMinuendColor colours its cut
-            // faces differently, so the two modes must never serve each
-            // other's bodies. Prefixing every key (not only differences)
-            // keeps the rule simple; the cache holds both.
-            if (keepMinuendColor) key->insert(0, "keepMinuendColor;");
-            // A key that serialized a function literal is not a pure
-            // function of content -- it embeds a raw AST address that the
-            // next parse can hand out again. Dropping the key here forces
-            // both the get() below and the put() further down to be
-            // skipped. See CSGNode::keyHasClosure.
-            if (node.keyHasClosure) key.reset();
-        }
+        std::optional<std::string> key = manifoldCacheKey(node);
         std::optional<CachedSubtree> cached = key ? manifoldCache_->get(*key) : std::nullopt;
         if (cached) {
+            // The children were not looked up, but they are still in use:
+            // an edit to this node alone misses here and hits them. Without
+            // this they aged out of a keep_renders cache (#1117) and that
+            // edit regenerated the whole subtree.
+            touchCachedDescendants(node);
             node.bodies = std::move(cached->bodies);
             // Replay what generating this subtree said the first time. A hit
             // runs none of it again, so without this the diagnostics simply
@@ -347,6 +361,9 @@ void Evaluator::applyDimensionRulesTo(const std::vector<CSGNode*>& children, int
 }
 
 std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_ptr<CSGNode>>& tree) {
+    // One render, for the cache's eviction count. Here and not in
+    // generateTreeImpl, which a render() expression also calls mid-render.
+    if (manifoldCache_) manifoldCache_->beginRender();
     std::vector<CSGNode*> ptrs;
     ptrs.reserve(tree.size());
     for (const std::unique_ptr<CSGNode>& n : tree) ptrs.push_back(n.get());

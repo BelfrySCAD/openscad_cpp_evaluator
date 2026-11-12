@@ -972,11 +972,12 @@ NB_MODULE(_openscad_cpp_evaluator, m) {
     m.doc() = "C++ OpenSCAD evaluator (nanobind binding)";
 
     // Opt-in, shared across evaluate() calls -- see manifold_cache.hpp.
-    // Only a constructor and clear() are ever called from Python (get/put
+    // Only the constructor, clear() and size() are ever called from Python (get/put
     // are internal to generateTree()'s own C++ implementation).
     nb::class_<oscadeval::ManifoldCache>(m, "ManifoldCache")
-        .def(nb::init<>())
-        .def("clear", &oscadeval::ManifoldCache::clear);
+        .def(nb::init<unsigned>(), nb::arg("keep_renders") = 0)
+        .def("clear", &oscadeval::ManifoldCache::clear)
+        .def("size", &oscadeval::ManifoldCache::size);
 
     // See FastContinueSignal's own doc comment, above -- only a
     // constructor and request() are ever called from Python.

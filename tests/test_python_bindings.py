@@ -61,6 +61,28 @@ def test_manifold_cache_reuse_across_evaluates():
     cache.clear()  # must not raise
 
 
+def test_manifold_cache_keep_renders_bounds_an_animation():
+    """BelfrySCAD #1117: every frame's keys are new, so an unbounded cache
+    grew by a frame per frame. keep_renders drops what recent renders did
+    not use, and keeps what every render reuses."""
+    moving = _write("rotate($t*360) cube([1, 2, 3]);")
+    def run(cache, path, frames):
+        for f in range(frames):
+            Evaluator(manifold_cache=cache).evaluate(path, {"$t": f / 100})
+    unbounded, bounded = ManifoldCache(), ManifoldCache(keep_renders=2)
+    run(unbounded, moving, 20)
+    run(bounded, moving, 20)
+    assert unbounded.size() >= 20
+    assert bounded.size() <= 2 * 2 + 2
+    # A part used by every render is never dropped.
+    static = _write("translate([5, 0, 0]) sphere(2);")
+    kept = ManifoldCache(keep_renders=1)
+    run(kept, static, 1)
+    n = kept.size()
+    run(kept, static, 10)
+    assert n > 0 and kept.size() == n
+
+
 def test_csg_tree_shape_and_format():
     path = _write("""
         difference() {
