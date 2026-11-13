@@ -51,6 +51,13 @@ add_library(openscad_cpp_evaluator STATIC
   builtins/offset3d.cpp
   builtins/export_as.cpp
   ../third_party/predicates/predicates.c
+  ../third_party/libtess2/Source/bucketalloc.c
+  ../third_party/libtess2/Source/dict.c
+  ../third_party/libtess2/Source/geom.c
+  ../third_party/libtess2/Source/mesh.c
+  ../third_party/libtess2/Source/priorityq.c
+  ../third_party/libtess2/Source/sweep.c
+  ../third_party/libtess2/Source/tess.c
   builtins/extrude.cpp
   builtins/roof.cpp
   builtins/surface.cpp
@@ -83,6 +90,16 @@ target_compile_options(openscad_cpp_evaluator PRIVATE
 # its own. GCC fuses by default (-ffp-contract=fast) wherever the target has
 # FMA, and GCC 15 on ubuntu-latest made alpha_wrap() return an empty mesh
 # (#319).
+# libtess2 splits polyhedron faces as OpenSCAD does (third_party/libtess2/
+# README.md). Vendored C, kept as published: quiet.
+set_source_files_properties(
+  ../third_party/libtess2/Source/bucketalloc.c ../third_party/libtess2/Source/dict.c
+  ../third_party/libtess2/Source/geom.c ../third_party/libtess2/Source/mesh.c
+  ../third_party/libtess2/Source/priorityq.c ../third_party/libtess2/Source/sweep.c
+  ../third_party/libtess2/Source/tess.c
+  PROPERTIES COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>"
+  INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libtess2/Include")
+
 set_source_files_properties(../third_party/predicates/predicates.c PROPERTIES
   COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w;/fp:precise,-w;-ffp-contract=off>")
 
