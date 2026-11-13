@@ -267,6 +267,8 @@ manifold::Manifold finishKeepMinuend(Evaluator& ev, std::vector<KeepPart>& parts
                 const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
                 auto node = ev.idToNode.find(id);
                 if (node != ev.idToNode.end()) ev.idToNode[fresh] = node->second;
+                if (auto m = ev.idToMinter_.find(id); m != ev.idToMinter_.end())
+                    ev.noteMinted(fresh, m->second);
                 // ponytail: a part that is itself a multi-colour merge
                 // gives its cut faces its first child's colour rather than
                 // the colour of whichever child the cut passed through.

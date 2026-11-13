@@ -98,9 +98,9 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
             // Evaluator::measuring_.
             if (node.node && !measuring_) {
                 auto producer = cacheProducer_.find(*key);
-                restampCachedIds(node.bodies, *node.node,
+                restampCachedIds(node.bodies, node,
                                  producer == cacheProducer_.end() ? nullptr : producer->second,
-                                 node.callChain);
+                                 cached->attribution);
             }
         } else {
             // Recurse into children first (bottom-up) -- populates each
@@ -131,6 +131,9 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 ~CaptureGuard() { ev.warnCapture = saved; }
             } captureGuard{*this, warnCapture};
             if (key) warnCapture = &subtreeWarnings;
+            // Everything minted from here to the put() below is this
+            // subtree's -- see mintLog_.
+            const size_t mintStart = mintLog_.size();
             generateTreeImpl(childPtrs);
             insideHull = savedInsideHull;
 
@@ -145,8 +148,10 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 // so a sibling generated at top level doesn't inherit it.
                 const oscad::Position* savedWarnEntry = generateWarnEntry;
                 const uint32_t savedCallChain = generateCallChain;
+                const CSGNode* savedGenerating = generatingNode_;
                 generateWarnEntry = node.warnEntry;
                 generateCallChain = node.callChain;
+                generatingNode_ = &node;
                 // An operation (union, offset, hull, linear_extrude, ...)
                 // sees its 2D children where OpenSCAD's F6 would: with any
                 // transform they carry projected onto the plane. Only the
@@ -181,6 +186,7 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 if (!measuring_) tagSections(node.bodies, *node.node, node.callChain);
                 generateWarnEntry = savedWarnEntry;
                 generateCallChain = savedCallChain;
+                generatingNode_ = savedGenerating;
             } else {
                 // No registered GenerateFn for this kind (a builtin with
                 // display-only semantics like render(), or a non-builtin
@@ -201,7 +207,15 @@ std::vector<ColoredBody> Evaluator::generateTreeImpl(const std::vector<CSGNode*>
                 // legitimately reuse it. Only the PRODUCER attribution is
                 // suppressed: a node that gets discarded must never be
                 // recorded as the origin of geometry a later render draws.
-                manifoldCache_->put(*key, node.bodies, std::move(subtreeWarnings));
+                std::vector<std::pair<uint32_t, uint32_t>> attribution;
+                if (node.preorder != UINT32_MAX) {
+                    for (size_t i = mintStart; i < mintLog_.size(); ++i) {
+                        const CSGNode* minter = mintLog_[i].second;
+                        if (minter->preorder == UINT32_MAX || minter->preorder < node.preorder) continue;
+                        attribution.emplace_back(mintLog_[i].first, minter->preorder - node.preorder);
+                    }
+                }
+                manifoldCache_->put(*key, node.bodies, std::move(subtreeWarnings), std::move(attribution));
                 if (!measuring_) cacheProducer_[*key] = node.node;
             }
                 // The children's bodies have been consumed (by the dispatch above,
@@ -367,6 +381,19 @@ std::vector<ColoredBody> Evaluator::generateTree(const std::vector<std::unique_p
     std::vector<CSGNode*> ptrs;
     ptrs.reserve(tree.size());
     for (const std::unique_ptr<CSGNode>& n : tree) ptrs.push_back(n.get());
+    // Number the tree for cache attribution (CSGNode::preorder). An
+    // explicit stack: the tree may be as deep as kMaxCsgTreeDepth.
+    preorderNodes_.clear();
+    if (manifoldCache_) {
+        std::vector<CSGNode*> stack(ptrs.rbegin(), ptrs.rend());
+        while (!stack.empty()) {
+            CSGNode* n = stack.back();
+            stack.pop_back();
+            n->preorder = static_cast<uint32_t>(preorderNodes_.size());
+            preorderNodes_.push_back(n);
+            for (auto c = n->children.rbegin(); c != n->children.rend(); ++c) stack.push_back(c->get());
+        }
+    }
     std::vector<ColoredBody> bodies = generateTreeImpl(ptrs);
     // The top level is an implicit union, so it gets the same Group warning
     // every other group node gets -- but it KEEPS both dimensions.
@@ -423,8 +450,9 @@ std::shared_ptr<const std::vector<ColoredBody>> remapParts(const std::vector<Col
 }
 } // namespace
 
-void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
-                                 const oscad::ASTNode* producer, uint32_t callChain) {
+void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const CSGNode& hit,
+                                 const oscad::ASTNode* producer,
+                                 const std::vector<std::pair<uint32_t, uint32_t>>& attribution) {
     // A cache hit hands back the geometry AND the originalIDs of whichever
     // call site first produced it. Those IDs are provenance -- "which node
     // made this" -- not content, so two identical shapes at two call sites
@@ -451,14 +479,42 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
     // share one attribution, since only the inner node is a cache hit and
     // its producer check keeps the first copy's descendants. They occupy
     // the same space, so there is nothing to select apart.
+    //
+    // All of the above is the FALLBACK. The entry's `attribution` names the
+    // node inside the subtree that made each ID, by its pre-order offset,
+    // and the hit's own subtree has the same shape (the key covers every
+    // child), so that offset finds the matching node here: its own line
+    // and its own call chain, across renders too. Without it a module's
+    // parts all became the module call from the second render on, and
+    // could no longer be selected apart (BelfrySCAD #1123).
+    const oscad::ASTNode& node = *hit.node;
+    std::unordered_map<uint32_t, uint32_t> relOf(attribution.begin(), attribution.end());
+    auto stamp = [&](uint32_t old, uint32_t fresh) {
+        const CSGNode* target = nullptr;
+        if (hit.preorder != UINT32_MAX) {
+            auto rel = relOf.find(old);
+            if (rel != relOf.end() && hit.preorder + rel->second < preorderNodes_.size())
+                target = preorderNodes_[hit.preorder + rel->second];
+        }
+        if (target != nullptr && target->node != nullptr) {
+            idToNode[fresh] = target->node;
+            idToCallChain[fresh] = target->callChain;
+            noteMinted(fresh, target);
+            return;
+        }
+        auto found = idToNode.find(old);
+        idToNode[fresh] = (found != idToNode.end() && found->second != producer) ? found->second : &node;
+        // Unlike idToNode, this is the call site that reached the geometry
+        // NOW: whichever node the cached copy is being reused at is the
+        // line the user would be shown, whatever produced the original.
+        idToCallChain[fresh] = hit.callChain;
+        noteMinted(fresh, &hit);
+    };
     for (ColoredBody& cb : bodies) {
         // A 2D body's one ID, restamped by the same rule as a solid's runs.
         if (cb.sectionId) {
             const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
-            auto old = idToNode.find(*cb.sectionId);
-            idToNode[fresh] =
-                (old != idToNode.end() && old->second != producer) ? old->second : &node;
-            idToCallChain[fresh] = callChain;
+            stamp(*cb.sectionId, fresh);
             idToColor[fresh] = cb.color;
             cb.sectionId = fresh;
         }
@@ -481,15 +537,7 @@ void Evaluator::restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::
             auto found = remap.find(id);
             if (found == remap.end()) {
                 const uint32_t fresh = manifold::Manifold::ReserveIDs(1);
-                auto old = idToNode.find(id);
-                idToNode[fresh] =
-                    (old != idToNode.end() && old->second != producer) ? old->second : &node;
-                // Unlike idToNode, this is the call site that reached the
-                // geometry NOW: whichever node the cached copy is being
-                // reused at is the line the user would be shown, whatever
-                // produced the original. A module called twice really is
-                // two different call sites.
-                idToCallChain[fresh] = callChain;
+                stamp(id, fresh);
                 // The colour has to be re-recorded too, or a later merge
                 // cannot tell this body's runs apart from uncoloured ones
                 // (attachTriColors looks runs up here). Across renders
@@ -563,6 +611,12 @@ void Evaluator::recordRunColors(ColoredBody& b, const std::optional<std::array<f
     for (uint32_t id : b.body->GetMeshGL().runOriginalID) idToColor[id] = rgba;
 }
 
+void Evaluator::noteMinted(uint32_t id, const CSGNode* minter) {
+    if (!manifoldCache_ || measuring_ || minter == nullptr) return;
+    mintLog_.emplace_back(id, minter);
+    idToMinter_[id] = minter;
+}
+
 void Evaluator::tagSections(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
                             uint32_t callChain) {
     for (ColoredBody& cb : bodies) {
@@ -571,6 +625,7 @@ void Evaluator::tagSections(std::vector<ColoredBody>& bodies, const oscad::ASTNo
         idToNode[id] = &node;
         idToColor[id] = cb.color;
         idToCallChain[id] = callChain;
+        noteMinted(id, generatingNode_);
         cb.sectionId = id;
     }
 }
@@ -583,6 +638,7 @@ ColoredBody Evaluator::tagGenerated(manifold::Manifold body, const oscad::ASTNod
             idToNode[originalId] = &node;
             idToColor[originalId] = color;
             idToCallChain[originalId] = generateCallChain;
+            noteMinted(originalId, generatingNode_);
         }
     }
     ColoredBody cb;
@@ -605,6 +661,7 @@ ColoredBody Evaluator::tagDisplayOnly(manifold::MeshGL mesh, const oscad::ASTNod
         idToNode[originalId] = &node;
         idToColor[originalId] = color;
         idToCallChain[originalId] = generateCallChain;
+        noteMinted(originalId, generatingNode_);
     }
 
     ColoredBody cb;

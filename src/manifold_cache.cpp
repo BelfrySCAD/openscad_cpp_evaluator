@@ -15,9 +15,11 @@ std::optional<CachedSubtree> ManifoldCache::get(const std::string& key) const {
     return it->second.value;
 }
 
-void ManifoldCache::put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings) {
+void ManifoldCache::put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings,
+                        std::vector<std::pair<uint32_t, uint32_t>> attribution) {
     std::lock_guard<std::mutex> lock(mutex_);
-    entries_[std::move(key)] = Entry{CachedSubtree{std::move(bodies), std::move(warnings)}, generation_};
+    entries_[std::move(key)] = Entry{
+        CachedSubtree{std::move(bodies), std::move(warnings), std::move(attribution)}, generation_};
 }
 
 void ManifoldCache::clear() {
