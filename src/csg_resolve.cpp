@@ -228,6 +228,9 @@ std::vector<std::unique_ptr<CSGNode>> Evaluator::resolveTreeImpl(const NodeList&
     idToColor.clear();
     syntheticNodes_.clear();
     cacheProducer_.clear(); // holds AST pointers, same lifetime as idToNode's
+    mintLog_.clear();
+    idToMinter_.clear();
+    preorderNodes_.clear();
     treeStack_.clear();
     treeStack_.emplace_back();
     rootCtx_ = &ctx;

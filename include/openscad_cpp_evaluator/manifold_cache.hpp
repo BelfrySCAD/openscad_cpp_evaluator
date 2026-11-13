@@ -35,6 +35,11 @@ namespace oscadeval {
 struct CachedSubtree {
     std::vector<ColoredBody> bodies;
     std::vector<std::string> warnings;  // already formatted, replayed verbatim
+    // originalID in `bodies` -> which node of the subtree made it, as its
+    // CSGNode::preorder minus the cached node's own. A hit reads it to give
+    // each part back its own line and call chain (BelfrySCAD #1123); an ID
+    // missing here falls back to the hit node.
+    std::vector<std::pair<uint32_t, uint32_t>> attribution;
 };
 
 class ManifoldCache {
@@ -48,7 +53,8 @@ public:
     // and stays. 0 keeps everything, as before.
     explicit ManifoldCache(unsigned keepRenders = 0) : keepRenders_(keepRenders) {}
     std::optional<CachedSubtree> get(const std::string& key) const;
-    void put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings);
+    void put(std::string key, std::vector<ColoredBody> bodies, std::vector<std::string> warnings,
+             std::vector<std::pair<uint32_t, uint32_t>> attribution = {});
     void clear();
     void touch(const std::string& key);  // marks it used, as get() does
     void beginRender();

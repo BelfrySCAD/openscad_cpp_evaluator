@@ -293,8 +293,12 @@ public:
     // Give every 2D body in `bodies` that has no sectionId yet one of its
     // own, attributed to `node`. See ColoredBody::sectionId.
     void tagSections(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node, uint32_t callChain);
-    void restampCachedIds(std::vector<ColoredBody>& bodies, const oscad::ASTNode& node,
-                          const oscad::ASTNode* producer, uint32_t callChain);
+    void restampCachedIds(std::vector<ColoredBody>& bodies, const CSGNode& hit,
+                          const oscad::ASTNode* producer,
+                          const std::vector<std::pair<uint32_t, uint32_t>>& attribution);
+    // Record that `minter` made originalID `id` (see mintLog_). A null
+    // minter is not recorded: the ID then falls back to the hit node.
+    void noteMinted(uint32_t id, const CSGNode* minter);
 
     std::unordered_map<uint32_t, const oscad::ASTNode*> idToNode;
     // originalID -> its interned call chain (innermost frame; walk
@@ -419,6 +423,20 @@ public:
     // The same republish for CSGNode::callChain, read by tagGenerated to
     // fill idToCallChain.
     uint32_t generateCallChain = kNoCallChain;
+    // The node whose GenerateFn is running, for tagGenerated and friends to
+    // name as the minter of what they build. Saved and restored like
+    // generateCallChain.
+    const CSGNode* generatingNode_ = nullptr;
+    // Every originalID minted this render, in order, with the node that
+    // made it: a cacheable node's slice of it is exactly the IDs its
+    // subtree made, which is what its cache entry's attribution is built
+    // from, with no mesh to read. idToMinter_ is the same, by ID, for an
+    // ID copied from another (booleans' keep-minuend recolouring).
+    // preorderNodes_ is the tree generateTree() numbered (CSGNode::preorder).
+    // All three point into this render's tree and are reset with it.
+    std::vector<std::pair<uint32_t, const CSGNode*>> mintLog_;
+    std::unordered_map<uint32_t, const CSGNode*> idToMinter_;
+    std::vector<const CSGNode*> preorderNodes_;
 
     // Set while generating anything beneath a hull(). An open mesh there is
     // not a mistake to report: a convex hull needs only points, so BOSL2's

@@ -1199,8 +1199,9 @@ def test_a_2d_union_is_its_own_shape(tmp_path):
 def test_a_cached_2d_shape_is_picked_as_a_solid_would_be(tmp_path):
     """A cache hit restamps IDs; a 2D shape's must follow, or the second
     render of an unchanged script loses every 2D selection. It follows the
-    same rule a solid's runs do: across renders the old ID is unknown, so it
-    goes to the reused node -- here the whole translate() statement."""
+    same rule a solid's runs do: the node inside the reused subtree that
+    made it, as an uncached render would say (BelfrySCAD #1123) -- not the
+    whole translate() statement, which is what it used to fall back to."""
     def two_renders(src):
         cache = ManifoldCache()
         return _picked_text(tmp_path, src, cache), _picked_text(tmp_path, src, cache)
@@ -1208,8 +1209,8 @@ def test_a_cached_2d_shape_is_picked_as_a_solid_would_be(tmp_path):
     flat = two_renders("square(3);\ntranslate([10, 0]) circle(4);\n")
     solid = two_renders("cube(3);\ntranslate([10, 0, 0]) sphere(4);\n")
     assert all(t is not None for render in flat for body in render for t in body)
-    assert flat[1] == [["square(3);"], ["translate([10, 0]) circle(4);"]]
-    assert solid[1] == [["cube(3);"], ["translate([10, 0, 0]) sphere(4);"]]
+    assert flat[1] == [["square(3);"], ["circle(4);"]]
+    assert solid[1] == [["cube(3);"], ["sphere(4);"]]
 
 
 def test_a_viewer_can_ask_for_a_thin_2d_slab_and_export_keeps_1(tmp_path):
@@ -1364,3 +1365,37 @@ def test_offset3d_hook_offsets_a_cube():
                   for a, b, c in ((P[tris[i]], P[tris[i + 1]], P[tris[i + 2]])
                                   for i in range(0, len(tris), 3))) / 6
         assert abs(vol - want) < 1e-5 * want, (mode, d, vol)
+
+
+def test_a_cache_hit_keeps_each_part_of_a_module_on_its_own_line(tmp_path):
+    """BelfrySCAD #1123: a module's parts keep their own lines and call
+    chains when the module comes back from the cache.
+
+    The second render's `part2()` is a whole-subtree cache hit. It used to
+    attribute every body to the hit node itself -- the `part2();` call --
+    with no chain, so from the second render on nothing inside a module
+    could be selected and the call trace held a single line.
+    """
+    script = tmp_path / "m.scad"
+    script.write_text(
+        "module part2() {\n"                   # 1
+        "    cube([10, 10, 60]);\n"            # 2
+        "    translate([10, 5, 2]) cube(5);\n" # 3
+        "}\n"                                  # 4
+        "cube([50, 50, 2]);\n"                 # 5
+        "part2();\n"                           # 6
+        "part2();\n"                           # 7: a hit within the render too
+    )
+
+    def attribution(id_to_node):
+        return sorted((n.position.line, tuple(f.line for f in n.call_sites))
+                      for n in id_to_node.values())
+
+    cache = ManifoldCache()
+    _, first = Evaluator(manifold_cache=cache).evaluate(str(script), {})
+    _, second = Evaluator(manifold_cache=cache).evaluate(str(script), {})
+    _, uncached = Evaluator().evaluate(str(script), {})
+    want = [(2, (6,)), (2, (7,)), (3, (6,)), (3, (7,)), (5, ())]
+    assert attribution(uncached) == want
+    assert attribution(first) == want
+    assert attribution(second) == want

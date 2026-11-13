@@ -58,6 +58,14 @@ struct CSGNode {
     // is affordable where a per-node list was not.
     uint32_t callChain = UINT32_MAX;
 
+    // This node's place in a pre-order walk of the tree being generated
+    // (Evaluator::preorderNodes_), numbered once per generateTree(). A
+    // cache entry names which node inside it made each body by the
+    // DIFFERENCE of two of these, which a later hit -- on a structurally
+    // identical subtree, since the key covers every child -- maps back to
+    // a node of its own tree. UINT32_MAX when not numbered.
+    uint32_t preorder = UINT32_MAX;
+
     // 1 + the deepest child's own treeDepth (1 for a leaf) -- set once,
     // at construction, by whichever csg_resolve.cpp site finalizes this
     // node's own `children` (buildTreeNode, evalModularCall's non-splice
