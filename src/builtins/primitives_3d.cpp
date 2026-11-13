@@ -1,5 +1,6 @@
 #include "openscad_cpp_evaluator/mesh_check.hpp"
 #include "builtins.hpp"
+#include "../../third_party/libtess2/Include/tesselator.h"
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
@@ -9,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <numbers>
 #include <optional>
@@ -626,8 +628,8 @@ namespace {
 // ponytail: O(n^2). Faces are a handful of points in nearly every model
 // and 34 in the one that prompted this; revisit if a model ever arrives
 // with thousand-sided faces.
-void triangulateFace(const std::vector<std::array<double, 3>>& verts, const std::vector<size_t>& loop,
-                      std::vector<uint32_t>& out) {
+void earClipFace(const std::vector<std::array<double, 3>>& verts, const std::vector<size_t>& loop,
+                 std::vector<uint32_t>& out) {
     const size_t n = loop.size();
     if (n < 3) return;
 
@@ -760,6 +762,111 @@ void triangulateFace(const std::vector<std::array<double, 3>>& verts, const std:
     // Whatever is left: three points, or a remainder no ear could be found
     // in. A fan over the remainder is the best available answer.
     for (size_t i = 1; i + 1 < idx.size(); ++i) emit(loop[idx[0]], loop[idx[i]], loop[idx[i + 1]]);
+}
+
+// Triangulate one polyhedron face as OpenSCAD does: through libtess2,
+// constrained Delaunay, odd winding, in single precision, with libtess2
+// choosing the plane (GeometryUtils::tessellatePolygonWithHoles). A face
+// that is not flat has no one right split -- how it folds is the choice --
+// and the best-shaped-ear rule above folded differently from OpenSCAD:
+// BelfrySCAD #1127's dovetail skin() came out with a cap cut across where
+// OpenSCAD runs it along an edge, flipping as a parameter moved by 0.005.
+// Matching the reference's tessellator is the only rule that cannot drift
+// from it. The ear clipper stays as the fallback for a face libtess2
+// cannot triangulate whole.
+void triangulateFace(const std::vector<std::array<double, 3>>& verts, const std::vector<size_t>& rawLoop,
+                      std::vector<uint32_t>& out) {
+    // Emitted reversed: OpenSCAD's faces are clockwise seen from outside,
+    // Manifold's counter-clockwise.
+    auto emit = [&out](size_t a, size_t b, size_t c) {
+        if (a == b || b == c || a == c) return;
+        out.push_back(static_cast<uint32_t>(a));
+        out.push_back(static_cast<uint32_t>(c));
+        out.push_back(static_cast<uint32_t>(b));
+    };
+    // A triangle is passed through untouched, coincident points and all:
+    // the weld after triangulation is what deals with those.
+    if (rawLoop.size() == 3) {
+        emit(rawLoop[0], rawLoop[1], rawLoop[2]);
+        return;
+    }
+    // As OpenSCAD's tessellate_faces: drop a point equal (in float) to the
+    // one before it, and the last while it equals the first.
+    auto asFloat = [&](size_t i) {
+        return std::array<float, 3>{static_cast<float>(verts[i][0]), static_cast<float>(verts[i][1]),
+                                    static_cast<float>(verts[i][2])};
+    };
+    std::vector<size_t> loop;
+    for (size_t i : rawLoop) {
+        if (loop.empty() || asFloat(i) != asFloat(loop.back())) loop.push_back(i);
+    }
+    while (loop.size() > 1 && asFloat(loop.front()) == asFloat(loop.back())) loop.pop_back();
+    const size_t n = loop.size();
+    if (n < 3) return;
+    if (n == 3) {
+        emit(loop[0], loop[1], loop[2]);
+        return;
+    }
+
+    TESSalloc ma{};
+    ma.memalloc = [](void*, unsigned int size) { return std::malloc(size); };
+    ma.memfree = [](void*, void* ptr) { std::free(ptr); };
+    ma.extraVertices = 256;
+    TESStesselator* tess = tessNewTess(&ma);
+    if (!tess) {
+        earClipFace(verts, loop, out);
+        return;
+    }
+    std::vector<TESSreal> contour;
+    contour.reserve(3 * n);
+    for (size_t i : loop) {
+        const std::array<float, 3> v = asFloat(i);
+        contour.insert(contour.end(), v.begin(), v.end());
+    }
+    tessAddContour(tess, 3, contour.data(), sizeof(TESSreal) * 3, static_cast<int>(n));
+
+    std::vector<std::array<size_t, 3>> tris;
+    bool whole = tessTesselate(tess, TESS_WINDING_ODD, TESS_CONSTRAINED_DELAUNAY_TRIANGLES, 3, 3, nullptr) != 0;
+    if (whole) {
+        // The face's directed edges. A triangle running one of them
+        // backwards is flipped, as OpenSCAD flips it; every edge must end up
+        // used exactly once, or the face was not covered and the ear clipper
+        // takes it instead (OpenSCAD patches the gap with loops of its own).
+        std::map<std::pair<size_t, size_t>, int> edges;
+        for (size_t i = 0; i < n; ++i) ++edges[{loop[i], loop[(i + 1) % n]}];
+        const TESSindex* vindices = tessGetVertexIndices(tess);
+        const TESSindex* elements = tessGetElements(tess);
+        const int count = tessGetElementCount(tess);
+        for (int t = 0; t < count && whole; ++t) {
+            std::array<size_t, 3> tri{};
+            bool undef = false;
+            for (int k = 0; k < 3; ++k) {
+                const TESSindex vi = vindices[elements[t * 3 + k]];
+                if (vi == TESS_UNDEF) { undef = true; break; }
+                tri[k] = loop[static_cast<size_t>(vi)];
+            }
+            if (undef) continue;     // a vertex libtess2 made itself, skipped as OpenSCAD does
+            bool reverse = false;
+            for (int k = 0; k < 3; ++k) {
+                const std::pair<size_t, size_t> e{tri[k], tri[(k + 1) % 3]};
+                if (edges.count(e) && edges[e] > 0) { reverse = false; break; }
+                if (edges.count({e.second, e.first}) && edges[{e.second, e.first}] > 0) reverse = true;
+            }
+            if (reverse) std::swap(tri[1], tri[2]);
+            for (int k = 0; k < 3; ++k) {
+                auto it = edges.find({tri[k], tri[(k + 1) % 3]});
+                if (it != edges.end() && --it->second == 0) edges.erase(it);
+            }
+            tris.push_back(tri);
+        }
+        whole = edges.empty();
+    }
+    tessDeleteTess(tess);
+    if (!whole) {
+        earClipFace(verts, loop, out);
+        return;
+    }
+    for (const auto& t : tris) emit(t[0], t[1], t[2]);
 }
 
 } // namespace

@@ -1017,6 +1017,17 @@ grep for `ponytail:`.
   shut. Note the reduction is NOT monotonic in the tolerance (1.0 gave *more* triangles than 0.5 on
   the test model, since simplification can force re-triangulation), so don't read a jump as a bug.
 
+- `polyhedron()` faces are split by **libtess2, as OpenSCAD splits them** (`triangulateFace`,
+  `primitives_3d.cpp`; vendored at `third_party/libtess2`, upstream c655ece plus OpenSCAD's two
+  patches, see its README). A face that is not flat has no right split -- the split decides how it
+  folds -- so only the reference's own tessellator cannot drift from it: the earlier
+  best-shaped-ear rule folded a BOSL2 `skin()` cap across its middle where OpenSCAD runs it along an
+  edge, and flipped as a parameter moved by 0.005 (BelfrySCAD #1127). Same settings as
+  `GeometryUtils::tessellatePolygonWithHoles`: odd winding, constrained Delaunay, float input,
+  libtess2 picks the plane, a triangle running an input edge backwards is flipped. A triangle
+  passes straight through; a face libtess2 does not cover whole falls back to the ear clipper.
+  Flat regions may still be split differently from OpenSCAD's STL (Manifold re-splits coplanar
+  triangles), which changes nothing: the dovetail matches it to 7e-8.
 - `mesh_repair()` (also `topology.cpp`) — makes a broken mesh watertight, so geometry that was
   merely *almost* closed can take part in CSG. Another BelfrySCAD extension: nothing in the language
   could repair geometry, and a mesh from a library generator or an import is routinely a few
