@@ -1399,3 +1399,21 @@ def test_a_cache_hit_keeps_each_part_of_a_module_on_its_own_line(tmp_path):
     assert attribution(uncached) == want
     assert attribution(first) == want
     assert attribution(second) == want
+
+
+def test_include_and_use_are_names_unless_a_file_follows(tmp_path):
+    """BelfrySCAD #1138: as in OpenSCAD, `include`/`use` are keywords only
+    before a `<`, so a parameter may be named either. A failed parse also
+    used to leave the next one reading `<...>` in a comment as a file name."""
+    bad = tmp_path / "bad.scad"
+    bad.write_text("include")
+    with pytest.raises(Exception):
+        Evaluator().evaluate(str(bad), {})
+    script = tmp_path / "m.scad"
+    script.write_text(
+        "// Author <someone@example.com>\n"
+        "module m(include = undef, use = 2) if (include) cube(use);\n"
+        "m(include = true);\n"
+    )
+    _, id_to_node = Evaluator().evaluate(str(script), {})
+    assert [n.position.line for n in id_to_node.values()] == [2]
