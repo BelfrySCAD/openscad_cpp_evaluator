@@ -1194,7 +1194,7 @@ CSGParams computeRoofParams(Evaluator& ev, const CallArgs& args, EvalContext& ef
 }
 
 CSGParams resolveRoof(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params = computeRoofParams(ev, args, effCtx, &node.position());
     // The child block is its own scope -- see Evaluator::blockScope.
     EvalContext blockCtx = ev.blockScope(effCtx);

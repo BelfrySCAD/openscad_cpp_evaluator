@@ -14,7 +14,7 @@
 namespace oscadeval {
 
 CSGParams resolveSurface(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     // (file, center, convexity) positional, invert named after them; center
     // and invert count only as real bools.
     const Value fileArg = getArg(args, 0, "file", Value{std::string("")});

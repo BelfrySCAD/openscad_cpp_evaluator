@@ -323,7 +323,7 @@ manifold::vec2 resizeScale2d(const manifold::Rect& bbox, const double ns[3], con
 
 BuiltinWrapParams computeTransformParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     const std::string& name = node.name->name;
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
 
     CSGParams params;
     params["name"] = Value{name};

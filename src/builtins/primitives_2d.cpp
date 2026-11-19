@@ -142,7 +142,7 @@ void readPolygonInput(Evaluator& ev, const Value& points, const Value& paths, co
 
 CSGParams resolve2d(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
     const std::string& name = node.name->name;
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     params["name"] = Value{name};
     params["color"] = colorToValue(effCtx.color);

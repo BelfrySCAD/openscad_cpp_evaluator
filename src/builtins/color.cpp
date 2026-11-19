@@ -28,7 +28,7 @@ std::string oneDecimal(double v) {
 } // namespace
 
 BuiltinWrapParams computeColorParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     const Value cArg = getArg(args, 0, "c");
     const Value alphaArg = getArg(args, 1, "alpha");
 

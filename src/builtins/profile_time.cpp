@@ -29,7 +29,7 @@ std::string profileLabel(const Value& label, const oscad::Position& pos) {
 // child alike; the geometry time is taken in generateTreeImpl. The label
 // goes into params (it is constant, so it costs the cache nothing).
 CSGParams resolveProfileTime(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     params["label"] = getArg(args, 0, "label");
     EvalContext blockCtx = ev.blockScope(effCtx);

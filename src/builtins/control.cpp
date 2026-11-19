@@ -11,7 +11,7 @@ namespace oscadeval {
 // deferred-evaluation logic; this just resolves the call's own arguments
 // and hands off. Mirrors _resolve_children_call.
 CSGParams resolveChildren(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     ev.builtinChildren(args, effCtx);
     return CSGParams{};
 }
@@ -29,7 +29,7 @@ std::vector<ColoredBody> generateChildren(Evaluator&, const CSGParams&, const st
 // child-concatenation, exactly reproducing passthrough). Mirrors
 // _resolve_render.
 CSGParams resolveRender(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     (void)args;
     // The child block is its own scope -- see Evaluator::blockScope.
     EvalContext blockCtx = ev.blockScope(effCtx);
@@ -44,7 +44,7 @@ CSGParams resolveRender(Evaluator& ev, const oscad::ModularCall& node, EvalConte
 // practice; falls to the default). Mirrors
 // _resolve_breakpoint/_builtin_breakpoint.
 CSGParams resolveBreakpoint(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     const Value condition = getArg(args, 0, "condition", Value{});
     if (!std::holds_alternative<std::monostate>(condition) && !truthy(condition)) return CSGParams{};
     ev.checkDebug(node, effCtx, /*forced=*/true);

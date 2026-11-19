@@ -148,7 +148,7 @@ double cosDegrees(double degrees) { return sinDegrees(degrees + 90.0); }
 } // namespace
 
 BuiltinWrapParams computeLinearExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
 
     // Argument reading (positional: height, v, scale, center, twist, slices,
     // segments): the extrusion vector, center, twist, slices, segments and
@@ -341,7 +341,7 @@ std::vector<ColoredBody> generateLinearExtrude(Evaluator& ev, const CSGParams& p
 // Split the same way as computeLinearExtrudeParams, above -- see its own
 // doc comment.
 BuiltinWrapParams computeRotateExtrudeParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
 
     // angle/start reading (positional: angle, start).
     const Discretizer disc = Discretizer::fromCtx(effCtx, [&](const std::string& m) { ev.warn(m, &node.position()); });
@@ -450,7 +450,7 @@ std::vector<ColoredBody> generateRotateExtrude(Evaluator& ev, const CSGParams& p
 // Split the same way as computeLinearExtrudeParams, above -- see its own
 // doc comment.
 BuiltinWrapParams computeProjectionParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     // Positional, and only a real bool cuts: cut=1 and cut="yes" do not,
     // projection(true) does.
@@ -505,7 +505,7 @@ std::vector<ColoredBody> generateProjection(Evaluator&, const CSGParams& params,
 // Split the same way as computeLinearExtrudeParams, above -- see its own
 // doc comment.
 BuiltinWrapParams computeOffsetParams(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
 
     // r/delta/chamfer reading: the offset distance and the join ("round",
     // "miter" or "square").

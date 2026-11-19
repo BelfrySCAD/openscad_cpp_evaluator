@@ -44,7 +44,7 @@ double textSizeArg(Evaluator& ev, const CallArgs& args, std::optional<int> sizeP
 }
 
 CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     const Value textArg = getArg(args, 0, "text", Value{std::string("")});
     // A non-string draws nothing, with the reference's warning; undef is
     // silent.

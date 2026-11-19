@@ -193,6 +193,7 @@ BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::Parameter
     result.reserve(arguments.size());
     size_t positionalIdx = 0;
     const size_t nparams = params.size();
+    bool warnedExtra = false;
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
@@ -203,11 +204,16 @@ BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::Parameter
             result.set(name, evalExprMaybeCompiled(*a.expr, ctx));
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
+            // OpenSCAD's rule (Parameters::parse): a positional argument takes
+            // the next parameter not ALREADY bound, so `f(a=1, b=2, 3)` binds c,
+            // not a (BelfrySCAD #1128).
+            while (positionalIdx < nparams && result.find(params[positionalIdx]->name->name)) ++positionalIdx;
             if (positionalIdx < nparams) {
                 result.set(params[positionalIdx]->name->name, evalExprMaybeCompiled(*a.expr, ctx));
-            } else if (positionalIdx == nparams) {
+            } else if (!warnedExtra) {
                 // Once per call, like the reference's warned_for_extra_arguments.
                 warnTooManyPositionalArgs(*this, &argPtr->position());
+                warnedExtra = true;
             }
             ++positionalIdx;
         }
@@ -1146,7 +1152,7 @@ bool Evaluator::isSeparatingChildrenCall(const oscad::ASTNode& stmt) {
 
 std::optional<std::vector<const oscad::ASTNode*>> Evaluator::expandSeparatingChildren(const oscad::ModularCall& call,
                                                                                        EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(*this, call.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(*this, call, ctx);
     std::optional<ChildrenForward> fwd = prepareChildrenForward(args, effCtx);
     if (!fwd) return std::vector<const oscad::ASTNode*>{};  // selects nothing -> no statements at all
     if (!fwd->separate) {

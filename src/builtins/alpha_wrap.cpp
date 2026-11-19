@@ -570,7 +570,7 @@ void appendTriangles(const manifold::MeshGL& m, std::vector<Tri>& out) {
 } // namespace
 
 CSGParams resolveAlphaWrap(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     params["alpha"] = getArg(args, 0, "alpha", Value{});
     params["offset"] = getArg(args, 1, "offset", Value{});

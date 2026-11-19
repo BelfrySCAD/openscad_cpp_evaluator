@@ -41,31 +41,42 @@ void bindEveryParamNamed(CompiledChunk::CallSite::ArgBind& b,
 // argument instead of recomputing it per call. The rule, unchanged: a named
 // argument binds the parameter of that name, warning when there is none and
 // the name is not a $-config variable; a positional argument binds the
-// parameter at its own positional index, warning once when it runs past the
-// end; an undeclared $-name still reaches ctx.dyn; anything else is dropped.
+// next parameter not already bound (OpenSCAD's rule: `f(a=1, b=2, 3)` binds
+// c), warning once when it runs past the end; an undeclared $-name still reaches ctx.dyn; anything else is dropped.
 // A later argument writing the same parameter still wins, because both bind
 // the same slot in order.
 void planCallSiteArgs(CompiledChunk::CallSite& site,
                       const std::vector<std::unique_ptr<oscad::ParameterDeclaration>>& params) {
     const size_t nparams = params.size();
     size_t positionalIdx = 0;
+    bool warnedExtra = false;
+    std::vector<char> isBound(nparams, 0);
+    auto markBound = [&](const CompiledChunk::CallSite::ArgBind& b) {
+        if (b.paramIndex >= 0) isBound[static_cast<size_t>(b.paramIndex)] = 1;
+        for (int p : b.alsoParams) isBound[static_cast<size_t>(p)] = 1;
+    };
     site.argBinds.resize(site.argNames.size());
     for (size_t i = 0; i < site.argNames.size(); ++i) {
         CompiledChunk::CallSite::ArgBind& b = site.argBinds[i];
         if (site.argNames[i]) {
             const std::string& name = *site.argNames[i];
             bindEveryParamNamed(b, params, name);
+            markBound(b);
             const bool found = b.paramIndex >= 0;
             b.warnUnexpectedNamed = !found && !isConfigVariable(name);
             b.toDyn = !found && !name.empty() && name[0] == '$';
         } else {
+            // The next parameter not already bound, as bindArgs.
+            while (positionalIdx < nparams && isBound[positionalIdx]) ++positionalIdx;
             if (positionalIdx < nparams) {
                 // By NAME, not just by index: a positional argument landing on
                 // a repeated name filled every parameter of that name too,
                 // because the old path keyed its bound arguments by name.
                 bindEveryParamNamed(b, params, params[positionalIdx]->name->name);
-            } else if (positionalIdx == nparams) {
+                markBound(b);
+            } else if (!warnedExtra) {
                 b.warnTooManyPositional = true;
+                warnedExtra = true;
             }
             ++positionalIdx;
         }

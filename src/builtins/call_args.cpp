@@ -2,6 +2,8 @@
 
 #include "openscad_cpp_evaluator/evaluator.hpp"
 
+#include "openscad_cpp_parser/ast/module_instantiation.hpp"
+
 #include <algorithm>
 
 namespace oscadeval {
@@ -99,6 +101,28 @@ ResolvedCallArgs resolveCallArgs(Evaluator& ev, const std::vector<std::unique_pt
         if (!key.empty() && key[0] == '$') effCtx.dyn->set(key, value);
     }
     return ResolvedCallArgs{std::move(args), std::move(effCtx)};
+}
+
+ResolvedCallArgs resolveCallArgs(Evaluator& ev, const oscad::ModularCall& call, EvalContext& ctx) {
+    ResolvedCallArgs r = resolveCallArgs(ev, call.arguments, ctx);
+    if (r.args.named.empty() || r.args.positional.empty()) return r;
+    const std::vector<std::string>* order = builtinPositionalParams(call.name->name);
+    if (!order) return r;
+    // Renumber: walk the arguments in call order; a positional one takes
+    // the next slot whose parameter no earlier argument has named.
+    std::vector<std::string> named;
+    size_t next = 0, p = 0;
+    for (const auto& a : call.arguments) {
+        if (a->kind() == oscad::NodeKind::NamedArgument) {
+            named.push_back(static_cast<const oscad::NamedArgument&>(*a).name->name);
+            continue;
+        }
+        while (next < order->size() &&
+               std::find(named.begin(), named.end(), (*order)[next]) != named.end())
+            ++next;
+        r.args.positional[p++].first = static_cast<int>(next++);
+    }
+    return r;
 }
 
 Value callArgsToValue(const CallArgs& args) {

@@ -120,7 +120,7 @@ std::string describeEdge(const M& mesh, std::pair<uint32_t, uint32_t> edge) {
 // cube(size = 1, center = false) -- mirrors _resolve_cube/_generate_cube.
 
 CSGParams resolveCube(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     // A number is a cube. A list of exactly three is read axis by axis up
     // to its first non-number, which (with the axes after it) stays at 1;
     // that, and any other kind of size, warns. undef is a unit cube.
@@ -490,7 +490,7 @@ SphereMesh buildIcosa(double r, int hsides) {
 } // namespace
 
 CSGParams resolveSphere(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     // r/d: see lookupRadius (spec section B1); r=1 by default.
     const double r = lookupRadius(ev, args, 0, 1, "r", "d", &node.position()).value_or(1.0);
 
@@ -556,7 +556,7 @@ std::vector<ColoredBody> generateSphere(Evaluator& ev, const CSGParams& params, 
 // (unlike sphere, its tessellation already matches real OpenSCAD).
 
 CSGParams resolveCylinder(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     // cylinder(h, r1, r2, center, r, d, d1, d2). r (or d) sets both ends,
     // then r1/d1 and r2/d2 override their own end; mixing r with either is
     // ambiguous and warned about.
@@ -922,7 +922,7 @@ bool readPolyhedronInput(Evaluator& ev, const Value& points, const Value& faces,
 } // namespace
 
 CSGParams resolvePolyhedron(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     Value pointsArg = getArg(args, 0, "points", Value{});
     Value facesArg = getArg(args, 1, "faces", Value{});
     if (isUndef(facesArg)) {

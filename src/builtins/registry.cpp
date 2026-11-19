@@ -157,6 +157,49 @@ const std::vector<std::string>* builtinParamNames(const std::string& name) {
     return it == table.end() ? nullptr : &it->second;
 }
 
+const std::vector<std::string>* builtinPositionalParams(const std::string& name) {
+    // Upstream's lists are its Parameters::parse calls' first argument
+    // (checked against openscad/openscad master). Only consulted when a
+    // named argument comes before a positional one.
+    static const std::unordered_map<std::string, std::vector<std::string>> table = {
+        {"cube", {"size", "center"}},
+        {"sphere", {"r"}},
+        {"cylinder", {"h", "r1", "r2", "center"}},
+        {"polyhedron", {"points", "faces", "convexity"}},
+        {"square", {"size", "center"}},
+        {"circle", {"r"}},
+        {"polygon", {"points", "paths", "convexity"}},
+        {"translate", {"v"}},
+        {"rotate", {"a", "v"}},
+        {"scale", {"v"}},
+        {"mirror", {"v"}},
+        {"multmatrix", {"m"}},
+        {"resize", {"newsize", "auto", "convexity"}},
+        {"color", {"c", "alpha"}},
+        {"minkowski", {"convexity"}},
+        {"children", {"index"}},
+        {"render", {"convexity"}},
+        {"import", {"file", "layer", "convexity", "origin", "scale"}},
+        {"linear_extrude", {"height", "v", "scale", "center", "twist", "slices", "segments"}},
+        {"rotate_extrude", {"angle", "start"}},
+        {"projection", {"cut"}},
+        {"roof", {"method"}},
+        {"offset", {"r"}},
+        {"surface", {"file", "center", "convexity"}},
+        {"text", {"text", "size", "font"}},
+        // This port's own.
+        {"profile_time", {"label"}},
+        {"breakpoint", {"condition"}},
+        {"export_as", {"name"}},
+        {"alpha_wrap", {"alpha", "offset"}},
+        {"simplify", {"tolerance"}},
+        {"mesh_repair", {"tolerance"}},
+        {"levelset", {"field", "bounds", "isovalue", "invert", "edge"}},
+    };
+    auto it = table.find(name);
+    return it == table.end() ? nullptr : &it->second;
+}
+
 void warnUnexpectedBuiltinArgs(Evaluator& ev, const oscad::ASTNode& callNode) {
     if (callNode.kind() != oscad::NodeKind::ModularCall) return;
     const auto& call = static_cast<const oscad::ModularCall&>(callNode);
