@@ -25,7 +25,7 @@ static constexpr double kDefaultSimplifyFraction = 0.001;
 // "evaluate children, return {}" shape as _resolve_transform).
 
 CSGParams resolveHull(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     (void)args;
     // The child block is its own scope -- see Evaluator::blockScope.
     EvalContext blockCtx = ev.blockScope(effCtx);
@@ -133,7 +133,7 @@ std::vector<ColoredBody> generateHull(Evaluator&, const CSGParams&, const std::v
 // and contributes nothing.
 
 CSGParams resolveFill(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     (void)args;
     // The child block is its own scope -- see Evaluator::blockScope.
     EvalContext blockCtx = ev.blockScope(effCtx);
@@ -196,7 +196,7 @@ std::vector<ColoredBody> generateFill(Evaluator& ev, const CSGParams&,
 }
 
 CSGParams resolveMinkowski(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     (void)args;
     // The child block is its own scope -- see Evaluator::blockScope.
     EvalContext blockCtx = ev.blockScope(effCtx);
@@ -408,7 +408,7 @@ std::vector<ColoredBody> generateMinkowski(Evaluator& ev, const CSGParams&, cons
 // 2D already has one in offset(r=-N).
 
 CSGParams resolveMinkowskiDifference(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     (void)args;
     // The child block is its own scope -- see Evaluator::blockScope.
     EvalContext blockCtx = ev.blockScope(effCtx);
@@ -468,7 +468,7 @@ std::vector<ColoredBody> generateMinkowskiDifference(Evaluator& ev, const CSGPar
 // on sections as well as solids.
 
 CSGParams resolveSimplify(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     // Position 0 so simplify(0.1) reads naturally.
     params["tolerance"] = getArg(args, 0, "tolerance", Value{});
@@ -555,7 +555,7 @@ std::vector<ColoredBody> generateSimplify(Evaluator& ev, const CSGParams& params
 // close the rest.
 
 CSGParams resolveMeshRepair(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     // Position 0, so mesh_repair(0.001) reads the way simplify(0.1) does.
     params["tolerance"] = getArg(args, 0, "tolerance", Value{});
@@ -1106,7 +1106,7 @@ manifold::MeshGL64 marchingCubes(const std::vector<double>& d, const size_t n[3]
 }
 
 CSGParams resolveLevelSet(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     params["field"] = getArg(args, 0, "field", Value{});
     params["bounds"] = getArg(args, 1, "bounds", Value{});

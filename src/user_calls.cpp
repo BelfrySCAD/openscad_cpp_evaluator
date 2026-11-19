@@ -1152,7 +1152,7 @@ bool Evaluator::isSeparatingChildrenCall(const oscad::ASTNode& stmt) {
 
 std::optional<std::vector<const oscad::ASTNode*>> Evaluator::expandSeparatingChildren(const oscad::ModularCall& call,
                                                                                        EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(*this, call.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(*this, call, ctx);
     std::optional<ChildrenForward> fwd = prepareChildrenForward(args, effCtx);
     if (!fwd) return std::vector<const oscad::ASTNode*>{};  // selects nothing -> no statements at all
     if (!fwd->separate) {

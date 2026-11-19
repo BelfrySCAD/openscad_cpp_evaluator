@@ -186,3 +186,26 @@ echo(x=f(a=1, b=2, c=3, 4));
         EXPECT_NE(warnings[0].find("Too many unnamed arguments supplied"), std::string::npos);
     }
 }
+
+// The same rule for builtin modules, whose arguments bind through CallArgs:
+// `cylinder(h=10, 5)` is r1=5 in OpenSCAD, and lost the 5 to h here. The
+// bounding boxes are OpenSCAD-dev 2026.02.01's for the same calls.
+TEST(UnexpectedArgs, BuiltinPositionalArgumentSkipsParametersAlreadyNamed) {
+    const std::string code = R"(
+echo(cyl=render() { cylinder(h=10, 5); }.boundingbox);
+echo(sq=render() { square(size=3, true); }.boundingbox);
+echo(lx=render() { linear_extrude(height=6, [0,0,1], 2) square(2); }.boundingbox);
+echo(rot=render() { rotate(v=[0,0,1], 90) cube([4,1,1]); }.boundingbox);
+)";
+    for (bool vm : {false, true}) {
+        ScopedVm scoped(vm);
+        std::vector<std::string> echoes;
+        evalSrc(code, [&](const std::string& msg) {
+            if (msg.rfind("ECHO: ", 0) == 0) echoes.push_back(msg);
+        });
+        EXPECT_EQ(echoes, (std::vector<std::string>{
+            "ECHO: cyl = [[-5, -5, 0], [5, 5, 10]]", "ECHO: sq = [[-1.5, -1.5], [1.5, 1.5]]",
+            "ECHO: lx = [[0, 0, 0], [4, 4, 6]]", "ECHO: rot = [[-1, 0, 0], [0, 4, 1]]"}))
+            << "vm=" << vm;
+    }
+}

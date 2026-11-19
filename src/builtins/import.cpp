@@ -260,7 +260,7 @@ std::vector<Contour2d> importSvg(Evaluator& ev, const CallArgs& args, const Valu
 } // namespace
 
 CSGParams resolveImport(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     Value fileArg = getArg(args, 0, "file", Value{});
     if (std::holds_alternative<std::monostate>(fileArg)) {
         fileArg = getArg(args, std::nullopt, "filename", Value{});

@@ -115,7 +115,7 @@ CSGParams resolveCsg(Evaluator& ev, const oscad::ModularCall& node, EvalContext&
     // no-op) so a $-prefixed named arg (e.g. `difference($fn=8) {...}`,
     // unusual but legal) still propagates into children the same way every
     // other builtin honors it.
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     (void)args;
 
     // ONE scope around both passes -- see Evaluator::blockScope. The

@@ -1166,7 +1166,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                     // warning could run under both engines.
                     warnUnexpectedBuiltinArgs(ev, *callNode);
                     const std::uint64_t randsBefore = ev.randsCallCount();
-                    auto [args, effCtx] = resolveCallArgs(ev, callNode->arguments, scopedCtx);
+                    auto [args, effCtx] = resolveCallArgs(ev, *callNode, scopedCtx);
                     std::optional<Evaluator::ChildrenForward> fwd = ev.prepareChildrenForward(args, effCtx);
                     if (!fwd) {
                         // No forwarded children in scope / empty / index
@@ -1250,7 +1250,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                             // resolveMinkowski/resolveRender's own
                             // `(void)args;`); no params of their own ever.
                             auto [args, effCtx] =
-                                resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node).arguments, ctx);
+                                resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
                             (void)args;
                             f.ctxChain.push_back(std::move(effCtx));
                             break;
@@ -1313,7 +1313,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         }
                         case CompiledChunk::BuiltinWrapSite::Kind::Roof: {
                             auto [args, effCtx] =
-                                resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node).arguments, ctx);
+                                resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
                             params = computeRoofParams(ev, args, effCtx, &site.node->position());
                             f.ctxChain.push_back(std::move(effCtx));
                             break;
@@ -1409,7 +1409,7 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         // (booleans.cpp). Only `effCtx` (a possibly-$-scoped
                         // child ctx, e.g. `difference($fn=8) {...}`) matters.
                         auto [args, effCtx] =
-                            resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node).arguments, ctx);
+                            resolveCallArgs(ev, static_cast<const oscad::ModularCall&>(*site.node), ctx);
                         (void)args;
                         f.ctxChain.push_back(std::move(effCtx));
                     }

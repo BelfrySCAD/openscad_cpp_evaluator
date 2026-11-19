@@ -15,7 +15,7 @@ namespace oscadeval {
 // body. An inner export_as() keeps its own name: only unnamed bodies take
 // this one.
 CSGParams resolveExportAs(Evaluator& ev, const oscad::ModularCall& node, EvalContext& ctx) {
-    auto [args, effCtx] = resolveCallArgs(ev, node.arguments, ctx);
+    auto [args, effCtx] = resolveCallArgs(ev, node, ctx);
     CSGParams params;
     const Value name = getArg(args, 0, "name");
     const std::string* s = std::get_if<std::string>(&name);

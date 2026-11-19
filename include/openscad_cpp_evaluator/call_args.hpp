@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+namespace oscad {
+class ModularCall;
+}
+
 namespace oscadeval {
 
 class Evaluator;
@@ -62,6 +66,18 @@ struct ResolvedCallArgs {
 // $fn lookups, ...).
 ResolvedCallArgs resolveCallArgs(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
                                   EvalContext& ctx);
+
+// The same, for a builtin module's call: a positional argument also skips
+// the parameters already given by name, as OpenSCAD's Parameters::parse
+// does, so `cylinder(h=10, 5)` gives r1=5 rather than losing the 5 to h
+// (BelfrySCAD #1128). Use this one wherever the call is at hand.
+ResolvedCallArgs resolveCallArgs(Evaluator& ev, const oscad::ModularCall& call, EvalContext& ctx);
+
+// Each builtin module's positional parameters, in order: the ones
+// OpenSCAD's Parameters::parse takes positionally (its first list), and
+// for this port's own builtins the order their getArg calls read. nullptr
+// for a builtin that takes none, or that reads its positionals as a list.
+const std::vector<std::string>* builtinPositionalParams(const std::string& name);
 
 // Named lookup takes precedence over a positional value at the same slot --
 // mirrors Evaluator._get_arg exactly, including that apparent quirk (a call
