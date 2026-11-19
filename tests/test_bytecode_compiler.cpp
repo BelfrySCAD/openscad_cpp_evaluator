@@ -2188,10 +2188,11 @@ TEST(BytecodeCompiler, CompileTimeArgumentPlanMatchesTheNameMatchingRules) {
     // A named argument overriding a parameter an earlier POSITIONAL already
     // filled: the later write wins, both before and after this change.
     EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, a = 9));"), "ECHO: \"9/2/30\"");
-    // Positional index counts only among POSITIONAL arguments: `b = 2` does
-    // not consume a position, so `1` binds a and `5` binds b -- overwriting
-    // the named 2, because the later write wins.
-    EXPECT_EQ(runCapturingEcho(f + "echo(f(b = 2, 1, 5));"), "ECHO: \"1/5/30\"");
+    // A positional argument takes the next parameter not already bound, as
+    // OpenSCAD's Parameters::parse does: `1` binds a, and `5` skips the
+    // named b and binds c. (This once pinned "1/5/30", overwriting b, which
+    // OpenSCAD never does: BelfrySCAD #1128.)
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(b = 2, 1, 5));"), "ECHO: \"1/2/5\"");
     // An unmatched name is dropped, with a warning naming the CALLER.
     EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, bogus = 9));"),
               "WARNING: variable bogus not specified as parameter in file <string>, line 2\n"

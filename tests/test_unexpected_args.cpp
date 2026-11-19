@@ -149,3 +149,40 @@ TEST(UnexpectedArgs, TextMetricsWarns) {
     auto w = warningsBothPaths("echo(textmetrics(text=\"hi\", size=5, nope=1));");
     EXPECT_TRUE(has(w, "variable nope not specified as parameter"));
 }
+
+// A positional argument takes the next parameter not already bound, as in
+// Parameters::parse: `f(a=1, b=2, 3)` binds c. It used to count only the
+// positional arguments, so it bound a and silently replaced a=1
+// (BelfrySCAD #1128). Expected values are OpenSCAD-dev 2026.02.01's.
+TEST(UnexpectedArgs, PositionalArgumentSkipsParametersAlreadyNamed) {
+    const std::string code = R"(
+function f(a, b, c) = [a, b, c];
+module m(a, b, c) echo(m=[a, b, c]);
+g = function(a, b, c) [a, b, c];
+function wrap(s, k) = s ? [f(a=1, b=2, k)] : [];
+echo(f1=f(a=1, b=2, 3));
+echo(f2=f(b=2, 3));
+echo(f4=f(c=3, 1, 2));
+echo(f5=f(b=2, 1, 3));
+echo(g1=g(a=1, b=2, 3));
+echo(w=wrap(true, 3));
+m(a=1, b=2, 3);
+m(b=2, 3);
+echo(x=f(a=1, b=2, c=3, 4));
+)";
+    for (bool vm : {false, true}) {
+        ScopedVm scoped(vm);
+        std::vector<std::string> echoes, warnings;
+        evalSrc(code, [&](const std::string& msg) {
+            if (msg.rfind("ECHO: ", 0) == 0) echoes.push_back(msg);
+            if (msg.rfind("WARNING: ", 0) == 0) warnings.push_back(msg);
+        });
+        EXPECT_EQ(echoes, (std::vector<std::string>{
+            "ECHO: f1 = [1, 2, 3]", "ECHO: f2 = [3, 2, undef]", "ECHO: f4 = [1, 2, 3]",
+            "ECHO: f5 = [1, 2, 3]", "ECHO: g1 = [1, 2, 3]", "ECHO: w = [[1, 2, 3]]",
+            "ECHO: m = [1, 2, 3]", "ECHO: m = [3, 2, undef]", "ECHO: x = [1, 2, 3]"}))
+            << "vm=" << vm;
+        ASSERT_EQ(warnings.size(), 1u) << "vm=" << vm;
+        EXPECT_NE(warnings[0].find("Too many unnamed arguments supplied"), std::string::npos);
+    }
+}

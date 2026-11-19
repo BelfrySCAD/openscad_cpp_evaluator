@@ -43,9 +43,9 @@ CallArgs& buildCallArgs(const CompiledChunk::CallSite& site, Value* args, size_t
     return callArgs;
 }
 
-// Replays bindArgs' own positional/named matching rule (positional index
-// counted only among positional arguments, later write for a repeated name
-// wins) against already-evaluated `args`, for a callee whose own parameter
+// Replays bindArgs' own positional/named matching rule (a positional
+// argument takes the next parameter not already bound, later write for a
+// repeated name wins) against already-evaluated `args`, for a callee whose own parameter
 // LIST is `paramNames` (in declared order -- a FunctionDeclaration's
 // parameters or a FunctionLiteral's). Shared by CallFn/CallFnTail (a
 // site.decl callee) and CallDynamic/CallDynamicTail (a closure callee).
@@ -60,6 +60,7 @@ BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, Val
     size_t positionalIdx = 0;
     const size_t nparams = paramNames.size();
     const oscad::Position* pos = site.callNode ? &site.callNode->position() : nullptr;
+    bool warnedExtra = false;
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
             const std::string& name = *site.argNames[i];
@@ -68,10 +69,13 @@ BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, Val
             }
             bound.set(name, std::move(args[i]));
         } else {
+            // The next parameter not already bound, as bindArgs.
+            while (positionalIdx < nparams && bound.find(paramNames[positionalIdx]->name->name)) ++positionalIdx;
             if (positionalIdx < nparams) {
                 bound.set(paramNames[positionalIdx]->name->name, std::move(args[i]));
-            } else if (emitWarnings && positionalIdx == nparams) {
+            } else if (emitWarnings && !warnedExtra) {
                 warnTooManyPositionalArgs(ev, pos);
+                warnedExtra = true;
             }
             ++positionalIdx;
         }
@@ -190,6 +194,7 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
     EvalContext& ctx = frame.ctxChain.back();
     size_t positionalIdx = 0;
     const size_t nparams = chunk.params.size();
+    bool warnedExtra = false;
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
@@ -217,6 +222,8 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
             Value v = ev.evalExpr(*a.expr, callerCtx);
+            // The next parameter not already bound, as bindArgs.
+            while (positionalIdx < nparams && frame.bound[positionalIdx]) ++positionalIdx;
             if (positionalIdx < nparams) {
                 const CompiledChunk::Param& p = chunk.params[positionalIdx];
                 if (p.isDyn) {
@@ -225,8 +232,9 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
                     frame.slots[static_cast<size_t>(p.slot)] = std::move(v);
                 }
                 frame.bound[positionalIdx] = true;
-            } else if (positionalIdx == nparams) {
+            } else if (!warnedExtra) {
                 warnTooManyPositionalArgs(ev, &argPtr->position());
+                warnedExtra = true;
             }
             ++positionalIdx;
         }
