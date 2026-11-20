@@ -8,10 +8,12 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_OUTLINE_H
+#include FT_TRUETYPE_TABLES_H
 
 #include <hb.h>
 #include <hb-ot.h>
 
+#include <cctype>
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
@@ -228,6 +230,23 @@ struct FreetypeFontProvider::Impl {
         }
     }
 
+    // A face as the matcher sees it: family, style, and its weight and
+    // slant on fontconfig's scale (#1161). The OS/2 weight when there is
+    // one, else FreeType's bold flag.
+    static FontFace describe(FT_Face f, std::string path, int index) {
+        FontFace out{std::move(path), index, f->family_name ? f->family_name : "",
+                     f->style_name ? f->style_name : ""};
+        const auto* os2 = static_cast<const TT_OS2*>(FT_Get_Sfnt_Table(f, FT_SFNT_OS2));
+        out.weight = os2 && os2->usWeightClass ? fontconfigWeight(os2->usWeightClass)
+                                               : (f->style_flags & FT_STYLE_FLAG_BOLD) ? 200 : 80;
+        if (f->style_flags & FT_STYLE_FLAG_ITALIC) {
+            std::string st = out.style;
+            for (char& ch : st) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            out.slant = st.find("oblique") != std::string::npos ? 110 : 100;
+        }
+        return out;
+    }
+
     // Reads family/style out of every face of every installed font file.
     // Deferred until a spec actually names a font: the common case (no
     // font=, or font= for a family already resolved once) never pays for
@@ -242,8 +261,7 @@ struct FreetypeFontProvider::Impl {
         // Their "path" is the sentinel below and their faceIndex is the
         // already-open handle, so resolveFont skips opening a file at all.
         for (std::size_t i = 0; i < faces.size() && i < kBundledFontCount; ++i) {
-            installed.push_back(FontFace{std::string(kBundledPath), static_cast<int>(i),
-                                          faces[i].metrics.family, faces[i].metrics.style});
+            installed.push_back(describe(faces[i].ft, kBundledPath, static_cast<int>(i)));
         }
         for (const std::string& path : findFontFiles()) {
             FT_Face probe = nullptr;
@@ -254,8 +272,7 @@ struct FreetypeFontProvider::Impl {
                 FT_Face f = nullptr;
                 if (FT_New_Face(lib, path.c_str(), i, &f) != 0) continue;
                 if (FT_IS_SCALABLE(f) && f->family_name) {
-                    installed.push_back(FontFace{path, static_cast<int>(i), f->family_name,
-                                                 f->style_name ? f->style_name : ""});
+                    installed.push_back(describe(f, path, static_cast<int>(i)));
                 }
                 FT_Done_Face(f);
             }
@@ -279,7 +296,7 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
         // family in that style, which is what fontconfig does with it and
         // what BOSL2's text3d() example relies on (BelfrySCAD #405).
         // Returning handle 0 here silently drew Regular.
-        if (parsed.style.empty()) return 0;
+        if (parsed.style.empty() && !parsed.weight && !parsed.slant) return 0;
         parsed.families.push_back(impl_->faces[0].metrics.family);
     }
 
@@ -288,7 +305,15 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
 
     impl_->scanInstalled();
     FontHandle handle = 0;
-    if (const std::optional<FontFace> hit = matchFace(parsed, impl_->installed)) {
+    std::optional<FontFace> hit = matchFace(parsed, impl_->installed);
+    if (!hit && (!parsed.style.empty() || parsed.weight || parsed.slant)) {
+        // No such family: the default family, in the face asked for, as
+        // fontconfig falls back ("slant=italic:weight=black" reads its
+        // first part as a family name, and still comes out bold).
+        parsed.families = {impl_->faces[0].metrics.family};
+        hit = matchFace(parsed, impl_->installed);
+    }
+    if (hit) {
         handle = hit->path == Impl::kBundledPath ? static_cast<FontHandle>(hit->faceIndex)
                                                   : impl_->openFile(hit->path, hit->faceIndex).value_or(0);
     }

@@ -13,14 +13,22 @@ namespace oscadeval {
 //   "Liberation Sans:style=Bold Italic"
 //   "Helvetica,Arial,sans-serif:style=Bold"
 //
-// Only `style=` is meaningful here; fontconfig accepts a long tail of
-// other properties (:size=, :weight=, :lang=) that OpenSCAD models never
-// use, and quietly ignoring them beats rejecting a spec that fontconfig
-// itself would have accepted. A bare `:Bold` (no `=`) is read as a style
-// too, since fontconfig's own parser allows it.
+// `style=` names a face outright and wins over everything else, as in
+// fontconfig. `weight=` and `slant=` take fontconfig's own scale (weight 80
+// regular, 200 bold, 210 black; slant 0 roman, 100 italic, 110 oblique) or
+// its constant names, and pick the nearest face (#1161; they were ignored).
+// A bare `:Bold` or `:Italic` is that constant; any other bare word is
+// ignored, as fontconfig ignores it. Every other known property (size=,
+// lang=, ...) is accepted and ignored. An UNKNOWN property name, or a
+// weight that is neither a number nor a constant, makes the whole spec
+// invalid: fontconfig refuses to parse it, and OpenSCAD then warns "Can't
+// get font" and draws nothing.
 struct FontSpec {
     std::vector<std::string> families;
     std::string style;
+    std::optional<double> weight;
+    std::optional<double> slant;
+    bool valid = true;
 };
 
 FontSpec parseFontSpec(const std::string& spec);
@@ -50,13 +58,21 @@ struct FontFace {
     int faceIndex = 0;
     std::string family;
     std::string style;
+    double weight = 80;   // fontconfig scale, from the OS/2 table
+    double slant = 0;     // 0 roman, 100 italic, 110 oblique
 };
+
+// fontconfig's weight for an OpenType usWeightClass (FcWeightFromOpenType).
+double fontconfigWeight(int openTypeWeight);
 
 // Best match for `spec` among `faces`, or nullopt if no requested family
 // (after generic expansion) is present at all. Family match is
 // case-insensitive and required; style is a preference, not a filter,
 // resolved in the order: exact style, then substring, then "Regular",
-// then the first face of that family.
+// then the first face of that family. With no style= but a weight= or
+// slant=, the nearest face wins instead: slant first, then weight, the
+// unset one defaulting to roman/regular, a tie going to the heavier or
+// more slanted face (as the reference picks).
 std::optional<FontFace> matchFace(const FontSpec& spec, const std::vector<FontFace>& faces);
 
 } // namespace oscadeval

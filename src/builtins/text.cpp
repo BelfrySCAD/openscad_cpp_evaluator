@@ -2,6 +2,7 @@
 
 #include "openscad_cpp_evaluator/call_args.hpp"
 #include "openscad_cpp_evaluator/evaluator.hpp"
+#include "openscad_cpp_evaluator/font_match.hpp"
 #include "openscad_cpp_evaluator/segments.hpp"
 #include "openscad_cpp_evaluator/text_metrics.hpp"
 
@@ -74,6 +75,10 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     shape.language = asStringOr(getArg(args, std::nullopt, "language", Value{std::string("")}), "");
     shape.script = asStringOr(getArg(args, std::nullopt, "script", Value{std::string("")}), "");
 
+    // A spec fontconfig cannot parse (an unknown property, a weight it
+    // cannot read) draws nothing, with the reference's warning (#1161).
+    const bool fontOk = parseFontSpec(fontSpec).valid;
+    if (!fontOk) ev.warn("Can't get font " + fontSpec, &node.position());
     FontProvider& fp = ev.fontProvider();
     const FontHandle handle = fp.resolveFont(fontSpec);
     const FontMetrics fm = fp.metrics(handle);
@@ -82,7 +87,7 @@ CSGParams resolveText(Evaluator& ev, const oscad::ModularCall& node, EvalContext
     // size, plus one (upstream FreetypeRenderer). This read $fn at radius 0
     // and halved it, so default text came out at 2 steps per curve, not 4.
     const int segs = std::max(Discretizer::fromCtx(effCtx).circular(size).value_or(3) / 8 + 1, 2);
-    const TextMeasurement m = measureText(fp, handle, text, size, spacing, shape);
+    const TextMeasurement m = measureText(fp, handle, fontOk ? text : std::string(), size, spacing, shape);
     const auto [offsetX, offsetY] = textAlignOffset(
         halign, valign, m, [&](const std::string& w) { ev.warn(w, &node.position()); });
 

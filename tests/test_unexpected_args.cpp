@@ -150,6 +150,17 @@ TEST(UnexpectedArgs, TextMetricsWarns) {
     EXPECT_TRUE(has(w, "variable nope not specified as parameter"));
 }
 
+// An unparseable font spec: undef and nothing drawn, with the reference's
+// warning (#1161).
+TEST(UnexpectedArgs, AnUnparseableFontWarns) {
+    auto w = warningsBothPaths("echo(textmetrics(\"Hg\", font=\"Liberation Sans:bogus=3\"));");
+    EXPECT_TRUE(has(w, "Can't get font Liberation Sans:bogus=3"));
+    w = warningsBothPaths("text(\"Hg\", font=\"Liberation Sans:SLANT=italic\");");
+    EXPECT_TRUE(has(w, "Can't get font Liberation Sans:SLANT=italic"));
+    w = warningsBothPaths("echo(fontmetrics(font=\"Liberation Sans:weight=heavyish\"));");
+    EXPECT_TRUE(has(w, "Can't get font Liberation Sans:weight=heavyish"));
+}
+
 // A positional argument takes the next parameter not already bound, as in
 // Parameters::parse: `f(a=1, b=2, 3)` binds c. It used to count only the
 // positional arguments, so it bound a and silently replaced a=1

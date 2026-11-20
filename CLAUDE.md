@@ -312,13 +312,22 @@ fontconfig's own never-fails matching, and so real OpenSCAD's: a missing font si
 nearest available one rather than an error.
 
 `font_match.cpp` is the part of fontconfig that `font=` actually needs, reimplemented: comma-
-separated family lists, `:style=Bold Italic` (and bare `:Bold`), other properties ignored rather
-than rejected, generic `sans-serif`/`serif`/`monospace` aliases expanded to concrete families, and
+separated family lists, `:style=Bold Italic`, `:weight=`/`:slant=` on fontconfig's own scale
+(weight 80 regular, 200 bold, 210 black; slant 0/100/110) or its constant names, a bare `:Bold` or
+`:Italic` as that constant (any other bare word ignored), other known properties ignored, generic `sans-serif`/`serif`/`monospace` aliases expanded to concrete families, and
 a recursive scan of the platform font directories plus `OPENSCAD_FONT_PATH` (the same environment
 variable real OpenSCAD reads). Family match is case-insensitive and required; style is a
 *preference* — exact, then substring, then Regular, then the family's first face — because
 dropping to Regular beats falling through to an unrelated family, which is what fontconfig does
-too.
+too. With no `style=` (which always wins), `weight=`/`slant=` pick the **nearest** face: slant first,
+then weight, the unset one defaulting to roman/regular, ties to the heavier or more slanted face;
+each face's weight is its OS/2 `usWeightClass` mapped as `FcWeightFromOpenType` maps it. An unknown
+family with any of the three falls back to the default family in that face. **An unknown property
+name (case-sensitive: `SLANT=` is unknown) or an unreadable `weight=` invalidates the spec**, as
+fontconfig refuses to parse it: `text()` draws nothing and `textmetrics()`/`fontmetrics()` return
+undef, each warning `Can't get font SPEC`, as OpenSCAD does. All of it was checked face by face
+against OpenSCAD-dev 2026.02.01, bundled Liberation and installed families alike (BelfrySCAD #1161:
+`weight=`/`slant=` used to be ignored and a bogus property silently accepted).
 
 **`text()` takes `font` positionally too — and NOTHING after it.** `text(text, size, font)` is the
 positional set; `halign`/`valign`/`spacing`/`direction`/`language`/`script` are name-only, because

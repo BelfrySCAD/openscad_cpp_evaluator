@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <tuple>
 #include <cstdlib>
 #include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
 #include <system_error>
 
 namespace fs = std::filesystem;
@@ -55,6 +59,47 @@ std::string envOr(const char* name, const std::string& fallback) {
 
 } // namespace
 
+namespace {
+
+// fontconfig's constants for the two properties matched here.
+const std::unordered_map<std::string, std::pair<char, double>>& fcConstants() {
+    static const std::unordered_map<std::string, std::pair<char, double>> table = {
+        {"thin", {'w', 0}},       {"extralight", {'w', 40}}, {"ultralight", {'w', 40}},
+        {"light", {'w', 50}},     {"demilight", {'w', 55}},  {"semilight", {'w', 55}},
+        {"book", {'w', 75}},      {"regular", {'w', 80}},    {"normal", {'w', 80}},
+        {"medium", {'w', 100}},   {"demibold", {'w', 180}},  {"semibold", {'w', 180}},
+        {"bold", {'w', 200}},     {"extrabold", {'w', 205}}, {"ultrabold", {'w', 205}},
+        {"black", {'w', 210}},    {"heavy", {'w', 210}},
+        {"roman", {'s', 0}},      {"italic", {'s', 100}},    {"oblique", {'s', 110}},
+    };
+    return table;
+}
+
+// fontconfig's object names: any other name fails its parse. Case matters
+// there (`SLANT=` is refused), so it does here.
+bool knownProperty(const std::string& name) {
+    static const std::unordered_set<std::string> names = {
+        "family", "familylang", "style", "stylelang", "fullname", "fullnamelang", "slant", "weight",
+        "width", "size", "aspect", "pixelsize", "spacing", "foundry", "antialias", "hintstyle",
+        "hinting", "verticallayout", "autohint", "globaladvance", "file", "index", "ftface",
+        "rasterizer", "outline", "scalable", "dpi", "rgba", "scale", "minspace", "charwidth",
+        "charheight", "matrix", "charset", "lang", "fontversion", "capability", "fontformat",
+        "embolden", "embeddedbitmap", "decorative", "lcdfilter", "namelang", "fontfeatures",
+        "prgname", "hash", "postscriptname", "color", "symbol", "fontvariations", "variable",
+        "fonthashint", "order", "desktop", "namedinstance", "fontwrapper"};
+    return names.count(name) != 0;
+}
+
+std::optional<double> number(const std::string& s) {
+    if (s.empty()) return std::nullopt;
+    char* end = nullptr;
+    const double v = std::strtod(s.c_str(), &end);
+    if (end == s.c_str() || *end != '\0') return std::nullopt;
+    return v;
+}
+
+} // namespace
+
 FontSpec parseFontSpec(const std::string& spec) {
     FontSpec out;
     const std::vector<std::string> parts = splitOn(spec, ':');
@@ -64,20 +109,60 @@ FontSpec parseFontSpec(const std::string& spec) {
         if (!f.empty()) out.families.push_back(f);
     }
 
+    // The first value given for a property wins, as fontconfig prefers the
+    // first of a list: "weight=bold:weight=thin" is bold.
     for (size_t i = 1; i < parts.size(); ++i) {
         const std::string prop = trim(parts[i]);
         if (prop.empty()) continue;
         const size_t eq = prop.find('=');
         if (eq == std::string::npos) {
-            // Bare `:Bold`. Only taken as a style if nothing already set
-            // one, so an explicit style= always wins.
-            if (out.style.empty()) out.style = prop;
-        } else if (lower(trim(prop.substr(0, eq))) == "style") {
-            out.style = trim(prop.substr(eq + 1));
+            // Bare `:Bold`: the constant's own property. Any other bare
+            // word is ignored by fontconfig, so here too.
+            const auto c = fcConstants().find(lower(prop));
+            if (c == fcConstants().end()) continue;
+            auto& slot = c->second.first == 'w' ? out.weight : out.slant;
+            if (!slot) slot = c->second.second;
+            continue;
         }
-        // Any other property (size=, weight=, lang=) is ignored on purpose.
+        const std::string name = trim(prop.substr(0, eq));
+        const std::string value = trim(prop.substr(eq + 1));
+        if (name.empty() || value.empty()) continue;
+        if (!knownProperty(name)) {
+            out.valid = false;
+            continue;
+        }
+        if (name == "style") {
+            if (out.style.empty()) out.style = value;
+        } else if (name == "weight" || name == "slant") {
+            const auto c = fcConstants().find(lower(value));
+            std::optional<double> v = c != fcConstants().end() ? std::optional<double>(c->second.second)
+                                                               : number(value);
+            if (!v && name == "weight" && value.front() == '[') v = 80;  // a range: accepted, not matched
+            if (!v && name == "weight") {
+                out.valid = false;                 // fontconfig: "Could not parse font"
+                continue;
+            }
+            if (!v) v = 0;                         // slant is an integer: strtol of junk is 0
+            auto& slot = name == "weight" ? out.weight : out.slant;
+            if (!slot) slot = v;
+        }
+        // Every other known property (size=, lang=, ...) is ignored.
     }
     return out;
+}
+
+double fontconfigWeight(int ot) {
+    // FcWeightFromOpenType's table, interpolated between its points.
+    static const double map[][2] = {{100, 0},   {200, 40},  {300, 50},  {350, 55},  {380, 75}, {400, 80},
+                                    {500, 100}, {600, 180}, {700, 200}, {800, 205}, {900, 210}, {1000, 215}};
+    if (ot <= 100) return 0;
+    for (size_t i = 1; i < sizeof map / sizeof map[0]; ++i) {
+        if (ot <= map[i][0]) {
+            const double t = (ot - map[i - 1][0]) / (map[i][0] - map[i - 1][0]);
+            return map[i - 1][1] + t * (map[i][1] - map[i - 1][1]);
+        }
+    }
+    return 215;
 }
 
 std::vector<std::string> expandGenericFamily(const std::string& family) {
@@ -178,6 +263,17 @@ std::optional<FontFace> matchFace(const FontSpec& spec, const std::vector<FontFa
             for (const FontFace* f : inFamily) {
                 if (lower(f->style).find(wantStyle) != std::string::npos) return *f;
             }
+        }
+        if (wantStyle.empty() && (spec.weight || spec.slant)) {
+            const double w = spec.weight.value_or(80), sl = spec.slant.value_or(0);
+            const FontFace* best = inFamily.front();
+            auto key = [&](const FontFace* f) {
+                return std::make_tuple(std::abs(f->slant - sl), -f->slant, std::abs(f->weight - w), -f->weight);
+            };
+            for (const FontFace* f : inFamily) {
+                if (key(f) < key(best)) best = f;
+            }
+            return *best;
         }
         for (const FontFace* f : inFamily) {
             if (lower(f->style) == "regular") return *f;
