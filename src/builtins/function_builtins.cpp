@@ -1,3 +1,4 @@
+#include "openscad_cpp_evaluator/font_match.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 
 #include "builtins.hpp"   // builtinDxfDim/builtinDxfCross
@@ -784,6 +785,11 @@ Value builtinTextmetrics(Evaluator& ev, const CallArgs& args, const oscad::Posit
     shape.language = asStringOr(getArg(args, 4, "language", Value{std::string("")}), "");
     shape.script = asStringOr(getArg(args, 5, "script", Value{std::string("")}), "");
 
+    // An unparseable spec is undef, with the reference's warning (#1161).
+    if (!parseFontSpec(fontSpec).valid) {
+        ev.warn("Can't get font " + fontSpec, pos);
+        return Value{};
+    }
     FontProvider& fp = ev.fontProvider();
     const FontHandle handle = fp.resolveFont(fontSpec);
     const TextMeasurement m = measureText(fp, handle, text, size, spacing, shape);
@@ -808,6 +814,10 @@ Value builtinFontmetrics(Evaluator& ev, const CallArgs& args, const oscad::Posit
     // how the bug report was written, and how the real binary reads it.
     const std::string fontSpec = asStringOr(getArg(args, 1, "font", Value{std::string("")}), "");
 
+    if (!parseFontSpec(fontSpec).valid) {
+        ev.warn("Can't get font " + fontSpec, pos);
+        return Value{};
+    }
     FontProvider& fp = ev.fontProvider();
     const FontHandle handle = fp.resolveFont(fontSpec);
     const FontMetrics fm = fp.metrics(handle);

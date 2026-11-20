@@ -322,10 +322,54 @@ TEST(FontMatch, ParsesFamilyListAndStyle) {
     EXPECT_EQ(s.style, "Bold Italic");
 }
 
-TEST(FontMatch, ParsesBareStyleAndIgnoresOtherProperties) {
-    EXPECT_EQ(parseFontSpec("Courier New:Bold").style, "Bold");
+TEST(FontMatch, ParsesStyleWeightAndSlant) {
+    // A bare constant is its own property, as in fontconfig (#1161).
+    EXPECT_EQ(parseFontSpec("Courier New:Bold").weight, 200);
+    EXPECT_EQ(parseFontSpec("Courier New:Italic").slant, 100);
+    EXPECT_TRUE(parseFontSpec("Courier New:Bold").style.empty());
+    EXPECT_FALSE(parseFontSpec("Courier New:Foo").weight);       // other bare words: ignored
     EXPECT_EQ(parseFontSpec("Courier New:size=12:style=Oblique").style, "Oblique");
-    EXPECT_TRUE(parseFontSpec("Courier New:weight=200").style.empty());
+    EXPECT_EQ(parseFontSpec("Courier New:weight=200").weight, 200);
+    EXPECT_EQ(parseFontSpec("Courier New:weight=Black").weight, 210);
+    EXPECT_EQ(parseFontSpec("Courier New:slant=oblique").slant, 110);
+    EXPECT_EQ(parseFontSpec("Courier New:weight=bold:weight=thin").weight, 200);   // first wins
+    EXPECT_EQ(parseFontSpec("Courier New:slant=sideways").slant, 0);  // an integer: junk is 0
+    EXPECT_TRUE(parseFontSpec("Courier New:lang=fr:size=3").valid);
+}
+
+TEST(FontMatch, AnUnparseableSpecIsInvalid) {
+    // fontconfig refuses these, and OpenSCAD then draws nothing (#1161).
+    EXPECT_FALSE(parseFontSpec("Liberation Sans:bogus=3").valid);
+    EXPECT_FALSE(parseFontSpec("Liberation Sans:SLANT=italic").valid);   // names are case-sensitive
+    EXPECT_FALSE(parseFontSpec("Liberation Sans:weight=heavyish").valid);
+    EXPECT_TRUE(parseFontSpec("Liberation Sans:weight=").valid);
+}
+
+TEST(BundledFonts, WeightAndSlantPickTheNearestFace) {
+    // Every expected face is what OpenSCAD-dev 2026.02.01 picks (#1161).
+    FreetypeFontProvider p;
+    const std::vector<std::pair<std::string, std::string>> want = {{
+        {"Liberation Sans:slant=Italic", "Italic"},
+        {"Liberation Sans:slant=italic:weight=black", "Bold Italic"},
+        {"Liberation Sans:weight=bold", "Bold"},
+        {"Liberation Sans:weight=demibold", "Bold"},
+        {"Liberation Sans:weight=140", "Bold"},
+        {"Liberation Sans:weight=100", "Regular"},
+        {"Liberation Sans:weight=thin", "Regular"},
+        {"Liberation Sans:slant=50", "Italic"},
+        {"Liberation Sans:slant=oblique", "Italic"},
+        {"Liberation Sans:Bold:Italic", "Bold Italic"},
+        {"Liberation Sans:Bold Italic", "Regular"},
+        {"Liberation Sans:weight=bold:style=Italic", "Italic"},
+        {"Liberation Sans:style=Bold:slant=italic", "Bold"},
+        {"slant=italic:weight=black", "Bold"},
+        {"No Such Font:slant=italic", "Italic"},
+    }};
+    for (const auto& [spec, style] : want) {
+        const FontMetrics m = p.metrics(p.resolveFont(spec));
+        EXPECT_EQ(m.family, "Liberation Sans") << spec;
+        EXPECT_EQ(m.style, style) << spec;
+    }
 }
 
 TEST(FontMatch, EmptySpecHasNoFamilyToMatch) {
