@@ -303,7 +303,8 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
         // family in that style, which is what fontconfig does with it and
         // what BOSL2's text3d() example relies on (BelfrySCAD #405).
         // Returning handle 0 here silently drew Regular.
-        if (parsed.style.empty() && !parsed.weight && !parsed.slant && !parsed.width && parsed.features.empty())
+        if (parsed.styles.empty() && parsed.weights.empty() && parsed.slants.empty() && parsed.widths.empty() &&
+            parsed.features.empty())
             return 0;
         parsed.families.push_back(impl_->faces[0].metrics.family);
     }
@@ -314,7 +315,8 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
     impl_->scanInstalled();
     FontHandle handle = 0;
     std::optional<FontFace> hit = matchFace(parsed, impl_->installed);
-    if (!hit && (!parsed.style.empty() || parsed.weight || parsed.slant || parsed.width || !parsed.features.empty())) {
+    if (!hit && (!parsed.styles.empty() || !parsed.weights.empty() || !parsed.slants.empty() || !parsed.widths.empty() ||
+                 !parsed.features.empty())) {
         // No such family: the default family, in the face asked for, as
         // fontconfig falls back ("slant=italic:weight=black" reads its
         // first part as a family name, and still comes out bold).

@@ -323,16 +323,19 @@ a recursive scan of the platform font directories plus `OPENSCAD_FONT_PATH` (the
 variable real OpenSCAD reads). Family match is case-insensitive and required; style is a
 *preference* — exact, then substring, then Regular, then the family's first face — because
 dropping to Regular beats falling through to an unrelated family, which is what fontconfig does
-too. With no `style=` (which always wins), `weight=`/`slant=`/`width=` pick the **nearest** face:
-slant, then weight, then width, each unset one defaulting to roman/regular/normal, ties to the more
-slanted, heavier or wider face (so `Helvetica Neue:condensed` is still Regular: there is no condensed
-Regular, and weight outranks width);
+too. A `style=` some face has wins; failing that, `weight=`/`slant=`/`width=` pick the **nearest**
+face: slant, then weight, then width, each unset one defaulting to roman/regular/normal, ties to the
+more slanted, heavier or wider face (so `Helvetica Neue:condensed` is still Regular: there is no
+condensed Regular, and weight outranks width). **A repeated property is a list of candidates**, as in
+fontconfig: each is scored by its nearest value, an earlier value winning a tie, so
+`weight=thin:weight=bold` is Bold where there is no thin face and `style=Nonesuch:style=Bold` is Bold
+(1.55.5 kept only the first value, which agreed with RC0 only when the first was also the nearest);
 each face's weight is its OS/2 `usWeightClass` mapped as `FcWeightFromOpenType` maps it. An unknown
 family with any of them falls back to the default family in that face. **`spacing=mono` is not a
 match criterion**: it puts `monospace` *in front of* the family list, as OpenSCAD's bundled
 `48-spacing.conf` does when any `spacing` value is 100, so `Liberation Sans:spacing=mono` is Liberation
 Mono, and no other spacing value changes anything. **`fontfeatures=`** (the first one; up to a `,`,
-split on `;`, as OpenSCAD splits it) goes to `hb_shape` through a face *alias* — a `Face` sharing an
+split on `;`, as OpenSCAD splits it; the one property where only the first counts, since OpenSCAD reads only value 0) goes to `hb_shape` through a face *alias* — a `Face` sharing an
 open face's FreeType/HarfBuzz objects plus its own features, so text and the metrics functions both
 see it; a string HarfBuzz cannot parse is skipped. **An unknown property name (case-sensitive:
 `SLANT=` is unknown), or a `weight=`/`width=` that is neither a number nor that property's own

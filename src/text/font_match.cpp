@@ -127,17 +127,15 @@ FontSpec parseFontSpec(const std::string& spec) {
         if (!f.empty()) out.families.push_back(f);
     }
 
-    // The first value given for a property wins, as fontconfig prefers the
-    // first of a list: "weight=bold:weight=thin" is bold. Spacing is the
-    // exception: 48-spacing.conf tests ANY of its values for 100.
+    // A repeated property is a list of candidates, in order (see FontSpec).
+    // spacing is only ever tested for 100, by 48-spacing.conf, on ANY value.
     bool mono = false;
     auto set = [&](char prop, double v) {
         if (prop == 'p') {
             mono = mono || v == 100;
             return;
         }
-        auto& slot = prop == 'w' ? out.weight : prop == 's' ? out.slant : out.width;
-        if (!slot) slot = v;
+        (prop == 'w' ? out.weights : prop == 's' ? out.slants : out.widths).push_back(v);
     };
     bool haveFeatures = false;
     for (size_t i = 1; i < parts.size(); ++i) {
@@ -158,7 +156,7 @@ FontSpec parseFontSpec(const std::string& spec) {
             continue;
         }
         if (name == "style") {
-            if (out.style.empty()) out.style = value;
+            out.styles.push_back(value);
         } else if (name == "weight" || name == "width") {
             // Doubles: their own constant, a number, or (accepted, not
             // matched) a range. Anything else fails fontconfig's parse --
@@ -294,7 +292,15 @@ std::optional<FontFace> matchFace(const FontSpec& spec, const std::vector<FontFa
         for (const std::string& alias : expandGenericFamily(fam)) wanted.push_back(alias);
     }
 
-    const std::string wantStyle = lower(spec.style);
+    // fontconfig scores a list by its nearest value, the earlier on a tie.
+    auto nearest = [](const std::vector<double>& values, double fallback, double have) {
+        std::pair<double, size_t> best{std::abs(have - fallback), 0};
+        for (size_t j = 0; j < values.size(); ++j) {
+            const std::pair<double, size_t> d{std::abs(have - values[j]), j};
+            if (j == 0 || d < best) best = d;
+        }
+        return best;
+    };
 
     for (const std::string& fam : wanted) {
         const std::string want = lower(fam);
@@ -304,21 +310,23 @@ std::optional<FontFace> matchFace(const FontSpec& spec, const std::vector<FontFa
         }
         if (inFamily.empty()) continue;
 
-        if (!wantStyle.empty()) {
+        for (const std::string& st : spec.styles) {
             for (const FontFace* f : inFamily) {
-                if (lower(f->style) == wantStyle) return *f;
-            }
-            for (const FontFace* f : inFamily) {
-                if (lower(f->style).find(wantStyle) != std::string::npos) return *f;
+                if (lower(f->style) == lower(st)) return *f;
             }
         }
-        if (wantStyle.empty() && (spec.weight || spec.slant || spec.width)) {
-            const double w = spec.weight.value_or(80), sl = spec.slant.value_or(0), wd = spec.width.value_or(100);
-            const FontFace* best = inFamily.front();
+        for (const std::string& st : spec.styles) {
+            for (const FontFace* f : inFamily) {
+                if (lower(f->style).find(lower(st)) != std::string::npos) return *f;
+            }
+        }
+        if (!spec.weights.empty() || !spec.slants.empty() || !spec.widths.empty()) {
             auto key = [&](const FontFace* f) {
-                return std::make_tuple(std::abs(f->slant - sl), -f->slant, std::abs(f->weight - w), -f->weight,
-                                       std::abs(f->width - wd), -f->width);
+                return std::make_tuple(nearest(spec.slants, 0, f->slant), -f->slant,
+                                       nearest(spec.weights, 80, f->weight), -f->weight,
+                                       nearest(spec.widths, 100, f->width), -f->width);
             };
+            const FontFace* best = inFamily.front();
             for (const FontFace* f : inFamily) {
                 if (key(f) < key(best)) best = f;
             }

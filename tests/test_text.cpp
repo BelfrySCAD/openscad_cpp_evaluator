@@ -15,6 +15,8 @@ using namespace oscadeval::test;
 
 namespace {
 
+using V = std::vector<double>;
+
 Value asExpr(const std::string& code, Evaluator& ev) {
     std::vector<std::unique_ptr<oscad::ASTNode>> ast;
     const oscad::Expression* expr = exprSrc(code, ast);
@@ -320,21 +322,21 @@ TEST(FontMatch, ParsesFamilyListAndStyle) {
     EXPECT_EQ(s.families[0], "Helvetica");
     EXPECT_EQ(s.families[1], "Arial");
     EXPECT_EQ(s.families[2], "sans-serif");
-    EXPECT_EQ(s.style, "Bold Italic");
+    EXPECT_EQ(s.styles, std::vector<std::string>{"Bold Italic"});
 }
 
 TEST(FontMatch, ParsesStyleWeightAndSlant) {
     // A bare constant is its own property, as in fontconfig (#1161).
-    EXPECT_EQ(parseFontSpec("Courier New:Bold").weight, 200);
-    EXPECT_EQ(parseFontSpec("Courier New:Italic").slant, 100);
-    EXPECT_TRUE(parseFontSpec("Courier New:Bold").style.empty());
-    EXPECT_FALSE(parseFontSpec("Courier New:Foo").weight);       // other bare words: ignored
-    EXPECT_EQ(parseFontSpec("Courier New:size=12:style=Oblique").style, "Oblique");
-    EXPECT_EQ(parseFontSpec("Courier New:weight=200").weight, 200);
-    EXPECT_EQ(parseFontSpec("Courier New:weight=Black").weight, 210);
-    EXPECT_EQ(parseFontSpec("Courier New:slant=oblique").slant, 110);
-    EXPECT_EQ(parseFontSpec("Courier New:weight=bold:weight=thin").weight, 200);   // first wins
-    EXPECT_EQ(parseFontSpec("Courier New:slant=sideways").slant, 0);  // an integer: junk is 0
+    EXPECT_EQ(parseFontSpec("Courier New:Bold").weights, V{200});
+    EXPECT_EQ(parseFontSpec("Courier New:Italic").slants, V{100});
+    EXPECT_TRUE(parseFontSpec("Courier New:Bold").styles.empty());
+    EXPECT_TRUE(parseFontSpec("Courier New:Foo").weights.empty());       // other bare words: ignored
+    EXPECT_EQ(parseFontSpec("Courier New:size=12:style=Oblique").styles, std::vector<std::string>{"Oblique"});
+    EXPECT_EQ(parseFontSpec("Courier New:weight=200").weights, V{200});
+    EXPECT_EQ(parseFontSpec("Courier New:weight=Black").weights, V{210});
+    EXPECT_EQ(parseFontSpec("Courier New:slant=oblique").slants, V{110});
+    EXPECT_EQ(parseFontSpec("Courier New:weight=bold:weight=thin").weights, (V{200, 0}));   // a list, in order
+    EXPECT_EQ(parseFontSpec("Courier New:slant=sideways").slants, V{0});  // an integer: junk is 0
     EXPECT_TRUE(parseFontSpec("Courier New:lang=fr:size=3").valid);
 }
 
@@ -353,11 +355,11 @@ TEST(FontMatch, AnUnparseableSpecIsInvalid) {
 }
 
 TEST(FontMatch, ParsesWidthSpacingAndFeatures) {
-    EXPECT_EQ(parseFontSpec("A:condensed").width, 75);
-    EXPECT_EQ(parseFontSpec("A:width=normal").width, 100);
-    EXPECT_EQ(parseFontSpec("A:normal").weight, 80);   // a bare word takes the first: weight
-    EXPECT_FALSE(parseFontSpec("A:normal").width);
-    EXPECT_EQ(parseFontSpec("A:width=63:width=200").width, 63);
+    EXPECT_EQ(parseFontSpec("A:condensed").widths, V{75});
+    EXPECT_EQ(parseFontSpec("A:width=normal").widths, V{100});
+    EXPECT_EQ(parseFontSpec("A:normal").weights, V{80});   // a bare word takes the first: weight
+    EXPECT_TRUE(parseFontSpec("A:normal").widths.empty());
+    EXPECT_EQ(parseFontSpec("A:width=63:width=200").widths, (V{63, 200}));
     // spacing=mono puts monospace first, even over a named family; any 100 counts.
     EXPECT_EQ(parseFontSpec("A:spacing=mono").families, (std::vector<std::string>{"monospace", "A"}));
     EXPECT_EQ(parseFontSpec(":mono").families, (std::vector<std::string>{"monospace"}));
@@ -393,6 +395,43 @@ TEST(FontMatch, WidthBreaksTiesAfterWeight) {
         {"H:style=Bold:condensed", "Bold"},          // style= wins
     }};
     for (const auto& [spec, style] : want) EXPECT_EQ(matchFace(parseFontSpec(spec), faces)->style, style) << spec;
+}
+
+TEST(FontMatch, ARepeatedPropertyIsAListOfCandidates) {
+    // Helvetica Neue's weights, OS/2 as fontconfig reads them. Every expected
+    // face is what OpenSCAD 2026.11-RC0 picks from the real family (#1161).
+    std::vector<FontFace> faces = {{"/f", 0, "H", "UltraLight"}, {"/f", 1, "H", "Light"}, {"/f", 2, "H", "Regular"},
+                                   {"/f", 3, "H", "Bold"}};
+    faces[0].weight = 0;
+    faces[1].weight = 50;
+    faces[3].weight = 200;
+    const std::vector<std::pair<std::string, std::string>> want = {{
+        {"H:weight=light:weight=bold", "Light"},     // both exact: the earlier
+        {"H:weight=bold:weight=light", "Bold"},
+        {"H:weight=thin:weight=bold", "UltraLight"},
+        {"H:weight=55:weight=200", "Bold"},          // the nearer of the two
+        {"H:weight=200:weight=55", "Bold"},
+        {"H:style=Nonesuch:style=Bold", "Bold"},
+        {"H:style=Bold:style=Light", "Bold"},
+    }};
+    for (const auto& [spec, style] : want) EXPECT_EQ(matchFace(parseFontSpec(spec), faces)->style, style) << spec;
+}
+
+TEST(BundledFonts, ARepeatedPropertyIsAListOfCandidates) {
+    // Each expected face is what OpenSCAD 2026.11-RC0 picks (#1161).
+    FreetypeFontProvider p;
+    const std::vector<std::pair<std::string, std::string>> want = {{
+        {"Liberation Sans:weight=bold:weight=thin", "Bold"},
+        {"Liberation Sans:weight=thin:weight=bold", "Bold"},
+        {"Liberation Sans:weight=light:weight=bold", "Bold"},
+        {"Liberation Sans:thin:bold", "Bold"},
+        {"Liberation Sans:slant=roman:slant=italic", "Regular"},
+        {"Liberation Sans:slant=italic:slant=roman", "Italic"},
+        {"Liberation Sans:style=Regular:style=Bold", "Regular"},
+        {"Liberation Sans:style=Bold:style=Regular", "Bold"},
+        {"Liberation Sans:style=Nonesuch:style=Bold", "Bold"},
+    }};
+    for (const auto& [spec, style] : want) EXPECT_EQ(p.metrics(p.resolveFont(spec)).style, style) << spec;
 }
 
 TEST(BundledFonts, SerifAndMonoAreBundled) {
