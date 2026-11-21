@@ -264,12 +264,22 @@ FetchContent_MakeAvailable(cpp_linenoise)
 # cannot be satisfied silently falls back to the regular face, which is
 # what made fontmetrics(10, "Liberation Sans:style=bold") report Regular's
 # numbers (BelfrySCAD #381). Regular stays FIRST -- it is the default face
-# and the last-resort fallback.
+# and the last-resort fallback. Serif and Mono too, as OpenSCAD bundles all
+# three (byte-identical 2.00.1 files): "Liberation Mono", `monospace` and
+# `spacing=mono` must find a monospaced face on any machine (BelfrySCAD #1161).
 set(BUNDLED_FONT_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-Regular.ttf
   ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-Bold.ttf
   ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-Italic.ttf
   ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSans-BoldItalic.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSerif-Regular.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSerif-Bold.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSerif-Italic.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationSerif-BoldItalic.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationMono-Regular.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationMono-Bold.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationMono-Italic.ttf
+  ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/LiberationMono-BoldItalic.ttf
 )
 set(BUNDLED_FONT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/openscad_cpp_evaluator/bundled_font_data.hpp)
 # Joined into ONE argument, and quoted. Left as a ";" list,

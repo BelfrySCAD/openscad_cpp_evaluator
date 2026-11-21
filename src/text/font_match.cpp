@@ -6,7 +6,6 @@
 #include <tuple>
 #include <cstdlib>
 #include <filesystem>
-#include <unordered_map>
 #include <unordered_set>
 #include <system_error>
 
@@ -61,18 +60,37 @@ std::string envOr(const char* name, const std::string& fallback) {
 
 namespace {
 
-// fontconfig's constants for the two properties matched here.
-const std::unordered_map<std::string, std::pair<char, double>>& fcConstants() {
-    static const std::unordered_map<std::string, std::pair<char, double>> table = {
-        {"thin", {'w', 0}},       {"extralight", {'w', 40}}, {"ultralight", {'w', 40}},
-        {"light", {'w', 50}},     {"demilight", {'w', 55}},  {"semilight", {'w', 55}},
-        {"book", {'w', 75}},      {"regular", {'w', 80}},    {"normal", {'w', 80}},
-        {"medium", {'w', 100}},   {"demibold", {'w', 180}},  {"semibold", {'w', 180}},
-        {"bold", {'w', 200}},     {"extrabold", {'w', 205}}, {"ultrabold", {'w', 205}},
-        {"black", {'w', 210}},    {"heavy", {'w', 210}},
-        {"roman", {'s', 0}},      {"italic", {'s', 100}},    {"oblique", {'s', 110}},
+// fontconfig's constants for the properties matched here, in fontconfig's
+// own order: a bare word takes the first ("normal" is a weight).
+struct FcConstant {
+    const char* name;
+    char prop;  // 'w'eight, 's'lant, 'x' width, 'p' spacing
+    double value;
+};
+const std::vector<FcConstant>& fcConstants() {
+    static const std::vector<FcConstant> table = {
+        {"thin", 'w', 0},        {"extralight", 'w', 40},     {"ultralight", 'w', 40},
+        {"light", 'w', 50},      {"demilight", 'w', 55},      {"semilight", 'w', 55},
+        {"book", 'w', 75},       {"regular", 'w', 80},        {"normal", 'w', 80},
+        {"medium", 'w', 100},    {"demibold", 'w', 180},      {"semibold", 'w', 180},
+        {"bold", 'w', 200},      {"extrabold", 'w', 205},     {"ultrabold", 'w', 205},
+        {"black", 'w', 210},     {"heavy", 'w', 210},
+        {"roman", 's', 0},       {"italic", 's', 100},        {"oblique", 's', 110},
+        {"ultracondensed", 'x', 50}, {"extracondensed", 'x', 63}, {"condensed", 'x', 75},
+        {"semicondensed", 'x', 87},  {"normal", 'x', 100},        {"semiexpanded", 'x', 113},
+        {"expanded", 'x', 125},      {"extraexpanded", 'x', 150}, {"ultraexpanded", 'x', 200},
+        {"proportional", 'p', 0},    {"dual", 'p', 90},           {"mono", 'p', 100},
+        {"charcell", 'p', 110},
     };
     return table;
+}
+
+// The constant `name` names; with `prop`, only one of that property.
+const FcConstant* fcConstant(const std::string& name, char prop = 0) {
+    for (const FcConstant& c : fcConstants()) {
+        if (name == c.name && (!prop || prop == c.prop)) return &c;
+    }
+    return nullptr;
 }
 
 // fontconfig's object names: any other name fails its parse. Case matters
@@ -110,7 +128,18 @@ FontSpec parseFontSpec(const std::string& spec) {
     }
 
     // The first value given for a property wins, as fontconfig prefers the
-    // first of a list: "weight=bold:weight=thin" is bold.
+    // first of a list: "weight=bold:weight=thin" is bold. Spacing is the
+    // exception: 48-spacing.conf tests ANY of its values for 100.
+    bool mono = false;
+    auto set = [&](char prop, double v) {
+        if (prop == 'p') {
+            mono = mono || v == 100;
+            return;
+        }
+        auto& slot = prop == 'w' ? out.weight : prop == 's' ? out.slant : out.width;
+        if (!slot) slot = v;
+    };
+    bool haveFeatures = false;
     for (size_t i = 1; i < parts.size(); ++i) {
         const std::string prop = trim(parts[i]);
         if (prop.empty()) continue;
@@ -118,10 +147,7 @@ FontSpec parseFontSpec(const std::string& spec) {
         if (eq == std::string::npos) {
             // Bare `:Bold`: the constant's own property. Any other bare
             // word is ignored by fontconfig, so here too.
-            const auto c = fcConstants().find(lower(prop));
-            if (c == fcConstants().end()) continue;
-            auto& slot = c->second.first == 'w' ? out.weight : out.slant;
-            if (!slot) slot = c->second.second;
+            if (const FcConstant* c = fcConstant(lower(prop))) set(c->prop, c->value);
             continue;
         }
         const std::string name = trim(prop.substr(0, eq));
@@ -133,21 +159,37 @@ FontSpec parseFontSpec(const std::string& spec) {
         }
         if (name == "style") {
             if (out.style.empty()) out.style = value;
-        } else if (name == "weight" || name == "slant") {
-            const auto c = fcConstants().find(lower(value));
-            std::optional<double> v = c != fcConstants().end() ? std::optional<double>(c->second.second)
-                                                               : number(value);
-            if (!v && name == "weight" && value.front() == '[') v = 80;  // a range: accepted, not matched
-            if (!v && name == "weight") {
+        } else if (name == "weight" || name == "width") {
+            // Doubles: their own constant, a number, or (accepted, not
+            // matched) a range. Anything else fails fontconfig's parse --
+            // "weight=italic" included.
+            const char p = name == "weight" ? 'w' : 'x';
+            const FcConstant* c = fcConstant(lower(value), p);
+            std::optional<double> v = c ? std::optional<double>(c->value) : number(value);
+            if (!v && value.front() == '[') v = p == 'w' ? 80 : 100;
+            if (!v) {
                 out.valid = false;                 // fontconfig: "Could not parse font"
                 continue;
             }
-            if (!v) v = 0;                         // slant is an integer: strtol of junk is 0
-            auto& slot = name == "weight" ? out.weight : out.slant;
-            if (!slot) slot = v;
+            set(p, *v);
+        } else if (name == "slant" || name == "spacing") {
+            // Integers: their own constant, else strtol, so junk is 0.
+            const char p = name == "slant" ? 's' : 'p';
+            const FcConstant* c = fcConstant(lower(value), p);
+            set(p, c ? c->value : static_cast<double>(std::strtol(value.c_str(), nullptr, 10)));
+        } else if (name == "fontfeatures") {
+            // OpenSCAD reads the first value (a ',' starts another) and
+            // splits it on ';'.
+            if (haveFeatures) continue;
+            haveFeatures = true;
+            for (const std::string& f : splitOn(value.substr(0, value.find(',')), ';')) {
+                const std::string t = trim(f);
+                if (!t.empty()) out.features.push_back(t);
+            }
         }
         // Every other known property (size=, lang=, ...) is ignored.
     }
+    if (mono) out.families.insert(out.families.begin(), "monospace");
     return out;
 }
 
@@ -163,6 +205,12 @@ double fontconfigWeight(int ot) {
         }
     }
     return 215;
+}
+
+double fontconfigWidth(int ot) {
+    // fontconfig's FreeType backend, usWidthClass 1-9.
+    static const double map[] = {50, 63, 75, 87, 100, 113, 125, 150, 200};
+    return ot >= 1 && ot <= 9 ? map[ot - 1] : 100;
 }
 
 std::vector<std::string> expandGenericFamily(const std::string& family) {
@@ -264,11 +312,12 @@ std::optional<FontFace> matchFace(const FontSpec& spec, const std::vector<FontFa
                 if (lower(f->style).find(wantStyle) != std::string::npos) return *f;
             }
         }
-        if (wantStyle.empty() && (spec.weight || spec.slant)) {
-            const double w = spec.weight.value_or(80), sl = spec.slant.value_or(0);
+        if (wantStyle.empty() && (spec.weight || spec.slant || spec.width)) {
+            const double w = spec.weight.value_or(80), sl = spec.slant.value_or(0), wd = spec.width.value_or(100);
             const FontFace* best = inFamily.front();
             auto key = [&](const FontFace* f) {
-                return std::make_tuple(std::abs(f->slant - sl), -f->slant, std::abs(f->weight - w), -f->weight);
+                return std::make_tuple(std::abs(f->slant - sl), -f->slant, std::abs(f->weight - w), -f->weight,
+                                       std::abs(f->width - wd), -f->width);
             };
             for (const FontFace* f : inFamily) {
                 if (key(f) < key(best)) best = f;
