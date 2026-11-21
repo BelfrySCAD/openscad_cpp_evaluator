@@ -145,6 +145,10 @@ struct FreetypeFontProvider::Impl {
         hb_face_t* hbFace = nullptr;
         hb_font_t* hbFont = nullptr;
         FontMetrics metrics;
+        // A spec's fontfeatures= (#1161). A face with features is an alias
+        // of an open one, sharing its FreeType/HarfBuzz objects.
+        std::vector<hb_feature_t> features;
+        bool alias = false;
     };
 
     //: A FontFace whose `path` is this is already open: its faceIndex IS
@@ -159,6 +163,7 @@ struct FreetypeFontProvider::Impl {
 
     ~Impl() {
         for (Face& f : faces) {
+            if (f.alias) continue;
             if (f.hbFont) hb_font_destroy(f.hbFont);
             if (f.hbFace) hb_face_destroy(f.hbFace);
             if (f.blob) hb_blob_destroy(f.blob);
@@ -206,10 +211,11 @@ struct FreetypeFontProvider::Impl {
         return faces.size() - 1;
     }
 
-    // Every bundled face, in order -- handle 0 is the regular one, the
-    // default and the last-resort fallback. The rest are the other styles
-    // of the same family: a `style=` request that nothing installed can
-    // satisfy used to fall silently back to regular, which is what made
+    // Every bundled face, in order -- handle 0 is Liberation Sans Regular,
+    // the default and the last-resort fallback. The rest are its other
+    // styles, then Liberation Serif and Mono (#1161). Without the styles,
+    // a `style=` request that nothing installed can satisfy used to fall
+    // silently back to regular, which is what made
     // fontmetrics("Liberation Sans:style=bold") report Regular's numbers
     // (BelfrySCAD #381).
     void openBundled() {
@@ -239,6 +245,7 @@ struct FreetypeFontProvider::Impl {
         const auto* os2 = static_cast<const TT_OS2*>(FT_Get_Sfnt_Table(f, FT_SFNT_OS2));
         out.weight = os2 && os2->usWeightClass ? fontconfigWeight(os2->usWeightClass)
                                                : (f->style_flags & FT_STYLE_FLAG_BOLD) ? 200 : 80;
+        if (os2) out.width = fontconfigWidth(os2->usWidthClass);
         if (f->style_flags & FT_STYLE_FLAG_ITALIC) {
             std::string st = out.style;
             for (char& ch : st) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -296,7 +303,8 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
         // family in that style, which is what fontconfig does with it and
         // what BOSL2's text3d() example relies on (BelfrySCAD #405).
         // Returning handle 0 here silently drew Regular.
-        if (parsed.style.empty() && !parsed.weight && !parsed.slant) return 0;
+        if (parsed.style.empty() && !parsed.weight && !parsed.slant && !parsed.width && parsed.features.empty())
+            return 0;
         parsed.families.push_back(impl_->faces[0].metrics.family);
     }
 
@@ -306,7 +314,7 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
     impl_->scanInstalled();
     FontHandle handle = 0;
     std::optional<FontFace> hit = matchFace(parsed, impl_->installed);
-    if (!hit && (!parsed.style.empty() || parsed.weight || parsed.slant)) {
+    if (!hit && (!parsed.style.empty() || parsed.weight || parsed.slant || parsed.width || !parsed.features.empty())) {
         // No such family: the default family, in the face asked for, as
         // fontconfig falls back ("slant=italic:weight=black" reads its
         // first part as a family name, and still comes out bold).
@@ -316,6 +324,18 @@ FontHandle FreetypeFontProvider::resolveFont(const std::string& spec) {
     if (hit) {
         handle = hit->path == Impl::kBundledPath ? static_cast<FontHandle>(hit->faceIndex)
                                                   : impl_->openFile(hit->path, hit->faceIndex).value_or(0);
+    }
+    std::vector<hb_feature_t> features;
+    for (const std::string& f : parsed.features) {
+        hb_feature_t feature;
+        if (hb_feature_from_string(f.c_str(), -1, &feature)) features.push_back(feature);  // junk is skipped
+    }
+    if (!features.empty()) {
+        Impl::Face alias = impl_->faces[handle];
+        alias.features = std::move(features);
+        alias.alias = true;
+        impl_->faces.push_back(alias);
+        handle = impl_->faces.size() - 1;
     }
     impl_->bySpec[spec] = handle;
     return handle;
@@ -363,7 +383,8 @@ std::vector<ShapedGlyph> FreetypeFontProvider::shapeText(FontHandle handle, cons
     // same job real OpenSCAD's detect_properties()/detect_script() does by
     // hand before shaping.
     hb_buffer_guess_segment_properties(buf);
-    hb_shape(font, buf, nullptr, 0);
+    const std::vector<hb_feature_t>& features = impl_->faces[handle].features;
+    hb_shape(font, buf, features.data(), static_cast<unsigned>(features.size()));
 
     unsigned int count = 0;
     const hb_glyph_info_t* info = hb_buffer_get_glyph_infos(buf, &count);

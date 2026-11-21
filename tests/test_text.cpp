@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include "openscad_cpp_evaluator/font_match.hpp"
+#include "openscad_cpp_evaluator/text_metrics.hpp"
 
 #include "test_helpers.hpp"
 
@@ -343,6 +344,102 @@ TEST(FontMatch, AnUnparseableSpecIsInvalid) {
     EXPECT_FALSE(parseFontSpec("Liberation Sans:SLANT=italic").valid);   // names are case-sensitive
     EXPECT_FALSE(parseFontSpec("Liberation Sans:weight=heavyish").valid);
     EXPECT_TRUE(parseFontSpec("Liberation Sans:weight=").valid);
+    // A double property takes only ITS constants; an integer one reads junk as 0.
+    EXPECT_FALSE(parseFontSpec("Helvetica Neue:weight=italic").valid);
+    EXPECT_FALSE(parseFontSpec("Helvetica Neue:width=bold").valid);
+    EXPECT_FALSE(parseFontSpec("Helvetica Neue:width=junk:bold").valid);
+    EXPECT_TRUE(parseFontSpec("Helvetica Neue:slant=bold").valid);
+    EXPECT_TRUE(parseFontSpec(":spacing=junk").valid);
+}
+
+TEST(FontMatch, ParsesWidthSpacingAndFeatures) {
+    EXPECT_EQ(parseFontSpec("A:condensed").width, 75);
+    EXPECT_EQ(parseFontSpec("A:width=normal").width, 100);
+    EXPECT_EQ(parseFontSpec("A:normal").weight, 80);   // a bare word takes the first: weight
+    EXPECT_FALSE(parseFontSpec("A:normal").width);
+    EXPECT_EQ(parseFontSpec("A:width=63:width=200").width, 63);
+    // spacing=mono puts monospace first, even over a named family; any 100 counts.
+    EXPECT_EQ(parseFontSpec("A:spacing=mono").families, (std::vector<std::string>{"monospace", "A"}));
+    EXPECT_EQ(parseFontSpec(":mono").families, (std::vector<std::string>{"monospace"}));
+    EXPECT_EQ(parseFontSpec(":spacing=100.5").families, (std::vector<std::string>{"monospace"}));
+    EXPECT_EQ(parseFontSpec(":spacing=proportional:spacing=mono").families.size(), 1u);
+    EXPECT_TRUE(parseFontSpec(":spacing=99").families.empty());
+    EXPECT_TRUE(parseFontSpec(":spacing=charcell").families.empty());
+    // The first fontfeatures= wins, up to a ',', split on ';'.
+    EXPECT_EQ(parseFontSpec("A:fontfeatures=-liga ; +smcp").features, (std::vector<std::string>{"-liga", "+smcp"}));
+    EXPECT_EQ(parseFontSpec("A:fontfeatures=-liga,+smcp").features, (std::vector<std::string>{"-liga"}));
+    EXPECT_EQ(parseFontSpec("A:fontfeatures=-liga:fontfeatures=+smcp").features, (std::vector<std::string>{"-liga"}));
+}
+
+TEST(FontMatch, WidthBreaksTiesAfterWeight) {
+    // Helvetica Neue's shape: condensed only in Bold and Black. Each expected
+    // face is what OpenSCAD 2026.11-RC0 picks from the real Helvetica Neue.
+    std::vector<FontFace> faces = {
+        {"/f", 0, "H", "Regular"}, {"/f", 1, "H", "Bold"}, {"/f", 2, "H", "Condensed Bold"}, {"/f", 3, "H", "Condensed Black"}};
+    faces[1].weight = faces[2].weight = 200;
+    faces[3].weight = 210;
+    faces[2].width = faces[3].width = 75;
+    const std::vector<std::pair<std::string, std::string>> want = {{
+        {"H:width=condensed", "Regular"},
+        {"H:width=75", "Regular"},
+        {"H:bold:width=condensed", "Condensed Bold"},
+        {"H:condensed:bold", "Condensed Bold"},
+        {"H:width=condensed:weight=black", "Condensed Black"},
+        {"H:width=50:bold", "Condensed Bold"},
+        {"H:width=81.26:bold", "Condensed Bold"},
+        {"H:width=87.5:weight=200", "Bold"},         // a tie goes to the wider face
+        {"H:expanded:bold", "Bold"},
+        {"H:width=normal:bold", "Bold"},
+        {"H:style=Bold:condensed", "Bold"},          // style= wins
+    }};
+    for (const auto& [spec, style] : want) EXPECT_EQ(matchFace(parseFontSpec(spec), faces)->style, style) << spec;
+}
+
+TEST(BundledFonts, SerifAndMonoAreBundled) {
+    // Each expected face is what OpenSCAD 2026.11-RC0 picks (#1161).
+    FreetypeFontProvider p;
+    const std::vector<std::array<std::string, 3>> want = {{
+        {"Liberation Mono", "Liberation Mono", "Regular"},
+        {"Liberation Mono:bold", "Liberation Mono", "Bold"},
+        {"Liberation Serif", "Liberation Serif", "Regular"},
+        {"Liberation Serif:bold:italic", "Liberation Serif", "Bold Italic"},
+        {"monospace", "Liberation Mono", "Regular"},
+        {"monospace:bold:italic", "Liberation Mono", "Bold Italic"},
+        {"serif", "Liberation Serif", "Regular"},
+        {":spacing=mono", "Liberation Mono", "Regular"},
+        {":mono", "Liberation Mono", "Regular"},
+        {":spacing=100", "Liberation Mono", "Regular"},
+        {"Liberation Sans:spacing=mono", "Liberation Mono", "Regular"},
+        {":spacing=mono:style=Bold", "Liberation Mono", "Bold"},
+        {":spacing=mono:italic", "Liberation Mono", "Italic"},
+        {":spacing=99", "Liberation Sans", "Regular"},
+        {":spacing=charcell", "Liberation Sans", "Regular"},
+        {"Liberation Mono:spacing=proportional", "Liberation Mono", "Regular"},
+    }};
+    for (const auto& [spec, family, style] : want) {
+        const FontMetrics m = p.metrics(p.resolveFont(spec));
+        EXPECT_EQ(m.family, family) << spec;
+        EXPECT_EQ(m.style, style) << spec;
+    }
+}
+
+TEST(BundledFonts, FontFeaturesReachTheShaper) {
+    // Advances OpenSCAD 2026.11-RC0 gives for "AVAWAY To" at size 10 (#1161).
+    FreetypeFontProvider p;
+    const std::vector<std::pair<std::string, double>> want = {{
+        {"Liberation Sans", 73.3306},
+        {"Liberation Sans:fontfeatures=-kern", 79.495},
+        {"Liberation Sans:fontfeatures=kern=0", 79.495},
+        {"Liberation Sans:fontfeatures=-kern,+liga", 79.495},
+        {":fontfeatures=-kern", 79.495},
+        {"Liberation Sans:fontfeatures=junk;-kern", 79.495},
+        {"Liberation Serif", 72.9166},
+        {"Liberation Serif:fontfeatures=-kern", 82.1601},
+        {"Liberation Mono:fontfeatures=-kern", 75.0123},
+    }};
+    for (const auto& [spec, advance] : want) {
+        EXPECT_NEAR(measureText(p, p.resolveFont(spec), "AVAWAY To", 10, 1).advanceX, advance, 1e-3) << spec;
+    }
 }
 
 TEST(BundledFonts, WeightAndSlantPickTheNearestFace) {

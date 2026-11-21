@@ -299,8 +299,11 @@ OpenSCAD's `detect_properties()`/`detect_script()` does by hand.
 (`resources/fonts/`, embedded into the binary by `cmake/embed_font.cmake`, byte-identical to the
 Python reference's own bundled font), which is both the default and the last-resort fallback — so
 `text()` draws something even on a machine with no fonts installed at all.
-**All four styles are bundled** (Regular, Bold, Italic, Bold Italic), and they are seeded into the
-face index ahead of anything installed, so `style=` resolves the same way on every machine.
+**All four styles are bundled** (Regular, Bold, Italic, Bold Italic), **and so are Liberation Serif
+and Liberation Mono in all four** — the twelve files OpenSCAD itself bundles, byte-identical 2.00.1,
+Sans first so handle 0 stays Sans Regular. They are seeded into the face index ahead of anything
+installed, so `style=`, `serif`, `monospace` and `spacing=mono` resolve the same way on every
+machine (Serif and Mono were missing until BelfrySCAD #1161: `"Liberation Mono"` drew Sans).
 Bundling only Regular meant a `style=Bold` nothing installed could satisfy fell silently back to
 Regular — `fontmetrics(10, "Liberation Sans:style=bold")` then reported Regular's numbers under
 the name the script asked for (BelfrySCAD #381). A bundled entry's `path` is the sentinel
@@ -313,21 +316,33 @@ nearest available one rather than an error.
 
 `font_match.cpp` is the part of fontconfig that `font=` actually needs, reimplemented: comma-
 separated family lists, `:style=Bold Italic`, `:weight=`/`:slant=` on fontconfig's own scale
-(weight 80 regular, 200 bold, 210 black; slant 0/100/110) or its constant names, a bare `:Bold` or
-`:Italic` as that constant (any other bare word ignored), other known properties ignored, generic `sans-serif`/`serif`/`monospace` aliases expanded to concrete families, and
+(weight 80 regular, 200 bold, 210 black; slant 0/100/110) or its constant names, `:width=` (75
+condensed, 100 normal; a face's from OS/2 `usWidthClass`), `:spacing=` and `:fontfeatures=`, a bare
+`:Bold`/`:Italic`/`:condensed`/`:mono` as that constant (any other bare word ignored), other known properties ignored, generic `sans-serif`/`serif`/`monospace` aliases expanded to concrete families, and
 a recursive scan of the platform font directories plus `OPENSCAD_FONT_PATH` (the same environment
 variable real OpenSCAD reads). Family match is case-insensitive and required; style is a
 *preference* — exact, then substring, then Regular, then the family's first face — because
 dropping to Regular beats falling through to an unrelated family, which is what fontconfig does
-too. With no `style=` (which always wins), `weight=`/`slant=` pick the **nearest** face: slant first,
-then weight, the unset one defaulting to roman/regular, ties to the heavier or more slanted face;
+too. With no `style=` (which always wins), `weight=`/`slant=`/`width=` pick the **nearest** face:
+slant, then weight, then width, each unset one defaulting to roman/regular/normal, ties to the more
+slanted, heavier or wider face (so `Helvetica Neue:condensed` is still Regular: there is no condensed
+Regular, and weight outranks width);
 each face's weight is its OS/2 `usWeightClass` mapped as `FcWeightFromOpenType` maps it. An unknown
-family with any of the three falls back to the default family in that face. **An unknown property
-name (case-sensitive: `SLANT=` is unknown) or an unreadable `weight=` invalidates the spec**, as
+family with any of them falls back to the default family in that face. **`spacing=mono` is not a
+match criterion**: it puts `monospace` *in front of* the family list, as OpenSCAD's bundled
+`48-spacing.conf` does when any `spacing` value is 100, so `Liberation Sans:spacing=mono` is Liberation
+Mono, and no other spacing value changes anything. **`fontfeatures=`** (the first one; up to a `,`,
+split on `;`, as OpenSCAD splits it) goes to `hb_shape` through a face *alias* — a `Face` sharing an
+open face's FreeType/HarfBuzz objects plus its own features, so text and the metrics functions both
+see it; a string HarfBuzz cannot parse is skipped. **An unknown property name (case-sensitive:
+`SLANT=` is unknown), or a `weight=`/`width=` that is neither a number nor that property's own
+constant (`weight=italic` included), invalidates the spec**; `slant=`/`spacing=` are integers and
+read junk as 0, as
 fontconfig refuses to parse it: `text()` draws nothing and `textmetrics()`/`fontmetrics()` return
 undef, each warning `Can't get font SPEC`, as OpenSCAD does. All of it was checked face by face
-against OpenSCAD-dev 2026.02.01, bundled Liberation and installed families alike (BelfrySCAD #1161:
-`weight=`/`slant=` used to be ignored and a bogus property silently accepted).
+against OpenSCAD-dev 2026.02.01 and 2026.11-RC0, bundled Liberation and installed families alike
+(BelfrySCAD #1161: `weight=`/`slant=`/`width=`/`spacing=`/`fontfeatures=` used to be ignored and a
+bogus property silently accepted). `lang=` and `foundry=` change nothing there either.
 
 **`text()` takes `font` positionally too — and NOTHING after it.** `text(text, size, font)` is the
 positional set; `halign`/`valign`/`spacing`/`direction`/`language`/`script` are name-only, because
