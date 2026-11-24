@@ -69,12 +69,17 @@ TEST(OscEqual, ListsRecurseElementwiseAndRejectMismatchedType) {
     EXPECT_FALSE(oscEqual(list({}), num(0))); // one list, one not
 }
 
-TEST(OscEqual, ObjectEqualityIsOrderSensitive) {
+// Key order does not matter, as in OpenSCAD 2026.11 (upstream #7176).
+TEST(OscEqual, ObjectEqualityIgnoresKeyOrder) {
     auto a = std::make_shared<const ValueObject>(ValueObject{{{"a", num(1)}, {"b", num(2)}}});
     auto sameOrder = std::make_shared<const ValueObject>(ValueObject{{{"a", num(1)}, {"b", num(2)}}});
     auto differentOrder = std::make_shared<const ValueObject>(ValueObject{{{"b", num(2)}, {"a", num(1)}}});
     EXPECT_TRUE(oscEqual(Value{a}, Value{sameOrder}));
-    EXPECT_FALSE(oscEqual(Value{a}, Value{differentOrder}));
+    EXPECT_TRUE(oscEqual(Value{a}, Value{differentOrder}));
+    auto otherValue = std::make_shared<const ValueObject>(ValueObject{{{"b", num(3)}, {"a", num(1)}}});
+    auto otherKey = std::make_shared<const ValueObject>(ValueObject{{{"c", num(2)}, {"a", num(1)}}});
+    EXPECT_FALSE(oscEqual(Value{a}, Value{otherValue}));
+    EXPECT_FALSE(oscEqual(Value{a}, Value{otherKey}));
 }
 
 // -- oscComparable ----------------------------------------------------------
@@ -299,7 +304,7 @@ TEST(FmtValue, List) {
 
 TEST(FmtValue, Object) {
     auto obj = std::make_shared<const ValueObject>(ValueObject{{{"a", num(1)}, {"b", num(2)}}});
-    EXPECT_EQ(fmtValue(Value{obj}), "{ a = 1; b = 2; }");
+    EXPECT_EQ(fmtValue(Value{obj}), "{ a : 1, b : 2 }");
     EXPECT_EQ(fmtValue(Value{std::make_shared<const ValueObject>()}), "{ }");
 }
 

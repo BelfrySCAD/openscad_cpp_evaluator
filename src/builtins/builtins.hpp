@@ -285,6 +285,14 @@ double tanDeg(double x);
 double atan2Deg(double y, double x);
 
 // A radius/diameter argument pair: a numeric `d` beats `r`, numbers only.
+// A closed solid wound inside out (negative volume) is turned right side out,
+// as OpenSCAD 2026.11's Manifold backend does (upstream #7209) and its CGAL
+// backend always has: booleans with an inside-out body are wrong. Warns, so
+// the bad winding is still reported. `what` prefixes the warning
+// ("polyhedron", "import"). Call only on a body whose Status() is NoError.
+void flipIfInsideOut(Evaluator& ev, manifold::Manifold& body, manifold::MeshGL64& mesh, const char* what,
+                     const oscad::Position* where);
+
 std::optional<double> lookupRadius(Evaluator& ev, const CallArgs& args, std::optional<int> rPos,
                                    std::optional<int> dPos, const std::string& rName, const std::string& dName,
                                    const oscad::Position* where);

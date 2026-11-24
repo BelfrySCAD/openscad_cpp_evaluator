@@ -68,6 +68,12 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
 // evaluated exactly once (resolving into a CallArgs first and then
 // re-evaluating from the raw list here would run every argument expression
 // twice -- wrong for anything with a side effect, e.g. rands()).
+// fragments(r|d) -- how many sides circle(r|d) would have under the
+// caller's $fn/$fa/$fs (OpenSCAD 2026.11, upstream #6890). Needs the call's
+// context for those, so it is routed here before evalBuiltinFunction, as
+// object() is; `$`-named arguments override them for this call only.
+Value builtinFragments(Evaluator& ev, const CallArgs& args, const EvalContext& ctx, const oscad::ASTNode& node);
+
 Value builtinObject(Evaluator& ev, const std::vector<std::unique_ptr<oscad::Argument>>& arguments, EvalContext& ctx,
                      const oscad::ASTNode& node);
 

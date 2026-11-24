@@ -4,6 +4,7 @@
 #include "openscad_cpp_evaluator/utf8.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -65,9 +66,11 @@ bool oscEqual(const Value& a, const Value& b) {
         const auto& pa = (*oa)->items;
         const auto& pb = (*ob)->items;
         if (pa.size() != pb.size()) return false;
-        for (size_t i = 0; i < pa.size(); ++i) {
-            if (pa[i].first != pb[i].first) return false;
-            if (!oscEqual(pa[i].second, pb[i].second)) return false;
+        // Key order does not matter (OpenSCAD 2026.11, upstream #7176).
+        // ponytail: O(n^2) key match; objects are small, index it if one isn't.
+        for (const auto& [key, val] : pa) {
+            const auto it = std::find_if(pb.begin(), pb.end(), [&key](const auto& kv) { return kv.first == key; });
+            if (it == pb.end() || !oscEqual(val, it->second)) return false;
         }
         return true;
     }
@@ -613,15 +616,27 @@ std::string fmtValue(const Value& v) {
         return s + "]";
     }
     if (const ObjectPtr* o = std::get_if<ObjectPtr>(&v)) {
-        // `{ a = 1; b = "x"; }`, not a constructor-call spelling: this is
-        // how the reference echoes an object (ObjectType's own stream
-        // operator), and it nests and appears inside lists/str() the same
-        // way. We used to print `object(a = 1)`, which nothing else agrees
-        // with.
+        // `{ a : 1, b : "x" }`, OpenSCAD 2026.11's OEP8 spelling (upstream
+        // #7200; before it, `{ a = 1; b = "x"; }`). A key that is not an
+        // ASCII identifier is quoted, as upstream's keyIsIdentifier decides.
         if (!*o || (*o)->items.empty()) return "{ }";
-        std::string s = "{ ";
-        for (const auto& [key, val] : (*o)->items) s += key + " = " + fmtValue(val) + "; ";
-        return s + "}";
+        const auto isIdent = [](const std::string& k) {
+            for (size_t i = 0; i < k.size(); ++i) {
+                const unsigned char c = static_cast<unsigned char>(k[i]);
+                if (c >= 0x80) return false;
+                if (i == 0 ? !(std::isalpha(c) || c == '$' || c == '_') : !(std::isalnum(c) || c == '_')) return false;
+            }
+            return true;
+        };
+        std::string s = "{";
+        const char* sep = " ";
+        for (const auto& [key, val] : (*o)->items) {
+            s += sep;
+            s += isIdent(key) ? key : "\"" + key + "\"";
+            s += " : " + fmtValue(val);
+            sep = ", ";
+        }
+        return s + " }";
     }
     if (const std::string* s = std::get_if<std::string>(&v)) return "\"" + *s + "\"";
     if (const ClosurePtr* c = std::get_if<ClosurePtr>(&v)) {

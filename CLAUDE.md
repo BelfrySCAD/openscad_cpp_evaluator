@@ -1834,6 +1834,20 @@ numbering, so a hit is an array increment. Used-file globals are in the universe
 `origin`, so includes and `use`d files report under their own paths. Let-bindings and plain
 comprehension elements are not in the vocabulary; hits on them are simply not reported.
 
+## OpenSCAD 2026.11 parity (from RC1)
+
+- **Object format**: `echo()`/`str()` print `{ a : 1, b : [2] }` (OEP8, upstream #7200),
+  `{ }` when empty, a non-identifier key quoted. Was `{ a = 1; b = [2]; }`. RC1 has **no**
+  object-literal expression syntax; only the printing changed.
+- **Object `==`** ignores key order (#7176).
+- **`fragments(r|d)`** (#6890): circle()'s side count under the caller's `$fn`/`$fa`/`$fs`.
+  Needs the call's context, so both engines route it outside `evalBuiltinFunction`
+  (`user_calls.cpp`, and the VM's `CallSite::isFragmentsBuiltin`), as `object()` is.
+- **Inside-out closed meshes are flipped** (#7209), in `polyhedron()` and `import()`
+  (`flipIfInsideOut`), with a warning so the bad winding is still reported. `render()`'s
+  `volume` therefore no longer comes out negative for one.
+- The r/d warning now says "Ignoring radius **argument**" (was "variable"), as RC1 does.
+
 ## `render()` in expression position
 
 `render()` has two jobs, decided by where it is written:
@@ -1854,7 +1868,8 @@ polyhedron(obj);                        // straight back in
 ```
 
 Keys — ordered, and the order is part of the API (`ValueObject` is an ordered
-vector and `oscEqual` is order-sensitive):
+vector; `oscEqual` ignores key order, as OpenSCAD 2026.11 does (upstream #7176), but
+iteration and `echo()` follow it):
 
 | dim | keys |
 |---|---|

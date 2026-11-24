@@ -1080,7 +1080,7 @@ TEST(BytecodeCompiler, ImportCompilesAsTailPositionBody) {
         out << R"({"a": 1, "b": 2})";
     }
     EXPECT_EQ(runCapturingEcho("function f() = import(\"" + path.generic_string() + "\");\necho(f());"),
-              "ECHO: { a = 1; b = 2; }");
+              "ECHO: { a : 1, b : 2 }");
     std::filesystem::remove(path);
 }
 
@@ -1093,10 +1093,10 @@ TEST(BytecodeCompiler, ObjectCompilesWithExactCallSiteInterleavedOrder) {
     EXPECT_EQ(runCapturingEcho("existing = object(b = 2);\n"
                                 "function f() = object(a = 1, existing, c = 3, a = 4);\n"
                                 "echo(f());"),
-              "ECHO: { a = 4; b = 2; c = 3; }");
+              "ECHO: { a : 4, b : 2, c : 3 }");
     // Positional list-of-pairs spread.
     EXPECT_EQ(runCapturingEcho("function g() = object(a = 1, [[\"b\", 2]], a = 3);\necho(g());"),
-              "ECHO: { a = 3; b = 2; }");
+              "ECHO: { a : 3, b : 2 }");
 }
 
 TEST(BytecodeCompiler, VmOffAndVmOnAgreeOnEchoAssertImportObjectCases) {

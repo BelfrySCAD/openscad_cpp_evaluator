@@ -26,7 +26,7 @@ std::optional<double> lookupRadius(Evaluator& ev, const CallArgs& args, std::opt
     const double* rNum = std::get_if<double>(&r);
     if (const double* dNum = std::get_if<double>(&d)) {
         if (rNum) {
-            ev.warn("Ignoring radius variable \"" + rName + "\" as diameter \"" + dName + "\" is defined too.",
+            ev.warn("Ignoring radius argument \"" + rName + "\" as diameter \"" + dName + "\" is defined too.",
                     where);
         }
         return *dNum / 2.0;

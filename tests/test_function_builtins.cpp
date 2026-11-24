@@ -372,7 +372,7 @@ TEST(StringListBuiltins, ObjectPlusObjectIsUndef) {
 
 TEST(StringListBuiltins, StrFormatsNestedObject) {
     Evaluator ev;
-    EXPECT_EQ(asStr(evalSrc("str(object(a=1, nested=object(x=10,y=20)))", ev)), "{ a = 1; nested = { x = 10; y = 20; }; }");
+    EXPECT_EQ(asStr(evalSrc("str(object(a=1, nested=object(x=10,y=20)))", ev)), "{ a : 1, nested : { x : 10, y : 20 } }");
 }
 
 TEST(StringListBuiltins, ForLoopOverObjectIteratesKeysInInsertionOrder) {
