@@ -800,6 +800,7 @@ struct CompiledChunk {
         BuiltinFnId builtinId = BuiltinFnId::None;
         const std::vector<std::string>* declaredParams = nullptr;
         bool isObjectBuiltin = false;
+        bool isFragmentsBuiltin = false; // needs the frame context ($fn/$fa/$fs)
 
         // Where each argument of this call goes, worked out once at compile
         // time against `decl`'s parameter list -- see ArgBind. Only filled in

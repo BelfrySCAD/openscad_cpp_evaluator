@@ -117,7 +117,7 @@ TEST(Parity, SquareAndCircleKeepTheirDefaultsForBadSizes) {
     EXPECT_NEAR(r.area, 2.0, 1e-9);
     // circle(r, d): both positional, d wins with upstream's warning.
     r = run("circle(3, 5, $fn=4);");
-    EXPECT_TRUE(logged(r, "Ignoring radius variable \"r\" as diameter \"d\" is defined too."));
+    EXPECT_TRUE(logged(r, "Ignoring radius argument \"r\" as diameter \"d\" is defined too."));
     EXPECT_NEAR(r.area, 2.0 * 2.5 * 2.5, 1e-9);
 }
 
@@ -274,7 +274,7 @@ TEST(Parity, PrimitiveArgumentsFollowUpstream) {
     EXPECT_NEAR(solidBounds("cylinder(h=2, r=1, center=1);").min.z, 0.0, 1e-12);
     // d beats r, with upstream's warnings.
     Outcome r = run("sphere(r=2, d=10, $fn=8);");
-    EXPECT_TRUE(logged(r, "Ignoring radius variable \"r\" as diameter \"d\" is defined too."));
+    EXPECT_TRUE(logged(r, "Ignoring radius argument \"r\" as diameter \"d\" is defined too."));
     r = run("cylinder(h=1, r=1, r1=2, $fn=8);");
     EXPECT_TRUE(logged(r, "Cylinder parameters ambiguous"));
 }
@@ -481,7 +481,7 @@ TEST(Parity, ChildrenIndexMustBeGiven) {
 // The box was the exact outline; OpenSCAD's is hinted and grid-fitted.
 TEST(Parity, TextMetricsBoxIsGridFitted) {
     EXPECT_TRUE(logged(run("echo(textmetrics(\"Hello\"));"),
-                       "position = [1.1392, -0.1408]; size = [29.929, 10.208]; ascent = 10.0672; descent = -0.1408;"));
+                       "position : [1.1392, -0.1408], size : [29.929, 10.208], ascent : 10.0672, descent : -0.1408,"));
 }
 
 // -- messages (tier 5) -------------------------------------------------------------
@@ -513,4 +513,60 @@ TEST(Parity, ZeroStepRangeIsTooMany) {
     EXPECT_TRUE(logged(run("module m() children([0:0:1]); m() cube(1);"),
                        "Bad range parameter for children: too many elements (4294967295)"));
     EXPECT_FALSE(logged(run("echo([for (i = [0:0/0:5]) i]);"), "too many"));  // NaN stays silent
+}
+
+// -- OpenSCAD 2026.11 ----------------------------------------------------------
+
+// Objects print in OEP8's `{ name : value, ... }` (upstream #7200); a key
+// that is not an identifier is quoted. We printed `{ a = 1; b = 2; }`.
+TEST(Parity2026_11, ObjectFormat) {
+    const Outcome r = run("echo(object(a=1, b=[2])); echo(object()); "
+                          "echo(str(object([[\"a b\", 1], [\"$k\", object(q=true)]])));");
+    EXPECT_TRUE(logged(r, "ECHO: { a : 1, b : [2] }"));
+    EXPECT_TRUE(logged(r, "ECHO: { }"));
+    EXPECT_TRUE(logged(r, "ECHO: \"{ \"a b\" : 1, $k : { q : true } }\""));
+}
+
+// Equality ignores key order (upstream #7176).
+TEST(Parity2026_11, ObjectEqualityIgnoresKeyOrder) {
+    const Outcome r = run("echo(object(x=1, y=2) == object(y=2, x=1)); echo(object(x=1) == object(y=1));");
+    EXPECT_TRUE(logged(r, "ECHO: true"));
+    EXPECT_TRUE(logged(r, "ECHO: false"));
+}
+
+// fragments(r|d), upstream #6890, with the expectations of upstream's own
+// tests/data/scad/functions/fragments.scad -- on both engines, since the VM
+// routes it through its own call site, and from inside a function body.
+TEST(Parity2026_11, Fragments) {
+    for (const bool vm : {false, true}) {
+        Evaluator::setBytecodeVmEnabledForTesting(vm);
+        const Outcome r = run("$fa = 45; $fs = 5; r = 20;\n"
+                              "echo(a=fragments(r=r)); echo(b=fragments(d=2*r)); echo(c=fragments(r=r/2, d=2*r));\n"
+                              "echo(d=fragments(r=r, $fn=7)); echo(e=fragments(r=r, $fa=1, $fs=1));\n"
+                              "echo(f=fragments(20)); echo(g=fragments());\n"
+                              "function h(x) = let($fn = 9) fragments(x); echo(h=h(5));\n");
+        Evaluator::setBytecodeVmEnabledForTesting(std::nullopt);
+        SCOPED_TRACE(vm ? "vm" : "interpreter");
+        for (const char* want : {"a = 8", "b = 8", "c = 8", "d = 7", "e = 126", "f = 8", "g = 5", "h = 9"})
+            EXPECT_TRUE(logged(r, std::string("ECHO: ") + want)) << want;
+        EXPECT_TRUE(logged(r, "Ignoring radius argument \"r\" as diameter \"d\" is defined too."));
+    }
+}
+
+// A closed polyhedron wound inside out is turned right side out, as upstream's
+// Manifold backend now does (#7209) -- and we say so. It used to keep its
+// negative volume, which broke booleans with it.
+TEST(Parity2026_11, InsideOutPolyhedronIsFlippedWithAWarning) {
+    const std::string cube =
+        "P=[[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]];\n"
+        "F=[[0,1,2,3],[4,5,1,0],[7,6,5,4],[5,6,2,1],[6,7,3,2],[7,4,0,3]];\n"
+        "R=[for (f=F) [for (i=[len(f)-1:-1:0]) f[i]]];\n";
+    Outcome r = run(cube + "o = render() { polyhedron(P, R); }; echo(v=o.volume);"
+                           "difference() { cube(2); polyhedron(P, R); }");
+    EXPECT_TRUE(logged(r, "ECHO: v = 1"));
+    EXPECT_TRUE(logged(r, "polyhedron: the solid is inside out"));
+    EXPECT_NEAR(r.volume, 7.0, 1e-9);
+    r = run(cube + "polyhedron(P, F);");  // the right way round says nothing
+    EXPECT_TRUE(r.log.empty());
+    EXPECT_NEAR(r.volume, 1.0, 1e-9);
 }

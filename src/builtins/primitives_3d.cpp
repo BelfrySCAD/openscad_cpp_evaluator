@@ -601,6 +601,18 @@ std::vector<ColoredBody> generateCylinder(Evaluator& ev, const CSGParams& params
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 
+void flipIfInsideOut(Evaluator& ev, manifold::Manifold& body, manifold::MeshGL64& mesh, const char* what,
+                     const oscad::Position* where) {
+    if (body.Volume() >= 0) return;
+    for (size_t i = 0; i + 2 < mesh.triVerts.size(); i += 3) std::swap(mesh.triVerts[i + 1], mesh.triVerts[i + 2]);
+    body = manifold::Manifold(mesh); // reversing every triangle keeps it manifold
+    if (!ev.insideHull) {
+        ev.warn(std::string(what) + ": the solid is inside out -- every face is wound backwards; drawing it "
+                                    "turned right side out. Reverse the point order of every face to fix it",
+                where);
+    }
+}
+
 // polyhedron(points, faces) -- fan-triangulates each face (reversing
 // winding: OpenSCAD's CW-from-outside -> Manifold's CCW-from-outside), and
 // deduplicates vertices at 1e-6 precision first (VNF meshes, e.g. from
@@ -1144,7 +1156,9 @@ std::vector<ColoredBody> generatePolyhedron(Evaluator& ev, const CSGParams& para
         soup.triVerts.assign(mesh.triVerts.begin(), mesh.triVerts.end());
         return {ev.tagDisplayOnly(std::move(soup), node, params.at("color"))};
     }
-    if (body.Status() != manifold::Manifold::Error::NoError) {
+    if (body.Status() == manifold::Manifold::Error::NoError) {
+        flipIfInsideOut(ev, body, mesh, "polyhedron", &node.position());
+    } else {
         // Broken vertex data rather than merely-open topology (a NaN
         // coordinate, an out-of-range index). Not drawable, so this keeps
         // the old drop-it behaviour -- but says so, which it never used to.

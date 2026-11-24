@@ -675,6 +675,7 @@ public:
                         site.builtinId = builtinFnIdFor(calleeName);
                         site.declaredParams = builtinParamNames(calleeName);
                         site.isObjectBuiltin = (calleeName == "object");
+                        site.isFragmentsBuiltin = (calleeName == "fragments");
                         isStatic = true;
                     }
                     // Anything else stays dynamic: a function-literal value,

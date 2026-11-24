@@ -840,9 +840,24 @@ bool isBuiltinFunctionName(const std::string& name) {
         "chr", "ord", "is_undef", "is_num", "is_bool", "is_string", "is_list", "is_function", "is_object",
         "search", "lookup", "has_key", "version", "version_num", "parent_module",
         "object", "textmetrics", "fontmetrics", "dxf_dim", "dxf_cross", "supported_feature",
-        "linear_solve",
+        "linear_solve", "fragments",
     };
     return names.count(name) > 0;
+}
+
+Value builtinFragments(Evaluator& ev, const CallArgs& args, const EvalContext& ctx, const oscad::ASTNode& node) {
+    const oscad::Position* where = &node.position();
+    for (const auto& [key, _] : args.named) {
+        if (!isConfigVariable(key) && key != "r" && key != "d") warnUnexpectedNamedArg(ev, key, where);
+    }
+    // Same r/d lookup as circle(): d wins, with the same warning; no size is r=1.
+    const double r = lookupRadius(ev, args, 0, 1, "r", "d", where).value_or(1.0);
+    EvalContext effCtx = ctx.childCtx();
+    for (const auto& [key, value] : args.named) {
+        if (isConfigVariable(key)) effCtx.dyn->set(key, value);
+    }
+    const auto warn = [&](const std::string& w) { ev.warn(w, where); };
+    return Value{static_cast<double>(Discretizer::fromCtx(effCtx, warn).circular(r).value_or(3))};
 }
 
 // object(...) argument merging, matching the reference's own semantics and

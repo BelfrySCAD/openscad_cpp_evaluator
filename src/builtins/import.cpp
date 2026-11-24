@@ -536,6 +536,7 @@ std::vector<ColoredBody> generateImport(Evaluator& ev, const CSGParams& params, 
         soup.triVerts.assign(mesh.triVerts.begin(), mesh.triVerts.end());
         return {ev.tagDisplayOnly(std::move(soup), node, params.at("color"))};
     }
+    flipIfInsideOut(ev, body, mesh, "import", &node.position());
     return {ev.tagGenerated(std::move(body), node, params.at("color"))};
 }
 

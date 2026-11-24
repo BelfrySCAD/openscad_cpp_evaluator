@@ -945,6 +945,7 @@ Value Evaluator::evalFunctionCall(const oscad::PrimaryCall& node, EvalContext& c
             // arguments aren't evaluated twice.
             if (leftId->name == "object") return builtinObject(*this, node.arguments, ctx, node);
             CallArgs args = resolveArgs(*this, node.arguments, ctx);
+            if (leftId->name == "fragments") return builtinFragments(*this, args, ctx, node);
             return evalBuiltinFunction(*this, leftId->name, args, node);
         }
     }

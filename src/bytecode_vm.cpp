@@ -897,6 +897,11 @@ Value driveVm(Evaluator& ev, size_t floor) {
                         f.stack.resize(argBase);
                         f.stack.push_back(mergeObjectArgs(ev, pairs, &site.callNode->position()));
                         ++f.pc;
+                    } else if (site.isFragmentsBuiltin) {
+                        CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
+                        f.stack.resize(argBase);
+                        f.stack.push_back(builtinFragments(ev, callArgs, f.ctxChain.back(), *site.callNode));
+                        ++f.pc;
                     } else if (site.isBuiltin) {
                         CallArgs& callArgs = buildCallArgs(site, args, argCount, f.argScratch);
                         f.stack.resize(argBase);
