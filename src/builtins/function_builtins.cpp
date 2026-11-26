@@ -11,6 +11,7 @@
 #include "openscad_cpp_evaluator/utf8.hpp"
 
 #include "openscad_cpp_parser/ast/ast_node.hpp"
+#include "openscad_cpp_parser/ast/expression.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -847,8 +848,11 @@ bool isBuiltinFunctionName(const std::string& name) {
 
 Value builtinFragments(Evaluator& ev, const CallArgs& args, const EvalContext& ctx, const oscad::ASTNode& node) {
     const oscad::Position* where = &node.position();
-    for (const auto& [key, _] : args.named) {
-        if (!isConfigVariable(key) && key != "r" && key != "d") warnUnexpectedNamedArg(ev, key, where);
+    // From the call's own argument list, which keeps call order: whether
+    // `r=` overrides a positional radius depends on which came first.
+    if (node.kind() == oscad::NodeKind::PrimaryCall) {
+        static const std::vector<std::string> kParams{"r", "d"};
+        warnUnexpectedArgs(ev, kParams, static_cast<const oscad::PrimaryCall&>(node).arguments);
     }
     // Same r/d lookup as circle(): d wins, with the same warning; no size is r=1.
     const double r = lookupRadius(ev, args, 0, 1, "r", "d", where).value_or(1.0);
@@ -1254,11 +1258,10 @@ Value evalBuiltinFunctionResolved(Evaluator& ev, BuiltinFnId id, const std::vect
     // function reads its arguments positionally in OpenSCAD and warns about
     // nothing. See builtinParamNames (registry.cpp).
     if (const std::vector<std::string>* declared = declaredParams) {
+        ArgWarningTracker tracker;  // repeats caught; positional overrides not (no call order here)
         for (const auto& [argName, _] : args.named) {
-            if (!isConfigVariable(argName) &&
-                std::find(declared->begin(), declared->end(), argName) == declared->end()) {
-                warnUnexpectedNamedArg(ev, argName, &node.position());
-            }
+            warnNamedArg(ev, tracker.named(argName, std::find(declared->begin(), declared->end(), argName) != declared->end()),
+                         argName, &node.position());
         }
     }
 

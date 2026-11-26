@@ -194,13 +194,12 @@ BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::Parameter
     size_t positionalIdx = 0;
     const size_t nparams = params.size();
     bool warnedExtra = false;
+    ArgWarningTracker tracker;
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
             const std::string& name = a.name->name;
-            if (!isConfigVariable(name) && !declaresParam(params, name)) {
-                warnUnexpectedNamedArg(*this, name, &argPtr->position());
-            }
+            warnNamedArg(*this, tracker.named(name, declaresParam(params, name)), name, &argPtr->position());
             result.set(name, evalExprMaybeCompiled(*a.expr, ctx));
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
@@ -209,6 +208,7 @@ BoundArgs Evaluator::bindArgs(const std::vector<std::unique_ptr<oscad::Parameter
             // not a (BelfrySCAD #1128).
             while (positionalIdx < nparams && result.find(params[positionalIdx]->name->name)) ++positionalIdx;
             if (positionalIdx < nparams) {
+                tracker.positional(params[positionalIdx]->name->name);
                 result.set(params[positionalIdx]->name->name, evalExprMaybeCompiled(*a.expr, ctx));
             } else if (!warnedExtra) {
                 // Once per call, like the reference's warned_for_extra_arguments.

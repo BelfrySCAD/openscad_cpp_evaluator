@@ -1945,7 +1945,7 @@ TEST(AssertShortCircuit, PassingAssertStillWarnsAboutUnexpectedArguments) {
                                        "assert(true, bogus=1);", "x = assert(true, bogus=1) 2;"}) {
             const AssertRun r = runAssert(code, vm);
             EXPECT_TRUE(r.log.find("Too many unnamed arguments supplied") != std::string::npos ||
-                        r.log.find("variable bogus not specified as parameter") != std::string::npos)
+                        r.log.find("variable \"bogus\" not specified as parameter") != std::string::npos)
                 << "vm=" << vm << ": " << code << " -> " << r.log;
             EXPECT_EQ(r.error, "") << "vm=" << vm << ": " << code;
         }
@@ -2186,8 +2186,10 @@ TEST(BytecodeCompiler, CompileTimeArgumentPlanMatchesTheNameMatchingRules) {
     EXPECT_EQ(runCapturingEcho(f + "echo(f(c = 3, a = 1, b = 2));"), "ECHO: \"1/2/3\""); // all named, out of order
     EXPECT_EQ(runCapturingEcho(f + "echo(f(1, c = 3, b = 2));"), "ECHO: \"1/2/3\"");     // positional then named
     // A named argument overriding a parameter an earlier POSITIONAL already
-    // filled: the later write wins, both before and after this change.
-    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, a = 9));"), "ECHO: \"9/2/30\"");
+    // filled: the later write wins, with OpenSCAD 2026.11's warning.
+    EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, a = 9));"),
+              "WARNING: argument \"a\" overrides positional argument in file <string>, line 2\n"
+              "ECHO: \"9/2/30\"");
     // A positional argument takes the next parameter not already bound, as
     // OpenSCAD's Parameters::parse does: `1` binds a, and `5` skips the
     // named b and binds c. (This once pinned "1/5/30", overwriting b, which
@@ -2195,7 +2197,7 @@ TEST(BytecodeCompiler, CompileTimeArgumentPlanMatchesTheNameMatchingRules) {
     EXPECT_EQ(runCapturingEcho(f + "echo(f(b = 2, 1, 5));"), "ECHO: \"1/2/5\"");
     // An unmatched name is dropped, with a warning naming the CALLER.
     EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, bogus = 9));"),
-              "WARNING: variable bogus not specified as parameter in file <string>, line 2\n"
+              "WARNING: variable \"bogus\" not specified as parameter in file <string>, line 2\n"
               "ECHO: \"1/2/30\"");
     // One warning for running past the parameter list, not one per extra.
     EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, 3, 4, 5));"),

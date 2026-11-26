@@ -138,12 +138,14 @@ std::string formatWarning(const std::string& msg, const oscad::Position* nodePos
 // argument the callee doesn't declare, and once per call for positional
 // arguments past the last parameter. Both are silently dropped otherwise,
 // which makes a typo'd argument name invisible -- the call still runs, the
-// parameter just keeps its default. Wording is verbatim from the reference
-// (2022.08.22, which quotes neither name nor message).
+// parameter just keeps its default. Wording is verbatim from 2026.11-RC1,
+// which quotes the name.
 //
-// NOT covered here (separate reference warnings, separate conditions):
-// "argument X supplied more than once" and "argument X overrides positional
-// argument".
+// A named argument gets at most one of three warnings, checked in
+// Parameters.cc's order: "argument X supplied more than once" (an earlier
+// argument already named it), "argument X overrides positional argument"
+// (an earlier positional argument already filled it), or "variable X not
+// specified as parameter". The last value given wins in every case.
 class Evaluator;
 
 // ContextFrame::is_config_variable: a $-prefixed name other than $children
@@ -157,11 +159,36 @@ bool declaresParam(const std::vector<std::unique_ptr<oscad::ParameterDeclaration
 void warnUnexpectedNamedArg(Evaluator& ev, const std::string& name, const oscad::Position* pos);
 void warnTooManyPositionalArgs(Evaluator& ev, const oscad::Position* pos);
 
+enum class NamedArgWarning : unsigned char { None, Unexpected, SuppliedTwice, OverridesPositional };
+
+// One call's arguments fed in call order, deciding each named argument's
+// warning as above. Plain data (no Evaluator), so the bytecode compiler can
+// plan the warnings once per call site. ponytail: linear scans, as
+// declaresParam -- argument lists are single-digit.
+class ArgWarningTracker {
+public:
+    // `declared`: the callee has a parameter of this name.
+    NamedArgWarning named(const std::string& name, bool declared);
+    // A positional argument bound to parameter `param`.
+    void positional(const std::string& param) { positional_.push_back(param); }
+    // Whether an earlier argument named `param` (a positional one skips it).
+    bool isNamed(const std::string& param) const;
+
+private:
+    std::vector<std::string> named_, positional_;
+};
+
+void warnNamedArg(Evaluator& ev, NamedArgWarning w, const std::string& name, const oscad::Position* pos);
+
 // Both warnings at once for a callee whose parameter names are a fixed list
 // rather than a declaration -- i.e. a builtin (see builtinParamNames,
 // dispatch.hpp). Reports against each argument's own position, which is the
 // call's own line in every case that isn't a multi-line argument list.
+// `positionalOrder` names the parameters positional arguments fill, in
+// order, when that differs from `params` (a builtin module's, see
+// builtinPositionalParams); nullptr means `params` itself.
 void warnUnexpectedArgs(Evaluator& ev, const std::vector<std::string>& params,
-                         const std::vector<std::unique_ptr<oscad::Argument>>& arguments);
+                         const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                         const std::vector<std::string>* positionalOrder = nullptr);
 
 } // namespace oscadeval

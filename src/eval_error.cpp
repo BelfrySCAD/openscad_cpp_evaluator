@@ -136,25 +136,51 @@ bool declaresParam(const std::vector<std::unique_ptr<oscad::ParameterDeclaration
 }
 
 void warnUnexpectedNamedArg(Evaluator& ev, const std::string& name, const oscad::Position* pos) {
-    ev.warn("variable " + name + " not specified as parameter", pos);
+    ev.warn("variable \"" + name + "\" not specified as parameter", pos);  // quoted, as OpenSCAD 2026.11 does
 }
 
 void warnTooManyPositionalArgs(Evaluator& ev, const oscad::Position* pos) {
     ev.warn("Too many unnamed arguments supplied", pos);
 }
 
+NamedArgWarning ArgWarningTracker::named(const std::string& name, bool declared) {
+    NamedArgWarning w = NamedArgWarning::None;
+    if (isNamed(name)) w = NamedArgWarning::SuppliedTwice;
+    else if (std::find(positional_.begin(), positional_.end(), name) != positional_.end()) w = NamedArgWarning::OverridesPositional;
+    else if (!declared && !isConfigVariable(name)) w = NamedArgWarning::Unexpected;
+    named_.push_back(name);
+    return w;
+}
+
+bool ArgWarningTracker::isNamed(const std::string& param) const {
+    return std::find(named_.begin(), named_.end(), param) != named_.end();
+}
+
+void warnNamedArg(Evaluator& ev, NamedArgWarning w, const std::string& name, const oscad::Position* pos) {
+    switch (w) {
+    case NamedArgWarning::None: return;
+    case NamedArgWarning::Unexpected: warnUnexpectedNamedArg(ev, name, pos); return;
+    case NamedArgWarning::SuppliedTwice: ev.warn("argument \"" + name + "\" supplied more than once", pos); return;
+    case NamedArgWarning::OverridesPositional: ev.warn("argument \"" + name + "\" overrides positional argument", pos); return;
+    }
+}
+
 void warnUnexpectedArgs(Evaluator& ev, const std::vector<std::string>& params,
-                         const std::vector<std::unique_ptr<oscad::Argument>>& arguments) {
-    size_t positionalIdx = 0;
+                         const std::vector<std::unique_ptr<oscad::Argument>>& arguments,
+                         const std::vector<std::string>* positionalOrder) {
+    const std::vector<std::string>& order = positionalOrder ? *positionalOrder : params;
+    ArgWarningTracker tracker;
+    size_t next = 0, positionalCount = 0;
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             const std::string& name = static_cast<const oscad::NamedArgument&>(*argPtr).name->name;
-            if (!isConfigVariable(name) &&
-                std::find(params.begin(), params.end(), name) == params.end()) {
-                warnUnexpectedNamedArg(ev, name, &argPtr->position());
-            }
-        } else if (positionalIdx++ == params.size()) {
-            warnTooManyPositionalArgs(ev, &argPtr->position());
+            warnNamedArg(ev, tracker.named(name, std::find(params.begin(), params.end(), name) != params.end()), name,
+                         &argPtr->position());
+        } else {
+            while (next < order.size() && tracker.isNamed(order[next])) ++next;
+            if (next < order.size()) tracker.positional(order[next]);
+            ++next;
+            if (positionalCount++ == params.size()) warnTooManyPositionalArgs(ev, &argPtr->position());
         }
     }
 }

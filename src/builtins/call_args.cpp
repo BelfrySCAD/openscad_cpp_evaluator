@@ -35,9 +35,11 @@ const Value* CallArgs::findPositional(int pos) const {
     return nullptr;
 }
 
+// The LAST argument of that name: `cube(size=1, size=2)` is size 2, as in
+// OpenSCAD (Parameters.cc sets each in turn), which also warns.
 const Value* CallArgs::findNamed(const std::string& name) const {
-    for (const auto& [k, v] : named) {
-        if (k == name) return &v;
+    for (auto it = named.rbegin(); it != named.rend(); ++it) {
+        if (it->first == name) return &it->second;
     }
     return nullptr;
 }
