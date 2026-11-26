@@ -352,8 +352,8 @@ struct ThreeMfObject {
 // a component's transform on the wrong side of its item's, and shift a
 // componented object up by 1 in z: both are bugs, and a slicer's file
 // would land off its bed. A mirroring transform reverses the triangles so the
-// solid stays right side out (OpenSCAD imports it inside out; RC1's new
-// inside-out flip covers polyhedron() only, not import()).
+// solid stays right side out (OpenSCAD keeps it inside out until a boolean
+// flips it).
 LoadedMesh loadThreeMf(const std::string& path) {
     const std::vector<uint8_t> xmlBytes = readStoredZipEntryBySuffix(path, "3dmodel.model");
     const std::string xml(xmlBytes.begin(), xmlBytes.end());
