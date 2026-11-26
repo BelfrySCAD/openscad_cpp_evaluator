@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -256,48 +258,176 @@ LoadedMesh loadOff(const std::string& path) {
     return weldVertices(out.verts, out.tris);
 }
 
+namespace {
+
+// An attribute's value, or nullopt. Requires whitespace before the name, so
+// `id` never matches inside `objectid` or `pid`.
+std::optional<std::string> xmlAttr(std::string_view tag, std::string_view name) {
+    const std::string needle = std::string(name) + "=\"";
+    for (size_t pos = tag.find(needle); pos != std::string_view::npos; pos = tag.find(needle, pos + 1)) {
+        if (pos == 0 || !std::isspace(static_cast<unsigned char>(tag[pos - 1]))) continue;
+        const size_t start = pos + needle.size();
+        const size_t end = tag.find('"', start);
+        if (end == std::string_view::npos) return std::nullopt;
+        return std::string(tag.substr(start, end - start));
+    }
+    return std::nullopt;
+}
+
+// Every `<name ...>` start tag in `text` (not `<names>`), in order.
+std::vector<std::string_view> startTags(std::string_view text, std::string_view name) {
+    std::vector<std::string_view> tags;
+    const std::string open = "<" + std::string(name);
+    for (size_t p = text.find(open); p != std::string_view::npos; p = text.find(open, p + 1)) {
+        const size_t after = p + open.size();
+        if (after >= text.size() || !(std::isspace(static_cast<unsigned char>(text[after])) || text[after] == '/' || text[after] == '>')) continue;
+        const size_t close = text.find('>', after);
+        if (close == std::string_view::npos) break;
+        tags.push_back(text.substr(p, close - p + 1));
+    }
+    return tags;
+}
+
+// A 3MF transform: x' = A x + t. The file writes it as twelve numbers,
+// "m00 m01 m02 m10 m11 m12 m20 m21 m22 m30 m31 m32", for a ROW vector
+// [x y z 1] times a 4x3 matrix, so A[r][c] = m[c*3 + r] and t[r] = m[9 + r].
+struct Affine3 {
+    double a[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    double t[3] = {0, 0, 0};
+};
+
+Affine3 parseTransform(const std::optional<std::string>& text, const std::string& path) {
+    Affine3 m;
+    if (!text) return m;
+    std::vector<double> v;
+    for (const std::string& tok : splitWs(*text)) {
+        try {
+            v.push_back(std::stod(tok));
+        } catch (const std::exception&) {
+            throw std::runtime_error("3MF file '" + path + "': transform \"" + *text + "\" is not twelve numbers");
+        }
+    }
+    if (v.size() != 12) throw std::runtime_error("3MF file '" + path + "': transform \"" + *text + "\" is not twelve numbers");
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) m.a[r][c] = v[static_cast<size_t>(c * 3 + r)];
+        m.t[r] = v[static_cast<size_t>(9 + r)];
+    }
+    return m;
+}
+
+// outer after inner: x -> outer(inner(x)).
+Affine3 compose(const Affine3& outer, const Affine3& inner) {
+    Affine3 m;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            m.a[r][c] = 0;
+            for (int k = 0; k < 3; ++k) m.a[r][c] += outer.a[r][k] * inner.a[k][c];
+        }
+        m.t[r] = outer.t[r];
+        for (int k = 0; k < 3; ++k) m.t[r] += outer.a[r][k] * inner.t[k];
+    }
+    return m;
+}
+
+struct ThreeMfObject {
+    LoadedMesh mesh;
+    bool hasMesh = false;
+    struct Component {
+        std::string objectId;
+        Affine3 transform;
+    };
+    std::vector<Component> components;
+};
+
+} // namespace
+
+// What is placed is what <build> lists: each <item> instances an object,
+// which is a <mesh> or a list of <component>s (each instancing another
+// object), every level applying its own `transform`. Objects no item reaches
+// are not part of the model. A file whose <build> lists no item (which the
+// spec does not allow) imports every mesh object as it stands, as before.
+//
+// Deliberately NOT OpenSCAD 2026.02.01 or 2026.11-RC1 (both checked
+// 2026-11-26, identical results), which compose
+// a component's transform on the wrong side of its item's, and shift a
+// componented object up by 1 in z: both are bugs, and a slicer's file
+// would land off its bed. A mirroring transform reverses the triangles so the
+// solid stays right side out (OpenSCAD keeps it inside out until a boolean
+// flips it).
 LoadedMesh loadThreeMf(const std::string& path) {
     const std::vector<uint8_t> xmlBytes = readStoredZipEntryBySuffix(path, "3dmodel.model");
     const std::string xml(xmlBytes.begin(), xmlBytes.end());
+    const std::string_view doc(xml);
 
+    std::map<std::string, ThreeMfObject> objects;
+    std::vector<std::string> order;
     LoadedMesh out;
-    size_t searchPos = 0;
-    while (true) {
-        const size_t meshStart = xml.find("<mesh", searchPos);
-        if (meshStart == std::string::npos) break;
-        const size_t meshEnd = xml.find("</mesh>", meshStart);
-        if (meshEnd == std::string::npos) break;
-        const std::string_view segment(xml.data() + meshStart, meshEnd - meshStart);
-        searchPos = meshEnd + 7;
-
-        LoadedMesh obj;
-        for (size_t p = 0;;) {
-            const size_t vStart = segment.find("<vertex", p);
-            if (vStart == std::string_view::npos) break;
-            const size_t vEnd = segment.find('>', vStart);
-            if (vEnd == std::string_view::npos) break;
-            const std::string_view tag = segment.substr(vStart, vEnd - vStart + 1);
-            obj.verts.push_back({std::stod(attrValue(tag, "x")), std::stod(attrValue(tag, "y")), std::stod(attrValue(tag, "z"))});
-            p = vEnd + 1;
+    bool externalPart = false;
+    for (const std::string_view objTag : startTags(doc, "object")) {
+        const size_t bodyStart = static_cast<size_t>(objTag.data() - doc.data()) + objTag.size();
+        const size_t bodyEnd = doc.find("</object>", bodyStart);
+        const std::string_view body = doc.substr(bodyStart, bodyEnd == std::string_view::npos ? std::string_view::npos : bodyEnd - bodyStart);
+        const std::string id = xmlAttr(objTag, "id").value_or("");
+        ThreeMfObject obj;
+        if (body.find("<mesh") != std::string_view::npos) {
+            obj.hasMesh = true;
+            for (const std::string_view tag : startTags(body, "vertex"))
+                obj.mesh.verts.push_back({std::stod(attrValue(tag, "x")), std::stod(attrValue(tag, "y")), std::stod(attrValue(tag, "z"))});
+            for (const std::string_view tag : startTags(body, "triangle"))
+                obj.mesh.tris.push_back({std::stoi(attrValue(tag, "v1")), std::stoi(attrValue(tag, "v2")), std::stoi(attrValue(tag, "v3"))});
         }
-        for (size_t p = 0;;) {
-            const size_t tStart = segment.find("<triangle", p);
-            if (tStart == std::string_view::npos) break;
-            if (tStart + 9 < segment.size() && std::isalpha(static_cast<unsigned char>(segment[tStart + 9]))) {  // <triangles>, not a triangle
-                p = tStart + 9;
+        for (const std::string_view tag : startTags(body, "component")) {
+            // ponytail: a production-extension component pointing into
+            // another model part (p:path, as Bambu Studio writes) is skipped
+            // with a warning; read that part when someone needs it.
+            if (xmlAttr(tag, "p:path")) {
+                externalPart = true;
                 continue;
             }
-            const size_t tEnd = segment.find('>', tStart);
-            if (tEnd == std::string_view::npos) break;
-            const std::string_view tag = segment.substr(tStart, tEnd - tStart + 1);
-            obj.tris.push_back({std::stoi(attrValue(tag, "v1")), std::stoi(attrValue(tag, "v2")), std::stoi(attrValue(tag, "v3"))});
-            p = tEnd + 1;
+            obj.components.push_back({xmlAttr(tag, "objectid").value_or(""), parseTransform(xmlAttr(tag, "transform"), path)});
         }
-        // Welded per object, as OpenSCAD makes each 3MF object a solid on
-        // its own (checked, 2026.02.01): a soup object closes, but two open
-        // halves in separate objects stay open.
-        appendWelded(out, obj);
+        order.push_back(id);
+        objects[id] = std::move(obj);
     }
+    if (externalPart)
+        out.warnings.push_back("this 3MF keeps part of its model in another file of the package (a production-extension p:path component), which is not imported");
+
+    const auto place = [&](const LoadedMesh& mesh, const Affine3& m) {
+        const double det = m.a[0][0] * (m.a[1][1] * m.a[2][2] - m.a[1][2] * m.a[2][1]) -
+                           m.a[0][1] * (m.a[1][0] * m.a[2][2] - m.a[1][2] * m.a[2][0]) +
+                           m.a[0][2] * (m.a[1][0] * m.a[2][1] - m.a[1][1] * m.a[2][0]);
+        LoadedMesh placed;
+        placed.verts.reserve(mesh.verts.size());
+        for (const auto& v : mesh.verts) {
+            std::array<double, 3> p{};
+            for (int r = 0; r < 3; ++r) p[static_cast<size_t>(r)] = m.a[r][0] * v[0] + m.a[r][1] * v[1] + m.a[r][2] * v[2] + m.t[r];
+            placed.verts.push_back(p);
+        }
+        placed.tris = mesh.tris;
+        if (det < 0)
+            for (auto& t : placed.tris) std::swap(t[1], t[2]);
+        // Welded per placed mesh, as OpenSCAD makes each 3MF object a solid
+        // on its own (checked, 2026.02.01): a soup object closes, but two
+        // open halves in separate objects stay open.
+        appendWelded(out, placed);
+    };
+
+    const std::vector<std::string_view> items = startTags(doc, "item");
+    if (items.empty()) {
+        for (const std::string& id : order)
+            if (objects[id].hasMesh) place(objects[id].mesh, Affine3{});
+        return out;
+    }
+    // Depth-limited, so a component cycle (invalid, but possible) ends.
+    std::function<void(const std::string&, const Affine3&, int)> instance = [&](const std::string& id, const Affine3& m, int depth) {
+        const auto it = objects.find(id);
+        if (it == objects.end()) throw std::runtime_error("3MF file '" + path + "': object " + id + " is used but never defined");
+        if (depth > 64) throw std::runtime_error("3MF file '" + path + "': components nest more than 64 deep (a cycle?)");
+        if (it->second.hasMesh) place(it->second.mesh, m);
+        for (const auto& c : it->second.components) instance(c.objectId, compose(m, c.transform), depth + 1);
+    };
+    for (const std::string_view item : items)
+        instance(xmlAttr(item, "objectid").value_or(""), parseTransform(xmlAttr(item, "transform"), path), 0);
     return out;
 }
 
