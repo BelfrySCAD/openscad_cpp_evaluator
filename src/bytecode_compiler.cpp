@@ -51,6 +51,7 @@ void planCallSiteArgs(CompiledChunk::CallSite& site,
     size_t positionalIdx = 0;
     bool warnedExtra = false;
     std::vector<char> isBound(nparams, 0);
+    ArgWarningTracker tracker;
     auto markBound = [&](const CompiledChunk::CallSite::ArgBind& b) {
         if (b.paramIndex >= 0) isBound[static_cast<size_t>(b.paramIndex)] = 1;
         for (int p : b.alsoParams) isBound[static_cast<size_t>(p)] = 1;
@@ -63,7 +64,7 @@ void planCallSiteArgs(CompiledChunk::CallSite& site,
             bindEveryParamNamed(b, params, name);
             markBound(b);
             const bool found = b.paramIndex >= 0;
-            b.warnUnexpectedNamed = !found && !isConfigVariable(name);
+            b.namedWarning = tracker.named(name, found);
             b.toDyn = !found && !name.empty() && name[0] == '$';
         } else {
             // The next parameter not already bound, as bindArgs.
@@ -74,6 +75,7 @@ void planCallSiteArgs(CompiledChunk::CallSite& site,
                 // because the old path keyed its bound arguments by name.
                 bindEveryParamNamed(b, params, params[positionalIdx]->name->name);
                 markBound(b);
+                tracker.positional(params[positionalIdx]->name->name);
             } else if (!warnedExtra) {
                 b.warnTooManyPositional = true;
                 warnedExtra = true;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "openscad_cpp_evaluator/eval_error.hpp"
 #include "openscad_cpp_evaluator/function_builtins.hpp"
 #include "openscad_cpp_evaluator/reassign.hpp"
 #include "openscad_cpp_evaluator/value.hpp"
@@ -830,7 +831,7 @@ struct CompiledChunk {
             // from whichever slot the duplicate name finally resolved to.
             std::vector<int> alsoParams;
             bool toDyn = false;     // instead bind by name into ctx.dyn ($-named, undeclared)
-            bool warnUnexpectedNamed = false;
+            NamedArgWarning namedWarning = NamedArgWarning::None;
             bool warnTooManyPositional = false;
         };
         std::vector<ArgBind> argBinds;

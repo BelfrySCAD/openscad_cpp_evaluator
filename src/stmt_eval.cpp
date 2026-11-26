@@ -80,14 +80,24 @@ const std::vector<std::string> kAssertParams{"condition", "message"};
 }
 
 AssertLayout assertLayout(const std::vector<std::unique_ptr<oscad::Argument>>& arguments) {
-    // A named argument wins; positional 0/1 fill whichever is left.
+    // A named argument wins (the last of a name, as OpenSCAD); positional
+    // 0/1 fill whichever is left. A repeated name, or one a positional
+    // argument already filled, warns too (warnUnexpectedArgs says which).
     AssertLayout layout;
+    bool positionalSeen = false;
     for (size_t i = 0; i < arguments.size(); ++i) {
-        if (arguments[i]->kind() != oscad::NodeKind::NamedArgument) continue;
+        if (arguments[i]->kind() != oscad::NodeKind::NamedArgument) {
+            positionalSeen = true;
+            continue;
+        }
         const std::string& name = static_cast<const oscad::NamedArgument&>(*arguments[i]).name->name;
-        if (name == "condition" && layout.cond < 0) layout.cond = static_cast<int>(i);
-        else if (name == "message" && layout.msg < 0) layout.msg = static_cast<int>(i);
-        else if (name != "condition" && name != "message" && !isConfigVariable(name)) layout.warns = true;
+        int& slot = name == "condition" ? layout.cond : layout.msg;
+        if (name == "condition" || name == "message") {
+            if (slot >= 0 || positionalSeen) layout.warns = true;
+            slot = static_cast<int>(i);
+        } else if (!isConfigVariable(name)) {
+            layout.warns = true;
+        }
     }
     int positional = 0;
     for (size_t i = 0; i < arguments.size(); ++i) {

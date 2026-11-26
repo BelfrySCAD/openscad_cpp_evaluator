@@ -61,17 +61,18 @@ BoundArgs buildBoundArgs(Evaluator& ev, const CompiledChunk::CallSite& site, Val
     const size_t nparams = paramNames.size();
     const oscad::Position* pos = site.callNode ? &site.callNode->position() : nullptr;
     bool warnedExtra = false;
+    ArgWarningTracker tracker;
     for (size_t i = 0; i < argCount; ++i) {
         if (site.argNames[i]) {
             const std::string& name = *site.argNames[i];
-            if (emitWarnings && !isConfigVariable(name) && !declaresParam(paramNames, name)) {
-                warnUnexpectedNamedArg(ev, name, pos);
-            }
+            const NamedArgWarning w = tracker.named(name, declaresParam(paramNames, name));
+            if (emitWarnings) warnNamedArg(ev, w, name, pos);
             bound.set(name, std::move(args[i]));
         } else {
             // The next parameter not already bound, as bindArgs.
             while (positionalIdx < nparams && bound.find(paramNames[positionalIdx]->name->name)) ++positionalIdx;
             if (positionalIdx < nparams) {
+                tracker.positional(paramNames[positionalIdx]->name->name);
                 bound.set(paramNames[positionalIdx]->name->name, std::move(args[i]));
             } else if (emitWarnings && !warnedExtra) {
                 warnTooManyPositionalArgs(ev, pos);
@@ -144,7 +145,7 @@ void warnPlannedArgs(Evaluator& ev, const CompiledChunk::CallSite& site, size_t 
     const oscad::Position* pos = site.callNode ? &site.callNode->position() : nullptr;
     for (size_t i = 0; i < argCount; ++i) {
         const CompiledChunk::CallSite::ArgBind& b = site.argBinds[i];
-        if (b.warnUnexpectedNamed) warnUnexpectedNamedArg(ev, *site.argNames[i], pos);
+        if (b.namedWarning != NamedArgWarning::None) warnNamedArg(ev, b.namedWarning, *site.argNames[i], pos);
         if (b.warnTooManyPositional) warnTooManyPositionalArgs(ev, pos);
     }
 }
@@ -195,6 +196,7 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
     size_t positionalIdx = 0;
     const size_t nparams = chunk.params.size();
     bool warnedExtra = false;
+    ArgWarningTracker tracker;
     for (const auto& argPtr : arguments) {
         if (argPtr->kind() == oscad::NodeKind::NamedArgument) {
             auto& a = static_cast<const oscad::NamedArgument&>(*argPtr);
@@ -216,9 +218,7 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
             if (!matched && !name.empty() && name[0] == '$') {
                 ctx.dyn->set(name, v);
             }
-            if (!matched && !isConfigVariable(name)) {
-                warnUnexpectedNamedArg(ev, name, &argPtr->position());
-            }
+            warnNamedArg(ev, tracker.named(name, matched), name, &argPtr->position());
         } else {
             auto& a = static_cast<const oscad::PositionalArgument&>(*argPtr);
             Value v = ev.evalExpr(*a.expr, callerCtx);
@@ -226,6 +226,7 @@ void bindAstArgsIntoFrame(Evaluator& ev, const CompiledChunk& chunk,
             while (positionalIdx < nparams && frame.bound[positionalIdx]) ++positionalIdx;
             if (positionalIdx < nparams) {
                 const CompiledChunk::Param& p = chunk.params[positionalIdx];
+                tracker.positional(p.name);
                 if (p.isDyn) {
                     ctx.dyn->set(p.name, std::move(v));
                 } else {

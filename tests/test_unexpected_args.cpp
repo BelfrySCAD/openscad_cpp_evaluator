@@ -220,3 +220,66 @@ echo(rot=render() { rotate(v=[0,0,1], 90) cube([4,1,1]); }.boundingbox);
             << "vm=" << vm;
     }
 }
+
+// OpenSCAD 2026.11's other two named-argument warnings, checked against
+// 2026.11-RC1 with the same calls: a name given twice, and a name filling a
+// parameter a positional argument already filled. The last value wins.
+namespace {
+size_t count(const std::vector<std::string>& w, const std::string& needle) {
+    size_t n = 0;
+    for (const std::string& s : w) n += s.find(needle) != std::string::npos;
+    return n;
+}
+} // namespace
+
+TEST(UnexpectedArgs, RepeatedAndOverridingNamesWarnOnEveryPath) {
+    const std::string decls = "module m(a) echo(a);\nfunction f(a) = a;\ng = function(a) a;\n"
+                              "function viaPlan() = f(a=1, a=2);\n";  // a compiled call site
+    struct Case {
+        const char* code;
+        const char* needle;
+        size_t times;
+    };
+    for (const Case& c : {
+             Case{"m(a=1, a=2);", "argument \"a\" supplied more than once", 1},
+             Case{"m(a=1, a=2, a=3);", "argument \"a\" supplied more than once", 2},
+             Case{"m(1, a=2);", "argument \"a\" overrides positional argument", 1},
+             Case{"echo(f(a=1, a=2));", "argument \"a\" supplied more than once", 1},
+             Case{"echo(f(1, a=2));", "argument \"a\" overrides positional argument", 1},
+             Case{"echo(g(a=1, a=2));", "argument \"a\" supplied more than once", 1},
+             Case{"echo(viaPlan());", "argument \"a\" supplied more than once", 1},
+             Case{"m($fn=1, $fn=2);", "argument \"$fn\" supplied more than once", 1},
+             Case{"cube(size=1, size=2);", "argument \"size\" supplied more than once", 1},
+             Case{"cube(1, size=2);", "argument \"size\" overrides positional argument", 1},
+             Case{"translate(v=[1,0,0], v=[2,0,0]) cube(1);", "argument \"v\" supplied more than once", 1},
+             Case{"echo(fragments(r=1, r=10));", "argument \"r\" supplied more than once", 1},
+             Case{"echo(fragments(1, r=10));", "argument \"r\" overrides positional argument", 1},
+         }) {
+        const auto w = warningsBothPaths(decls + c.code);
+        EXPECT_EQ(count(w, c.needle), c.times) << c.code << ::testing::PrintToString(w);
+    }
+    // Unknown AND repeated: "not specified" for the first, "more than once"
+    // for the second -- never "not specified" twice.
+    const auto w = warningsBothPaths(decls + "m(b=1, b=2);");
+    EXPECT_EQ(count(w, "variable \"b\" not specified as parameter"), 1u) << ::testing::PrintToString(w);
+    EXPECT_EQ(count(w, "argument \"b\" supplied more than once"), 1u) << ::testing::PrintToString(w);
+    // A positional argument AFTER the name skips it, as before: no warning.
+    EXPECT_TRUE(warningsBothPaths("module n(a, b) {}\nn(a=1, 2);").empty());
+    // object() and str() take any names: nothing to repeat.
+    EXPECT_TRUE(warningsBothPaths("echo(object(a=1, a=2), str(a=1, a=1));").empty());
+}
+
+TEST(UnexpectedArgs, TheLastRepeatedValueWins) {
+    for (const bool vm : {false, true}) {
+        ScopedVm scoped(vm);
+        Evaluated e = evalSrc("cube(size=1, size=2);\ntranslate(v=[1,0,0], v=[5,0,0]) cube(1);");
+        ASSERT_EQ(e.bodies.size(), 2u);
+        EXPECT_NEAR(e.bodies[0].body->Volume(), 8.0, 1e-9) << "vm " << vm;
+        EXPECT_NEAR(e.bodies[1].body->BoundingBox().min.x, 5.0, 1e-9) << "vm " << vm;
+        std::vector<std::string> echoes;
+        evalSrc("module m(a) echo(a);\nm(a=1, a=2);\necho(fragments(r=1, r=10));\n"
+                "echo(textmetrics(text=\"a\", text=\"bb\").size == textmetrics(\"bb\").size);",
+                [&](const std::string& msg) { if (msg.rfind("ECHO: ", 0) == 0) echoes.push_back(msg); });
+        EXPECT_EQ(echoes, (std::vector<std::string>{"ECHO: 2", "ECHO: 30", "ECHO: true"})) << "vm " << vm;
+    }
+}

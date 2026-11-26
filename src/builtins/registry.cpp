@@ -204,7 +204,7 @@ void warnUnexpectedBuiltinArgs(Evaluator& ev, const oscad::ASTNode& callNode) {
     if (callNode.kind() != oscad::NodeKind::ModularCall) return;
     const auto& call = static_cast<const oscad::ModularCall&>(callNode);
     if (const std::vector<std::string>* declared = builtinParamNames(call.name->name)) {
-        warnUnexpectedArgs(ev, *declared, call.arguments);
+        warnUnexpectedArgs(ev, *declared, call.arguments, builtinPositionalParams(call.name->name));
     }
 }
 
