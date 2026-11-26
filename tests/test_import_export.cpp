@@ -556,7 +556,7 @@ TEST(ImportModuleContext, ThreeMfBuildItemTransformIsApplied) {
               {10, 20, 30}, {11, 21, 31});
 }
 
-// The component's transform first, then the item's -- OpenSCAD 2026.02.01
+// The component's transform first, then the item's -- OpenSCAD 2026.02.01 and 2026.11-RC1
 // composes them the other way round, putting this cube at x 4..5.
 TEST(ImportModuleContext, ThreeMfComponentTransformComposesInsideTheItems) {
     const std::string res = threeMfCube(1) +
@@ -589,7 +589,7 @@ TEST(ImportModuleContext, ThreeMfImportsWhatTheBuildListsOnly) {
     EXPECT_NEAR(p.volume, 2.0, 1e-9);
 }
 
-// A mirroring transform keeps the solid right side out (OpenSCAD 2026.02.01
+// A mirroring transform keeps the solid right side out (OpenSCAD 2026.02.01 and RC1
 // imports it inside out, volume -1).
 TEST(ImportModuleContext, ThreeMfMirroringItemStaysRightSideOut) {
     const Placed p = importThreeMf(threeMfCube(1), "<item objectid=\"1\" transform=\"-1 0 0 0 1 0 0 0 1 0 0 0\"/>");

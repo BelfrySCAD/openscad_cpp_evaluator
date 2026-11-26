@@ -347,11 +347,13 @@ struct ThreeMfObject {
 // are not part of the model. A file whose <build> lists no item (which the
 // spec does not allow) imports every mesh object as it stands, as before.
 //
-// Deliberately NOT OpenSCAD 2026.02.01 (checked 2026-11-26), which composes
-// a component's transform on the wrong side of its item's, and can shift a
-// componented object up by 1 in z: both are its bugs, and a slicer's file
+// Deliberately NOT OpenSCAD 2026.02.01 or 2026.11-RC1 (both checked
+// 2026-11-26, identical results), which compose
+// a component's transform on the wrong side of its item's, and shift a
+// componented object up by 1 in z: both are bugs, and a slicer's file
 // would land off its bed. A mirroring transform reverses the triangles so the
-// solid stays right side out (OpenSCAD imports it inside out).
+// solid stays right side out (OpenSCAD imports it inside out; RC1's new
+// inside-out flip covers polyhedron() only, not import()).
 LoadedMesh loadThreeMf(const std::string& path) {
     const std::vector<uint8_t> xmlBytes = readStoredZipEntryBySuffix(path, "3dmodel.model");
     const std::string xml(xmlBytes.begin(), xmlBytes.end());
