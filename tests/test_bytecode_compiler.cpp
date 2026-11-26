@@ -1945,7 +1945,7 @@ TEST(AssertShortCircuit, PassingAssertStillWarnsAboutUnexpectedArguments) {
                                        "assert(true, bogus=1);", "x = assert(true, bogus=1) 2;"}) {
             const AssertRun r = runAssert(code, vm);
             EXPECT_TRUE(r.log.find("Too many unnamed arguments supplied") != std::string::npos ||
-                        r.log.find("variable bogus not specified as parameter") != std::string::npos)
+                        r.log.find("variable \"bogus\" not specified as parameter") != std::string::npos)
                 << "vm=" << vm << ": " << code << " -> " << r.log;
             EXPECT_EQ(r.error, "") << "vm=" << vm << ": " << code;
         }
@@ -2195,7 +2195,7 @@ TEST(BytecodeCompiler, CompileTimeArgumentPlanMatchesTheNameMatchingRules) {
     EXPECT_EQ(runCapturingEcho(f + "echo(f(b = 2, 1, 5));"), "ECHO: \"1/2/5\"");
     // An unmatched name is dropped, with a warning naming the CALLER.
     EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, bogus = 9));"),
-              "WARNING: variable bogus not specified as parameter in file <string>, line 2\n"
+              "WARNING: variable \"bogus\" not specified as parameter in file <string>, line 2\n"
               "ECHO: \"1/2/30\"");
     // One warning for running past the parameter list, not one per extra.
     EXPECT_EQ(runCapturingEcho(f + "echo(f(1, 2, 3, 4, 5));"),

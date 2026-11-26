@@ -65,13 +65,13 @@ bool has(const std::vector<std::string>& warnings, const std::string& needle) {
 TEST(UnexpectedArgs, UserModuleNamedArgNotAParameter) {
     auto w = warningsBothPaths("module m(a=1) { } m(a=2, b=3);");
     ASSERT_EQ(w.size(), 1u);
-    EXPECT_NE(w[0].find("WARNING: variable b not specified as parameter"), std::string::npos);
+    EXPECT_NE(w[0].find("WARNING: variable \"b\" not specified as parameter"), std::string::npos);
 }
 
 TEST(UnexpectedArgs, UserFunctionNamedArgNotAParameter) {
     auto w = warningsBothPaths("function f(x=1) = x; echo(f(x=2, y=3));");
     ASSERT_EQ(w.size(), 1u);
-    EXPECT_NE(w[0].find("WARNING: variable y not specified as parameter"), std::string::npos);
+    EXPECT_NE(w[0].find("WARNING: variable \"y\" not specified as parameter"), std::string::npos);
 }
 
 // A call from inside another function is the case the bytecode VM's own
@@ -80,13 +80,13 @@ TEST(UnexpectedArgs, UserFunctionNamedArgNotAParameter) {
 TEST(UnexpectedArgs, NestedUserFunctionCallStillWarns) {
     auto w = warningsBothPaths("function inner(n=1) = n; function outer(k) = inner(n=k, bogus=1); echo(outer(2));");
     ASSERT_EQ(w.size(), 1u);
-    EXPECT_NE(w[0].find("WARNING: variable bogus not specified as parameter"), std::string::npos);
+    EXPECT_NE(w[0].find("WARNING: variable \"bogus\" not specified as parameter"), std::string::npos);
 }
 
 TEST(UnexpectedArgs, FunctionLiteralWarnsToo) {
     auto w = warningsBothPaths("g = function(p) p * 2; echo(g(3, extra=9));");
     ASSERT_EQ(w.size(), 1u);
-    EXPECT_NE(w[0].find("WARNING: variable extra not specified as parameter"), std::string::npos);
+    EXPECT_NE(w[0].find("WARNING: variable \"extra\" not specified as parameter"), std::string::npos);
 }
 
 TEST(UnexpectedArgs, TooManyPositionalArgsWarnsExactlyOnce) {
@@ -114,19 +114,19 @@ TEST(UnexpectedArgs, DeclaredParametersNeverWarn) {
 TEST(UnexpectedArgs, BuiltinPrimitiveWarns) {
     auto w = warningsBothPaths("cube(size=2, bogus=9);");
     ASSERT_EQ(w.size(), 1u);
-    EXPECT_NE(w[0].find("WARNING: variable bogus not specified as parameter"), std::string::npos);
+    EXPECT_NE(w[0].find("WARNING: variable \"bogus\" not specified as parameter"), std::string::npos);
 }
 
 // The transform/color/hull/CSG family never reaches evalModularCall once
 // the bytecode compiler turns it into Op::PushBuiltinWrap/Op::PushCsgWrap
 // -- the whole point of running these VM-on as well.
 TEST(UnexpectedArgs, BuiltinsWithChildrenWarnOnBothPaths) {
-    EXPECT_TRUE(has(warningsBothPaths("translate([1,0,0], junk=1) cube(1);"), "variable junk"));
-    EXPECT_TRUE(has(warningsBothPaths("color(\"red\", junk=1) cube(1);"), "variable junk"));
-    EXPECT_TRUE(has(warningsBothPaths("hull(junk=1) cube(1);"), "variable junk"));
-    EXPECT_TRUE(has(warningsBothPaths("union(junk=1) cube(1);"), "variable junk"));
-    EXPECT_TRUE(has(warningsBothPaths("difference(junk=1) { cube(1); }"), "variable junk"));
-    EXPECT_TRUE(has(warningsBothPaths("offset(r=1, junk=1) square(1);"), "variable junk"));
+    EXPECT_TRUE(has(warningsBothPaths("translate([1,0,0], junk=1) cube(1);"), "variable \"junk\""));
+    EXPECT_TRUE(has(warningsBothPaths("color(\"red\", junk=1) cube(1);"), "variable \"junk\""));
+    EXPECT_TRUE(has(warningsBothPaths("hull(junk=1) cube(1);"), "variable \"junk\""));
+    EXPECT_TRUE(has(warningsBothPaths("union(junk=1) cube(1);"), "variable \"junk\""));
+    EXPECT_TRUE(has(warningsBothPaths("difference(junk=1) { cube(1); }"), "variable \"junk\""));
+    EXPECT_TRUE(has(warningsBothPaths("offset(r=1, junk=1) square(1);"), "variable \"junk\""));
 }
 
 // The `#`/`%`/`!` modifiers share BuiltinWrapSite with the transforms but
@@ -147,7 +147,7 @@ TEST(UnexpectedArgs, BuiltinFunctionsDoNotWarn) {
 
 TEST(UnexpectedArgs, TextMetricsWarns) {
     auto w = warningsBothPaths("echo(textmetrics(text=\"hi\", size=5, nope=1));");
-    EXPECT_TRUE(has(w, "variable nope not specified as parameter"));
+    EXPECT_TRUE(has(w, "variable \"nope\" not specified as parameter"));
 }
 
 // An unparseable font spec: undef and nothing drawn, with the reference's

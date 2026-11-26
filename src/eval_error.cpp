@@ -136,7 +136,7 @@ bool declaresParam(const std::vector<std::unique_ptr<oscad::ParameterDeclaration
 }
 
 void warnUnexpectedNamedArg(Evaluator& ev, const std::string& name, const oscad::Position* pos) {
-    ev.warn("variable " + name + " not specified as parameter", pos);
+    ev.warn("variable \"" + name + "\" not specified as parameter", pos);  // quoted, as OpenSCAD 2026.11 does
 }
 
 void warnTooManyPositionalArgs(Evaluator& ev, const oscad::Position* pos) {
