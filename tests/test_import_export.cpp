@@ -499,6 +499,110 @@ std::vector<std::vector<Tri>> cubeHalves() {
 
 } // namespace
 
+namespace {
+
+// A unit cube [0,1]^3 as 3MF object `id`, with outward (counter-clockwise)
+// faces.
+std::string threeMfCube(int id) {
+    const char* v = "<vertex x=\"0\" y=\"0\" z=\"0\"/><vertex x=\"1\" y=\"0\" z=\"0\"/><vertex x=\"1\" y=\"1\" z=\"0\"/>"
+                    "<vertex x=\"0\" y=\"1\" z=\"0\"/><vertex x=\"0\" y=\"0\" z=\"1\"/><vertex x=\"1\" y=\"0\" z=\"1\"/>"
+                    "<vertex x=\"1\" y=\"1\" z=\"1\"/><vertex x=\"0\" y=\"1\" z=\"1\"/>";
+    const int t[12][3] = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                          {1, 2, 6}, {1, 6, 5}, {2, 3, 7}, {2, 7, 6}, {3, 0, 4}, {3, 4, 7}};
+    std::string s = "<object id=\"" + std::to_string(id) + "\" type=\"model\"><mesh><vertices>" + v + "</vertices><triangles>";
+    for (const auto& f : t)
+        s += "<triangle v1=\"" + std::to_string(f[0]) + "\" v2=\"" + std::to_string(f[1]) + "\" v3=\"" + std::to_string(f[2]) + "\"/>";
+    return s + "</triangles></mesh></object>";
+}
+
+struct Placed {
+    manifold::Box box;
+    double volume = 0;
+    std::vector<std::string> messages;
+};
+
+Placed importThreeMf(const std::string& resources, const std::string& build) {
+    const std::string text = "<?xml version=\"1.0\"?><model unit=\"millimeter\"><resources>" + resources +
+                             "</resources><build>" + build + "</build></model>";
+    const auto path = tempPath("placed.3mf");
+    writeStoredZip(path.string(), {ZipEntry{"3D/3dmodel.model", std::vector<uint8_t>(text.begin(), text.end())}});
+    Placed out;
+    Evaluated e = evalSrc("import(\"" + path.generic_string() + "\");", [&](const std::string& m) { out.messages.push_back(m); });
+    std::filesystem::remove(path);
+    for (const auto& b : e.bodies)
+        if (b.body) {
+            out.box = out.box.Union(b.body->BoundingBox());
+            out.volume += b.body->Volume();
+        }
+    return out;
+}
+
+void expectBox(const Placed& p, manifold::vec3 lo, manifold::vec3 hi) {
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_NEAR(p.box.min[i], lo[i], 1e-9) << "min " << i;
+        EXPECT_NEAR(p.box.max[i], hi[i], 1e-9) << "max " << i;
+    }
+}
+
+} // namespace
+
+// What a 3MF places is what <build> lists, each <item> and <component>
+// applying its own transform (BelfrySCAD#1175: an OrcaSlicer file whose
+// mesh sits under a component, placed by the item's transform, came in
+// rotated and off its bed). The transform is twelve numbers for a ROW
+// vector, so its last three are the translation.
+TEST(ImportModuleContext, ThreeMfBuildItemTransformIsApplied) {
+    expectBox(importThreeMf(threeMfCube(1), "<item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 10 20 30\"/>"),
+              {10, 20, 30}, {11, 21, 31});
+}
+
+// The component's transform first, then the item's -- OpenSCAD 2026.02.01
+// composes them the other way round, putting this cube at x 4..5.
+TEST(ImportModuleContext, ThreeMfComponentTransformComposesInsideTheItems) {
+    const std::string res = threeMfCube(1) +
+                            "<object id=\"2\" type=\"model\"><components>"
+                            "<component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 5 0 0\"/></components></object>";
+    // Item: 90 degrees about z, x -> y.
+    expectBox(importThreeMf(res, "<item objectid=\"2\" transform=\"0 1 0 -1 0 0 0 0 1 0 0 0\"/>"), {-1, 5, 0}, {0, 6, 1});
+}
+
+// BelfrySCAD#1175's own matrices: an identity component under an item that
+// stands the part up (y -> z) and lifts it by half its height.
+TEST(ImportModuleContext, ThreeMfOrcaSlicerPlacement) {
+    const std::string res = threeMfCube(1) +
+                            "<object id=\"2\" type=\"model\"><components>"
+                            "<component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/></components></object>";
+    const Placed p = importThreeMf(res, "<item objectid=\"2\" transform=\"1 -1.19248804e-08 -9.92616735e-24 1.25740227e-23 "
+                                        "2.22044605e-16 1 -1.19248804e-08 -1 2.22044605e-16 0 0 77.25\" printable=\"1\"/>");
+    EXPECT_NEAR(p.box.min.x, 0, 1e-6);
+    EXPECT_NEAR(p.box.min.y, -1, 1e-6);  // y' = -z
+    EXPECT_NEAR(p.box.min.z, 77.25, 1e-6);  // z' = y + 77.25
+    EXPECT_NEAR(p.volume, 1.0, 1e-6);
+}
+
+// An object no item reaches is not part of the model; one reached twice is
+// placed twice.
+TEST(ImportModuleContext, ThreeMfImportsWhatTheBuildListsOnly) {
+    const Placed p = importThreeMf(threeMfCube(1) + threeMfCube(3),
+                                   "<item objectid=\"1\"/><item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 3 0 0\"/>");
+    expectBox(p, {0, 0, 0}, {4, 1, 1});
+    EXPECT_NEAR(p.volume, 2.0, 1e-9);
+}
+
+// A mirroring transform keeps the solid right side out (OpenSCAD 2026.02.01
+// imports it inside out, volume -1).
+TEST(ImportModuleContext, ThreeMfMirroringItemStaysRightSideOut) {
+    const Placed p = importThreeMf(threeMfCube(1), "<item objectid=\"1\" transform=\"-1 0 0 0 1 0 0 0 1 0 0 0\"/>");
+    expectBox(p, {-1, 0, 0}, {0, 1, 1});
+    EXPECT_NEAR(p.volume, 1.0, 1e-9);
+    EXPECT_FALSE(anyContains(p.messages, "inside out")) << ::testing::PrintToString(p.messages);
+}
+
+TEST(ImportModuleContext, ThreeMfBadTransformIsAnError) {
+    EXPECT_TRUE(anyContains(importThreeMf(threeMfCube(1), "<item objectid=\"1\" transform=\"1 0 0\"/>").messages,
+                            "is not twelve numbers"));
+}
+
 // Every mesh format welds exactly-equal vertices, as AMF and STL do, so a
 // closed solid written as a triangle soup imports closed. OpenSCAD
 // 2026.02.01 imports such an OFF, OBJ or 3MF as a solid that takes part in
